@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DonchianBreakout_1dTrend_Filter
-Hypothesis: Uses weekly pivot points (from weekly high/low/close) as support/resistance, combined with Donchian(20) breakout on 6h and 1d EMA200 trend filter to capture institutional breakouts. Weekly pivots provide stronger S/R than daily; Donchian captures breakouts; 1d EMA200 filters trend direction. Designed for 25-40 trades/year (~100-160 total over 4 years) to minimize fee drift while capturing strong directional moves in both bull and bear markets.
+4h_Keltner_Channel_Breakout_With_Trend_Filter
+Hypothesis: Uses Keltner Channel breakout (ATR-based bands) with 1d EMA trend filter and volume spike (2x 48-bar avg) to capture high-probability breakouts on 4h timeframe. Designed for low trade frequency (19-50/year) to minimize fee drift. Works in both bull and bear by following 1d trend direction. Targets 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,78 +18,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (HLC/3)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly pivot: (H+L+C)/3; R1 = 2*P - L; S1 = 2*P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    
-    # Align weekly pivots to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get 1d data for EMA200 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ATR for Keltner Channel (14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: >1.8x 48-period MA (8 days of 6h bars)
+    # Keltner Channel: 20-period EMA ± 2 * ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + (2 * atr)
+    lower_keltner = ema_20 - (2 * atr)
+    
+    # Volume confirmation: >2x 48-period MA (8 days of 4h bars)
     vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200 to stabilize
+    start_idx = 50  # Wait for EMA20 and ATR to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(upper_keltner[i]) or
+            np.isnan(lower_keltner[i]) or
             np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA200
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation (>1.8x average)
-        vol_confirm = volume[i] > (1.8 * vol_ma_48[i])
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_48[i])
         
-        # Breakout conditions at weekly S1/R1 with Donchian confirmation
-        long_breakout = (close[i] > r1_aligned[i] and 
-                         close[i] > donchian_high[i] and 
-                         vol_confirm and 
-                         uptrend)
-        short_breakout = (close[i] < s1_aligned[i] and 
-                          close[i] < donchian_low[i] and 
-                          vol_confirm and 
-                          downtrend)
+        # Breakout conditions at Keltner Bands
+        long_breakout = close[i] > upper_keltner[i] and vol_confirm and uptrend
+        short_breakout = close[i] < lower_keltner[i] and vol_confirm and downtrend
         
-        # Exit conditions: return to weekly pivot
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit conditions: return to EMA20 (middle line)
+        long_exit = close[i] < ema_20[i]
+        short_exit = close[i] > ema_20[i]
         
         if long_breakout and position <= 0:
             signals[i] = 0.25
@@ -114,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DonchianBreakout_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Keltner_Channel_Breakout_With_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
