@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla R3/S3 levels with 1d KAMA trend filter and volume confirmation.
-# Enter long when price breaks above 1w Camarilla R3 level with volume > 2.0x average and close > KAMA (bullish bias).
-# Enter short when price breaks below 1w Camarilla S3 level with volume > 2.0x average and close < KAMA (bearish bias).
-# Exit when price returns to the 1w Camarilla midpoint (P) or touches the opposite level (S3 for long exit, R3 for short exit).
-# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 30-100 total trades over 4 years.
-# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
-# Uses 1w Camarilla for structure (more stable than 1d) and 1d KAMA for trend filter (adaptive, fewer whipsaws).
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with volume confirmation and ATR-based trend filter.
+# Enter long when price breaks above 1d Donchian upper channel with volume > 2.0x average and ATR(14) rising.
+# Enter short when price breaks below 1d Donchian lower channel with volume > 2.0x average and ATR(14) rising.
+# Exit when price returns to the 1d Donchian midpoint or touches the opposite channel.
+# Uses discrete position sizing (0.25) to control risk and minimize fee churn.
+# Target: 80-150 total trades over 4 years (20-38/year).
+# Works in bull markets (breakouts continue up) and bear markets (breakdowns continue down) due to volume and ATR confirmation.
+# Uses 1d Donchian for structure (more stable than 4h) and ATR(14) for trend strength filter.
 
-name = "1d_Camarilla_R3S3_Breakout_1w_KAMA_VolumeConfirm_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1d_Volume_ATRTrend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +26,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivot calculation (MTF structure)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate 1w Camarilla levels (using previous bar's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True range for Camarilla calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w)
-    tr3 = np.abs(low_1w - close_1w)
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Camarilla levels (based on previous bar's close and range)
-    camarilla_pivot = close_1w  # Pivot is previous close
-    camarilla_range = high_1w - low_1w
-    
-    # R3 and S3 levels (stronger breakout levels for fewer trades)
-    r3 = camarilla_pivot + camarilla_range * 1.1 / 4
-    s3 = camarilla_pivot - camarilla_range * 1.1 / 4
-    
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
-    
-    # Get 1d data for KAMA trend filter (HTF trend)
+    # Get 1d data for Donchian channels and ATR (MTF structure/trend)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d KAMA (adaptive moving average)
-    close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian upper and lower channels
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
+    # Align Donchian levels to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    
+    # Calculate 1d ATR(14) for trend strength filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar TR
+    tr2[0] = high_1d[0] - close_1d[0]  # first bar TR (no previous close)
+    tr3[0] = low_1d[0] - close_1d[0]   # first bar TR (no previous close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Calculate volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -85,29 +69,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(kama_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d KAMA bias
-        bullish_bias = close[i] > kama_aligned[i]
-        bearish_bias = close[i] < kama_aligned[i]
+        # Trend strength filter: ATR(14) rising (current > previous)
+        atr_rising = atr_14_aligned[i] > atr_14_aligned[i-1] if i > 0 else False
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > r3_aligned[i]
-        short_breakout = close[i] < s3_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_upper_aligned[i]
+        short_breakout = close[i] < donchian_lower_aligned[i]
         
-        # Exit conditions: return to pivot or touch opposite level
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit conditions: return to midpoint or touch opposite channel
+        long_exit = close[i] < donchian_mid_aligned[i]
+        short_exit = close[i] > donchian_mid_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and bullish_bias
-        short_entry = short_breakout and vol_confirm and bearish_bias
+        long_entry = long_breakout and vol_confirm and atr_rising
+        short_entry = short_breakout and vol_confirm and atr_rising
         
         # Handle entries and exits
         if long_entry and position <= 0:
