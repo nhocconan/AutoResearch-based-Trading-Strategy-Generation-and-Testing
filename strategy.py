@@ -34,6 +34,8 @@ def generate_signals(prices):
     # Align to 4h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
     s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
+    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
