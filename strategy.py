@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_BullishTrend_Filter
-Hypothesis: Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe with 1d trend filter and volume confirmation to capture trend-following entries. Designed for low trade frequency (12-37/year) to minimize fee decay while capturing strong directional moves. Works in bull/bear by following 1d trend direction. Targets 50-150 total trades over 4 years.
+4h_KAMA_Slope_12hTrend_VolumeFilter
+Hypothesis: Uses KAMA (adaptive moving average) slope as primary trend signal, filtered by 12h EMA50 trend direction and volume spike (2x 48-bar average). KAMA adapts to market conditions, making it effective in both trending and ranging markets. Combined with 12h trend filter ensures we trade in higher timeframe direction, reducing whipsaws. Volume filter ensures momentum behind moves. Designed for low trade frequency (20-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,63 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator
+    # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 12h
-    median_price_12h = (df_12h['high'] + df_12h['low']) / 2
-    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    # Correct volatility calculation: sum of absolute changes over ER period
+    volatility_sum = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility_sum[i] = volatility_sum[i-1] + np.abs(close[i] - close[i-1])
+        if i >= 10:
+            volatility_sum[i] -= np.abs(close[i-10] - close[i-11]) if i >= 11 else 0
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    er = np.zeros_like(close)
+    er[9:] = np.abs(close[9:] - close[:-9]) / (volatility_sum[9:] + 1e-10)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # for EMA(2)
+    slow_sc = 2 / (30 + 1)  # for EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume confirmation: >1.5x 24-period MA (12h * 24 = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate KAMA slope (rate of change over 3 periods)
+    kama_slope = np.zeros_like(close)
+    kama_slope[3:] = (kama[3:] - kama[:-3]) / kama[:-3]
+    
+    # Volume confirmation: >2x 48-period MA (8 days of 4h bars)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(kama_slope[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator signals: Lips > Teeth > Jaw = bullish alignment
-        bullish_align = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        bearish_align = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_48[i])
         
-        # Volume confirmation (>1.5x average)
-        vol_confirm = volume[i] > (1.5 * vol_ma_24[i])
+        # Entry conditions: KAMA slope aligned with trend
+        long_entry = kama_slope[i] > 0.001 and vol_confirm and uptrend
+        short_entry = kama_slope[i] < -0.001 and vol_confirm and downtrend
         
-        # Entry conditions
-        long_entry = bullish_align and uptrend and vol_confirm
-        short_entry = bearish_align and downtrend and vol_confirm
-        
-        # Exit conditions: Alligator lines cross (Lips crosses Teeth)
-        long_exit = lips_aligned[i] < teeth_aligned[i]  # Lips crossing below Teeth
-        short_exit = lips_aligned[i] > teeth_aligned[i]  # Lips crossing above Teeth
+        # Exit conditions: KAMA slope reverses or volume drops
+        long_exit = kama_slope[i] < -0.0005
+        short_exit = kama_slope[i] > 0.0005
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_BullishTrend_Filter"
-timeframe = "12h"
+name = "4h_KAMA_Slope_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
