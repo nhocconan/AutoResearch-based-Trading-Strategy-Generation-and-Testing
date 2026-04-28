@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_LiquidityVoid_Trap_Reversal
-Hypothesis: Price often reverses after creating liquidity voids (fair value gaps) on 6h timeframe.
-In ranging markets, price revisits these voids before continuing. In trending markets,
-voids act as support/resistance. We enter when price returns to fill a void with
-confluence from 1d trend (price vs 50 EMA) and volume confirmation.
-Designed for low trade frequency (~15-25/year) to minimize fee decay in choppy markets.
+12h_Camarilla_Pivot_Reversal_1wTrend
+Hypothesis: On 12-hour timeframe, enter long when price touches Camarilla S1 level with bullish divergence (price > 1w EMA50) and volume spike; short when price touches R1 level with bearish divergence (price < 1w EMA50). Exit on opposite touch. Uses 1w EMA50 for trend filter and volume confirmation to reduce false signals. Targets 50-150 trades over 4 years to minimize fee drag while capturing reversals in ranging markets and continuations in trending markets.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,116 +18,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Detect 6h fair value gaps (liquidity voids)
-    # Bullish FVG: gap between low[i-2] and high[i] where low[i-2] > high[i]
-    # Bearish FVG: gap between high[i-2] and low[i] where high[i-2] < low[i]
-    fvg_bull = np.zeros(n, dtype=bool)
-    fvg_bear = np.zeros(n, dtype=bool)
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    for i in range(2, n):
-        # Bullish FVG: two candles ago low > current candle high (gap up)
-        if low[i-2] > high[i]:
-            fvg_bull[i] = True
-        # Bearish FVG: two candles ago high < current candle low (gap down)
-        if high[i-2] < low[i]:
-            fvg_bear[i] = True
+    # Focus on S1 and R1 for reversals
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     
-    # Track active FVG zones (price hasn't filled them yet)
-    # For bullish FVG: active while price hasn't reached the gap low
-    # For bearish FVG: active while price hasn't reached the gap high
-    active_bull_fvg = np.zeros(n, dtype=bool)
-    active_bear_fvg = np.zeros(n, dtype=bool)
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Track the gap boundaries
-    bull_fvg_low = np.full(n, np.nan)
-    bull_fvg_high = np.full(n, np.nan)
-    bear_fvg_low = np.full(n, np.nan)
-    bear_fvg_high = np.full(n, np.nan)
+    # Align all data to 12h timeframe
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    for i in range(2, n):
-        if fvg_bull[i]:
-            bull_fvg_low[i] = high[i]      # Bottom of gap
-            bull_fvg_high[i] = low[i-2]    # Top of gap
-            active_bull_fvg[i] = True
-        elif i > 0:
-            bull_fvg_low[i] = bull_fvg_low[i-1]
-            bull_fvg_high[i] = bull_fvg_high[i-1]
-            active_bull_fvg[i] = active_bull_fvg[i-1]
-            # If price touches or goes below gap bottom, gap is filled
-            if low[i] <= bull_fvg_high[i]:
-                active_bull_fvg[i] = False
-        
-        if fvg_bear[i]:
-            bear_fvg_low[i] = high[i-2]    # Bottom of gap
-            bear_fvg_high[i] = low[i]      # Top of gap
-            active_bear_fvg[i] = True
-        elif i > 0:
-            bear_fvg_low[i] = bear_fvg_low[i-1]
-            bear_fvg_high[i] = bear_fvg_high[i-1]
-            active_bear_fvg[i] = active_bear_fvg[i-1]
-            # If price touches or goes above gap top, gap is filled
-            if high[i] >= bear_fvg_low[i]:
-                active_bear_fvg[i] = False
-    
-    # Align 1d trend data to 6h
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    d1_uptrend = close > ema_50_aligned
-    d1_downtrend = close < ema_50_aligned
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.8)
+    # Volume confirmation: current volume > 2x 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (vol_ma_24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_surge[i]) or
-            np.isnan(bull_fvg_low[i]) or np.isnan(bear_fvg_high[i])):
+        if (np.isnan(S1_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: price fills bullish FVG (returns to gap) with trend and volume
-        long_setup = (active_bull_fvg[i] and 
-                     low[i] <= bull_fvg_high[i] and  # Price touched gap top
-                     high[i] >= bull_fvg_low[i] and  # Price entered gap
-                     d1_uptrend[i] and 
-                     volume_surge[i])
+        # Trend filter: bullish when price > 1w EMA50, bearish when price < 1w EMA50
+        bullish_trend = close[i] > ema_50_1w_aligned[i]
+        bearish_trend = close[i] < ema_50_1w_aligned[i]
         
-        # Short setup: price fills bearish FVG (returns to gap) with trend and volume
-        short_setup = (active_bear_fvg[i] and
-                      high[i] >= bear_fvg_low[i] and   # Price touched gap bottom
-                      low[i] <= bear_fvg_high[i] and   # Price entered gap
-                      d1_downtrend[i] and
-                      volume_surge[i])
+        # Entry conditions: touch S1/R1 with trend alignment and volume spike
+        long_entry = (low[i] <= S1_aligned[i]) and bullish_trend and volume_spike[i]
+        short_entry = (high[i] >= R1_aligned[i]) and bearish_trend and volume_spike[i]
         
-        # Exit when price moves through the gap (opposite side)
-        long_exit = active_bull_fvg[i] and high[i] > bull_fvg_high[i]
-        short_exit = active_bear_fvg[i] and low[i] < bear_fvg_low[i]
+        # Exit conditions: touch opposite level
+        long_exit = high[i] >= R1_aligned[i]
+        short_exit = low[i] <= S1_aligned[i]
         
-        if long_setup and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_setup and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Close long
-            position = 0
+            signals[i] = -0.25  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Close short
-            position = 0
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -143,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_LiquidityVoid_Trap_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Reversal_1wTrend"
+timeframe = "12h"
 leverage = 1.0
