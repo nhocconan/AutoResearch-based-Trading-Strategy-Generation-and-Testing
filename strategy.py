@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme + 1d ADX25 Regime Filter + Volume Spike
-# Williams %R identifies overbought/oversold conditions (long when %R < -80, short when %R > -20)
-# 1d ADX > 25 filters for trending markets (avoid ranging/whipsaw)
-# Volume spike (>2.0x 24-bar average) confirms momentum strength
-# Target: 12-37 trades/year (50-150 total over 4 years) with discrete position sizing 0.25
-# Works in both bull/bear: mean reversion in ranging markets (via %R extremes) + trend filter avoids false signals
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR-based volatility filter.
+# Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years).
+# 1d EMA34 provides primary trend filter: bull when price > EMA34, bear when price < EMA34.
+# Donchian(20) breakout captures institutional price channels with proven edge.
+# ATR(14) < ATR(50) ensures low volatility breakouts (avoid chop).
+# Position size 0.25 for balance between return and drawdown control.
+# Discrete levels (0.0, ±0.25) minimize fee churn.
 
-name = "6h_WilliamsR_Extreme_1dADX25_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Trend_ATR_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,116 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to reduce noise
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 1d data for Williams %R and ADX
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for Williams %R(14) and ADX(14)
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ADX(14)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate ATR(14) and ATR(50) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    low_volatility = atr_14 < atr_50  # Low volatility regime
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    # First period DM is 0
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def WilderSmoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr = WilderSmoothing(tr, 14)
-    dm_plus_smooth = WilderSmoothing(dm_plus, 14)
-    dm_minus_smooth = WilderSmoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    # Handle division by zero
-    di_plus = np.where(atr == 0, 0, di_plus)
-    di_minus = np.where(atr == 0, 0, di_minus)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = WilderSmoothing(dx, 14)
-    
-    # Extract Williams %R signals and ADX regime
-    williams_r_signal = williams_r  # Values: 0 to -100
-    adx_trending = adx > 25  # ADX > 25 indicates trending market
-    
-    # Align HTF indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_signal)
-    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending.astype(float))
-    
-    # Calculate 6h volume spike: >2.0x 24-bar average volume
-    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * volume_ma_24
+    # Calculate Donchian(20) channels
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient history for all indicators
+    start_idx = 50  # Ensure sufficient history for ATR50 and EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or
-            np.isnan(adx_trending_aligned[i]) or
-            np.isnan(volume_ma_24[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(atr_14[i]) or
+            np.isnan(atr_50[i]) or
+            np.isnan(donchian_high_20[i]) or
+            np.isnan(donchian_low_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip outside trading session (08-20 UTC)
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Trend filter: 1d EMA34 direction (price above/below EMA34)
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Williams %R extreme conditions
-        williams_r_oversold = williams_r_aligned[i] < -80  # Extremely oversold
-        williams_r_overbought = williams_r_aligned[i] > -20  # Extremely overbought
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high_20[i]
+        short_breakout = close[i] < donchian_low_20[i]
         
-        # Trend filter: only trade in trending markets (ADX > 25)
-        is_trending = adx_trending_aligned[i] > 0.5  # Boolean array converted to float
+        # Volatility filter: only trade in low volatility regime
+        vol_filter = low_volatility[i]
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        long_entry = price_above_ema and long_breakout and vol_filter
+        short_entry = price_below_ema and short_breakout and vol_filter
         
-        long_entry = williams_r_oversold and is_trending and vol_confirm
-        short_entry = williams_r_overbought and is_trending and vol_confirm
-        
-        # Exit conditions: opposite extreme or loss of trend/volume
-        long_exit = (williams_r_aligned[i] > -20) or (not is_trending) or (not vol_confirm)
-        short_exit = (williams_r_aligned[i] < -80) or (not is_trending) or (not vol_confirm)
+        # Exit conditions: opposite Donchian level (reversion to mean)
+        long_exit = close[i] < donchian_low_20[i]  # Exit long at lower band
+        short_exit = close[i] > donchian_high_20[i]  # Exit short at upper band
         
         # Handle entries and exits
         if long_entry and position <= 0:
