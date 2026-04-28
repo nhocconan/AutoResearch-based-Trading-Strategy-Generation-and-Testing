@@ -13,23 +13,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
     # Get weekly data once for HTF context
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily high/low/close for calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily range for pivot calculations
-    daily_range = high_1d - low_1d
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
     # Weekly high/low/close for calculations
     high_1w = df_1w['high'].values
@@ -38,6 +30,14 @@ def generate_signals(prices):
     
     # Calculate weekly range for pivot calculations
     weekly_range = high_1w - low_1w
+    
+    # Daily high/low/close for calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
     
     # Camarilla pivot levels (based on previous day)
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
@@ -50,7 +50,7 @@ def generate_signals(prices):
     # Weekly EMA21 for trend
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align Camarilla levels and weekly EMA to 6h timeframe
+    # Align Camarilla levels and weekly EMA to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     r4_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_w)
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_WeeklyContext_EMA21"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_WeeklyContext_EMA21"
+timeframe = "12h"
 leverage = 1.0
