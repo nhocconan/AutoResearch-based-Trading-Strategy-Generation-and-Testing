@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Uses Camarilla R1/S1 levels from daily chart with 1-day trend filter (EMA34) and volume spike (>2x average) to capture strong breakouts. Works in bull/bear by following trend direction. Targets 15-25 trades/year via strict R1/S1 breakout conditions.
+6h_RSI_Pullback_to_MA_1dTrend
+Hypothesis: Uses 60-period EMA on 6h as dynamic support/resistance with RSI(14) pullbacks (RSI<30 for long, RSI>70 for short) in the direction of 1-day EMA34 trend. Works in bull/bear by following trend direction. Targets 15-25 trades/year via strict pullback conditions.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA34 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -28,30 +28,29 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
-    R1 = typical_price + (range_ * 1.1 / 6)
-    S1 = typical_price - (range_ * 1.1 / 6)
+    # Calculate 60-period EMA on 6h for dynamic support/resistance
+    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    
-    # Volume confirmation: >2x 24-period MA (4 days of 4h bars)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 to stabilize
+    start_idx = 60  # Wait for EMA60 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+            np.isnan(ema_60[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -59,22 +58,22 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>2x average)
-        vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
+        # Pullback conditions: price near EMA60 with RSI extreme
+        near_ema = abs(close[i] - ema_60[i]) / ema_60[i] < 0.01  # Within 1% of EMA60
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Breakout conditions at R1/S1
-        long_breakout = close[i] > R1_aligned[i] and vol_confirm and uptrend
-        short_breakout = close[i] < S1_aligned[i] and vol_confirm and downtrend
+        long_setup = near_ema and rsi_oversold and uptrend
+        short_setup = near_ema and rsi_overbought and downtrend
         
-        # Exit conditions: return to midpoint of R1/S1
-        midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        long_exit = rsi[i] > 40
+        short_exit = rsi[i] < 60
         
-        if long_breakout and position <= 0:
+        if long_setup and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_setup and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -94,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_RSI_Pullback_to_MA_1dTrend"
+timeframe = "6h"
 leverage = 1.0
