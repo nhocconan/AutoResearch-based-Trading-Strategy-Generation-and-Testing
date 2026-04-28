@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels calculated from 1d data (R3/S3 for mean reversion, R4/S4 for breakout)
-# Only takes breakout trades in direction of 1w EMA34 trend with volume confirmation (>2.0x average)
-# Designed to work in both bull and bear markets by combining pivot structure with weekly trend filter
-# Target: 7-25 trades/year via tight Camarilla breakout conditions + volume + weekly trend filter
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume confirmation
+# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect trend strength
+# Uses 1d EMA34 as primary trend filter (bullish when price > EMA34, bearish when price < EMA34)
+# Takes long when bull power > 0 AND volume spike, short when bear power < 0 AND volume spike
+# Includes ATR-based stoploss and exits when power reverses or price crosses EMA
+# Designed to work in both bull and bear markets by adapting to 1d trend regime
+# Target: 12-37 trades/year via Elder Ray signals filtered by 1d trend and volume
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,39 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (same timeframe, no alignment needed)
-    df_1d = prices  # primary timeframe is 1d
-    if len(df_1d) < 2:
+    # Get 1d data for EMA34 trend filter and Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC using previous day's data (avoid look-ahead)
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 6h timeframe (completed 1d candles only)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate Elder Ray components on 1d data
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Using EMA13 as the reference (standard Elder Ray uses EMA13)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), but min_periods will handle via checks
+    bull_power_1d = high_1d - ema13_1d  # Bull Power: High - EMA13
+    bear_power_1d = low_1d - ema13_1d   # Bear Power: Low - EMA13
     
-    # Calculate Camarilla levels
-    camarilla_r4 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 2)
-    camarilla_r3 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 4)
-    camarilla_s3 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 4)
-    camarilla_s4 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 2)
-    
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate EMA34 on 1w close for trend filter
-    close_1w = pd.Series(df_1w['close'])
-    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1w EMA34 to 1d timeframe (completed 1w candles only)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align Elder Ray components to 6h timeframe (completed 1d candles only)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -70,48 +65,46 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        r4 = camarilla_r4[i]
-        s4 = camarilla_s4[i]
-        ema34_val = ema34_1w_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R4 AND 1w EMA34 uptrend AND volume spike
-            if price > r4 and price > ema34_val and vol_confirm:
+            # Long: bull power positive AND price above 1d EMA34 AND volume spike
+            if bull_power > 0 and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S4 AND 1w EMA34 downtrend AND volume spike
-            elif price < s4 and price < ema34_val and vol_confirm:
+            # Short: bear power negative AND price below 1d EMA34 AND volume spike
+            elif bear_power < 0 and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price falls below R3 (mean reversion)
-            # ATR-based stoploss: 2.5 * ATR below entry (using 1d ATR)
+        elif position == 1:  # Long - exit on stoploss or bear power turns negative
+            # ATR-based stoploss: 2.5 * ATR below entry (using 6h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price - 2.5 * atr_val
-            # Exit on stoploss or price < R3 (mean reversion back to pivot)
-            if price < stop_loss or price < r3:
+            # Exit on stoploss or bear power < 0 (trend weakening) or price < EMA34
+            if price < stop_loss or bear_power < 0 or price < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price rises above S3 (mean reversion)
+        elif position == -1:  # Short - exit on stoploss or bull power turns positive
             # ATR-based stoploss: 2.5 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
@@ -119,8 +112,8 @@ def generate_signals(prices):
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price + 2.5 * atr_val
-            # Exit on stoploss or price > S3 (mean reversion back to pivot)
-            if price > stop_loss or price > s3:
+            # Exit on stoploss or bull power > 0 (trend weakening) or price > EMA34
+            if price > stop_loss or bull_power > 0 or price > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
