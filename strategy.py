@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian breakout (20) with weekly pivot direction filter and volume confirmation.
-# Uses weekly pivot points from 1w timeframe to establish directional bias, then looks for breakouts
-# on 6h timeframe with volume confirmation. This avoids whipsaws in ranging markets by only trading
-# in the direction of the weekly pivot bias. Designed for 6h to target 50-150 total trades over 4 years.
-# Works in both bull and bear markets by using pivot-based directional filter.
+# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 1-day EMA34 trend filter and volume confirmation.
+# Camarilla pivot levels (R3/S3) provide strong intraday support/resistance levels.
+# Breakout above R3 or below S3 with volume confirmation indicates strong momentum.
+# 1-day EMA34 filter ensures we only trade in the direction of the daily trend.
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+# Works in both bull and bear markets by following the daily trend direction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P = (H+L+C)/3, R1 = 2*P-L, S1 = 2*P-H, etc."""
-    p = (high + low + close) / 3.0
-    r1 = 2 * p - low
-    s1 = 2 * p - high
-    r2 = p + (high - low)
-    s2 = p - (high - low)
-    r3 = high + 2 * (p - low)
-    s3 = low - 2 * (high - p)
-    return p, r1, s1, r2, s2, r3, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,27 +20,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot point calculation (directional bias)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:  # Need enough for pivot calculation
+    # Get daily data for Camarilla pivots and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need enough for EMA34 calculation
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    p, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(high_1w, low_1w, close_1w)
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Use weekly bias: price above pivot = bullish bias, below = bearish bias
-    weekly_bias = np.where(close_1w > p, 1, -1)  # 1 for bullish, -1 for bearish
+    # Camarilla levels: R3/S3 are the most significant
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Align weekly bias to 6h timeframe
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # Calculate daily EMA34 for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Donchian channel (20-period) on 6h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels and EMA34 to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,30 +53,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)  # Wait for sufficient warmup
+    start_idx = 34  # Wait for EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_bias_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly bias filter
-        bullish_bias = weekly_bias_aligned[i] == 1
-        bearish_bias = weekly_bias_aligned[i] == -1
+        # Trend filter: price above EMA34 = uptrend, below = downtrend
+        uptrend = close[i] > ema_34_aligned[i]
+        downtrend = close[i] < ema_34_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Breakout conditions
+        breakout_long = close[i] > r3_aligned[i]  # Break above R3
+        breakout_short = close[i] < s3_aligned[i]  # Break below S3
         
-        # Entry conditions with volume confirmation and bias filter
-        long_entry = bullish_bias and breakout_up and volume_filter[i]
-        short_entry = bearish_bias and breakout_down and volume_filter[i]
+        # Entry conditions with volume confirmation
+        long_entry = uptrend and breakout_long and volume_filter[i]
+        short_entry = downtrend and breakout_short and volume_filter[i]
         
-        # Exit conditions: opposite breakout or loss of bias
-        long_exit = (not bullish_bias) or breakout_down
-        short_exit = (not bearish_bias) or breakout_up
+        # Exit conditions: when price returns to pivot level or trend reverses
+        pivot_level = (df_1d['high'].iloc[-1] + df_1d['low'].iloc[-1] + df_1d['close'].iloc[-1]) / 3 if len(df_1d) > 0 else 0
+        # Simplified exit: reverse signal or trend change
+        long_exit = not uptrend or close[i] < pivot_level
+        short_exit = not downtrend or close[i] > pivot_level
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivotBias_VolumeFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
