@@ -3,9 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d EMA trend filter.
+# Works in bull markets (breakouts continue) and bear markets (false breakouts filtered by EMA trend).
+# Target: 20-40 trades/year to avoid fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,35 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get daily data for EMA filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily EMA(34)
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily ATR(14)
-    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate daily SMA(50)
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate daily ATR MA(10) for volatility filter
-    atr_ma10_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    
-    # Align daily indicators to 12h
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    atr_ma10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma10_1d)
-    
-    # Calculate average volume over 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4-period average volume for confirmation
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -51,13 +37,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 200
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(sma50_aligned[i]) or
-            np.isnan(atr_ma10_aligned[i]) or
+        if (np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,23 +51,24 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below SMA50
-        uptrend = close[i] > sma50_aligned[i]
-        downtrend = close[i] < sma50_aligned[i]
+        # Donchian breakout: 4-period high/low
+        donch_high = np.max(high[i-4:i])
+        donch_low = np.min(low[i-4:i])
         
-        # Volatility filter: only trade when ATR is above its 10-period average
-        vol_filter = atr_aligned[i] > atr_ma10_aligned[i]
+        # Volume confirmation: current volume above average
+        vol_confirm = volume[i] > vol_ma[i]
         
-        # Volume filter: current volume above average
-        vol_filter = vol_filter and volume[i] > vol_ma[i]
+        # Trend filter: price relative to daily EMA34
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
         
-        # Entry conditions: trend + volatility + volume
-        long_entry = uptrend and vol_filter
-        short_entry = downtrend and vol_filter
+        # Entry conditions
+        long_entry = (close[i] > donch_high) and vol_confirm and uptrend
+        short_entry = (close[i] < donch_low) and vol_confirm and downtrend
         
-        # Exit conditions: trend reversal or volatility drop
-        long_exit = not uptrend or not vol_filter
-        short_exit = not downtrend or not vol_filter
+        # Exit conditions: opposite Donchian breakout
+        long_exit = close[i] < donch_low
+        short_exit = close[i] > donch_high
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -108,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_SMA50_ATR14_Volume_Trend_Session"
-timeframe = "12h"
+name = "4h_Donchian4_Volume_EMA34Trend"
+timeframe = "4h"
 leverage = 1.0
