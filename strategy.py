@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KeltnerBreakout_12hTrend_VolumeFilter
-Hypothesis: Keltner Channel breakouts with 12h EMA trend filter and volume spikes capture momentum moves while avoiding false breakouts. The Keltner Channel adapts to volatility, making it effective in both bull and bear markets. Volume confirmation ensures momentum, and the 12h EMA filter ensures we trade with the higher timeframe trend. Targets 20-40 trades/year.
+1d_Camarilla_Pivot_1wTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels from 1d combined with 1w trend filter and volume spikes capture swing moves in BTC/ETH. Works in bull by buying pullbacks to S1/S2 in uptrend, and in bear by selling rallies to R1/R2 in downtrend. Volume confirmation ensures momentum, reducing false signals. Targets 10-20 trades/year.
 """
 
 import numpy as np
@@ -18,27 +18,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Keltner Channel (20-period EMA, 2*ATR)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
+    # Camarilla levels
+    R4 = pivot + (range_hl * 1.1 / 2)
+    R3 = pivot + (range_hl * 1.1 / 4)
+    R2 = pivot + (range_hl * 1.1 / 6)
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    S2 = pivot - (range_hl * 1.1 / 6)
+    S3 = pivot - (range_hl * 1.1 / 4)
+    S4 = pivot - (range_hl * 1.1 / 2)
     
-    # Volume confirmation: >1.8x 20-period MA
+    # Align Camarilla levels to 1d timeframe (already daily, so just forward fill)
+    R1_1d = np.where(np.isnan(R1), np.nan, R1)
+    R2_1d = np.where(np.isnan(R2), np.nan, R2)
+    S1_1d = np.where(np.isnan(S1), np.nan, S1)
+    S2_1d = np.where(np.isnan(S2), np.nan, S2)
+    
+    # Forward fill to handle NaN from shift
+    def ffill(arr):
+        mask = np.isnan(arr)
+        if not np.any(mask):
+            return arr
+        idx = np.where(~mask, np.arange(len(arr)), 0)
+        np.maximum.accumulate(idx, out=idx)
+        return arr[idx]
+    
+    R1_ff = ffill(R1_1d)
+    R2_ff = ffill(R2_1d)
+    S1_ff = ffill(S1_1d)
+    S2_ff = ffill(S2_1d)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA21 for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Volume confirmation: >2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,31 +81,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(kc_upper[i]) or
-            np.isnan(kc_lower[i]) or
+        if (np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(R1_ff[i]) or np.isnan(R2_ff[i]) or
+            np.isnan(S1_ff[i]) or np.isnan(S2_ff[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 1w EMA21
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
-        # Breakout conditions: break of Keltner Channel
-        breakout_upper = close[i] > kc_upper[i]
-        breakdown_lower = close[i] < kc_lower[i]
+        # Price near Camarilla levels (within 0.5% tolerance)
+        tol = 0.005
+        near_R1 = abs(close[i] - R1_ff[i]) / R1_ff[i] < tol
+        near_R2 = abs(close[i] - R2_ff[i]) / R2_ff[i] < tol
+        near_S1 = abs(close[i] - S1_ff[i]) / S1_ff[i] < tol
+        near_S2 = abs(close[i] - S2_ff[i]) / S2_ff[i] < tol
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_upper
-        short_entry = vol_confirm and downtrend and breakdown_lower
+        # Entry logic: 
+        # Long: price near S1/S2 in uptrend with volume
+        # Short: price near R1/R2 in downtrend with volume
+        long_entry = vol_confirm and uptrend and (near_S1 or near_S2)
+        short_entry = vol_confirm and downtrend and (near_R1 or near_R2)
         
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_lower or (not uptrend)
-        short_exit = breakout_upper or (not downtrend)
+        # Exit logic: opposite signal or trend change
+        long_exit = (near_R1 or near_R2) or (not uptrend)
+        short_exit = (near_S1 or near_S2) or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KeltnerBreakout_12hTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
