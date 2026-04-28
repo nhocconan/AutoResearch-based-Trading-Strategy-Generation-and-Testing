@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend filter (price > 12h EMA50) and volume confirmation.
-# Uses 6h primary timeframe for moderate trade frequency (~12-37 trades/year) to balance signal quality and fee drag.
-# Camarilla R3/S3 levels from 1d provide strong support/resistance, filtered by 12h EMA50 trend and volume spikes.
-# Designed to work in both bull and bear markets by following the 12h trend while using Camarilla levels as entry signals.
-# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA34) and volume confirmation.
+# Uses 4h primary timeframe for lower trade frequency (~19-50 trades/year) to minimize fee drag.
+# Camarilla R3/S3 levels from 1d provide strong support/resistance, filtered by 1d EMA34 trend and volume spikes.
+# Designed to work in both bull and bear markets by following the 1d trend while using Camarilla levels as entry signals.
+# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.25.
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,9 +28,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla levels (R3, S3)
+    # Get 1d data for Camarilla levels (R3, S3) and EMA34 (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -44,33 +44,26 @@ def generate_signals(prices):
     R3 = close_1d + range_1d * 1.1 / 4
     S3 = close_1d - range_1d * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d indicators to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 12h data for EMA50 (trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA50
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # 6h volume spike: >1.5x 20-bar average volume
+    # 4h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # EMA50 needs 50 bars, volume MA needs 20, use 50 for safety
+    start_idx = 34  # EMA34 needs 34 bars, volume MA needs 20, use 34 for safety
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(R3_aligned[i]) or
             np.isnan(S3_aligned[i]) or
             np.isnan(volume_ma_20[i])):
@@ -82,9 +75,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 12h EMA50 direction
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: 1d EMA34 direction
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         # Breakout conditions
         long_breakout = close[i] > R3_aligned[i]
