@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v5"
+name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v6"
 timeframe = "12h"
 leverage = 1.0
