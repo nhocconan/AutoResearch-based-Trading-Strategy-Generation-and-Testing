@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 # Enter long when price breaks above 20-period high with 1d EMA34 uptrend and volume > 1.5x 20-bar average.
 # Enter short when price breaks below 20-period low with 1d EMA34 downtrend and volume > 1.5x 20-bar average.
 # Exit when price retraces to the 10-period EMA.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Target: 75-200 total trades over 4 years (19-50/year).
 # Donchian channels provide robust trend structure; 1d EMA34 ensures higher timeframe alignment;
 # volume confirmation filters weak breakouts. Works in both bull (strong breakouts) and bear (strong breakdowns).
 
-name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,14 +29,14 @@ def generate_signals(prices):
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
     close_1d = df_1d['close'].values
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 12h
+    # Align EMA34 to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate Donchian channels (20-period)
