@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA(50) trend filter and volume spike
-# Camarilla pivot levels provide high-probability reversal/continuation points. Breakouts above R3 or below S3
-# indicate strong momentum. 12h EMA ensures alignment with medium-term trend. Volume spike confirms conviction.
-# Designed for 4h timeframe targeting 20-50 trades/year to minimize fee drag while capturing strong moves.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume spike
+# Donchian channel breakouts capture strong momentum moves. 1w EMA ensures alignment with weekly trend.
+# Volume spike confirms conviction. Designed for 1d timeframe targeting 15-25 trades/year to minimize fee drag.
 # Works in both bull and bear markets by following trend direction via EMA filter.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,18 +22,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 1w EMA(34) for trend
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align 12h EMA to 4h (changes only when 12h bar closes)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 1w EMA to 1d (changes only when 1w bar closes)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -43,23 +42,11 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Camarilla levels: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 4h (using prior day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: >2.0x 20-bar average volume (strict filter to reduce trades)
     volume_series = pd.Series(volume)
@@ -70,12 +57,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50, 14)  # volume MA(20), 12h EMA(50), ATR(14)
+    start_idx = max(20, 34, 14)  # Donchian(20), 1w EMA(34), ATR(14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -84,30 +71,30 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > Camarilla R3, above 12h EMA50, volume spike
-            if price > camarilla_r3_aligned[i] and price > ema_50_12h_aligned[i] and vol_confirm:
+            # Long entry: Price > Donchian High, above 1w EMA34, volume spike
+            if price > donchian_high[i] and price > ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: Price < Camarilla S3, below 12h EMA50, volume spike
-            elif price < camarilla_s3_aligned[i] and price < ema_50_12h_aligned[i] and vol_confirm:
+            # Short entry: Price < Donchian Low, below 1w EMA34, volume spike
+            elif price < donchian_low[i] and price < ema_34_1w_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or retracement to 12h EMA50
+        elif position == 1:  # Long - exit on stoploss or retracement to 1w EMA34
             # ATR-based stoploss: 2.0 * ATR below entry
             stop_loss = entry_price - 2.0 * atr[i]
-            if price < stop_loss or price < ema_50_12h_aligned[i]:
+            if price < stop_loss or price < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or retracement to 12h EMA50
+        elif position == -1:  # Short - exit on stoploss or retracement to 1w EMA34
             # ATR-based stoploss: 2.0 * ATR above entry
             stop_loss = entry_price + 2.0 * atr[i]
-            if price > stop_loss or price > ema_50_12h_aligned[i]:
+            if price > stop_loss or price > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
