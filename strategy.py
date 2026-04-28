@@ -1,10 +1,9 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h_Pivot_Volume_Squeeze
-Hypothesis: Combines 15-minute price range contraction (squeeze) with 1d pivot points and volume expansion for breakouts.
-Works in both bull and bear markets by trading breakouts of consolidation with volume confirmation.
-Uses Bollinger Band width for squeeze detection and 1d pivot levels for directional bias.
-Target: 20-30 trades/year with strict entry conditions to avoid overtrading.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
+Hypothesis: Breakouts of daily Camarilla R1/S1 levels on 12h timeframe with 1-day EMA trend filter and volume spike confirmation.
+Targets 12-37 trades/year by requiring volume > 2x 20-period average and clear trend alignment.
+Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,102 +20,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d pivot points (standard floor trader pivots)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Camarilla formulas:
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Bollinger Bands for squeeze detection (20-period, 2 std)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma + (bb_std * std_dev)
-    lower_bb = sma - (bb_std * std_dev)
-    bb_width = (upper_bb - lower_bb) / sma  # Normalized width
-    
-    # Squeeze condition: BB width below 20-period average (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >2x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_expansion = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(sma[i]) or 
-            np.isnan(std_dev[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions with volume expansion
-        long_breakout = (close[i] > r1_aligned[i]) and vol_expansion[i]
-        short_breakout = (close[i] < s1_aligned[i]) and vol_expansion[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Exit conditions: opposite breakout or loss of momentum
-        long_exit = (close[i] < s1_aligned[i]) or (not vol_expansion[i] and position == 1)
-        short_exit = (close[i] > r1_aligned[i]) or (not vol_expansion[i] and position == -1)
+        # Breakout conditions
+        breakout_r1 = close[i] > camarilla_r1_aligned[i]
+        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
         
-        # Only trade during squeeze breakouts (avoid choppy markets)
-        if squeeze[i]:
-            if long_breakout and position <= 0:
-                signals[i] = 0.25
-                position = 1
-            elif short_breakout and position >= 0:
-                signals[i] = -0.25
-                position = -1
-            elif long_exit and position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif short_exit and position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position during squeeze
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        # Volume confirmation
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_r1
+        short_entry = vol_confirm and downtrend and breakdown_s1
+        
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_s1 or (not uptrend)
+        short_exit = breakout_r1 or (not downtrend)
+        
+        if long_entry and position <= 0:
+            signals[i] = 0.25
+            position = 1
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit and position == 1:
+            signals[i] = 0.0
+            position = 0
+        elif short_exit and position == -1:
+            signals[i] = 0.0
+            position = 0
         else:
-            # Outside squeeze: flatten position (avoid chop)
+            # Hold position
             if position == 1:
-                signals[i] = 0.0
-                position = 0
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = 0.0
-                position = 0
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Pivot_Volume_Squeeze"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
