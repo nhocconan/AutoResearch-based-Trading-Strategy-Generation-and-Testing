@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_R3_S3_Breakout_1wTrend
-Hypothesis: Camarilla pivot (R3/S3) breakout on 1d with 1w EMA50 trend filter.
-Targets 15-30 trades/year to minimize fee drag and ensure generalization.
-Works in bull via breakouts above R3 in uptrend, in bear via breakdowns below S3 in downtrend.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: Camarilla pivot (R1/S1) breakout on 12h with 1d EMA34 trend filter and volume spike confirmation.
+Trades with the trend in both bull and bear markets using 1d EMA34 as trend filter.
+Targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drift.
 """
 
 import numpy as np
@@ -20,20 +20,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1-day data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,13 +40,13 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         # Calculate Camarilla pivot levels for current day
         # Need previous day's OHLC (1d data)
-        day_idx = i  # Since we're on 1d timeframe, each bar is a day
+        day_idx = i // 2  # 2 = 12h bars per day (12h timeframe)
         if day_idx < 1:
             signals[i] = 0.0
             continue
@@ -66,29 +61,29 @@ def generate_signals(prices):
         pl = df_1d['low'].iloc[prev_day_idx]
         pc = df_1d['close'].iloc[prev_day_idx]
         
-        # Camarilla levels (R3/S3)
+        # Camarilla levels
         range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)  # R3 = C + (H-L)*1.1/4
-        s3 = pc - (range_val * 1.1 / 4)  # S3 = C - (H-L)*1.1/4
+        r1 = pc + (range_val * 1.1 / 12)
+        s1 = pc - (range_val * 1.1 / 12)
         
-        # Trend direction from 1w EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Trend direction from 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation: >2.0x 20-period MA
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
         # Breakout conditions
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
+        long_breakout = close[i] > r1
+        short_breakout = close[i] < s1
         
         # Entry logic
         long_entry = vol_confirm and trend_up and long_breakout
         short_entry = vol_confirm and trend_down and short_breakout
         
         # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        long_exit = (close[i] < s1) or (not trend_up)
+        short_exit = (close[i] > r1) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_Pivot_R3_S3_Breakout_1wTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
