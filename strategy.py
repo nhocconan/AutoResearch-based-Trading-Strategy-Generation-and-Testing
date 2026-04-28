@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,52 +15,46 @@ def generate_signals(prices):
     
     # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Daily high/low/close for calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily close for calculations
     close_1d = df_1d['close'].values
     
-    # Calculate daily range for pivot calculations
-    daily_range = high_1d - low_1d
+    # Calculate daily return for volatility
+    daily_return = np.diff(close_1d, prepend=close_1d[0]) / close_1d
+    daily_vol = pd.Series(daily_return).rolling(window=10, min_periods=10).std().values
     
-    # Camarilla pivot levels (based on previous day)
-    camarilla_r3 = close_1d + daily_range * 1.1 / 4
-    camarilla_s3 = close_1d - daily_range * 1.1 / 4
+    # Calculate volatility percentile (20-day lookback)
+    vol_percentile = pd.Series(daily_vol).rolling(window=20, min_periods=10).apply(
+        lambda x: np.percentile(x, 50) if len(x) > 0 else 50, raw=False).values
     
-    # Daily EMA34 for trend
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Current volatility vs median (normalized)
+    vol_ratio = daily_vol / (pd.Series(daily_vol).rolling(window=20, min_periods=10).median().values + 1e-10)
     
-    # Align Camarilla levels and daily EMA to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align volatility ratio to 4h timeframe
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Low volatility filter (below median)
+    low_vol_filter = vol_ratio_aligned < 1.0
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Hour filter: 0-6 UTC (Asian session - typically lower volatility)
     hours = pd.DatetimeIndex(prices['open_time']).hour
+    asian_session = (hours >= 0) & (hours < 6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 20  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(vol_ratio_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        # Session filter: only trade Asian session (0-6 UTC)
+        if not asian_session[i]:
             # Outside session: flatten position
             if position != 0:
                 signals[i] = 0.0
@@ -69,22 +63,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: above average volume
-        vol_filter = volume[i] > vol_ma[i]
+        # Low volatility filter
+        vol_filter = low_vol_filter[i]
         
-        # Daily trend filter: price above/below daily EMA34
-        price_above_daily_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_daily_ema = close[i] < ema_34_1d_aligned[i]
+        if not vol_filter:
+            # High volatility: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         # Entry conditions: 
-        # Long: price breaks above daily R3 with volume and daily uptrend
-        # Short: price breaks below daily S3 with volume and daily downtrend
-        long_entry = (close[i] > r3_aligned[i]) and price_above_daily_ema and vol_filter
-        short_entry = (close[i] < s3_aligned[i]) and price_below_daily_ema and vol_filter
+        # Long: price above previous day's close with low volatility in Asian session
+        # Short: price below previous day's close with low volatility in Asian session
+        long_entry = (close[i] > close_1d[i]) and vol_filter
+        short_entry = (close[i] < close_1d[i]) and vol_filter
         
-        # Exit conditions: price returns to opposite daily S3/R3 levels
-        long_exit = (close[i] < s3_aligned[i])
-        short_exit = (close[i] > r3_aligned[i])
+        # Exit conditions: price returns to previous day's close or volatility increases
+        long_exit = (close[i] <= close_1d[i]) or (not vol_filter)
+        short_exit = (close[i] >= close_1d[i]) or (not vol_filter)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_DailyEMA34"
-timeframe = "12h"
+name = "4h_AsianSession_LowVol_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
