@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using Camarilla pivot levels (R3/S3) with 1w EMA50 trend filter and volume spike confirmation.
-# Enter long when price breaks above Camarilla R3 with volume > 2.0x 20-bar average and price > 1w EMA50 (uptrend).
-# Enter short when price breaks below Camarilla S3 with volume > 2.0x 20-bar average and price < 1w EMA50 (downtrend).
-# Exit on close below Camarilla S3 (for longs) or above Camarilla R3 (for shorts).
-# Uses discrete position sizing (0.25) to limit drawdown. Target: 30-100 trades over 4 years.
-# Camarilla levels provide precise intraday support/resistance, volume confirms breakout strength, 1w EMA50 filters counter-trend noise.
-# Works in bull (breakouts with trend) and bear (failed breaks via exits) markets.
+# Hypothesis: 6h strategy using 1d Williams %R extreme readings with volume confirmation and 1d EMA50 trend filter.
+# Enter long when Williams %R < -80 (oversold) with volume > 1.8x 24-bar average and price > 1d EMA50 (uptrend).
+# Enter short when Williams %R > -20 (overbought) with volume > 1.8x 24-bar average and price < 1d EMA50 (downtrend).
+# Exit on opposite Williams %R extreme or Donchian(10) break of the trend.
+# Uses discrete position sizing (0.25) to limit drawdown. Target: 50-150 trades over 4 years.
+# Williams %R captures exhaustion points, volume confirms reversal pressure, 1d EMA50 filters counter-trend noise.
+# Works in bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend) markets.
 
-name = "1d_Camarilla_R3S3_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_Volume_Extreme_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +25,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Williams %R and EMA50 (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d Williams %R (14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    def camarilla_levels(high, low, close):
-        # Camarilla levels calculated from previous day's range
-        range_ = high - low
-        camarilla_r3 = close + range_ * 1.1 / 4
-        camarilla_s3 = close - range_ * 1.1 / 4
-        return camarilla_r3, camarilla_s3
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    camarilla_r3 = np.full_like(close, np.nan)
-    camarilla_s3 = np.full_like(close, np.nan)
+    # Align 1d indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each bar using previous day's OHLC
-    for i in range(1, n):
-        camarilla_r3[i], camarilla_s3[i] = camarilla_levels(high[i-1], low[i-1], close[i-1])
-    
-    # Calculate 1d volume confirmation: >2.0x 20-bar average volume
+    # Calculate 6h volume confirmation: >1.8x 24-bar average volume (4d)
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_24
+    
+    # Calculate 6h Donchian(10) for exit
+    def donchian_channels(high, low, length=10):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(length-1, len(high)):
+            upper[i] = np.max(high[i-length+1:i+1])
+            lower[i] = np.min(low[i-length+1:i+1])
+        return upper, lower
+    
+    donchian_upper, donchian_lower = donchian_channels(high, low, 10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,24 +71,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and trend filter
-        long_breakout = close[i] > camarilla_r3[i] and volume_confirm[i] and close[i] > ema_50_1w_aligned[i]
-        short_breakout = close[i] < camarilla_s3[i] and volume_confirm[i] and close[i] < ema_50_1w_aligned[i]
+        # Williams %R extreme conditions with volume confirmation and trend filter
+        long_setup = williams_r_aligned[i] < -80 and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]
+        short_setup = williams_r_aligned[i] > -20 and volume_confirm[i] and close[i] < ema_50_1d_aligned[i]
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] < camarilla_s3[i]
-        short_exit = close[i] > camarilla_r3[i]
+        # Exit conditions: opposite Williams %R extreme or Donchian break
+        long_exit = williams_r_aligned[i] > -20 or close[i] < donchian_lower[i]
+        short_exit = williams_r_aligned[i] < -80 or close[i] > donchian_upper[i]
         
         # Handle entries and exits
-        if long_breakout and position <= 0:
+        if long_setup and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_setup and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
