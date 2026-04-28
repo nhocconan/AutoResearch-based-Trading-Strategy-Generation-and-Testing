@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_3BarBreakout_WeeklyTrend_200MA_Filter
-Hypothesis: On daily timeframe, enter long when price breaks above the 3-day high with volume surge and weekly uptrend (EMA8>EMA21), short when price breaks below the 3-day low with volume surge and weekly downtrend. Exit on opposite breakout with volume. Price must be above/below 200-day MA to avoid counter-trend trades. Designed for low trade frequency (~10-25/year) to minimize fee decay in both bull and bear markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 with volume surge and 1d uptrend (close > EMA34), short when price breaks below S3 with volume surge and 1d downtrend. Exit on opposite breakout with volume. Uses volume confirmation and 1d trend filter to reduce false signals. Designed for moderate trade frequency (~25-40/year) to balance signal quality and fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,55 +18,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 21:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly 8 and 21 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate daily 34 EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align weekly EMAs to daily timeframe
-    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
-    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
+    # Daily trend: bullish when close > EMA34
+    daily_uptrend = close_1d > ema34_1d
+    daily_downtrend = close_1d < ema34_1d
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Weekly trend: bullish when EMA8 > EMA21
-    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
-    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
+    # Calculate Camarilla levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Use previous day's typical price (shift by 1)
+    prev_typical = pd.Series(typical_price).shift(1).values
     
-    # Calculate 3-day high and low (using previous 3 days, not including current)
-    high_3d = pd.Series(high).rolling(window=3, min_periods=3).max().shift(1).values
-    low_3d = pd.Series(low).rolling(window=3, min_periods=3).min().shift(1).values
+    # Calculate range (high - low) of previous day
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Volume confirmation: current volume > 2.0x 50-day average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_surge = volume > (vol_ma_50 * 2.0)
+    # Camarilla levels
+    R3 = prev_typical + (prev_range * 1.1 / 4)
+    S3 = prev_typical - (prev_range * 1.1 / 4)
     
-    # 200-day moving average filter
-    ma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
-            np.isnan(high_3d[i]) or np.isnan(low_3d[i]) or np.isnan(volume_surge[i]) or
-            np.isnan(ma_200[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(daily_uptrend_aligned[i]) or
+            np.isnan(daily_downtrend_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with weekly trend alignment, volume surge, and 200MA filter
-        long_entry = close[i] > high_3d[i] and weekly_uptrend[i] and volume_surge[i] and close[i] > ma_200[i]
-        short_entry = close[i] < low_3d[i] and weekly_downtrend[i] and volume_surge[i] and close[i] < ma_200[i]
+        # Entry conditions with daily trend alignment and volume surge
+        long_entry = close[i] > R3[i] and daily_uptrend_aligned[i] > 0.5 and volume_surge[i]
+        short_entry = close[i] < S3[i] and daily_downtrend_aligned[i] > 0.5 and volume_surge[i]
         
-        # Exit on opposite 3-day break with volume surge (no 200MA filter on exit to avoid whipsaw)
-        long_exit = close[i] < low_3d[i] and volume_surge[i]
-        short_exit = close[i] > high_3d[i] and volume_surge[i]
+        # Exit on opposite Camarilla level break with volume surge
+        long_exit = close[i] < S3[i] and volume_surge[i]
+        short_exit = close[i] > R3[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -91,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_3BarBreakout_WeeklyTrend_200MA_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
