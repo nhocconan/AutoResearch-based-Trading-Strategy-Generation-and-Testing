@@ -1,10 +1,3 @@
-# 12h Williams Alligator with Volume Confirmation and Trend Filter
-# Strategy uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction
-# Entry when price crosses above/below Alligator teeth with volume confirmation
-# Exit when price crosses back through teeth or opposite signal
-# Designed for 12h timeframe with 1d/1h trend filters to reduce whipsaw
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,94 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator calculation
+    # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 1d data
-    # Jaw (Blue): 13-period SMMA smoothed 8 periods ahead
-    # Teeth (Red): 8-period SMMA smoothed 5 periods ahead  
-    # Lips (Green): 5-period SMMA smoothed 3 periods ahead
+    # Calculate 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # SMMA (Smoothed Moving Average) calculation
-    def smma(data, period):
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_CLOSE) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # 1d Bollinger Bands (20, 2.0)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + (2.0 * std_20)
+    bb_lower = sma_20 - (2.0 * std_20)
     
-    # Williams Alligator lines
-    jaw = smma(close_1d, 13)  # 13-period SMMA
-    teeth = smma(close_1d, 8)  # 8-period SMMA
-    lips = smma(close_1d, 5)   # 5-period SMMA
+    # Bollinger Band Width for squeeze detection
+    bb_width = (bb_upper - bb_lower) / sma_20
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_squeeze = bb_width < bb_width_ma * 0.8
     
-    # Shift jaws forward by 8, teeth by 5, lips by 3 (as per Williams Alligator)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
+    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    # 1d Volume spike detection
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 2.0)
     
-    # Get 1h trend filter (EMA 50)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
-        return np.zeros(n)
-    
-    close_1h = df_1h['close'].values
-    ema_50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
-    
-    # Volume confirmation (20-period volume MA spike)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.5)
+    # Align HTF indicators to 4h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Sufficient warmup for all indicators
+    start_idx = 80  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1h_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(sma_20_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(bb_squeeze_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator signals
-        # Bullish: Lips > Teeth > Jaw (all aligned and separated)
-        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        # Bearish: Lips < Teeth < Jaw (all aligned and separated)
-        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        # Bollinger Band squeeze breakout conditions
+        breakout_up = close[i] > bb_upper_aligned[i]
+        breakout_down = close[i] < bb_lower_aligned[i]
         
-        # Price position relative to teeth (trigger line)
-        price_above_teeth = close[i] > teeth_aligned[i]
-        price_below_teeth = close[i] < teeth_aligned[i]
+        # Momentum filter: RSI in favorable range
+        rsi_momentum_up = rsi_aligned[i] > 50
+        rsi_momentum_down = rsi_aligned[i] < 50
         
-        # Trend filter: 1h EMA50 direction
-        uptrend_filter = close[i] > ema_50_1h_aligned[i]
-        downtrend_filter = close[i] < ema_50_1h_aligned[i]
+        # Only trade during squeeze breakouts with momentum
+        squeeze_active = bb_squeeze_aligned[i]
+        vol_confirm = vol_spike_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = vol_spike[i]
+        # Entry conditions - Bollinger Band squeeze breakout with volume
+        long_entry = breakout_up and rsi_momentum_up and squeeze_active and vol_confirm
+        short_entry = breakout_down and rsi_momentum_down and squeeze_active and vol_confirm
         
-        # Entry conditions
-        long_entry = bullish_alignment and price_above_teeth and uptrend_filter and vol_confirm
-        short_entry = bearish_alignment and price_below_teeth and downtrend_filter and vol_confirm
-        
-        # Exit conditions: price crosses back through teeth or opposite alignment
-        long_exit = price_below_teeth or bearish_alignment
-        short_exit = price_above_teeth or bullish_alignment
+        # Exit conditions: return to middle Bollinger Band or opposite breakout
+        long_exit = close[i] < sma_20_aligned[i] or breakout_down
+        short_exit = close[i] > sma_20_aligned[i] or breakout_up
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -132,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_Teeth_Cross_Volume"
-timeframe = "12h"
+name = "4h_BollingerSqueeze_Breakout_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
