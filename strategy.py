@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for Donchian channels and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Daily Donchian Channel (20)
@@ -26,7 +26,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(df_1d['close'].values)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -34,13 +34,13 @@ def generate_signals(prices):
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -83,10 +83,10 @@ def generate_signals(prices):
         short_exit = (close[i] > high_20_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit:
             signals[i] = 0.0
@@ -97,14 +97,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DonchianBreakout_DailyTrend_Volume_Session"
-timeframe = "4h"
+name = "12h_DonchianBreakout_DailyTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
