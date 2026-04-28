@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,69 +13,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for HTF context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for long-term trend context
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate weekly SMA(20) for trend filter
+    sma_20_weekly = pd.Series(df_weekly['close'].values).rolling(window=20, min_periods=20).mean().values
+    sma_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_20_weekly)
     
-    # 1d ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate daily ATR(14) for volatility filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 14:
+        return np.zeros(n)
+    
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
+    
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_14_daily)
     
-    # 1d EMA(50) for trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily ADX(14) for trend strength
+    plus_dm = np.diff(high_daily, prepend=high_daily[0])
+    minus_dm = np.diff(low_daily, prepend=low_daily[0]) * -1
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    # 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
-    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    tr_daily = tr  # Already calculated above
+    atr_14_daily_for_adx = pd.Series(tr_daily).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_daily_for_adx
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_daily_for_adx
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_14_aligned = align_htf_to_ltf(prices, df_daily, adx_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(sma_20_weekly_aligned[i]) or np.isnan(atr_14_daily_aligned[i]) or 
+            np.isnan(adx_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below weekly SMA20
+        trend_up = close[i] > sma_20_weekly_aligned[i]
+        trend_down = close[i] < sma_20_weekly_aligned[i]
         
-        # Momentum filter: RSI in favorable range
-        rsi_momentum_up = rsi_aligned[i] > 50
-        rsi_momentum_down = rsi_aligned[i] < 50
+        # Volatility filter: ATR > 50th percentile of recent ATR (avoid low volatility)
+        if i >= 20:
+            atr_recent = atr_14_daily_aligned[max(0, i-20):i+1]
+            atr_median = np.median(atr_recent[~np.isnan(atr_recent)])
+            vol_filter = atr_14_daily_aligned[i] > atr_median
+        else:
+            vol_filter = True
         
-        # Entry conditions
-        long_entry = trend_up and rsi_momentum_up
-        short_entry = trend_down and rsi_momentum_down
+        # Trend strength filter: ADX > 20 (trending market)
+        trend_strength = adx_14_aligned[i] > 20
         
-        # Exit conditions: opposite trend or RSI reversal
-        long_exit = not trend_up or rsi_aligned[i] < 50
-        short_exit = not trend_down or rsi_aligned[i] > 50
+        # Entry conditions - only in strong trends with sufficient volatility
+        long_entry = trend_up and vol_filter and trend_strength
+        short_entry = trend_down and vol_filter and trend_strength
+        
+        # Exit conditions - reverse when trend changes or volatility drops
+        long_exit = not trend_up or not vol_filter or not trend_strength
+        short_exit = not trend_down or not vol_filter or not trend_strength
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_RSI_Trend_Momentum"
-timeframe = "12h"
+name = "1d_WeeklySMA20_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
