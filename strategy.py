@@ -1,3 +1,9 @@
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakouts on 12h with 1d EMA50 trend filter and volume confirmation capture institutional moves.
+# Works in bull/bear: breakouts capture momentum in trends, volume filter prevents fakeouts in ranges.
+# Target: 15-30 trades/year on 12h timeframe to minimize fee drag.
+# Uses 1d Camarilla levels and EMA50, aligned to 12h chart. No look-ahead bias.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,32 +19,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Get daily data for Donchian channels
+    # Get daily data for Camarilla pivots and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(20) for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels (R3, S3)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3_1d = pivot_1d + (range_1d * 1.1 / 2.0)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 2.0)
     
-    # Daily Donchian(20) channels
-    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly and daily indicators to daily timeframe
-    ema20_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    high_max_aligned = align_htf_to_ltf(prices, df_1d, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_1d, low_min)
+    # Align daily indicators to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,9 +57,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_aligned[i]) or 
-            np.isnan(high_max_aligned[i]) or
-            np.isnan(low_min_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,23 +69,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = close[i] > ema20_aligned[i]
-        downtrend = close[i] < ema20_aligned[i]
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # Breakout conditions: price breaks Donchian channels with volume and trend
-        long_breakout = close[i] > high_max_aligned[i]
-        short_breakout = close[i] < low_min_aligned[i]
+        # Breakout conditions: price breaks R3/S3 with volume and trend
+        long_breakout = close[i] > r3_aligned[i]
+        short_breakout = close[i] < s3_aligned[i]
         
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: price returns to opposite Donchian level or trend reverses
-        long_exit = close[i] < low_min_aligned[i] or not uptrend
-        short_exit = close[i] > high_max_aligned[i] or not downtrend
+        # Exit conditions: price returns to pivot level or trend reverses
+        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        long_exit = close[i] < pivot_aligned[i] or not uptrend
+        short_exit = close[i] > pivot_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -108,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_Donchian20_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
