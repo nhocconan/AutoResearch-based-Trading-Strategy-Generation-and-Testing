@@ -1,11 +1,8 @@
-# 12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter
-# Hypothesis: 12h Camarilla R3/S3 breakout with daily EMA34 trend filter and volume confirmation.
-# Uses 12h primary timeframe with 1d higher timeframe for pivot points and trend filter.
-# R3/S3 levels represent stronger support/resistance than R1/S1, leading to fewer but higher-quality breakouts.
-# Daily EMA34 filters for trend alignment, reducing counter-trend trades.
-# Volume confirmation ensures breakouts have participation.
-# This combination should work in both bull and bear markets by filtering for momentum with trend alignment.
-# Target: 12-37 trades/year to avoid fee drag.
+#!/usr/bin/env python3
+# Hypothesis: 4h Donchian(20) breakout with 4h ATR-based volatility filter and volume confirmation.
+# Uses price channel breakouts with volatility filtering to avoid choppy markets.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+# Target: 20-40 trades/year to avoid fee drag.
 
 import numpy as np
 import pandas as pd
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,41 +18,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough for EMA34
+    # Get 4h data for ATR calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ATR(14) on 4h data
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Standard Camarilla calculation
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # First day uses its own close
+    # True Range calculation
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Camarilla levels
-    r3 = close_prev + 1.1 * range_1d / 2
-    s3 = close_prev - 1.1 * range_1d / 2
-    r4 = close_prev + 1.1 * range_1d
-    s4 = close_prev - 1.1 * range_1d
+    # ATR calculation
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Donchian channel (20-period) on price data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: volume > 1.8x 20-period average to avoid noise
+    # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.8)
+    volume_filter = volume > (volume_ma * 1.5)
+    
+    # Volatility filter: ATR > 0.5 * 50-period ATR average (avoid low volatility chop)
+    atr_50 = pd.Series(atr_4h_aligned).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr_4h_aligned > (atr_50 * 0.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,27 +58,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(atr_4h_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
-        
         # Entry conditions
-        # Long: break above R3 with upward trend and volume
-        long_breakout = close[i] > r3_aligned[i]
-        long_entry = long_breakout and trend_up and volume_filter[i]
+        # Long: break above 20-period high with volume and volatility
+        long_breakout = close[i] > high_20[i]
+        long_entry = long_breakout and volume_filter[i] and vol_filter[i]
         
-        # Short: break below S3 with downward trend and volume
-        short_breakout = close[i] < s3_aligned[i]
-        short_entry = short_breakout and trend_down and volume_filter[i]
+        # Short: break below 20-period low with volume and volatility
+        short_breakout = close[i] < low_20[i]
+        short_entry = short_breakout and volume_filter[i] and vol_filter[i]
         
-        # Exit conditions: opposite S3/R3 levels (mean reversion)
-        long_exit = close[i] < s3_aligned[i] and position == 1
-        short_exit = close[i] > r3_aligned[i] and position == -1
+        # Exit conditions: opposite Donchian level (mean reversion)
+        long_exit = close[i] < low_20[i] and position == 1
+        short_exit = close[i] > high_20[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -110,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_VolVol_Filter"
+timeframe = "4h"
 leverage = 1.0
