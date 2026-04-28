@@ -1,10 +1,3 @@
-# 1h_RSI_Volume_Trend_Filter
-# Hypothesis: On 1h timeframe, combine RSI mean reversion with volume confirmation and 4h EMA trend filter.
-# In bull markets: RSI oversold during uptrend signals continuation longs. In bear markets: RSI overbought during downtrend signals continuation shorts.
-# Volume filter ensures breakouts have institutional participation. 4h EMA filter prevents counter-trend trades.
-# Target: 20-50 trades per year to minimize fee drag on 1h timeframe.
-# Uses RSI(14) on 1h, volume confirmation, and 4h EMA(50) trend filter for multi-timeframe alignment.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,28 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get daily data for pivot points and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA(50) for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate daily pivot points (classic)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Calculate RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily EMA(34) for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate average volume over 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily indicators to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate average volume over 24 periods
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -55,8 +55,12 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -66,29 +70,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 4h EMA50
-        uptrend = close[i] > ema50_4h_aligned[i]
-        downtrend = close[i] < ema50_4h_aligned[i]
+        # Trend filter: price above/below EMA34
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # RSI conditions: oversold in uptrend, overbought in downtrend
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Entry conditions: break of S1/R1 with trend and volume
+        long_entry = (close[i] > r1_aligned[i]) and uptrend and vol_filter
+        short_entry = (close[i] < s1_aligned[i]) and downtrend and vol_filter
         
-        long_entry = rsi_oversold and uptrend and vol_filter
-        short_entry = rsi_overbought and downtrend and vol_filter
-        
-        # Exit conditions: RSI returns to neutral or trend reverses
-        long_exit = (rsi[i] > 50) or (not uptrend)
-        short_exit = (rsi[i] < 50) or (not downtrend)
+        # Exit conditions: return to pivot or trend reversal
+        long_exit = (close[i] < pivot_aligned[i]) or (not uptrend)
+        short_exit = (close[i] > pivot_aligned[i]) or (not downtrend)
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -99,14 +100,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_RSI_Volume_Trend_Filter"
-timeframe = "1h"
+name = "12h_Pivot_S1R1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
