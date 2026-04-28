@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 Breakout with 1d EMA34 Trend and Volume Spike
-# Camarilla R3/S3 levels represent stronger support/resistance than R1/S1.
-# Breakout above R3 or below S3 with 1d EMA34 trend alignment and volume spike = entry.
-# Exit on retracement to prior day's close (pivot-like behavior).
+# Hypothesis: 12h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1.
+# Breakout above R3 with 1d EMA34 uptrend and volume spike = long.
+# Breakdown below S3 with 1d EMA34 downtrend and volume spike = short.
+# Exit on retracement to Camarilla H3/L3 levels (mean reversion zone).
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Target: 75-150 total trades over 4 years (19-37/year).
 # Works in both bull/bear markets by requiring alignment with 1d trend.
+# Volume confirmation filters weak breakouts.
+# Using 12h primary timeframe as requested in experiment #105512.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +28,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter and Camarilla calculation (requires daily OHLC)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
@@ -36,22 +39,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (prior day's OHLC)
-    # Camarilla: PP = (H+L+C)/3
+    # Calculate Camarilla levels from prior 1d bar
+    # Camarilla uses prior period's OHLC: PP = (H+L+C)/3
     # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # We shift by 1 to use prior completed 1d bar's OHLC
     prior_high = df_1d['high'].shift(1).values
     prior_low = df_1d['low'].shift(1).values
     prior_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla R3 and S3 levels
+    # Calculate Camarilla levels
     pp = (prior_high + prior_low + prior_close) / 3.0
     r3 = prior_close + (prior_high - prior_low) * 1.1 / 4.0
     s3 = prior_close - (prior_high - prior_low) * 1.1 / 4.0
+    h3 = prior_close + (prior_high - prior_low) * 1.1 / 2.0
+    l3 = prior_close - (prior_high - prior_low) * 1.1 / 2.0
     
-    # Align Camarilla levels to 6h (they change only when 1d bar closes)
+    # Align Camarilla levels to 12h (they change only when 1d bar closes)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)  # for exit condition
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -65,8 +73,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -91,14 +100,14 @@ def generate_signals(prices):
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on retracement to prior day's close (PP)
-            if price < pp_aligned[i]:
+        elif position == 1:  # Long - exit on retracement to L3 (mean reversion)
+            if price < l3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on retracement to prior day's close (PP)
-            if price > pp_aligned[i]:
+        elif position == -1:  # Short - exit on retracement to H3 (mean reversion)
+            if price > h3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
