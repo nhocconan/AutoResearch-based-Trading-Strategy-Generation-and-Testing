@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
-# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1.
-# Breakout above R3 with 1d EMA34 uptrend and volume spike = long.
-# Breakdown below S3 with 1d EMA34 downtrend and volume spike = short.
-# Exit on retracement to pivot point (PP) or opposite Camarilla level (R1/S1).
-# Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Works in both bull/bear markets by requiring alignment with 1d trend.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume spike + ATR trailing stop
+# Donchian channel breakouts capture momentum bursts with clear structure.
+# 1d EMA34 ensures alignment with higher timeframe trend (works in bull/bear).
 # Volume confirmation filters weak breakouts.
+# ATR trailing stop limits drawdown during reversals.
+# Discrete position sizing (0.30) balances return and risk.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,10 +25,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend filter
@@ -38,39 +36,35 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior 1d bar
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate ATR(14) for stoploss and volatility filter
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels
-    pp = (prior_high + prior_low + prior_close) / 3.0
-    r3 = prior_close + (prior_high - prior_low) * 1.1/4.0
-    s3 = prior_close - (prior_high - prior_low) * 1.1/4.0
-    r1 = prior_close + (prior_high - prior_low) * 1.1/12.0
-    s1 = prior_close - (prior_high - prior_low) * 1.1/12.0
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h (they change only when 1d bar closes)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = max(20, 34)  # Ensure sufficient history for volume MA and EMA
+    start_idx = max(20, 34)  # Ensure sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -83,29 +77,44 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > R3, 1d EMA34 uptrend, volume confirm
-            if price > r3_aligned[i] and ema_trend_up and vol_confirm:
-                signals[i] = 0.25
+            # Long entry: Price > Donchian upper, 1d EMA34 uptrend, volume confirm
+            if price > highest_high[i] and ema_trend_up and vol_confirm:
+                signals[i] = 0.30
                 position = 1
-            # Short entry: Price < S3, 1d EMA34 downtrend, volume confirm
-            elif price < s3_aligned[i] and ema_trend_down and vol_confirm:
-                signals[i] = -0.25
+                entry_price = price
+                highest_since_entry = price
+            # Short entry: Price < Donchian lower, 1d EMA34 downtrend, volume confirm
+            elif price < lowest_low[i] and ema_trend_down and vol_confirm:
+                signals[i] = -0.30
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on retracement to PP or below S1
-            if price < pp_aligned[i] or price < s1_aligned[i]:
+        elif position == 1:  # Long - trail stop or exit on reversal
+            highest_since_entry = max(highest_since_entry, price)
+            # ATR trailing stop: exit if price drops 2.5*ATR from highest since entry
+            if price < highest_since_entry - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit on trend reversal
+            elif not ema_trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:  # Short - exit on retracement to PP or above R1
-            if price > pp_aligned[i] or price > r1_aligned[i]:
+                signals[i] = 0.30
+        elif position == -1:  # Short - trail stop or exit on reversal
+            lowest_since_entry = min(lowest_since_entry, price)
+            # ATR trailing stop: exit if price rises 2.5*ATR from lowest since entry
+            if price > lowest_since_entry + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit on trend reversal
+            elif not ema_trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
