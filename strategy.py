@@ -1,7 +1,9 @@
-# 1d_KAMA_RSI_ChopFilter
-# Hypothesis: KAMA adapts to market conditions, RSI identifies overbought/oversold, and Choppiness Index filters ranging markets. Works in bull/bear by adapting to volatility and avoiding false signals in chop.
-# Target: 10-25 trades/year on 1d timeframe to minimize fee drag.
-# Uses KAMA direction, RSI extremes, and Choppiness Index regime filter.
+# 6h_SuperTrend_TripleFilter
+# Hypothesis: SuperTrend on 6h with EMA200 trend filter and volume confirmation captures strong trends while avoiding whipsaws.
+# Works in bull: rides uptrends with SuperTrend long signals.
+# Works in bear: avoids false longs in downtrends via EMA200 filter and takes shorts when SuperTrend flips.
+# Volume filter ensures breakouts have conviction. Target: 20-40 trades/year on 6h timeframe.
+# Uses 1d EMA200 and volume MA20, aligned to 6h chart. No look-ahead bias.
 
 #!/usr/bin/env python3
 import numpy as np
@@ -18,113 +20,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA(20) for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily EMA(200) for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align weekly trend to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate SuperTrend on 6h data
+    atr_period = 10
+    multiplier = 3.0
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i-1] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad RSI to match length
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
-    
-    # Calculate Choppiness Index(14)
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr[1:] = np.sum(tr.reshape(-1, 14), axis=1) / 14
-    atr = np.concatenate([np.full(14, np.nan), atr])
+    tr[0] = tr1[0]  # First value
     
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(tr.reshape(-1, 14), axis=1) / 14 / (max_high - min_low)) / np.log10(14)
-    chop = np.concatenate([np.full(14, np.nan), chop])
+    # ATR
+    atr = np.zeros_like(close)
+    atr[:atr_period] = np.nan
+    atr[atr_period] = np.mean(tr[1:atr_period+1])
+    for i in range(atr_period+1, len(close)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Align weekly trend to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + multiplier * atr
+    basic_lb = (high + low) / 2 - multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close)):
+        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+    
+    # SuperTrend
+    supertrend = np.zeros_like(close)
+    supertrend[0] = final_ub[0]
+    direction = np.ones_like(close, dtype=int)  # 1 for uptrend, -1 for downtrend
+    direction[0] = 1
+    
+    for i in range(1, len(close)):
+        if close[i] > final_ub[i-1]:
+            direction[i] = 1
+        elif close[i] < final_lb[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = final_lb[i]
+        else:
+            supertrend[i] = final_ub[i]
+    
+    # Align daily indicators to 6h timeframe
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Calculate average volume over 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(ema200_aligned[i]) or 
+            np.isnan(supertrend[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: avoid choppy markets (Choppiness > 61.8)
-        if chop[i] > 61.8:
+        # Session filter: only trade during active hours
+        if not session_mask[i]:
             signals[i] = 0.0
             continue
         
-        # KAMA direction: price above/below KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
+        # Trend filter: price above/below EMA200
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
-        # RSI extremes: oversold/overbought
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Weekly trend filter: align with higher timeframe
-        uptrend = close[i] > ema20_1w_aligned[i]
-        downtrend = close[i] < ema20_1w_aligned[i]
+        # SuperTrend signals
+        supertrend_long = direction[i] == 1
+        supertrend_short = direction[i] == -1
         
-        # Entry conditions
-        long_entry = above_kama and rsi_oversold and uptrend
-        short_entry = below_kama and rsi_overbought and downtrend
+        # Entry conditions: SuperTrend signal with trend and volume filter
+        long_entry = supertrend_long and uptrend and vol_filter
+        short_entry = supertrend_short and downtrend and vol_filter
         
-        # Exit conditions: opposite signal or RSI normalization
-        long_exit = below_kama or rsi[i] > 50
-        short_exit = above_kama or rsi[i] < 50
+        # Exit conditions: SuperTrend reversal or trend change
+        long_exit = not supertrend_long or not uptrend
+        short_exit = not supertrend_short or not downtrend
         
-        if long_entry:
+        if long_entry and position <= 0:
             signals[i] = 0.25
-        elif short_entry:
+            position = 1
+        elif short_entry and position >= 0:
             signals[i] = -0.25
-        elif long_exit and i > 0 and signals[i-1] > 0:
+            position = -1
+        elif long_exit and position == 1:
             signals[i] = 0.0
-        elif short_exit and i > 0 and signals[i-1] < 0:
+            position = 0
+        elif short_exit and position == -1:
             signals[i] = 0.0
+            position = 0
         else:
-            # Hold previous position
-            signals[i] = signals[i-1]
+            # Hold position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_SuperTrend_TripleFilter"
+timeframe = "6h"
 leverage = 1.0
