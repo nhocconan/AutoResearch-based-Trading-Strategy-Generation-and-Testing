@@ -13,36 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly high/low/close for calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily high/low/close for calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly range for pivot calculations
-    weekly_range = high_1w - low_1w
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
     
-    # Weekly pivot levels (based on previous week)
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3
-    weekly_r1 = (2 * weekly_pivot) - low_1w
-    weekly_s1 = (2 * weekly_pivot) - high_1w
-    weekly_r2 = weekly_pivot + (high_1w - low_1w)
-    weekly_s2 = weekly_pivot - (high_1w - low_1w)
+    # Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Weekly EMA21 for trend
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Daily 14-period RSI for overbought/oversold conditions
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,25 +79,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Weekly trend filter: price above/below weekly EMA21
-        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
-        
-        # Weekly context: price relative to weekly pivot levels
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
-        price_above_r2 = close[i] > r2_aligned[i]
-        price_below_s2 = close[i] < s2_aligned[i]
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
         
         # Entry conditions: 
-        # Long: price breaks above weekly R1 with volume, weekly uptrend
-        # Short: price breaks below weekly S1 with volume, weekly downtrend
-        long_entry = price_above_r1 and price_above_weekly_ema and vol_filter
-        short_entry = price_below_s1 and price_below_weekly_ema and vol_filter
+        # Long: price breaks above daily R4 with volume and RSI not overbought
+        # Short: price breaks below daily S4 with volume and RSI not oversold
+        long_entry = (close[i] > r4_aligned[i]) and vol_filter and rsi_not_overbought
+        short_entry = (close[i] < s4_aligned[i]) and vol_filter and rsi_not_oversold
         
-        # Exit conditions: price returns to opposite side of weekly pivot or weekly trend reversal
-        long_exit = price_below_s1 or (not price_above_weekly_ema)
-        short_exit = price_above_r1 or (not price_below_weekly_ema)
+        # Exit conditions: price returns to opposite daily S4/R4 levels
+        long_exit = (close[i] < s4_aligned[i])
+        short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_EMA21_Trend_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R4S4_RSI_Filter"
+timeframe = "6h"
 leverage = 1.0
