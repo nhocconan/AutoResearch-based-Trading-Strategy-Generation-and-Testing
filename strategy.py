@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 12h primary timeframe to reduce trade frequency and capture medium-term trends.
-# Donchian breakouts provide clear entry/exit signals, filtered by 1d EMA34 trend direction
-# and volume spikes to avoid false breakouts. Works in both bull and bear markets by
-# following the 1d trend while using Donchian channels as structure.
-# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 4h primary timeframe with 1d EMA34 for stronger trend filter (less noise than 12h).
+# Donchian breakouts provide clear structure, filtered by 1d EMA34 direction and volume spikes.
+# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.25.
+# Works in both bull and bear markets by following the 1d trend while using Donchian channels as structure.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,21 +37,21 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe
+    # Align 1d EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h Donchian(20) channels
+    # 4h Donchian(20) channels
     high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume spike: >1.5x 20-bar average volume
+    # 4h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # EMA34 needs 34, Donchian needs 20, volume MA needs 20 -> use 50 for safety
+    start_idx = 50  # EMA34 needs 34 bars, Donchian needs 20, volume MA needs 20 -> use 50 for safety
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
