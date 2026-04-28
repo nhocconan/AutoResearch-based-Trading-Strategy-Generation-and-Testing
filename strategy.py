@@ -1,18 +1,11 @@
-# 12h_Camarilla_R4S4_Breakout_VolumeTrend
-# Hypothesis: Price breaking above/below Camarilla R4/S4 levels with volume confirmation
-# and aligned with higher timeframe trend (weekly EMA21) provides high-probability entries.
-# Weekly trend filter reduces whipsaws in ranging markets while capturing strong trends.
-# Target: 12h timeframe for lower trade frequency (~20-50/year) to minimize fee drag.
-# Works in bull markets via breakout continuation and bear markets via trend-following shorts.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,89 +15,73 @@ def generate_signals(prices):
     
     # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate daily true range for ATR
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
+    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
-    # Daily high/low/close for calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 14-day RSI
+    delta = pd.Series(df_1d['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
     
-    # Calculate daily range for pivot calculations
-    daily_range = high_1d - low_1d
+    # Align daily ATR and RSI to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Weekly high/low/close for calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly range for pivot calculations
-    weekly_range = high_1w - low_1w
-    
-    # Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
-    
-    # Weekly EMA21 for trend
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align Camarilla levels and weekly EMA to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 4h price channels: Donchian(20)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Volatility filter: ATR > 0
+        vol_filter = atr_1d_aligned[i] > 0
         
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Momentum filter: RSI between 30 and 70 (avoid extremes)
+        mom_filter = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
         
         # Volume filter: above average volume
-        vol_filter = volume[i] > vol_ma[i]
-        
-        # Weekly trend filter: price above/below weekly EMA21
-        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
+        vol_filter = vol_filter and (volume[i] > vol_ma[i])
         
         # Entry conditions: 
-        # Long: price breaks above daily R4 with volume and weekly uptrend
-        # Short: price breaks below daily S4 with volume and weekly downtrend
-        long_entry = (close[i] > r4_aligned[i]) and price_above_weekly_ema and vol_filter
-        short_entry = (close[i] < s4_aligned[i]) and price_below_weekly_ema and vol_filter
+        # Long: price breaks above Donchian high with volume and momentum
+        # Short: price breaks below Donchian low with volume and momentum
+        long_entry = (close[i] > high_roll[i]) and vol_filter and mom_filter
+        short_entry = (close[i] < low_roll[i]) and vol_filter and mom_filter
         
-        # Exit conditions: price returns to opposite daily S4/R4 levels or weekly trend reversal
-        long_exit = (close[i] < s4_aligned[i]) or (not price_above_weekly_ema)
-        short_exit = (close[i] > r4_aligned[i]) or (not price_below_weekly_ema)
+        # Exit conditions: ATR-based stop loss
+        long_exit = False
+        short_exit = False
+        
+        if position == 1:
+            # Long exit: price drops 2*ATR from entry
+            # We approximate by checking if price is below the Donchian low
+            long_exit = close[i] < low_roll[i]
+        elif position == -1:
+            # Short exit: price rises 2*ATR from entry
+            # We approximate by checking if price is above the Donchian high
+            short_exit = close[i] > high_roll[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -129,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4S4_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Donchian20_RSI_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
