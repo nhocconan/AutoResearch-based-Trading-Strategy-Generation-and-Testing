@@ -35,36 +35,29 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 4h
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align pivot levels to daily (no need for intra-day alignment since we're on 1d timeframe)
+    H4_aligned = H4
+    L4_aligned = L4
+    H3_aligned = H3
+    L3_aligned = L3
     
-    # Get 4h data for volume and volatility
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
+    # Get 1d data for volume and volatility
+    volume_1d = df_1d['volume'].values
     
-    volume_4h = df_4h['volume'].values
-    close_4h = df_4h['close'].values
-    
-    # Volume ratio (current 4h volume / 20-period average)
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # Volume ratio (current 1d volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for volatility filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,8 +69,8 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(H4_aligned[i]) or 
             np.isnan(L4_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(atr_4h_aligned[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(atr_1d[i])):
             signals[i] = 0.0
             continue
         
@@ -85,11 +78,11 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 4h volume above average
-        volume_filter = volume_4h[i] > vol_ma_20_aligned[i]
+        # Volume filter: current 1d volume above average
+        volume_filter = volume_1d[i] > vol_ma_20[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_4h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
+        vol_filter = atr_1d[i] > 0.001 * close[i]  # At least 0.1% ATR
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
         long_breakout = close[i] > H4_aligned[i]
@@ -123,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "1d_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
