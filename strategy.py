@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1
-Hypothesis: Focus on high-probability breakouts at daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation on 12h timeframe.
-Targets 12-37 trades/year by requiring multiple confluence factors (breakout, trend, volume) to reduce false signals and work in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Focus on high-probability breakouts at daily Camarilla R1/S1 levels with 12h EMA50 trend filter and volume confirmation on 4h timeframe.
+Targets 20-50 trades/year by requiring multiple confluence factors (breakout, trend, volume) to reduce false signals and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
@@ -30,21 +30,26 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla R3 and S3 levels
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # 1d EMA50 for trend filter (more responsive than 100)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Align all higher timeframe data to 12h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all higher timeframe data to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    d1_uptrend = close > ema_50_1d_aligned
-    d1_downtrend = close < ema_50_1d_aligned
+    h12_uptrend = close > ema_50_12h_aligned
+    h12_downtrend = close < ema_50_12h_aligned
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,25 +62,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R3 + daily uptrend + volume surge
-        long_entry = (close[i] > R3_aligned[i] and 
-                     d1_uptrend[i] and 
+        # Long: price breaks above R1 + 12h uptrend + volume surge
+        long_entry = (close[i] > R1_aligned[i] and 
+                     h12_uptrend[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S3 + daily downtrend + volume surge
-        short_entry = (close[i] < S3_aligned[i] and 
-                      d1_downtrend[i] and 
+        # Short: price breaks below S1 + 12h downtrend + volume surge
+        short_entry = (close[i] < S1_aligned[i] and 
+                      h12_downtrend[i] and 
                       volume_surge[i])
         
         # Exit on opposite level break with volume surge
-        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
+        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
