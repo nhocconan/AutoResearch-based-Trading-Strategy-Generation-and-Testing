@@ -3,13 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend and volume spike
-# Works in bull/bear: Breakouts capture momentum, EMA34 filters direction, volume avoids false breakouts
-# Target: 20-40 trades/year (80-160 total) to stay under 400 total 4h trades limit
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,39 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
+    # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels (using complete previous day)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6)
-    #          R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
-    #          S2 = C - ((H-L)*1.1/6), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # We need previous day's H,L,C for current day's levels
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    hl_range = prev_high - prev_low
-    r1 = prev_close + (hl_range * 1.1 / 12)
-    s1 = prev_close - (hl_range * 1.1 / 12)
+    # Calculate daily SMA(50) for trend filter
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate daily EMA(34) for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align daily indicators to 6h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # Align daily indicators to 4h (wait for completed 1d bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 1.5 * 20-period average
+    # Calculate 20-period moving average of volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -59,13 +47,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_aligned[i]) or
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(sma50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -75,22 +62,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA34
-        uptrend = close[i] > ema34_aligned[i]
-        downtrend = close[i] < ema34_aligned[i]
+        # Trend filter: price above/below SMA50
+        uptrend = close[i] > sma50_aligned[i]
+        downtrend = close[i] < sma50_aligned[i]
         
-        # Breakout conditions with volume confirmation
-        long_breakout = close[i] > r1_aligned[i] and vol_spike[i]
-        short_breakout = close[i] < s1_aligned[i] and vol_spike[i]
+        # Volatility filter: only trade when ATR is above its 10-period average
+        atr_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean()
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
+        vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
         
-        # Exit on opposite side breakout or trend reversal
-        long_exit = close[i] < s1_aligned[i] or not uptrend
-        short_exit = close[i] > r1_aligned[i] or not downtrend
+        # Volume filter: current volume above average
+        vol_filter = vol_filter and volume[i] > vol_ma[i]
         
-        if long_breakout and position <= 0:
+        # Entry conditions: trend + volatility + volume
+        long_entry = uptrend and vol_filter
+        short_entry = downtrend and vol_filter
+        
+        # Exit conditions: trend reversal or volatility drop
+        long_exit = not uptrend or not vol_filter
+        short_exit = not downtrend or not vol_filter
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -110,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_EMA34_Volume"
-timeframe = "4h"
+name = "6h_SMA50_ATR14_Volume_Trend_Session"
+timeframe = "6h"
 leverage = 1.0
