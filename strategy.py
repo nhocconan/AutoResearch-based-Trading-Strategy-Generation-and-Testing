@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_12hTrend_Volume
-Hypothesis: Camarilla pivot (R3/S3) breakout on 6h with 12h EMA trend filter and volume spike confirmation.
-Trades with the trend in both bull and bear markets using 12h EMA50 as trend filter.
-Targets 12-37 trades/year to minimize fee drift.
+12h_KAMA_Trend_RSI_Filter_Volume
+Hypothesis: KAMA (10,2) trend direction combined with RSI(14) overbought/oversold and volume confirmation.
+Works in both bull and bear markets by following adaptive trend with mean-reversion entries.
+Targets 12-37 trades/year to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
@@ -20,20 +20,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
+    # Get 1-day data for trend filter and regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate KAMA (10,2) on 1d close
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
+    vol = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # 1-period volatility
+    # Pad arrays for alignment
+    change = np.concatenate([np.full(10, np.nan), change])
+    vol = np.concatenate([np.full(1, np.nan), vol])
+    # Avoid division by zero
+    er = np.where(vol != 0, change / vol, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan)
+    kama[29] = close_1d[29]  # start at index 29 (30th value)
+    for i in range(30, len(close_1d)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate RSI(14) on 1d close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # Pad first element
+    gain = np.concatenate([np.array([0.0]), gain])
+    loss = np.concatenate([np.array([0.0]), loss])
+    # Wilder's smoothing
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    avg_gain[14] = np.mean(gain[1:15])  # first 14 gains
+    avg_loss[14] = np.mean(loss[1:15])  # first 14 losses
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,50 +77,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla pivot levels for current day
-        # Need previous day's OHLC (1d data)
-        day_idx = i // 4  # 4 = 24/6 (6h bars per day)
-        if day_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_day_idx = day_idx - 1
-        if prev_day_idx >= len(df_1d):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC from 1d data
-        ph = df_1d['high'].iloc[prev_day_idx]
-        pl = df_1d['low'].iloc[prev_day_idx]
-        pc = df_1d['close'].iloc[prev_day_idx]
+        # Trend direction from KAMA
+        trend_up = close[i] > kama_aligned[i]
+        trend_down = close[i] < kama_aligned[i]
         
-        # Camarilla levels
-        range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)
-        s3 = pc - (range_val * 1.1 / 4)
+        # RSI conditions: oversold (<30) for long, overbought (>70) for short
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
         
-        # Trend direction from 12h EMA50
-        trend_up = close[i] > ema_50_12h_aligned[i]
-        trend_down = close[i] < ema_50_12h_aligned[i]
-        
-        # Volume confirmation: >2.0x 20-period MA
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
-        
-        # Breakout conditions
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
+        # Volume confirmation: >1.5x 20-period MA
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
         # Entry logic
-        long_entry = vol_confirm and trend_up and long_breakout
-        short_entry = vol_confirm and trend_down and short_breakout
+        long_entry = vol_confirm and trend_up and rsi_oversold
+        short_entry = vol_confirm and trend_down and rsi_overbought
         
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        # Exit logic: opposite RSI extreme or trend reversal
+        long_exit = rsi_aligned[i] > 70 or not trend_up
+        short_exit = rsi_aligned[i] < 30 or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Trend_RSI_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
