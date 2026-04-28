@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian_WeekTrend_VolumeBreakout
-Hypothesis: Daily Donchian breakouts in the direction of weekly trend with volume confirmation capture strong momentum moves in both bull and bear markets. Weekly trend filter reduces false signals, while volume ensures conviction. Targets 15-25 trades/year on daily timeframe.
+4h_TRIX_Trend_VolumeSpike_Conservative
+Hypothesis: TRIX momentum crossover combined with 1d EMA100 trend filter and volume spikes captures high-probability trend continuations. Conservative settings (TRIX crossover only after 2-bar confirmation) reduce overtrading while maintaining edge in both bull and bear markets. Targets 15-25 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,55 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 1d EMA100 for trend filter
+    close_1d = df_1d['close'].values
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Daily Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
+    # ROC period = 1
+    roc = np.diff(close, prepend=close[0])
+    # Three consecutive EMAs
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3 * 100  # Scale for readability
     
-    # Volume confirmation: >2.0x 20-period MA
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Volume confirmation: >1.8x 20-period MA (approx 10 hours on 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian to initialize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
+        if (np.isnan(ema_100_1d_aligned[i]) or 
+            np.isnan(trix[i]) or
+            np.isnan(trix_signal[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA100
+        uptrend = close[i] > ema_100_1d_aligned[i]
+        downtrend = close[i] < ema_100_1d_aligned[i]
         
-        # Donchian breakout
-        breakout_up = high[i] > highest_high[i-1]  # Current high > previous period's high
-        breakout_down = low[i] < lowest_low[i-1]   # Current low < previous period's low
+        # TRIX crossover with confirmation (require 2 consecutive bars)
+        trix_bullish = trix[i] > trix_signal[i] and trix[i-1] > trix_signal[i-1]
+        trix_bearish = trix[i] < trix_signal[i] and trix[i-1] < trix_signal[i-1]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
         
-        # Entry logic: Donchian breakout in direction of weekly trend with volume
-        long_entry = vol_confirm and uptrend and breakout_up
-        short_entry = vol_confirm and downtrend and breakout_down
+        # Entry logic: TRIX crossover in direction of trend with volume
+        long_entry = vol_confirm and uptrend and trix_bullish
+        short_entry = vol_confirm and downtrend and trix_bearish
         
-        # Exit logic: opposite Donchian breakout or trend change
-        long_exit = breakout_down or (not uptrend)
-        short_exit = breakout_up or (not downtrend)
+        # Exit logic: opposite TRIX crossover or trend change
+        long_exit = trix_bearish or (not uptrend)
+        short_exit = trix_bullish or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -91,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_WeekTrend_VolumeBreakout"
-timeframe = "1d"
+name = "4h_TRIX_Trend_VolumeSpike_Conservative"
+timeframe = "4h"
 leverage = 1.0
