@@ -12,49 +12,31 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for trend filter and pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Pre-compute hour filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    H4 = close_1d + (range_hl * 1.1 / 2)
-    L4 = close_1d - (range_hl * 1.1 / 2)
-    H3 = close_1d + (range_hl * 1.1 / 4)
-    L3 = close_1d - (range_hl * 1.1 / 4)
-    
-    # Align pivot levels to 4h
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Get 4h data for volume and volatility
+    # Get 4h data for trend and volume
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    volume_4h = df_4h['volume'].values
     close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # 4h EMA(50) for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume ratio (current 4h volume / 20-period average)
     vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
     # ATR(14) for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     tr1 = np.abs(high_4h[1:] - low_4h[1:])
     tr2 = np.abs(high_4h[1:] - close_4h[:-1])
     tr3 = np.abs(low_4h[1:] - close_4h[:-1])
@@ -66,38 +48,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 20, 14)
+    start_idx = max(100, 50, 20, 14)
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or 
-            np.isnan(L4_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or
             np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 4h EMA
+        uptrend = close[i] > ema_50_4h_aligned[i]
+        downtrend = close[i] < ema_50_4h_aligned[i]
         
         # Volume filter: current 4h volume above average
-        volume_filter = volume_4h[i] > vol_ma_20_aligned[i]
+        volume_filter = volume_4h[i // 4] > vol_ma_20_aligned[i] if i // 4 < len(volume_4h) else False
         
         # Volatility filter: avoid extremely low volatility periods
         vol_filter = atr_4h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
         
-        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
-        long_breakout = close[i] > H4_aligned[i]
-        short_breakout = close[i] < L4_aligned[i]
+        # Entry conditions: breakout with volume and trend
+        long_entry = uptrend and close[i] > close[i-1] and volume_filter and vol_filter
+        short_entry = downtrend and close[i] < close[i-1] and volume_filter and vol_filter
         
-        long_entry = uptrend and long_breakout and volume_filter and vol_filter
-        short_entry = downtrend and short_breakout and volume_filter and vol_filter
-        
-        # Exit conditions: Camarilla H3/L3 retracement
-        long_exit = close[i] < H3_aligned[i]
-        short_exit = close[i] > L3_aligned[i]
+        # Exit conditions: opposite signal or volatility expansion
+        long_exit = not uptrend or close[i] < close[i-1] or atr_4h_aligned[i] > 2 * atr_4h_aligned[i-1]
+        short_exit = not downtrend or close[i] > close[i-1] or atr_4h_aligned[i] > 2 * atr_4h_aligned[i-1]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -120,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_Tight"
-timeframe = "4h"
+name = "1h_EMA50_Volume_Breakout_Session"
+timeframe = "1h"
 leverage = 1.0
