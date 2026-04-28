@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla H3/L3 breakout with 1d EMA50 trend filter, volume spike confirmation, and session filter.
+# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter, volume spike confirmation, and session filter.
 # Uses 1h primary timeframe targeting 15-37 trades/year (60-150 total over 4 years).
-# 1d EMA50 provides strong trend filter for both bull and bear markets (price > EMA50 = bull, < EMA50 = bear).
+# 4h EMA50 provides strong trend filter for both bull and bear markets (price > EMA50 = bull, < EMA50 = bear).
 # Camarilla H3/L3 from 4h provide institutional pivot points with proven edge.
 # Volume spike (>2.0x 20-bar average) confirms breakout strength and filters low-momentum false breakouts.
 # Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
 # Position size 0.20 for capital preservation. Discrete levels minimize fee churn.
 
-name = "1h_Camarilla_H3_L3_Breakout_1dEMA50_Trend_VolumeSpike_Session_v1"
+name = "1h_Camarilla_H3_L3_Breakout_4hEMA50_Trend_VolumeSpike_Session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -29,7 +29,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for Camarilla pivots
+    # Get 4h data for Camarilla pivots and EMA50 trend filter
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
@@ -44,18 +44,13 @@ def generate_signals(prices):
     h3_4h = close_4h + (high_4h - low_4h) * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
     l3_4h = close_4h - (high_4h - low_4h) * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 4h EMA50 trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 4h and 1d indicators to 1h timeframe
+    # Align 4h indicators to 1h timeframe
     h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
     l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate 1h volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,7 +65,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(h3_4h_aligned[i]) or
             np.isnan(l3_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -80,9 +75,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA50 direction
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: 4h EMA50 direction
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
         
         # Camarilla breakout conditions
         long_breakout = close[i] > h3_4h_aligned[i]
