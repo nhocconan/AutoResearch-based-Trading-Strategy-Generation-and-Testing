@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dTrend_VolumeSpike
-Hypothesis: Uses 4-hour Donchian channel breakout (20-period) with 1-day trend filter and volume spike confirmation.
-Trades in the direction of the daily trend, entering on Donchian breakouts confirmed by volume spikes.
-Designed to work in both bull and bear markets by following the higher timeframe trend.
-Targets 20-50 trades per year to minimize fee drift while capturing significant market moves.
+12h_KAMA_Trend_With_1dVolume_Spike_And_1wTrend_Filter
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 12h to capture trend direction.
+Enters long when price crosses above KAMA with 1d volume spike confirmation and 1w uptrend.
+Enters short when price crosses below KAMA with 1d volume spike confirmation and 1w downtrend.
+Uses 1d volume spike (>2.0x 20-period MA) to filter false signals.
+Designed to work in both bull and bear markets by following the adaptive trend.
+Targets 12-37 trades per year to minimize fee drag while capturing meaningful moves.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,23 +23,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get 1d data for volume spike and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d volume spike (>2.0x 20-period MA)
+    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_20)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Calculate 4-hour Donchian channels (20-period)
-    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate volume spike (>1.8x 20-period MA)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_ma_20)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate KAMA on 12h close
+    # KAMA parameters: ER = 10, Fast = 2, Slow = 30
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,29 +70,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1-day EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # 1w trend filter
+        trend_up = close[i] > ema_50_1w_aligned[i]
+        trend_down = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
-        vol_confirm = vol_spike[i]
+        vol_confirm = vol_spike_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_4h[i-1]  # Break above previous high
-        breakout_down = close[i] < low_4h[i-1]  # Break below previous low
+        # Entry logic:
+        # Long: Price crosses above KAMA with volume spike and 1w uptrend
+        long_entry = vol_confirm and price_above_kama and not (close[i-1] > kama[i-1]) and trend_up
+        # Short: Price crosses below KAMA with volume spike and 1w downtrend
+        short_entry = vol_confirm and price_below_kama and not (close[i-1] < kama[i-1]) and trend_down
         
-        # Entry logic: Breakout in direction of trend with volume confirmation
-        long_entry = vol_confirm and trend_up and breakout_up
-        short_entry = vol_confirm and trend_down and breakout_down
-        
-        # Exit logic: Opposite Donchian break
-        long_exit = breakout_down
-        short_exit = breakout_up
+        # Exit logic: Opposite cross of KAMA
+        long_exit = price_below_kama and (close[i-1] > kama[i-1])
+        short_exit = price_above_kama and (close[i-1] < kama[i-1])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -93,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_KAMA_Trend_With_1dVolume_Spike_And_1wTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
