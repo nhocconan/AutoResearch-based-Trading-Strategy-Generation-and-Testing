@@ -1,7 +1,12 @@
+# 4H_RSI_Momentum_Breaker
+# Hypothesis: 4H RSI momentum combined with volume breakout and ADX trend filter captures strong momentum moves while avoiding false signals in ranging markets.
+# Works in bull/bear: RSI momentum identifies strong moves, volume confirms institutional participation, ADX filters out chop.
+# Target: 20-40 trades/year on 4h timeframe to minimize fee drag.
+# Uses 4h RSI(14) with momentum, volume spike, and ADX(14) > 25 for trend strength.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -13,43 +18,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate daily Donchian channels (20-period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI momentum (rate of change)
+    rsi_momentum = np.diff(rsi, prepend=rsi[0])
     
-    # Calculate daily ADX (14-period) for trend strength
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(abs(high_1d[1:] - high_1d[:-1]), 
-                               abs(low_1d[1:] - low_1d[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / \
-              pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / \
-               pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate average volume over 20 periods
+    # Calculate volume spike (current vs 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
+    
+    # Calculate ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -59,14 +61,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(rsi_momentum[i]) or
+            np.isnan(vol_ratio[i]) or
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -76,21 +78,24 @@ def generate_signals(prices):
             continue
         
         # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        strong_trend = adx[i] > 25
         
-        # Volume filter: current volume above average
-        vol_filter = volume[i] > vol_ma[i]
+        # Volume filter: volume spike > 1.5x average
+        vol_spike = vol_ratio[i] > 1.5
         
-        # Breakout conditions: price breaks Donchian channels with trend and volume
-        long_breakout = close[i] > high_20_aligned[i]
-        short_breakout = close[i] < low_20_aligned[i]
+        # RSI momentum conditions
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
+        rsi_momentum_up = rsi_momentum[i] > 5
+        rsi_momentum_down = rsi_momentum[i] < -5
         
-        long_entry = long_breakout and strong_trend and vol_filter
-        short_entry = short_breakout and strong_trend and vol_filter
+        # Entry conditions
+        long_entry = rsi_oversold and rsi_momentum_up and vol_spike and strong_trend
+        short_entry = rsi_overbought and rsi_momentum_down and vol_spike and strong_trend
         
-        # Exit conditions: price returns to opposite Donchian level
-        long_exit = close[i] < low_20_aligned[i]
-        short_exit = close[i] > high_20_aligned[i]
+        # Exit conditions: RSI returns to neutral range or momentum fades
+        long_exit = rsi[i] > 50 or rsi_momentum[i] < 0
+        short_exit = rsi[i] < 50 or rsi_momentum[i] > 0
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -115,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_ADX25_Volume"
-timeframe = "12h"
+name = "4H_RSI_Momentum_Breaker"
+timeframe = "4h"
 leverage = 1.0
