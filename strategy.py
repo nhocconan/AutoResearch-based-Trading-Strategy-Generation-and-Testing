@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Camarilla R4/S4 levels with 1d EMA50 trend filter and volume confirmation (>2x average).
-# Enter long when price breaks above weekly Camarilla R4 level with volume > 2x average and close > 1d EMA50 (bullish bias).
-# Enter short when price breaks below weekly Camarilla S4 level with volume > 2x average and close < 1d EMA50 (bearish bias).
-# Exit when price returns to the weekly Camarilla midpoint (P) or touches the opposite level (S4 for long exit, R4 for short exit).
-# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 50-150 total trades over 4 years.
-# Weekly Camarilla provides stable structure; 1d EMA50 filters counter-trend breakouts; volume confirms institutional interest.
-# Designed to work in both bull (breakouts with trend) and bear (breakdowns with trend) markets by aligning with HTF direction.
+# Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) for trend direction and 4h Donchian(20) breakout for entries.
+# Enter long when price breaks above 4h Donchian upper band with volume > 2.0x average and Alligator aligned bullish (Lips > Teeth > Jaw).
+# Enter short when price breaks below 4h Donchian lower band with volume > 2.0x average and Alligator aligned bearish (Lips < Teeth < Jaw).
+# Exit when price touches the opposite Donchian band or Alligator alignment fails.
+# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 80-150 total trades over 4 years.
+# Works in bull markets (breakouts continue with trend) and bear markets (breakdowns continue with trend).
+# Uses 1d Alligator for slower trend filter (reduces whipsaws) and 4h Donchian for structure (proven edge on SOLUSDT).
 
-name = "6h_Camarilla_R4S4_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_Donchian20_Breakout_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,46 +25,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation (MTF structure)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels (using previous bar's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True range for Camarilla calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w)
-    tr3 = np.abs(low_1w - close_1w)
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Camarilla levels (based on previous bar's close and range)
-    camarilla_pivot = close_1w  # Pivot is previous close
-    camarilla_range = high_1w - low_1w
-    
-    # R4 and S4 levels (strongest breakout levels for very few trades)
-    r4 = camarilla_pivot + camarilla_range * 1.1 / 2
-    s4 = camarilla_pivot - camarilla_range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
-    
-    # Get 1d data for EMA50 trend filter (HTF trend)
+    # Get 1d data for Williams Alligator (HTF trend)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d Williams Alligator: SMAs of median price
+    # Median price = (high + low) / 2
+    median_price = (df_1d['high'] + df_1d['low']) / 2
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
+    jaw[:8] = np.nan  # first 8 values invalid
+    
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
+    teeth[:5] = np.nan  # first 5 values invalid
+    
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
+    lips[:3] = np.nan  # first 3 values invalid
+    
+    # Align Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Get 4h data for Donchian channels (structure)
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h Donchian(20) channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
+    # Align Donchian channels to 4h timeframe (no shift needed as same TF)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
     
     # Calculate volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -78,29 +87,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d EMA50 bias
-        bullish_bias = close[i] > ema_50_1d_aligned[i]
-        bearish_bias = close[i] < ema_50_1d_aligned[i]
+        # Alligator trend alignment
+        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
         
-        # Weekly Camarilla breakout conditions
-        long_breakout = close[i] > r4_aligned[i]
-        short_breakout = close[i] < s4_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_upper_aligned[i]
+        short_breakout = close[i] < donchian_lower_aligned[i]
         
-        # Exit conditions: return to pivot or touch opposite level
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit conditions: touch opposite band or Alligator alignment fails
+        long_exit = close[i] < donchian_lower_aligned[i] or not bullish_alignment
+        short_exit = close[i] > donchian_upper_aligned[i] or not bearish_alignment
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and bullish_bias
-        short_entry = short_breakout and vol_confirm and bearish_bias
+        long_entry = long_breakout and vol_confirm and bullish_alignment
+        short_entry = short_breakout and vol_confirm and bearish_alignment
         
         # Handle entries and exits
         if long_entry and position <= 0:
