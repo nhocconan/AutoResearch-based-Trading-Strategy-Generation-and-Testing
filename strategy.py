@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_48h_Range_With_Volume_And_Trend
-Hypothesis: Uses 48-hour (2-day) price range to identify accumulation/distribution zones with volume confirmation and 12h EMA trend filter. Trades breakouts from the 48h range in the direction of the 12h trend. Designed for low trade frequency (15-30/year) to minimize fee decay while capturing strong directional moves in both bull and bear markets by following the 12h trend.
+1d_Weekly_Range_Breakout_Filter
+Hypothesis: Breakouts from weekly range (Monday high/low) with volume confirmation and weekly trend filter.
+Targets 15-30 trades/year on daily timeframe to minimize fee drag while capturing strong directional moves.
+Uses weekly trend to filter direction, Monday range as breakout levels, and volume spike for confirmation.
+Works in both bull and bear by following weekly trend direction.
 """
 
 import numpy as np
@@ -10,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,53 +21,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter and Monday range
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 48h high/low for range (2 days of 4h data)
-    # We need to look back 12 periods of 4h data for 48h range
-    high_48h = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    low_48h = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    # Calculate Monday high/low from weekly data (weekly candles start at Monday 00:00 UTC)
+    # For weekly data, the open is Monday 00:00, high/low are for the week
+    # We'll use the weekly high/low as breakout levels (simplified approach)
+    week_high = df_1w['high'].values
+    week_low = df_1w['low'].values
+    week_high_aligned = align_htf_to_ltf(prices, df_1w, week_high)
+    week_low_aligned = align_htf_to_ltf(prices, df_1w, week_low)
     
-    # Volume confirmation: >1.8x 48-period MA (8 days of 4h bars)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and 48h range to stabilize
+    start_idx = 20  # Wait for EMA20 and volume MA to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(high_48h[i]) or
-            np.isnan(low_48h[i]) or
-            np.isnan(vol_ma_48[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(week_high_aligned[i]) or
+            np.isnan(week_low_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Volume confirmation (>1.8x average)
-        vol_confirm = volume[i] > (1.8 * vol_ma_48[i])
+        # Volume confirmation (>1.5x average)
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Breakout conditions from 48h range
-        long_breakout = close[i] > high_48h[i] and vol_confirm and uptrend
-        short_breakout = close[i] < low_48h[i] and vol_confirm and downtrend
+        # Breakout conditions at weekly high/low
+        long_breakout = close[i] > week_high_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < week_low_aligned[i] and vol_confirm and downtrend
         
-        # Exit conditions: return to midpoint of 48h range
-        midpoint_48h = (high_48h[i] + low_48h[i]) / 2
-        long_exit = close[i] < midpoint_48h
-        short_exit = close[i] > midpoint_48h
+        # Exit conditions: return to weekly midpoint
+        week_mid = (week_high_aligned[i] + week_low_aligned[i]) / 2
+        long_exit = close[i] < week_mid
+        short_exit = close[i] > week_mid
         
         if long_breakout and position <= 0:
             signals[i] = 0.25
@@ -89,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_48h_Range_With_Volume_And_Trend"
-timeframe = "4h"
+name = "1d_Weekly_Range_Breakout_Filter"
+timeframe = "1d"
 leverage = 1.0
