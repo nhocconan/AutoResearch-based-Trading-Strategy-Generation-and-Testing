@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_RSI34_1dEMA21_TopBottom_Reversal
-Hypothesis: RSI(34) on 12h identifies overbought/oversold conditions, while EMA(21) on 1d provides the primary trend filter. In bull markets, we buy oversold bounces above the rising 1d EMA21; in bear markets, we sell overbought rejections below the falling 1d EMA21. This mean-reversion-with-trend strategy avoids counter-trend trades and works in both regimes. Target: 20-30 trades/year per symbol to minimize fee drag while capturing meaningful reversals at key support/resistance levels.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot breakouts at R1/S1 levels on 4h timeframe with 1-day EMA50 trend filter and volume spike work in both bull and bear markets. The 1d trend filter reduces whipsaw from counter-trend breakouts, volume confirms institutional participation, and R1/S1 levels provide high-probability entry points with favorable risk-reward. Target: 20-50 trades/year per symbol to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
@@ -20,51 +20,67 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA21 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h RSI(34) for overbought/oversold signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d Camarilla pivot levels (based on previous 1d bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate pivot point and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R1, R2, S1, S2
+    r1_1d = pivot_1d + range_1d * 1.1000 / 12.0
+    r2_1d = pivot_1d + range_1d * 1.1000 / 6.0
+    s1_1d = pivot_1d - range_1d * 1.1000 / 12.0
+    s2_1d = pivot_1d - range_1d * 1.1000 / 6.0
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for RSI to stabilize
+    start_idx = 50  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # RSI conditions
-        oversold = rsi[i] < 30
-        overbought = rsi[i] > 70
+        # Camarilla breakout conditions
+        breakout_long = close[i] > r1_1d_aligned[i-1]  # Break above R1
+        breakout_short = close[i] < s1_1d_aligned[i-1]  # Break below S1
         
-        # Trend filter from 1d EMA21
-        uptrend = close[i] > ema_21_1d_aligned[i]
-        downtrend = close[i] < ema_21_1d_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: trade with the trend from extreme RSI levels
-        long_entry = oversold and uptrend
-        short_entry = overbought and downtrend
+        # Entry conditions with volume confirmation and trend alignment
+        long_entry = breakout_long and volume_spike[i] and uptrend
+        short_entry = breakout_short and volume_spike[i] and downtrend
         
-        # Exit conditions: RSI returns to neutral territory or trend changes
-        long_exit = (rsi[i] > 50) or (not uptrend)
-        short_exit = (rsi[i] < 50) or (not downtrend)
+        # Exit on opposite breakout (reverse position)
+        long_exit = breakout_short and volume_spike[i]
+        short_exit = breakout_long and volume_spike[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -73,11 +89,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = -0.25  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.0
-            position = 0
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -89,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI34_1dEMA21_TopBottom_Reversal"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
