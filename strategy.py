@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme reversal with 1d trend filter (price > 1d EMA50) and volume confirmation.
-# Uses 4h primary timeframe for lower trade frequency (~19-50 trades/year) to minimize fee drag.
-# Williams %R identifies overbought/oversold conditions; extreme readings below -80 or above -20 signal potential reversals.
-# Filtered by 1d EMA50 trend to ensure trades align with higher timeframe direction and volume spike for confirmation.
-# Designed to work in both bull and bear markets by following the 1d trend while using Williams %R for timing.
-# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.25.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses 12h primary timeframe for low trade frequency (~12-37/year) to minimize fee drag.
+# Donchian channels from 12h provide structure, filtered by 1d EMA50 trend and volume spikes.
+# Designed to work in both bull and bear markets by following the 1d trend while using Donchian levels as entry signals.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
 
-name = "4h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,27 +38,27 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1d EMA50 to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # 12h Donchian(20) channels
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h volume spike: >1.5x 20-bar average volume
+    # 12h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # EMA50 needs 50 bars, Williams %R needs 14, volume MA needs 20, use 50 for safety
+    start_idx = 50  # EMA50 needs 50 bars, Donchian needs 20, volume MA needs 20, use 50 for safety
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or
+            np.isnan(high_ma_20[i]) or
+            np.isnan(low_ma_20[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -73,19 +72,19 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_50_1d_aligned[i]
         price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Williams %R extreme conditions
-        oversold = williams_r[i] < -80  # Oversold condition
-        overbought = williams_r[i] > -20  # Overbought condition
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_ma_20[i]
+        short_breakout = close[i] < low_ma_20[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and oversold and vol_confirm
-        short_entry = price_below_ema and overbought and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: Williams %R returns to neutral territory
-        long_exit = williams_r[i] > -50  # Exit long when %R rises above -50
-        short_exit = williams_r[i] < -50  # Exit short when %R falls below -50
+        # Exit conditions: opposite Donchian break
+        long_exit = close[i] < low_ma_20[i]
+        short_exit = close[i] > high_ma_20[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
