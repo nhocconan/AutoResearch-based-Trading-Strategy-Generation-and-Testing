@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# Uses Camarilla pivot levels for institutional breakout structure, 12h EMA>price for primary trend filter, and volume spike (>2.0x 20-bar avg) for momentum
-# Exits on opposite Camarilla level (R3/S3) touch or ATR-based stoploss (2.0x)
-# Designed to capture strong trends with minimal whipsaw via 12h trend filter and volume confirmation
-# Target: 25-60 trades/year via tight Camarilla breakout conditions + 12h trend + volume filter
+# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d ADX25 regime filter and 13-period EMA trend
+# Uses Elder Ray to measure bull/bear power relative to 13-period EMA, ADX(25) from 1d to filter trending vs ranging markets,
+# and EMA(13) on 6h for dynamic trend direction. In trending markets (ADX>25), take signals in direction of EMA(13).
+# In ranging markets (ADX<25), fade extremes when Bull/Bear power diverges from price.
+# Designed to work in both bull and bear regimes by adapting to market conditions.
+# Target: 12-37 trades/year via regime-adaptive filtering
 
-name = "4h_Camarilla_R3S3_12hEMA50_TrendFilter_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_Power_1dADX25_Regime_EMA13Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,95 +24,131 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need sufficient data for EMA calculation
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
         return np.zeros(n)
     
-    # Calculate EMA(50) on 12h close
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX(25) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 12h EMA50 to 4h timeframe (completed 12h candles only)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # True Range
+    tr1 = pd.Series(high_1d[1:] - low_1d[:-1])
+    tr2 = pd.Series(np.abs(high_1d[1:] - close_1d[:-1]))
+    tr3 = pd.Series(np.abs(low_1d[1:] - close_1d[:-1]))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # Align with 1d index
     
-    # Calculate Camarilla levels (R3, S3) on 4h data using previous bar's OHLC
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using previous bar's values to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan  # First bar has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    # Smoothed values
+    tr_period = 25
+    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
     
-    # Volume confirmation: >2.0x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align 1d ADX to 6h timeframe (completed 1d candles only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 13-period EMA on 6h close
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray Power (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 50  # Need sufficient history for EMA and volume MA
+    start_idx = max(50, 25)  # Need sufficient history for EMA and ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume_spike[i]
+        adx_val = adx_aligned[i]
+        ema_val = ema_13[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         price = close[i]
-        ema_trend = ema_50_12h_aligned[i]
         
-        # Handle entries and exits
-        if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R3 AND price > 12h EMA50 (uptrend) AND volume spike
-            if price > r3[i] and price > ema_trend and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            # Short breakout: price breaks below S3 AND price < 12h EMA50 (downtrend) AND volume spike
-            elif price < s3[i] and price < ema_trend and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+        # Regime determination: ADX > 25 = trending, ADX < 25 = ranging
+        is_trending = adx_val > 25
+        
+        if is_trending:
+            # Trending regime: follow EMA13 direction
+            if price > ema_val and bull_val > 0:  # Uptrend confirmation
+                if position != 1:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.25
+            elif price < ema_val and bear_val < 0:  # Downtrend confirmation
+                if position != -1:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price touches S3 (opposite level)
-            # ATR-based stoploss: 2.0 * ATR below entry
-            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
-            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr = np.maximum(np.maximum(tr1, tr2), tr3)
-            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or price < S3 (opposite level touch)
-            if price < stop_loss or price < s3[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price touches R3 (opposite level)
-            # ATR-based stoploss: 2.0 * ATR above entry
-            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
-            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr = np.maximum(np.maximum(tr1, tr2), tr3)
-            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or price > R3 (opposite level touch)
-            if price > stop_loss or price > r3[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                # Exit if trend weakens
+                if position == 1 and (price <= ema_val or bull_val <= 0):
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and (price >= ema_val or bear_val >= 0):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25 if position == -1 else 0.0
+        else:
+            # Ranging regime: mean reversion at extremes
+            # Look for divergences: price making new high/low but power not confirming
+            if position == 0:
+                # Long setup: price makes new low but bear power doesn't confirm (bullish divergence)
+                if i >= 20:
+                    recent_low = np.min(low[i-20:i+1])
+                    recent_bear = np.min(bear_power[i-20:i+1])
+                    if price == recent_low and bear_val > recent_bear:  # Bullish divergence
+                        signals[i] = 0.25
+                        position = 1
+                # Short setup: price makes new high but bull power doesn't confirm (bearish divergence)
+                elif i >= 20:
+                    recent_high = np.max(high[i-20:i+1])
+                    recent_bull = np.max(bull_power[i-20:i+1])
+                    if price == recent_high and bull_val < recent_bull:  # Bearish divergence
+                        signals[i] = -0.25
+                        position = -1
+            elif position == 1:
+                # Exit long when price reaches EMA13 or bear power turns positive
+                if price >= ema_val or bear_val >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short when price reaches EMA13 or bull power turns negative
+                if price <= ema_val or bull_val <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
