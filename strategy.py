@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_RSI_MeanRev_with_WeeklyTrend_Filter
-Hypothesis: On daily timeframe, use weekly trend (via 8/21 EMA crossover) to filter RSI mean-reversion entries. 
-Long when weekly uptrend + RSI < 30 + price below Bollinger lower band. 
-Short when weekly downtrend + RSI > 70 + price above Bollinger upper band. 
-Weekly trend filter avoids counter-trend trades; RSI extremes + Bollinger bands capture mean-reversion in both bull/bear markets. 
-Designed for low trade frequency (<25/year) to minimize fee drag.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 level with 1d EMA34 uptrend and volume spike; enter short when price breaks below S3 level with 1d EMA34 downtrend and volume spike. Camarilla levels provide institutional support/resistance, EMA34 filters trend direction, volume surge confirms institutional participation. Designed for moderate trade frequency (20-50/year) to balance edge capture and fee drag, working in both bull/bear markets via trend alignment.
 """
 
 import numpy as np
@@ -17,63 +13,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 21:
+    # Get daily data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly 8 and 21 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align weekly EMAs to daily timeframe
-    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
-    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
+    # Daily trend: bullish when close > EMA34, bearish when close < EMA34
+    daily_uptrend = close_1d > ema34_1d
+    daily_downtrend = close_1d < ema34_1d
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend)
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend)
     
-    # Weekly trend: bullish when EMA8 > EMA21
-    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
-    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
+    # Calculate Camarilla levels from previous day's range
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # For breakout, we use R3 and S3 from prior day
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    # First day has no previous day, set to current values to avoid false signals
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # Daily RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla R3 and S3 levels
+    R3 = prev_close + 1.1 * (prev_high - prev_low)
+    S3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Daily Bollinger Bands (20-period, 2 std)
-    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    lower_band = ma20 - (2 * std20)
-    upper_band = ma20 + (2 * std20)
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Wait for weekly EMA21 and daily indicators to stabilize
+    start_idx = 34  # Wait for daily EMA34 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(lower_band[i]) or np.isnan(upper_band[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: weekly trend alignment + RSI extreme + Bollinger band touch
-        long_entry = weekly_uptrend[i] and (rsi[i] < 30) and (close[i] <= lower_band[i])
-        short_entry = weekly_downtrend[i] and (rsi[i] > 70) and (close[i] >= upper_band[i])
+        # Entry conditions with daily trend alignment and volume spike
+        long_entry = close[i] > R3_aligned[i] and daily_uptrend_aligned[i] and volume_spike[i]
+        short_entry = close[i] < S3_aligned[i] and daily_downtrend_aligned[i] and volume_spike[i]
         
-        # Exit when RSI returns to neutral zone (40-60)
-        long_exit = rsi[i] > 40
-        short_exit = rsi[i] < 60
+        # Exit on opposite Camarilla level touch (to avoid whipsaw)
+        long_exit = close[i] < S3_aligned[i] and volume_spike[i]
+        short_exit = close[i] > R3_aligned[i] and volume_spike[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -98,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_MeanRev_with_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
