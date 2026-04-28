@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R4_S4_Breakout_12hEMA50_VolumeSpike
-Hypothesis: Uses stronger Camarilla R4/S4 levels (1.5x range) with 12h EMA50 trend filter and volume spike (2x 24-bar avg) to capture high-probability breakouts. R4/S4 are more extreme, reducing false signals. Works in both bull and bear by following trend direction. Targets 20-30 trades/year via strict conditions.
+12h_KAMA_Trend_With_Volume_Spike
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 12h to capture trend direction, with volume spikes (2x 24-period average) to confirm momentum. Works in bull/bear by following trend direction only. Targets 15-25 trades/year via strict entry conditions. Uses 1w RSI as regime filter to avoid extreme overbought/oversold conditions.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,68 +18,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Get 12h data for trend filter
+    # Get 12h data for KAMA trend
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
+    # Get 1w data for RSI regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate KAMA (ER=10, fast=2, slow=30) on 12h
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
+    # Fix: volatility should be rolling sum
+    volatility = pd.Series(close_12h).diff().abs().rolling(window=30, min_periods=1).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_12h)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    kama_12h = kama
     
-    # Calculate Camarilla pivot levels (R4/S4: 1.5x range)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
-    R4 = typical_price + (range_ * 1.5 / 2)
-    S4 = typical_price - (range_ * 1.5 / 2)
+    # Align KAMA to 12h timeframe (already on 12h, but need to align to main timeframe)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Align Camarilla levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    # Calculate 1w RSI for regime filter
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Volume confirmation: >2x 24-period MA (4 days of 4h bars)
+    # Volume confirmation: >2x 24-period MA (2 days of 12h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or
-            np.isnan(S4_aligned[i]) or
+        if (np.isnan(kama_12h_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below KAMA
+        uptrend = close[i] > kama_12h_aligned[i]
+        downtrend = close[i] < kama_12h_aligned[i]
         
         # Volume confirmation (>2x average)
         vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
         
-        # Breakout conditions at R4/S4
-        long_breakout = close[i] > R4_aligned[i] and vol_confirm and uptrend
-        short_breakout = close[i] < S4_aligned[i] and vol_confirm and downtrend
+        # Regime filter: avoid extreme RSI
+        rsi_ok = (rsi_1w_aligned[i] > 20) and (rsi_1w_aligned[i] < 80)
         
-        # Exit conditions: return to midpoint of R4/S4
-        midpoint = (R4_aligned[i] + S4_aligned[i]) / 2
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Entry conditions
+        long_entry = uptrend and vol_confirm and rsi_ok
+        short_entry = downtrend and vol_confirm and rsi_ok
         
-        if long_breakout and position <= 0:
+        # Exit conditions: trend reversal
+        long_exit = not uptrend
+        short_exit = not downtrend
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -99,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4_S4_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "12h_KAMA_Trend_With_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
