@@ -1,7 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_BullBear
-Hypothesis: Williams Alligator identifies market trends and ranging conditions. In trending markets (price outside Alligator mouth), follow the direction with momentum. In ranging markets (price inside mouth), fade extremes. Uses 1-day trend filter and volume confirmation to avoid false signals. Designed for 12h timeframe to target 50-150 total trades over 4 years.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels (R3/S3) on daily timeframe act as strong support/resistance.
+Breakouts of these levels with 1-day EMA trend filter and volume spike capture explosive moves.
+The 12h timeframe reduces noise while capturing multi-day moves. Works in both bull and bear
+markets by following the daily trend. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,101 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator and trend filter
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams Alligator: three SMAs (Jaw=13, Teeth=8, Lips=5) with future shift
+    # Calculate daily Camarilla levels (R3, S3)
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Align HTF indicators to LTF with proper delay
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate pivot and support/resistance levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # 1-day EMA34 for trend filter
+    # Camarilla levels: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
+    r3 = close_1d + range_1d * 1.1 / 2.0
+    s3 = close_1d - range_1d * 1.1 / 2.0
+    
+    # Align daily levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: >1.5x 20-period MA
+    # Volume confirmation: >2.0x 20-period MA on 12h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator conditions
-        # Market is trending when all three lines are ordered and separated
-        # Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
-        # Market is ranging when lines are intertwined
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Check for clear separation (trending market)
-        uptrend_alligator = jaw_val > teeth_val and teeth_val > lips_val
-        downtrend_alligator = jaw_val < teeth_val and teeth_val < lips_val
-        ranging_market = not (uptrend_alligator or downtrend_alligator)
-        
-        # Price position relative to Alligator
-        price_above_alligator = close[i] > max(jaw_val, teeth_val, lips_val)
-        price_below_alligator = close[i] < min(jaw_val, teeth_val, lips_val)
-        price_inside_mouth = not (price_above_alligator or price_below_alligator)
-        
-        # Trend filter from 1-day EMA
-        uptrend_1d = close[i] > ema_34_1d_aligned[i]
-        downtrend_1d = close[i] < ema_34_1d_aligned[i]
+        # Breakout conditions: break of Camarilla R3/S3 levels
+        breakout_r3 = close[i] > r3_aligned[i]
+        breakdown_s3 = close[i] < s3_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry logic
-        # In trending markets: follow Alligator direction with volume
-        # In ranging markets: fade extremes (mean reversion)
-        long_entry = False
-        short_entry = False
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_r3
+        short_entry = vol_confirm and downtrend and breakdown_s3
         
-        if uptrend_alligator and vol_confirm:
-            # Strong uptrend: go long on pullbacks to teeth
-            if close[i] <= teeth_val and price_below_alligator:
-                long_entry = True
-        elif downtrend_alligator and vol_confirm:
-            # Strong downtrend: go short on retracements to teeth
-            if close[i] >= teeth_val and price_above_alligator:
-                short_entry = True
-        elif ranging_market and vol_confirm:
-            # Ranging market: fade extremes
-            if price_below_alligator and close[i] > lips_val:  # bounce from lower band
-                long_entry = True
-            elif price_above_alligator and close[i] < teeth_val:  # reject from upper band
-                short_entry = True
-        
-        # Exit logic: opposite signal or loss of momentum
-        long_exit = (price_above_alligator and close[i] < jaw_val) or \
-                    (not vol_confirm) or \
-                    (downtrend_alligator and close[i] < teeth_val)
-        short_exit = (price_below_alligator and close[i] > jaw_val) or \
-                     (not vol_confirm) or \
-                     (uptrend_alligator and close[i] > teeth_val)
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_s3 or (not uptrend)
+        short_exit = breakout_r3 or (not downtrend)
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -123,14 +100,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsAlligator_BullBear"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
