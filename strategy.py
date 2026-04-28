@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) high, 1d ADX > 25 (trending), and volume > 1.5x 20-bar average.
-# Enter short when price breaks below Donchian(20) low, 1d ADX > 25 (trending), and volume > 1.5x 20-bar average.
-# Exit when price touches the opposite Donchian level or ADX falls below 20 (range regime).
-# Uses discrete position sizing (0.30) to balance return and fee drag.
-# Target: 80-150 total trades over 4 years (20-38/year) to avoid excessive fee churn.
-# Donchian channels provide objective breakout levels; ADX filters for trending markets only;
-# Volume confirmation reduces false breakouts. Works in both bull and bear by capturing strong trends.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when price breaks above Camarilla R3 level, 1d EMA34 trending up, and volume > 2.0x 20-bar average.
+# Enter short when price breaks below Camarilla S3 level, 1d EMA34 trending down, and volume > 2.0x 20-bar average.
+# Exit when price reaches opposite Camarilla level (R3/S3) or crosses the 1d EMA34.
+# Uses discrete position sizing (0.25) to balance return and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid excessive fee drag.
+# Camarilla levels provide precise support/resistance; 1d EMA34 filters for daily trend alignment;
+# Volume spike confirms institutional participation in breakouts.
+# Works in both bull and bear markets by following the higher timeframe trend with volume confirmation.
 
-name = "4h_Donchian20_1dADX_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,93 +27,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Need previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Smoothed TR, DM+
-    tr_period = 14
-    tr_sum = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
-    dm_plus_sum = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False).mean().values
-    dm_minus_sum = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False).mean().values
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_sum / tr_sum
-    di_minus = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian(20) levels from 4h data
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 30)  # Ensure sufficient history
+    start_idx = max(50, 20)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: ADX > 25 for trending market
-        is_trending = adx_aligned[i] > 25
-        is_ranging = adx_aligned[i] < 20  # Exit condition
+        # 1d EMA34 trend: slope over 3 periods
+        if i >= 3:
+            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
+            ema_trend_up = ema_slope > 0
+            ema_trend_down = ema_slope < 0
+        else:
+            ema_trend_up = False
+            ema_trend_down = False
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        # Camarilla breakout conditions
+        breakout_up = close[i] > camarilla_r3_aligned[i]
+        breakout_down = close[i] < camarilla_s3_aligned[i]
         
-        # Exit conditions: opposite Donchian level or ADX < 20 (range)
-        exit_long = close[i] < donchian_low[i] or is_ranging
-        exit_short = close[i] > donchian_high[i] or is_ranging
+        # Exit conditions: price reaches opposite Camarilla level or crosses 1d EMA34
+        exit_long = close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_aligned[i]
+        exit_short = close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_aligned[i]
         
         # Handle entries and exits
-        if breakout_up and is_trending and vol_confirm and position <= 0:
-            signals[i] = 0.30
+        if breakout_up and ema_trend_up and vol_confirm and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif breakout_down and is_trending and vol_confirm and position >= 0:
-            signals[i] = -0.30
+        elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -123,9 +105,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
