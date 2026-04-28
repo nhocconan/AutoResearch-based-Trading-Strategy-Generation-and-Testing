@@ -18,11 +18,6 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
     # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -31,31 +26,24 @@ def generate_signals(prices):
     # Calculate daily range for pivot calculations
     daily_range = high_1d - low_1d
     
-    # Weekly high/low/close for calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly range for pivot calculations
-    weekly_range = high_1w - low_1w
-    
     # Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    camarilla_r3 = close_1d + daily_range * 1.1 / 4
+    camarilla_s3 = close_1d - daily_range * 1.1 / 4
     
-    # Camarilla pivot levels (based on previous week) - for weekly context
-    camarilla_r4_w = close_1w + weekly_range * 1.1 / 2
-    camarilla_s4_w = close_1w - weekly_range * 1.1 / 2
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Weekly EMA21 for trend
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align Camarilla levels and weekly EMA to daily timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    r4_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_w)
-    s4_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_w)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Daily ATR for volatility filter
+    atr_period = 14
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r4_w_aligned[i]) or np.isnan(s4_w_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -92,23 +79,18 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Weekly trend filter: price above/below weekly EMA21
-        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
-        
-        # Weekly context: price relative to weekly Camarilla levels
-        price_above_weekly_r4 = close[i] > r4_w_aligned[i]
-        price_below_weekly_s4 = close[i] < s4_w_aligned[i]
+        # Volatility filter: ATR above average (avoid low volatility chop)
+        vol_regime_filter = atr_aligned[i] > np.nanmedian(atr_aligned[:i+1])
         
         # Entry conditions: 
-        # Long: price breaks above daily R4 with volume, weekly uptrend, and above weekly R4
-        # Short: price breaks below daily S4 with volume, weekly downtrend, and below weekly S4
-        long_entry = (close[i] > r4_aligned[i]) and price_above_weekly_ema and vol_filter and price_above_weekly_r4
-        short_entry = (close[i] < s4_aligned[i]) and price_below_weekly_ema and vol_filter and price_below_weekly_s4
+        # Long: price breaks above S3 with volume and volatility
+        # Short: price breaks below R3 with volume and volatility
+        long_entry = (close[i] > s3_aligned[i]) and vol_filter and vol_regime_filter
+        short_entry = (close[i] < r3_aligned[i]) and vol_filter and vol_regime_filter
         
-        # Exit conditions: price returns to opposite daily S4/R4 levels or weekly trend reversal
-        long_exit = (close[i] < s4_aligned[i]) or (not price_above_weekly_ema)
-        short_exit = (close[i] > r4_aligned[i]) or (not price_below_weekly_ema)
+        # Exit conditions: price returns to opposite S3/R3 levels
+        long_exit = (close[i] < r3_aligned[i])
+        short_exit = (close[i] > s3_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -133,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R4S4_WeeklyContext_EMA21"
-timeframe = "1d"
+name = "12h_Camarilla_S3R3_VolVol_Regime"
+timeframe = "12h"
 leverage = 1.0
