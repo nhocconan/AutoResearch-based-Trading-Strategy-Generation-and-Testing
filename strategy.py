@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot R3/S3 Breakout with 1d Volume Spike and 12h EMA50 Trend Filter
-# Buy when price breaks above Weekly R3 (resistance 3) with volume > 2x 20-bar average AND 12h EMA50 rising
-# Sell when price breaks below Weekly S3 (support 3) with volume > 2x 20-bar average AND 12h EMA50 falling
-# Weekly pivots calculated from prior week's OHLC: R3 = High + 2*(High - Low), S3 = Low - 2*(High - Low)
-# Volume spike confirms institutional interest; 12h EMA50 trend filter ensures alignment with intermediate trend
-# Works in both bull and bear markets by only trading breakouts in the direction of the 12h trend
-# Target: 12-35 trades/year via tight breakout conditions requiring volume and trend confluence
+# Hypothesis: 12h Williams %R Extreme + 1d EMA34 Trend Filter + Volume Spike
+# Williams %R(14) < -80 = oversold (long signal), > -20 = overbought (short signal)
+# Only trade in direction of 1d EMA34 trend: long when close > EMA34, short when close < EMA34
+# Volume confirmation: current volume > 2.0x 20-bar average to avoid low-liquidity false signals
+# Exit when Williams %R returns to neutral range (-50) or volume drops
+# Target: 12-37 trades/year via extreme readings + volume filter reducing false signals
+# Williams %R is a momentum oscillator that works well in both bull and bear markets
+# when combined with trend filter and volume confirmation to avoid whipsaws
 
-name = "6h_WeeklyPivot_R3S3_Breakout_1dVolumeSpike_12hEMA50_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,82 +26,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: R3, S3 from prior week's OHLC
-    # R3 = High + 2*(High - Low), S3 = Low - 2*(High - Low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    weekly_range = high_1w - low_1w
-    r3 = high_1w + 2 * weekly_range  # Resistance 3
-    s3 = low_1w - 2 * weekly_range   # Support 3
-    
-    # Align weekly pivot levels to 6h timeframe (use prior week's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for EMA34 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > 2.0 * volume_ma_20_1d
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Calculate EMA(34) on 1d close
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_prev = np.roll(ema_50_12h, 1)
-    ema_50_12h_prev[0] = np.nan
-    ema_50_rising = ema_50_12h > ema_50_12h_prev
-    ema_50_falling = ema_50_12h < ema_50_12h_prev
-    ema_50_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_50_rising)
-    ema_50_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_50_falling)
+    # Calculate Williams %R(14) on 12h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume confirmation: >2.0x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 30)  # Need sufficient history
+    start_idx = max(34, 20)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(ema_50_rising_aligned[i]) or 
-            np.isnan(ema_50_falling_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        vol_conf = volume_confirm[i]
+        ema_34_val = ema_34_1d_aligned[i]
+        wr = williams_r[i]
+        close_val = close[i]
+        
+        # Determine trend direction from 1d EMA34
+        uptrend = close_val > ema_34_val
+        downtrend = close_val < ema_34_val
+        
         # Handle entries and exits
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above R3, volume spike, AND 12h EMA50 rising
-            if close[i] > r3_aligned[i] and volume_spike_aligned[i] and ema_50_rising_aligned[i]:
+        if position == 0:  # Flat - look for new entries
+            # Long when Williams %R < -80 (oversold) AND uptrend AND volume confirmation
+            if wr < -80 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, volume spike, AND 12h EMA50 falling
-            elif close[i] < s3_aligned[i] and volume_spike_aligned[i] and ema_50_falling_aligned[i]:
+            # Short when Williams %R > -20 (overbought) AND downtrend AND volume confirmation
+            elif wr > -20 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price breaks below S3 or volume dries up
-            if close[i] < s3_aligned[i] or not volume_spike_aligned[i]:
+        elif position == 1:  # Long - exit when Williams %R >= -50 or no volume
+            if wr >= -50 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price breaks above R3 or volume dries up
-            if close[i] > r3_aligned[i] or not volume_spike_aligned[i]:
+        elif position == -1:  # Short - exit when Williams %R <= -50 or no volume
+            if wr <= -50 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
