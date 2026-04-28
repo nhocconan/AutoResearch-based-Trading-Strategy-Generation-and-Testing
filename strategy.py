@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,9 +13,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and 6h data for entry timing
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    df_6h = get_htf_data(prices, '6h')
+    
+    if len(df_1d) < 34 or len(df_6h) < 20:
         return np.zeros(n)
     
     # 1d EMA(34) for trend filter
@@ -23,33 +25,31 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Donchian breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # 6h RSI(14) for momentum filter
+    close_6h = df_6h['close'].values
+    delta = pd.Series(close_6h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_6h = 100 - (100 / (1 + rs))
+    rsi_6h = rsi_6h.fillna(50).values
+    rsi_6h_aligned = align_htf_to_ltf(prices, df_6h, rsi_6h)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # 4h Donchian(20) channels
-    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
-    
-    # Volume confirmation: current volume > 1.5x average volume (adjust to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > vol_ma * 1.5
+    # Volume confirmation: current volume > 1.3x average volume (reduced to increase trades slightly)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30, 20)
+    start_idx = max(34, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i])):
+            np.isnan(rsi_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,19 +57,19 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Breakout conditions: price breaks Donchian(20) channel
-        long_breakout = close[i] > donch_high_20_aligned[i]
-        short_breakout = close[i] < donch_low_20_aligned[i]
+        # Momentum filter from 6h RSI
+        rsi_momentum_up = rsi_6h_aligned[i] > 50
+        rsi_momentum_down = rsi_6h_aligned[i] < 50
         
-        # Entry conditions: require alignment of 1d trend and breakout with volume confirmation
-        long_entry = long_breakout and uptrend and volume_confirm[i]
-        short_entry = short_breakout and downtrend and volume_confirm[i]
+        # Entry conditions: require 1d trend, 6h momentum, and volume confirmation
+        long_entry = uptrend and rsi_momentum_up and volume_confirm[i]
+        short_entry = downtrend and rsi_momentum_down and volume_confirm[i]
         
-        # Exit conditions: reverse signal
+        # Exit conditions: when trend or momentum reverses
         if position == 1:
-            exit_condition = not uptrend
+            exit_condition = not (uptrend and rsi_momentum_up)
         elif position == -1:
-            exit_condition = not downtrend
+            exit_condition = not (downtrend and rsi_momentum_down)
         else:
             exit_condition = False
         
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "6h_EMA34_Trend_RSI14_Momentum_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
