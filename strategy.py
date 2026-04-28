@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,35 +18,28 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Williams %R (14-period)
+    # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close_1d) / (highest_high - lowest_low)) * -100
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate daily range for pivot calculations
+    daily_range = high_1d - low_1d
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Daily trend filter: EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # 6h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: above average volume (30-period)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,12 +47,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,27 +72,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Volatility filter: ATR above 50-period average
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_regime = atr[i] > atr_ma[i]
+        # Trend filter: price above/below daily EMA34
+        price_above_ema = close[i] > ema_34_aligned[i]
+        price_below_ema = close[i] < ema_34_aligned[i]
         
-        # Williams %R conditions: oversold (< -80) or overbought (> -20)
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
+        # Entry conditions: 
+        # Long: price breaks above R4 with volume and uptrend
+        # Short: price breaks below S4 with volume and downtrend
+        long_entry = (close[i] > r4_aligned[i]) and price_above_ema and vol_filter
+        short_entry = (close[i] < s4_aligned[i]) and price_below_ema and vol_filter
         
-        # Trend filter: price above/below daily EMA50
-        price_above_ema = close[i] > ema_50_aligned[i]
-        price_below_ema = close[i] < ema_50_aligned[i]
-        
-        # Entry conditions:
-        # Long: Williams %R oversold + price above EMA50 + volume + volatility
-        # Short: Williams %R overbought + price below EMA50 + volume + volatility
-        long_entry = oversold and price_above_ema and vol_filter and vol_regime
-        short_entry = overbought and price_below_ema and vol_filter and vol_regime
-        
-        # Exit conditions: Williams %R returns to neutral range (-50) or trend reversal
-        long_exit = williams_r_aligned[i] > -50 or not price_above_ema
-        short_exit = williams_r_aligned[i] < -50 or not price_below_ema
+        # Exit conditions: price returns to opposite S4/R4 levels or trend reversal
+        long_exit = (close[i] < s4_aligned[i]) or (not price_above_ema)
+        short_exit = (close[i] > r4_aligned[i]) or (not price_below_ema)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -124,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_EMA50_VolRegime"
+name = "6h_Camarilla_R4S4_Breakout_EMA34"
 timeframe = "6h"
 leverage = 1.0
