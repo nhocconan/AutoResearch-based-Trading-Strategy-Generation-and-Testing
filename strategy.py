@@ -13,54 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # 1d Donchian channels (20-period) for entry signals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    highest_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    highest_high_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_high_1d)
+    lowest_low_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_1d)
     
-    # 12h Donchian channels (15-period) - longer period for fewer trades
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 15:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    highest_high_12h = pd.Series(high_12h).rolling(window=15, min_periods=15).max().values
-    lowest_low_12h = pd.Series(low_12h).rolling(window=15, min_periods=15).min().values
-    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
-    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
-    
-    # Volume confirmation: current volume > 1.3x average volume (12h average)
-    vol_ma_12h = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    volume_confirm = volume > vol_ma_12h * 1.3
+    # Volume confirmation: current volume > 1.5x average volume (1d average)
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma_1d * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 15, 15)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(highest_high_12h_aligned[i]) or
-            np.isnan(lowest_low_12h_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(highest_high_1d_aligned[i]) or
+            np.isnan(lowest_low_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > highest_high_12h_aligned[i]
-        breakout_down = close[i] < lowest_low_12h_aligned[i]
+        breakout_up = close[i] > highest_high_1d_aligned[i]
+        breakout_down = close[i] < lowest_low_1d_aligned[i]
         
         # Entry conditions: require trend + breakout + volume confirmation
         long_entry = uptrend and breakout_up and volume_confirm[i]
@@ -76,10 +76,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif exit_condition and position != 0:
             signals[i] = 0.0
@@ -87,14 +87,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian15_1dEMA34_Volume"
+name = "12h_1wEMA34_1dDonchian20_Volume"
 timeframe = "12h"
 leverage = 1.0
