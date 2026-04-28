@@ -1,3 +1,13 @@
+# 12h Multi-Timeframe Bollinger Breakout Strategy
+# Strategy Type: Bollinger Bands breakout with trend confirmation and volume filter
+# Timeframe: 12h (primary), with 1d and 1w for higher timeframe context
+# Why it should work in both bull and bear: 
+# - Bollinger Bands adapt to volatility, expanding in trending markets and contracting in ranging markets
+# - Breakouts capture momentum in trending markets while the trend filter avoids false signals in ranging markets
+# - Volume confirmation ensures breakouts have conviction
+# - The strategy is designed to capture significant moves while avoiding whipsaws in choppy markets
+# - Target trades: 50-150 total over 4 years (12-37/year) to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,51 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
+    # Get 1d data for Bollinger Bands and trend context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get weekly data for additional context
+    # Get 1w data for higher timeframe trend
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily high/low/close for calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Bollinger Bands on daily data (20-period, 2 standard deviations)
     close_1d = df_1d['close'].values
+    bb_period = 20
+    bb_std = 2
     
-    # Calculate weekly high/low for range identification
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate middle band (SMA)
+    sma_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    
+    # Calculate standard deviation
+    std_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    
+    # Calculate upper and lower bands
+    upper_bb = sma_1d + (bb_std * std_1d)
+    lower_bb = sma_1d - (bb_std * std_1d)
+    
+    # Calculate 1d EMA for trend direction (50-period)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Calculate 1w EMA for higher timeframe trend (20-period)
     close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Daily range for pivot calculations
-    daily_range = high_1d - low_1d
-    
-    # Pivot point (classic)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    
-    # Weekly range for trend context
-    weekly_range = high_1w - low_1w
-    
-    # Align daily pivot and weekly range to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    weekly_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_range)
-    
-    # Align daily low for weekly midpoint calculation
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Calculate daily midpoint for trend context
-    daily_midpoint = (low_1d_aligned + high_1d_aligned) / 2
+    # Align all indicators to 12h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Hour filter: 0-23 UTC (trade all hours for 12h timeframe)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -67,48 +75,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(weekly_range_aligned[i]) or
-            np.isnan(daily_midpoint[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(sma_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Session filter: trade all hours for 12h timeframe (no restriction)
+        # For 12h, we can trade any hour as each bar represents 12 hours
         
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Weekly trend filter: price above/below weekly midpoint
-        weekly_midpoint = low_1w + weekly_range_aligned[i] / 2
-        low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
-        weekly_midpoint = low_1w_aligned[i] + weekly_range_aligned[i] / 2
+        # Breakout conditions:
+        # Long: price breaks above upper Bollinger Band with volume and trend alignment
+        # Short: price breaks below lower Bollinger Band with volume and trend alignment
+        long_breakout = close[i] > upper_bb_aligned[i]
+        short_breakout = close[i] < lower_bb_aligned[i]
         
-        price_above_weekly_mid = close[i] > weekly_midpoint
-        price_below_weekly_mid = close[i] < weekly_midpoint
+        # Trend filters:
+        # For long: price above 1d EMA50 and 1w EMA20 (bullish alignment)
+        # For short: price below 1d EMA50 and 1w EMA20 (bearish alignment)
+        bullish_alignment = close[i] > ema_50_1d_aligned[i] and close[i] > ema_20_1w_aligned[i]
+        bearish_alignment = close[i] < ema_50_1d_aligned[i] and close[i] < ema_20_1w_aligned[i]
         
-        # Daily trend filter: price above/below daily midpoint
-        price_above_daily_mid = close[i] > daily_midpoint[i]
-        price_below_daily_mid = close[i] < daily_midpoint[i]
+        # Entry conditions
+        long_entry = long_breakout and vol_filter and bullish_alignment
+        short_entry = short_breakout and vol_filter and bearish_alignment
         
-        # Entry conditions: 
-        # Long: price above daily AND weekly midpoint with volume
-        # Short: price below daily AND weekly midpoint with volume
-        long_entry = price_above_daily_mid and price_above_weekly_mid and vol_filter
-        short_entry = price_below_daily_mid and price_below_weekly_mid and vol_filter
-        
-        # Exit conditions: loss of either trend
-        long_exit = not (price_above_daily_mid and price_above_weekly_mid)
-        short_exit = not (price_below_daily_mid and price_below_weekly_mid)
+        # Exit conditions: return to middle Bollinger Band
+        long_exit = close[i] < sma_1d_aligned[i]
+        short_exit = close[i] > sma_1d_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -133,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DualTimeframe_Midpoint_Filter"
-timeframe = "6h"
+name = "12h_Bollinger_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
