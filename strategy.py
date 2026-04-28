@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -76,7 +76,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
+        # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
         # Entry conditions: Camarilla H4/L4 breakout with volume, trend, and volatility filter
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_ATRFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
