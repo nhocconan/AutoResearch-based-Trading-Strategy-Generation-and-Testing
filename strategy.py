@@ -13,7 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Get daily data for pivot points and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -29,17 +34,17 @@ def generate_signals(prices):
     r2 = pp + (high_1d - low_1d)
     s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 1d timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA20 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Daily ATR14 for volatility filter (adaptive)
     tr1 = np.abs(high_1d - low_1d)
@@ -62,13 +67,13 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i])):
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(atr14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
+        # Trend filter: weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Volatility filter: avoid extreme volatility
         vol_filter = atr14_1d_aligned[i] < (np.mean(atr14_1d_aligned[max(0, i-30):i+1]) * 2)
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R2S2_Breakout_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_Pivot_R2S2_Breakout_1wEMA20_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
