@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Bands breakout with 1d trend filter and volume confirmation
-# Long when price breaks above upper BB(20,2) AND 1d close > 1d EMA50 AND volume > 2x 20-bar avg
-# Short when price breaks below lower BB(20,2) AND 1d close < 1d EMA50 AND volume > 2x 20-bar avg
-# Exit when price returns to middle BB(20) or volume drops
-# Uses Bollinger Bands as dynamic support/resistance that adapts to volatility
-# Works in both bull and bear markets by requiring 1d trend alignment to avoid counter-trend whipsaw
-# Volume confirmation ensures breakouts have conviction
-# Target: 12-37 trades/year via strict entry conditions reducing false breakouts
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX25 trend filter
+# Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-bar avg AND 1d ADX > 25
+# Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-bar avg AND 1d ADX > 25
+# Exit when price returns to Donchian(20) midpoint OR ADX < 20 (range) OR volume confirmation lost
+# Target: 12-37 trades/year via Donchian structure + volume + trend filter reducing whipsaw
+# Works in both bull and bear markets by only trading breakouts in trending conditions (ADX>25)
 
-name = "6h_BollingerBreakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolume_ADX25_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,77 +19,101 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for volume and ADX calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:  # Need sufficient data for EMA50
+    if len(df_1d) < 30:  # Need sufficient data for calculations
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
+    # Calculate 1d volume 20-bar moving average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_1d = np.concatenate([np.full(19, np.nan), volume_ma_20_1d])  # prepend NaN for alignment
+    
+    # Calculate 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Prepend zeros for alignment (since we lost first 49 bars in EMA calculation)
-    ema_50_1d = np.concatenate([np.full(49, np.nan), ema_50_1d])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    # Calculate Bollinger Bands on 6h close (20,2)
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Smoothed DM
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: >2.0x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Prepend zeros for alignment (lost bars in calculations: 1 for TR + 14 for ADX smoothing)
+    adx_1d = np.concatenate([np.full(15, np.nan), adx_1d])
+    
+    # Align 1d indicators to 12h timeframe
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate Donchian(20) on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need sufficient history for all indicators
+    start_idx = 40  # Need sufficient history for all indicators (20 for Donchian + buffer)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_conf = volume_confirm[i]
-        price = close[i]
-        bb_m = bb_middle[i]
-        bb_u = bb_upper[i]
-        bb_l = bb_lower[i]
-        ema_50 = ema_50_1d_aligned[i]
+        vol_conf = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above upper BB AND 1d close > 1d EMA50 AND volume confirmation
-            if price > bb_u and close[i-1] <= bb_u and price > ema_50 and vol_conf:
+            # Long when price breaks above Donchian high AND volume confirmation AND ADX > 25 (trending)
+            if close[i] > donchian_high[i] and vol_conf and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below lower BB AND 1d close < 1d EMA50 AND volume confirmation
-            elif price < bb_l and close[i-1] >= bb_l and price < ema_50 and vol_conf:
+            # Short when price breaks below Donchian low AND volume confirmation AND ADX > 25 (trending)
+            elif close[i] < donchian_low[i] and vol_conf and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price returns to middle BB or volume drops
-            if price <= bb_m or not vol_conf:
+        elif position == 1:  # Long - exit when price returns to midpoint OR ADX < 20 OR volume confirmation lost
+            if close[i] < donchian_mid[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price returns to middle BB or volume drops
-            if price >= bb_m or not vol_conf:
+        elif position == -1:  # Short - exit when price returns to midpoint OR ADX < 20 OR volume confirmation lost
+            if close[i] > donchian_mid[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
