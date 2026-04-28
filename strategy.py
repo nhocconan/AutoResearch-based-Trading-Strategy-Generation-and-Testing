@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1wTrend_Filter
-Hypothesis: Uses 1-week Elder Ray (Bull/Bear Power) to determine market direction and 6-hour EMA13 pullbacks for entry. Bull Power > 0 and Bear Power < 0 from weekly timeframe defines trend, with entries on pullbacks to EMA13 in the direction of the weekly trend. Designed for low trade frequency (12-37/year) to minimize fee drift while capturing swing moves in both bull and bear markets. Weekly trend filter avoids whipsaws during sideways periods.
+12h_KAMA_Direction_RSI_Pullback_Volume_Regime
+Hypothesis: Uses 12h KAMA for primary trend direction (10-period ER), with RSI(14) pullback entries during low volatility (Choppiness Index > 61.8) and volume confirmation (1.5x 24-bar average). Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year). Works in both bull and bear markets by following KAMA direction and using pullbacks in ranging conditions to avoid whipsaw.
 """
 
 import numpy as np
@@ -10,63 +10,114 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Elder Ray (requires 13 EMA)
+    # Get 1w data for Choppiness Index regime filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 13-period EMA on weekly close
+    # Calculate 1w Choppiness Index (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1w['high'].values - ema13_1w
-    bear_power = df_1w['low'].values - ema13_1w
+    atr_1w = []
+    for i in range(len(close_1w)):
+        if i == 0:
+            tr = high_1w[0] - low_1w[0]
+        else:
+            tr = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
+        atr_1w.append(tr)
     
-    # Determine weekly trend: Bull Power > 0 and Bear Power < 0 = uptrend
-    # Bear Power > 0 and Bull Power < 0 = downtrend (both conditions rarely true together)
-    # More practical: Bull Power > 0 = uptrend bias, Bear Power < 0 = downtrend bias
-    bull_power_aligned = align_htf_to_ltf(prices, df_1w, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1w, bear_power)
+    atr_1w = np.array(atr_1w)
+    atr_sum_1w = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
+    high_low_range_1w = pd.Series(high_1w - low_1w).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr_sum_1w / high_low_range_1w) / np.log10(14)
+    chop = np.where(high_low_range_1w == 0, 100, chop)
+    chop_align = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
     
-    # Get 6h EMA13 for pullback entries
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 12h data for KAMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
+    
+    # Calculate 12h KAMA (10-period ER)
+    close_12h = df_12h['close'].values
+    change_12h = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility_12h = np.abs(np.diff(close_12h, 1))
+    
+    er_12h = np.where(volatility_12h > 0, change_12h / volatility_12h, 0)
+    sc_12h = (er_12h * (0.6645 - 0.0645) + 0.0645) ** 2
+    
+    kama_12h = np.full_like(close_12h, np.nan)
+    kama_12h[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        kama_12h[i] = kama_12h[i-1] + sc_12h[i] * (close_12h[i] - kama_12h[i-1])
+    
+    kama_12h_align = align_htf_to_ltf(prices, df_12h, kama_12h)
+    
+    # Get daily data for volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Volume confirmation: >1.5x 24-period MA (2 days of 12h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Wait for EMA13 to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema13_6h[i])):
+        if (np.isnan(kama_12h_align[i]) or 
+            np.isnan(chop_align[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filters from Elder Ray
-        weekly_uptrend = bull_power_aligned[i] > 0  # Weekly highs above EMA13
-        weekly_downtrend = bear_power_aligned[i] < 0  # Weekly lows below EMA13
+        # Trend filter: price above/below 12h KAMA
+        uptrend = close[i] > kama_12h_align[i]
+        downtrend = close[i] < kama_12h_align[i]
         
-        # 6h price relative to EMA13 for pullback entries
-        price_above_ema = close[i] > ema13_6h[i]
-        price_below_ema = close[i] < ema13_6h[i]
+        # Volume confirmation (>1.5x average)
+        vol_confirm = volume[i] > (1.5 * vol_ma_24[i])
         
-        # Entry conditions: pullback to EMA13 in direction of weekly trend
-        long_entry = weekly_uptrend and price_below_ema  # Pullback in uptrend
-        short_entry = weekly_downtrend and price_above_ema  # Pullback in downtrend
+        # Range filter: Choppiness Index > 61.8 (ranging market)
+        range_filter = chop_align[i] > 61.8
         
-        # Exit conditions: price crosses EMA13 against the trend
-        long_exit = not weekly_uptrend or price_above_ema  # Trend broken or price above EMA
-        short_exit = not weekly_downtrend or price_below_ema  # Trend broken or price below EMA
+        # RSI(14) for pullback entries
+        if i >= 14:
+            rsi_period = 14
+            delta = np.diff(close[max(0, i-rsi_period):i+1])
+            gain = np.where(delta > 0, delta, 0)
+            loss = np.where(delta < 0, -delta, 0)
+            avg_gain = np.mean(gain[-rsi_period:]) if len(gain) >= rsi_period else 0
+            avg_loss = np.mean(loss[-rsi_period:]) if len(loss) >= rsi_period else 0
+            rs = avg_gain / avg_loss if avg_loss != 0 else 0
+            rsi = 100 - (100 / (1 + rs)) if avg_loss != 0 else 50
+        else:
+            rsi = 50
+        
+        # RSI pullback conditions: RSI < 40 in uptrend, RSI > 60 in downtrend
+        rsi_long = rsi < 40
+        rsi_short = rsi > 60
+        
+        # Entry conditions
+        long_entry = uptrend and vol_confirm and range_filter and rsi_long
+        short_entry = downtrend and vol_confirm and range_filter and rsi_short
+        
+        # Exit conditions: reverse signal or loss of trend/volume
+        long_exit = not uptrend or not vol_confirm or not range_filter
+        short_exit = not downtrend or not vol_confirm or not range_filter
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -91,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1wTrend_Filter"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RSI_Pullback_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
