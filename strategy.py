@@ -13,83 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and regime detection
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for volatility and trend filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate weekly ATR(14) for volatility regime
-    tr1_w = high_1w - low_1w
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w[0] = tr1_w[0]
-    atr_1w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
-    
-    # Align weekly indicators to daily timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Calculate daily Donchian channels (20-period) for breakout signals
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate daily ATR(10) for position sizing and stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate daily ATR(14) for volatility
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Precompute day-of-week filter (avoid Monday gaps, trade Tue-Fri)
-    day_of_week = pd.DatetimeIndex(prices["open_time"]).dayofweek  # Monday=0, Sunday=6
-    trade_day = (day_of_week >= 1) & (day_of_week <= 4)  # Tuesday to Friday
+    # Calculate daily ADX(14) for trend strength
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 12-hour Donchian channels (15-period)
+    high_15 = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    low_15 = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or 
-            np.isnan(atr_10[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(high_15[i]) or 
+            np.isnan(low_15[i])):
             signals[i] = 0.0
             continue
         
-        # Trade only Tuesday-Friday to avoid weekend gaps
-        if not trade_day[i]:
+        # Session filter: only trade during active hours
+        if not session_mask[i]:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above SMA50 for long, below for short
+        sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+        if np.isnan(sma_50[i]):
+            signals[i] = 0.0
+            continue
+        uptrend = close[i] > sma_50[i]
+        downtrend = close[i] < sma_50[i]
         
-        # Volatility regime filter: avoid extremely low volatility days
-        vol_normal = atr_10[i] > (atr_1w_aligned[i] * 0.1)
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_aligned[i] > 25
         
         # Donchian breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # Break above previous high
-        breakout_down = close[i] < low_20[i-1]  # Break below previous low
+        breakout_up = close[i] > high_15[i-1]  # Break above previous high
+        breakout_down = close[i] < low_15[i-1]  # Break below previous low
         
-        # Long conditions: uptrend + normal volatility + breakout up
-        long_condition = uptrend and vol_normal and breakout_up
+        # Volatility filter: ensure sufficient ATR
+        atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+        if np.isnan(atr_ma_aligned[i]):
+            signals[i] = 0.0
+            continue
+        vol_ok = atr_aligned[i] > (atr_ma_aligned[i] * 0.15)
         
-        # Short conditions: downtrend + normal volatility + breakout down
-        short_condition = downtrend and vol_normal and breakout_down
+        # Long conditions: uptrend + strong trend + breakout up + volatility
+        long_condition = uptrend and strong_trend and breakout_up and vol_ok
+        
+        # Short conditions: downtrend + strong trend + breakout down + volatility
+        short_condition = downtrend and strong_trend and breakout_down and vol_ok
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -97,11 +113,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite Donchian breakout or volatility spike
-        elif position == 1 and (close[i] < low_20[i-1] or atr_10[i] > (atr_1w_aligned[i] * 0.3)):
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < low_15[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > high_20[i-1] or atr_10[i] > (atr_1w_aligned[i] * 0.3)):
+        elif position == -1 and close[i] > high_15[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -115,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA20_Trend_Donchian20_Breakout_VolatilityFilter"
-timeframe = "1d"
+name = "12h_Donchian15_Breakout_ADX25_SMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
