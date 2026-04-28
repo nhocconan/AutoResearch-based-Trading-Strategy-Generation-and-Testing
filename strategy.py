@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Camarilla pivot (R1/S1) breakout on 4h with 12h EMA50 trend filter and volume spike confirmation.
+4h_Donchian20_12hTrend_Filter_VolumeSpike
+Hypothesis: Donchian channel breakout (20-period) on 4h with 12h EMA50 trend filter and volume spike confirmation.
 Trades with the trend in both bull and bear markets using 12h EMA50 as trend filter.
 Targets 20-40 trades/year to minimize fee drift.
 """
@@ -20,11 +20,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
@@ -38,6 +33,10 @@ def generate_signals(prices):
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -45,31 +44,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
             signals[i] = 0.0
             continue
-        
-        # Calculate Camarilla pivot levels for current day
-        # Need previous day's OHLC (1d data)
-        day_idx = i // 96  # 96 = 24*4 (4h bars per day)
-        if day_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_day_idx = day_idx - 1
-        if prev_day_idx >= len(df_1d):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC from 1d data
-        ph = df_1d['high'].iloc[prev_day_idx]
-        pl = df_1d['low'].iloc[prev_day_idx]
-        pc = df_1d['close'].iloc[prev_day_idx]
-        
-        # Camarilla levels
-        range_val = ph - pl
-        r1 = pc + (range_val * 1.1 / 12)
-        s1 = pc - (range_val * 1.1 / 12)
         
         # Trend direction from 12h EMA50
         trend_up = close[i] > ema_50_12h_aligned[i]
@@ -78,17 +55,17 @@ def generate_signals(prices):
         # Volume confirmation: >2.0x 20-period MA
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Breakout conditions
-        long_breakout = close[i] > r1
-        short_breakout = close[i] < s1
+        # Donchian breakout
+        long_breakout = close[i] > high_max[i]
+        short_breakout = close[i] < low_min[i]
         
         # Entry logic
         long_entry = vol_confirm and trend_up and long_breakout
         short_entry = vol_confirm and trend_down and short_breakout
         
         # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s1) or (not trend_up)
-        short_exit = (close[i] > r1) or (not trend_down)
+        long_exit = (close[i] < low_min[i]) or (not trend_up)
+        short_exit = (close[i] > high_max[i]) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -113,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+name = "4h_Donchian20_12hTrend_Filter_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
