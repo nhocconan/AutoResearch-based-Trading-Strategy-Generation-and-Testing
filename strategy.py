@@ -44,6 +44,11 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
+    # Calculate volume ratio for confirmation
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1d / vol_ma_1d
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -52,7 +57,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,11 +73,14 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility periods
         vol_filter = atr_14_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
         
+        # Volume confirmation: require above-average volume
+        vol_confirm = vol_ratio_aligned[i] > 1.2
+        
         # Entry conditions - balanced for 4h timeframe
-        # Long: upward breakout + uptrend + vol filter
-        long_entry = breakout_up and trend_up and vol_filter
-        # Short: downward breakout + downtrend + vol filter
-        short_entry = breakout_down and trend_down and vol_filter
+        # Long: upward breakout + uptrend + vol filter + volume confirmation
+        long_entry = breakout_up and trend_up and vol_filter and vol_confirm
+        # Short: downward breakout + downtrend + vol filter + volume confirmation
+        short_entry = breakout_down and trend_down and vol_filter and vol_confirm
         
         # Exit conditions: opposite breakout or trend reversal
         long_exit = breakout_down or not trend_up
