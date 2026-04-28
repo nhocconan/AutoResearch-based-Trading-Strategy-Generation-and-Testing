@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_R1S1_R4S4_Breakout_VolumeSpike
-Hypothesis: Combines daily R1/S1 mean-reversion with weekly R4/S4 breakout continuation.
-Filters with volume spike and session filter to avoid false signals.
-Designed to work in both bull and bear markets by fading extremes and riding breakouts.
-Target: 15-25 trades/year (60-100 total over 4 years).
+6h_Donchian20_WeeklyTrend_Pullback_VolumeSpike
+Hypothesis: Combines 6h Donchian breakout with weekly trend filter and volume confirmation.
+In trending markets (price above/below weekly 20-bar SMA), pullbacks to the 6h Donchian
+channel midpoint offer high-probability entries. Volume spike filters false breakouts.
+Works in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend).
+Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,58 +22,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 12:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily data for R1/S1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
-    
-    # Weekly data for R4/S4
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    sma20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
-    # Calculate daily Camarilla R1/S1
-    hl_range_1d = high_1d - low_1d
-    r1_1d = close_1d + hl_range_1d * 1.1 / 12.0
-    s1_1d = close_1d - hl_range_1d * 1.1 / 12.0
-    
-    # Calculate weekly Camarilla R4/S4
-    hl_range_1w = high_1w - low_1w
-    r4_1w = close_1w + hl_range_1w * 1.1 / 2.0  # R4 = C + (H-L)*1.1/2
-    s4_1w = close_1w - hl_range_1w * 1.1 / 2.0  # S4 = C - (H-L)*1.1/2
-    
-    # Align to daily timeframe (since timeframe=1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    
-    # Daily volume spike (>2x 20-period MA)
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_ma_20_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # 6h Donchian channel (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
+    # Volume spike: >1.5x 20-period MA on 6h
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = max(lookback, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(sma20_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i])):
             signals[i] = 0.0
             continue
         
@@ -81,35 +62,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Price levels
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
-        vol_spike = vol_spike_aligned[i] > 0.5
+        # Trend filter: price above/below weekly SMA20
+        uptrend = close[i] > sma20_1w_aligned[i]
+        downtrend = close[i] < sma20_1w_aligned[i]
         
-        # Midpoint for exits (daily close)
-        midpoint_1d = close_1d
-        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
-        midpoint_val = midpoint_aligned[i]
+        # Donchian breakout with pullback to midpoint
+        breakout_up = (high[i] > highest_high[i-1])  # broke above prior period high
+        breakout_down = (low[i] < lowest_low[i-1])   # broke below prior period low
+        pullback_to_mid = abs(close[i] - donchian_mid[i]) < (highest_high[i] - lowest_low[i]) * 0.1
         
-        # Entry logic:
-        # Long: Price > R1 AND < R4 with volume spike (fade at R1, but not beyond R4)
-        # Short: Price < S1 AND > S4 with volume spike (fade at S1, but not beyond S4)
-        # Breakout continuation: Price > R4 OR < S4 with volume spike (trend continuation)
-        long_fade = (close[i] > r1) and (close[i] < r4) and vol_spike
-        short_fade = (close[i] < s1) and (close[i] > s4) and vol_spike
-        long_breakout = (close[i] > r4) and vol_spike
-        short_breakout = (close[i] < s4) and vol_spike
+        # Volume confirmation
+        vol_confirm = vol_spike[i]
         
-        # Exit: price returns to daily midpoint
-        long_exit = close[i] < midpoint_val
-        short_exit = close[i] > midpoint_val
+        # Entry logic
+        long_entry = uptrend and breakout_up and pullback_to_mid and vol_confirm
+        short_entry = downtrend and breakout_down and pullback_to_mid and vol_confirm
         
-        if (long_fade or long_breakout) and position <= 0:
+        # Exit: opposite Donchian breakout
+        long_exit = breakout_down
+        short_exit = breakout_up
+        
+        if (long_entry or (position == 1 and not long_exit)) and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif (short_fade or short_breakout) and position >= 0:
+        elif (short_entry or (position == -1 and not short_exit)) and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -129,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_Pivot_R1S1_R4S4_Breakout_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyTrend_Pullback_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
