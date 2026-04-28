@@ -1,8 +1,3 @@
-# Hypothesis: 12h strategy using daily pivot points with volume confirmation and 1w trend filter
-# Uses contrarian entries at S1/R1 in strong trends and breakouts at R2/S2 in weak trends
-# Designed for low trade frequency (<30/year) to avoid fee drag, works in bull/bear via trend adaptation
-# Weekly trend filter avoids counter-trend trades in strong moves, reducing whipsaw
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -18,128 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (HTF)
+    # Get daily data for ATR and moving averages
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get weekly data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 6-day EMA for trend filter (shorter for responsiveness)
+    ema6_1d = pd.Series(close_1d).ewm(span=6, adjust=False, min_periods=6).mean().values
     
-    close_1w = df_1w['close'].values
+    # Calculate 14-day EMA for trend filter (longer for confirmation)
+    ema14_1d = pd.Series(close_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align daily ATR and EMAs to 6h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema6_aligned = align_htf_to_ltf(prices, df_1d, ema6_1d)
+    ema14_aligned = align_htf_to_ltf(prices, df_1d, ema14_1d)
     
-    # Align daily pivot levels to 12h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Align weekly EMA50 to 12h
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
-    
-    # Calculate RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 50
+    # Start after warmup period
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(ema6_aligned[i]) or 
+            np.isnan(ema14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current weekly trend
-        price_above_ema = close[i] > ema50_1w_aligned[i]
-        price_below_ema = close[i] < ema50_1w_aligned[i]
+        # Session filter: only trade during active hours
+        if not session_mask[i]:
+            signals[i] = 0.0
+            continue
         
-        # Strong trend: price > 2% away from EMA50
-        strong_uptrend = price_above_ema and (close[i] > ema50_1w_aligned[i] * 1.02)
-        strong_downtrend = price_below_ema and (close[i] < ema50_1w_aligned[i] * 0.98)
+        # Trend filter: EMA6 > EMA14 for uptrend, EMA6 < EMA14 for downtrend
+        uptrend = ema6_aligned[i] > ema14_aligned[i]
+        downtrend = ema6_aligned[i] < ema14_aligned[i]
         
-        # Weak trend/ranging: price within 1% of EMA50
-        weak_trend = abs(close[i] - ema50_1w_aligned[i]) < (ema50_1w_aligned[i] * 0.01)
+        # Volatility filter: only trade when ATR is above its 20-day average (avoid low volatility chop)
+        atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean()
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
+        vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
         
-        # Fade conditions at S1/R1 (counter-trend in weak markets)
-        fade_s1 = close[i] <= s1_aligned[i] and rsi[i] < 35 and volume_confirm[i]
-        fade_r1 = close[i] >= r1_aligned[i] and rsi[i] > 65 and volume_confirm[i]
+        # Long conditions: uptrend + volatility filter + price above EMA6
+        long_condition = uptrend and vol_filter and close[i] > ema6_aligned[i]
         
-        # Breakout conditions at S2/R2 (trend continuation)
-        breakout_s2 = close[i] < s2_aligned[i] and rsi[i] < 40 and volume_confirm[i]
-        breakout_r2 = close[i] > r2_aligned[i] and rsi[i] > 60 and volume_confirm[i]
+        # Short conditions: downtrend + volatility filter + price below EMA6
+        short_condition = downtrend and vol_filter and close[i] < ema6_aligned[i]
         
-        # Long logic
-        long_signal = False
-        if weak_trend:
-            # In ranging markets, fade at S1
-            long_signal = fade_s1
-        elif strong_uptrend:
-            # In strong uptrend, buy dips to S1
-            long_signal = fade_s1
-        else:
-            # In strong downtrend or transition, look for S2 breakouts
-            long_signal = breakout_s2
-        
-        # Short logic
-        short_signal = False
-        if weak_trend:
-            # In ranging markets, fade at R1
-            short_signal = fade_r1
-        elif strong_downtrend:
-            # In strong downtrend, sell rallies to R1
-            short_signal = fade_r1
-        else:
-            # In strong uptrend or transition, look for R2 breakouts
-            short_signal = breakout_r2
-        
-        # Execute signals with position management
-        if long_signal and position <= 0:
+        if long_condition and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit on opposite signal or extreme RSI reversal
-        elif position == 1 and (rsi[i] > 75 or short_signal):
+        # Exit conditions: trend reversal or volatility collapse
+        elif position == 1 and (not uptrend or not vol_filter):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (rsi[i] < 25 or long_signal):
+        elif position == -1 and (not downtrend or not vol_filter):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -153,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_WeeklyTrend_FadeBreakout"
-timeframe = "12h"
+name = "6h_EMA6_EMA14_VolumeFilter_Trend"
+timeframe = "6h"
 leverage = 1.0
