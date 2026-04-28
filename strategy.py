@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extremes with 1d EMA34 trend filter and volume spike confirmation.
-# Enter long when Williams %R < -80 (oversold) with 1d EMA34 uptrend and volume > 1.8x 24-bar average.
-# Enter short when Williams %R > -20 (overbought) with 1d EMA34 downtrend and volume > 1.8x 24-bar average.
-# Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
+# Hypothesis: 12h Williams %R extremes with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when Williams %R < -80 (oversold) with 1d EMA34 uptrend and volume > 1.5x 24-bar average.
+# Enter short when Williams %R > -20 (overbought) with 1d EMA34 downtrend and volume > 1.5x 24-bar average.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year).
-# Williams %R identifies exhaustion points; 1d EMA34 ensures higher timeframe alignment;
-# volume spike filters weak reversals. Works in bull (buy oversold dips) and bear (sell overbought rallies).
+# Williams %R identifies momentum extremes; 1d EMA34 ensures higher timeframe alignment;
+# volume spike filters weak reversals. Works in both bull (buy dips) and bear (sell rallies).
 
-name = "6h_WilliamsR_Extremes_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extremes_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,57 +26,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Williams %R and EMA34
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 34:
         return np.zeros(n)
     
+    # Calculate 1d Williams %R (14-period)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
     # Calculate 1d EMA34
     close_1d = df_1d['close'].values
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 6h
+    # Align 1d indicators to 12h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Williams %R (14-period) on 6h data
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation: >1.8x 24-bar average volume
+    # Volume confirmation: >1.5x 24-bar average volume (2 periods of 12h)
     volume_series = pd.Series(volume)
     volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_24
+    volume_confirm = volume > 1.5 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure sufficient history for Williams %R and volume MA
+    start_idx = 24  # Ensure sufficient history for volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(volume_ma_24[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 1d EMA34 trend: slope over 3 periods
-        if i >= 3:
-            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
+        # 1d EMA34 trend: slope over 2 periods
+        if i >= 2:
+            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-2]) / 2
             ema_trend_up = ema_slope > 0
             ema_trend_down = ema_slope < 0
         else:
             ema_trend_up = False
             ema_trend_down = False
         
-        wr = williams_r[i]
+        wr = williams_r_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
