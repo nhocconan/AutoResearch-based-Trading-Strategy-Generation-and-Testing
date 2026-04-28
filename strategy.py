@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 1d timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
-timeframe = "4h"
+name = "1d_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
