@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_ADX_Trend_RSI_MeanReversion
-Hypothesis: On daily timeframe, use ADX to detect trend regimes. When ADX > 25 (trending), trade pullbacks to EMA21 in trend direction. When ADX < 20 (range), trade RSI extremes for mean reversion. Volume confirmation filters false signals. Designed to work in both bull and bear markets by adapting to regime.
+6h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+Hypothesis: 6-hour breakouts at Camarilla R3/S3 levels with 12-hour trend filter and volume confirmation. Targets 12-37 trades/year by requiring strong breaks beyond the 3rd support/resistance levels (indicating institutional momentum), alignment with the 12-hour trend, and volume surge to avoid false breakouts. Works in both bull and bear markets by trading with the 12-hour trend direction while using Camarilla levels for high-probability entry points.
 """
 
 import numpy as np
@@ -18,118 +18,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ADX(14) for regime detection
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Get 12-hour data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate Camarilla levels from previous 12h bar
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_close = df_12h['close'].shift(1).values
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[:period]) / period
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] * (1 - 1/period) + arr[i] * (1/period)
-        return result
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    tr_smooth = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Avoid division by zero
-    plus_di = np.where(tr_smooth != 0, plus_dm_smooth / tr_smooth * 100, 0)
-    minus_di = np.where(tr_smooth != 0, minus_dm_smooth / tr_smooth * 100, 0)
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = wilder_smooth(dx, 14)
+    # Align all higher timeframe data to 6h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # EMA21 for trend following pullbacks
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
     
-    # RSI(14) for mean reversion in ranging markets
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        delta = np.insert(delta, 0, 0)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(prices, np.nan, dtype=float)
-        avg_loss = np.full_like(prices, np.nan, dtype=float)
-        
-        if len(prices) < period:
-            return avg_gain
-            
-        # First average
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        
-        # Subsequent averages
-        for i in range(period, len(prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-            
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, 14)
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(ema_21[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_surge[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if adx[i] > 25:  # Trending regime
-            # Long: pullback to EMA21 in uptrend
-            long_entry = (close[i] > ema_21[i] and 
-                         close[i] < ema_21[i] * 1.02 and  # Within 2% above EMA
-                         volume_surge[i])
-            # Short: pullback to EMA21 in downtrend
-            short_entry = (close[i] < ema_21[i] and 
-                          close[i] > ema_21[i] * 0.98 and  # Within 2% below EMA
-                          volume_surge[i])
-        elif adx[i] < 20:  # Ranging regime
-            # Long: RSI oversold
-            long_entry = (rsi[i] < 30 and volume_surge[i])
-            # Short: RSI overbought
-            short_entry = (rsi[i] > 70 and volume_surge[i])
-        else:  # Transition zone - no trades
-            long_entry = False
-            short_entry = False
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above Camarilla R3 + daily uptrend + volume surge
+        long_entry = (close[i] > camarilla_r3_aligned[i] and 
+                     trend_up[i] and 
+                     volume_surge[i])
         
-        # Exit conditions
-        long_exit = (position == 1 and 
-                    (adx[i] < 20 or  # Regime changed to range
-                     rsi[i] > 70 or  # RSI overbought
-                     close[i] < ema_21[i] * 0.95))  # Stop: 5% below EMA
-        short_exit = (position == -1 and 
-                     (adx[i] < 20 or  # Regime changed to range
-                      rsi[i] < 30 or  # RSI oversold
-                      close[i] > ema_21[i] * 1.05))  # Stop: 5% above EMA
+        # Short: price breaks below Camarilla S3 + daily downtrend + volume surge
+        short_entry = (close[i] < camarilla_s3_aligned[i] and 
+                      trend_down[i] and 
+                      volume_surge[i])
+        
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < camarilla_s3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > camarilla_r3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -154,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ADX_Trend_RSI_MeanReversion"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
