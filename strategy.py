@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: 12-hour breakouts at daily-derived Camarilla R3/S3 levels with daily trend filter and volume confirmation. Targets 12-37 trades/year by requiring strong breakouts, daily trend alignment, and volume surge to reduce false signals and work in both bull and bear markets.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_Tight
+Hypothesis: Tighten the original by raising volume threshold to 3x and requiring consecutive closes for breakout confirmation. Targets 20-50 trades/year by requiring stronger momentum and filtering out weak breakouts. Works in bull/bear via daily trend filter.
 """
 
 import numpy as np
@@ -18,15 +18,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for price action
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    prev_high = df_12h['high'].shift(1).values
-    prev_low = df_12h['low'].shift(1).values
-    prev_close = df_12h['close'].shift(1).values
+    # Calculate Camarilla levels from previous 4h bar
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
+    prev_close = df_4h['close'].shift(1).values
     
     # Camarilla R3 and S3 levels (stronger support/resistance)
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
@@ -40,18 +40,18 @@ def generate_signals(prices):
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all higher timeframe data to 12h
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    # Align all higher timeframe data to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
     trend_up = close > ema_34_1d_aligned
     trend_down = close < ema_34_1d_aligned
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 3.0x 20-period average (stricter)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 3.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,13 +66,15 @@ def generate_signals(prices):
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R3 + daily uptrend + volume surge
+        # Long: price closes above R3 for 2 consecutive bars + daily uptrend + volume surge
         long_entry = (close[i] > R3_aligned[i] and 
+                     close[i-1] > R3_aligned[i-1] and
                      trend_up[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S3 + daily downtrend + volume surge
+        # Short: price closes below S3 for 2 consecutive bars + daily downtrend + volume surge
         short_entry = (close[i] < S3_aligned[i] and 
+                      close[i-1] < S3_aligned[i-1] and
                       trend_down[i] and 
                       volume_surge[i])
         
@@ -103,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_Tight"
+timeframe = "4h"
 leverage = 1.0
