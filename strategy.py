@@ -11,7 +11,6 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
@@ -21,7 +20,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    open_1d = df_1d['open'].values
     
     # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -35,34 +33,34 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 6h
+    # Align pivot levels to 12h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Get 6h data for volume and volatility
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 10:
+    # Get 12h data for volume and volatility
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    volume_6h = df_6h['volume'].values
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume ratio (current 6h volume / 20-period average)
-    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    # Volume ratio (current 12h volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     # ATR(14) for volatility filter
-    tr1 = np.abs(high_6h[1:] - low_6h[1:])
-    tr2 = np.abs(high_6h[1:] - close_6h[:-1])
-    tr3 = np.abs(low_6h[1:] - close_6h[:-1])
-    tr_6h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_6h = np.concatenate([[np.nan], tr_6h])
-    atr_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_6h)
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,7 +73,7 @@ def generate_signals(prices):
             np.isnan(H4_aligned[i]) or 
             np.isnan(L4_aligned[i]) or
             np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(atr_6h_aligned[i])):
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -83,11 +81,11 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 6h volume above average
-        volume_filter = volume_6h[i] > vol_ma_20_aligned[i]
+        # Volume filter: current 12h volume above average
+        volume_filter = volume_12h[i] > vol_ma_20_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_6h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
+        vol_filter = atr_12h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
         long_breakout = close[i] > H4_aligned[i]
@@ -121,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
