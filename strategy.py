@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and ATR(14) volatility filter.
-# Uses 4h primary timeframe for balanced trade frequency (~20-50/year expected).
-# Donchian breakouts capture institutional price action with proven edge in crypto.
-# 12h EMA50 filters for trend alignment, reducing counter-trend trades.
-# ATR filter ensures breakouts occur during sufficient volatility, avoiding low-momentum false signals.
-# Position size 0.25 for controlled risk. Target: 100-200 total trades over 4 years (25-50/year).
+# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume spike confirmation.
+# Uses 1h primary timeframe targeting 15-37 trades/year (60-150 total over 4 years).
+# Camarilla H3/L3 from 4h provide institutional pivot points with proven edge.
+# 4h EMA50 filters for trend alignment, reducing counter-trend trades in bear markets.
+# Volume spike (>2.0x 20-bar average) confirms breakout strength and filters low-momentum false breakouts.
+# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
+# Position size 0.20 for capital preservation. Discrete levels minimize fee churn.
 
-name = "4h_Donchian20_12hEMA50_Trend_ATRFilter_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3_L3_Breakout_4hEMA50_Trend_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,29 +29,32 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 4h data for Camarilla pivots and EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h Camarilla pivot levels (H3, L3)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
+    h3_4h = close_4h + (high_4h - low_4h) * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
+    l3_4h = close_4h - (high_4h - low_4h) * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr_14 > 0.5 * atr_ma_50  # ATR > 50% of its 50-bar MA
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align 4h indicators to 1h timeframe
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Calculate 1h volume spike: >2.0x 20-bar average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,10 +63,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(atr_ma_50[i])):
+        if (np.isnan(h3_4h_aligned[i]) or
+            np.isnan(l3_4h_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -71,33 +75,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 12h EMA50 direction
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: 4h EMA50 direction
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_20[i]
-        short_breakout = close[i] < lowest_20[i]
+        # Camarilla breakout conditions
+        long_breakout = close[i] > h3_4h_aligned[i]
+        short_breakout = close[i] < l3_4h_aligned[i]
         
-        # Volatility filter
-        vol_filter = volatility_filter[i]
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and long_breakout and vol_filter
-        short_entry = price_below_ema and short_breakout and vol_filter
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: opposite Donchian level (10-period for faster exit)
-        highest_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-        lowest_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+        # Exit conditions: opposite Camarilla level (H4/L4 for tighter stop)
+        # Calculate H4/L4 for exit
+        h4_4h = close_4h + (high_4h - low_4h) * 1.1 / 2.0  # H4 = Close + 1.1*(Range)/2
+        l4_4h = close_4h - (high_4h - low_4h) * 1.1 / 2.0  # L4 = Close - 1.1*(Range)/2
+        h4_4h_aligned = align_htf_to_ltf(prices, df_4h, h4_4h)
+        l4_4h_aligned = align_htf_to_ltf(prices, df_4h, l4_4h)
         
-        long_exit = close[i] < lowest_10[i]  # Exit long at 10-period low
-        short_exit = close[i] > highest_10[i]  # Exit short at 10-period high
+        long_exit = close[i] < l4_4h_aligned[i]  # Exit long at L4
+        short_exit = close[i] > h4_4h_aligned[i]  # Exit short at H4
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -105,9 +112,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
