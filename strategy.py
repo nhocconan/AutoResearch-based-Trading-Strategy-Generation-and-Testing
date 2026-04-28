@@ -1,10 +1,9 @@
-# 102302
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_RSI_Divergence
-Hypothesis: KAMA identifies trend direction; RSI divergence on momentum exhaustion provides high-probability reversal entries.
-Works in bull markets (buy bullish RSI divergence in uptrend) and bear markets (sell bearish RSI divergence in downtrend).
-Target: 20-30 trades/year via strict divergence requirements + KAMA trend filter + volume confirmation.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
+Hypothesis: Breakouts of daily Camarilla R1/S1 levels on 12h chart with 1-day EMA trend filter and volume spike confirmation.
+Targets 15-25 trades/year by requiring volume > 2x 20-period average and clear trend alignment.
+Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
 """
 
 import numpy as np
@@ -21,86 +20,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d KAMA for trend filter (ER=10)
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder - will compute properly
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        if i >= 10:
-            direction = np.abs(close_1d[i] - close_1d[i-10])
-            volatility_sum = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-            er[i] = direction / volatility_sum if volatility_sum > 0 else 0
-        else:
-            er[i] = 0
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama_1d = np.zeros_like(close_1d)
-    kama_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # RSI for divergence (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation
+    # Camarilla formulas:
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume confirmation: >2x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1d KAMA
-        uptrend = close[i] > kama_1d_aligned[i]
-        downtrend = close[i] < kama_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # RSI divergence detection (look back 5 bars for swing)
-        bullish_div = False
-        bearish_div = False
-        if i >= 5:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            if low[i] < low[i-5] and rsi[i] > rsi[i-5]:
-                # Confirm with higher low in price
-                if low[i] > low[i-1] and low[i-1] > low[i-2]:
-                    bullish_div = True
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            if high[i] > high[i-5] and rsi[i] < rsi[i-5]:
-                # Confirm with lower high in price
-                if high[i] < high[i-1] and high[i-1] < high[i-2]:
-                    bearish_div = True
+        # Breakout conditions
+        breakout_r1 = close[i] > camarilla_r1_aligned[i]
+        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry logic
-        long_entry = vol_confirm and uptrend and bullish_div
-        short_entry = vol_confirm and downtrend and bearish_div
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_r1
+        short_entry = vol_confirm and downtrend and breakdown_s1
         
-        # Exit logic: opposite divergence or trend change
-        long_exit = bearish_div or (not uptrend)
-        short_exit = bullish_div or (not downtrend)
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_s1 or (not uptrend)
+        short_exit = breakout_r1 or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -125,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_With_RSI_Divergence"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
