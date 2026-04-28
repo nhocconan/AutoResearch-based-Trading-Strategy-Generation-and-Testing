@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX25 regime filter and volume confirmation
-# Long when price > Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
-# Short when price < Donchian(20) low AND ADX > 25 AND volume > 1.5x 20-bar avg
-# Exit when price crosses Donchian(10) midpoint OR ADX < 20 (range) OR volume drops
-# Target: 20-50 trades/year via regime filter reducing whipsaw in ranging markets
-# Works in both bull and bear markets by only trading when ADX confirms trending conditions
+# Hypothesis: 6h Volume-Weighted MACD (VMACD) with 1d EMA50 trend filter and ADX25 regime
+# VMACD = EMA(volume * close, 12) - EMA(volume * close, 26)
+# Long when VMACD crosses above signal line AND price > 1d EMA50 AND ADX > 25
+# Short when VMACD crosses below signal line AND price < 1d EMA50 AND ADX > 25
+# Uses volume weighting to confirm institutional participation
+# Regime filter (ADX > 25) avoids whipsaw in ranging markets
+# Target: 12-37 trades/year via strict confluence of volume, momentum, trend and regime
 
-name = "1d_Donchian20_1wADX25_Regime_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_VMACD_1dEMA50_ADX25_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,28 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need sufficient data for ADX
+    # Get 1d data for EMA50 and ADX calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:  # Need sufficient data for EMA50 and ADX
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on 1d close
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate ADX(14) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
     # Smoothed DM
     dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
@@ -61,67 +66,75 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Prepend zeros for alignment (since we lost first bar in calculations)
-    adx = np.concatenate([np.full(27, np.nan), adx])  # 14 (TR) + 14 (ADX smoothing) - 1
+    ema_50_1d = np.concatenate([np.full(49, np.nan), ema_50_1d])
+    adx = np.concatenate([np.full(27, np.nan), adx])  # 13 (EMA) + 14 (TR) + 14 (ADX smoothing) - 1
     
-    # Align 1w indicators to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align 1d indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Donchian channels on 1d data
-    # Donchian(20) for entry
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Donchian(10) for exit (midpoint)
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_mid_10 = (high_10 + low_10) / 2
+    # Calculate Volume-Weighted MACD on 6h data
+    # VMACD = EMA(volume * close, 12) - EMA(volume * close, 26)
+    vc = volume * close  # volume-weighted close
+    vc_series = pd.Series(vc)
+    ema_vc_12 = vc_series.ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_vc_26 = vc_series.ewm(span=26, adjust=False, min_periods=26).mean().values
+    vmacd = ema_vc_12 - ema_vc_26
     
-    # Volume confirmation: >1.5x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    # Signal line: EMA of VMACD
+    vmacd_series = pd.Series(vmacd)
+    signal_line = vmacd_series.ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # VMACD histogram (for crossover detection)
+    vmacd_hist = vmacd - signal_line
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need sufficient history for all indicators
+    start_idx = max(50, 26, 9)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(donchian_mid_10[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vmacd[i]) or np.isnan(signal_line[i]) or np.isnan(vmacd_hist[i])):
             signals[i] = 0.0
             continue
         
-        vol_conf = volume_confirm[i]
         adx_val = adx_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         price = close[i]
-        upper_20 = high_20[i]
-        lower_20 = low_20[i]
-        mid_10 = donchian_mid_10[i]
+        hist = vmacd_hist[i]
+        hist_prev = vmacd_hist[i-1]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price > Donchian(20) high AND ADX > 25 (trending) AND volume confirmation
-            if price > upper_20 and adx_val > 25 and vol_conf:
-                signals[i] = 0.30
+            # Long when VMACD crosses above zero (bullish momentum) AND price > 1d EMA50 AND ADX > 25
+            if hist_prev <= 0 and hist > 0 and price > ema_50_val and adx_val > 25:
+                signals[i] = 0.25
                 position = 1
-            # Short when price < Donchian(20) low AND ADX > 25 AND volume confirmation
-            elif price < lower_20 and adx_val > 25 and vol_conf:
-                signals[i] = -0.30
+            # Short when VMACD crosses below zero (bearish momentum) AND price < 1d EMA50 AND ADX > 25
+            elif hist_prev >= 0 and hist < 0 and price < ema_50_val and adx_val > 25:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price crosses Donchian(10) midpoint OR ADX < 20 (range) OR no volume
-            if price < mid_10 or adx_val < 20 or not vol_conf:
+        elif position == 1:  # Long - exit when VMACD crosses below zero or ADX < 20 (range)
+            if hist >= 0 and hist_prev > 0 and hist < hist_prev:  # momentum weakening
+                signals[i] = 0.0
+                position = 0
+            elif adx_val < 20:  # regime change to ranging
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
-        elif position == -1:  # Short - exit when price crosses Donchian(10) midpoint OR ADX < 20 (range) OR no volume
-            if price > mid_10 or adx_val < 20 or not vol_conf:
+                signals[i] = 0.25
+        elif position == -1:  # Short - exit when VMACD crosses above zero or ADX < 20 (range)
+            if hist >= 0 and hist_prev < 0 and hist > hist_prev:  # momentum weakening
+                signals[i] = 0.0
+                position = 0
+            elif adx_val < 20:  # regime change to ranging
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
