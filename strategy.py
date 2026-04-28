@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,59 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context (as required)
+    # Get daily data for HTF context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility filter
+    # Get weekly data for additional context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly high/low/close for calculations
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily ATR-based volatility filter (low volatility = range bound)
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr_1d < atr_ma_1d * 1.2  # Low volatility regime
-    
-    # Align daily ATR volatility filter to 4h timeframe
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
-    
-    # Daily range for volatility breakout
+    # Calculate daily range for pivot calculations
     daily_range = high_1d - low_1d
     
-    # Calculate 20-period SMA of daily range for breakout threshold
-    range_ma = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
-    range_ma_aligned = align_htf_to_ltf(prices, df_1d, range_ma)
+    # Daily Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Volatility breakout signals: when daily range expands significantly
-    volatility_expansion = daily_range > range_ma * 1.5
-    volatility_expansion_aligned = align_htf_to_ltf(prices, df_1d, volatility_expansion)
+    # Align Daily Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # 4-hour momentum confirmation (EMA crossover)
-    ema_fast = pd.Series(close).ewm(span=9, min_periods=9, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    momentum_up = ema_fast > ema_slow
-    momentum_down = ema_fast < ema_slow
+    # Weekly trend filter: price above/below weekly SMA20
+    close_1w_series = pd.Series(close_1w)
+    sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
-    # Time filter: 8-20 UTC (most active trading hours)
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vol_filter_aligned[i]) or np.isnan(volatility_expansion_aligned[i]) or 
-            np.isnan(range_ma_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -82,25 +80,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: low volatility environment (range bound)
-        vol_cond = vol_filter_aligned[i]
+        # Volume filter: above average volume
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Volatility expansion: significant increase in daily range
-        vol_expansion = volatility_expansion_aligned[i]
-        
-        # Momentum confirmation
-        mom_up = momentum_up[i]
-        mom_down = momentum_down[i]
+        # Trend filter: price above/below weekly SMA20
+        trend_up = close[i] > sma20_1w_aligned[i]
+        trend_down = close[i] < sma20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: volatility expansion + upward momentum in low vol environment
-        # Short: volatility expansion + downward momentum in low vol environment
-        long_entry = vol_expansion and mom_up and vol_cond
-        short_entry = vol_expansion and mom_down and vol_cond
+        # Long: price breaks above daily R4 with volume and trend up
+        # Short: price breaks below daily S4 with volume and trend down
+        long_entry = (close[i] > r4_aligned[i]) and vol_filter and trend_up
+        short_entry = (close[i] < s4_aligned[i]) and vol_filter and trend_down
         
-        # Exit conditions: momentum reversal
-        long_exit = not mom_up  # Exit long when momentum turns down
-        short_exit = not mom_down  # Exit short when momentum turns up
+        # Exit conditions: price returns to opposite daily S4/R4 levels
+        long_exit = (close[i] < s4_aligned[i])
+        short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -125,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityExpansion_Momentum_LowVol_Filter"
+name = "4h_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
