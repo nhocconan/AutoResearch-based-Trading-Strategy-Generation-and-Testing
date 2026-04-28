@@ -31,20 +31,20 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Get 12h data for volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get 4h data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
+    volume_4h = df_4h['volume'].values
     
-    # Volume ratio (current 12h volume / 20-period average)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Volume ratio (current 4h volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,8 +64,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
-        volume_filter = volume_12h[i] > vol_ma_20_aligned[i]
+        # Volume filter: current 4h volume above average
+        volume_filter = volume_4h[i] > vol_ma_20_aligned[i]
         
         # Entry conditions: Camarilla H3/L3 breakout with volume and trend
         long_breakout = close[i] > H3_aligned[i]
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
