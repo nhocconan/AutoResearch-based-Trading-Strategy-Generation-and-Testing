@@ -19,26 +19,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d Williams %R for momentum (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # 6-hour Donchian channels (20-period) - primary timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume confirmation: current volume > 1.3x average volume (6h average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma * 1.3
+    highest_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
+    
+    # Volume confirmation: current volume > 1.5x average volume (12h average)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma_12h * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,9 +49,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+            np.isnan(highest_high_12h_aligned[i]) or
+            np.isnan(lowest_low_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -58,23 +58,19 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Williams %R conditions: oversold < -80, overbought > -20
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
-        
         # Breakout conditions
-        breakout_up = close[i] > highest_high[i]
-        breakout_down = close[i] < lowest_low[i]
+        breakout_up = close[i] > highest_high_12h_aligned[i]
+        breakout_down = close[i] < lowest_low_12h_aligned[i]
         
-        # Entry conditions: trend + Williams extreme + breakout + volume
-        long_entry = uptrend and oversold and breakout_up and volume_confirm[i]
-        short_entry = downtrend and overbought and breakout_down and volume_confirm[i]
+        # Entry conditions: require trend + breakout + volume confirmation
+        long_entry = uptrend and breakout_up and volume_confirm[i]
+        short_entry = downtrend and breakout_down and volume_confirm[i]
         
-        # Exit conditions: trend reversal or opposite Williams extreme
+        # Exit conditions: when trend reverses or opposite breakout
         if position == 1:
-            exit_condition = not uptrend or williams_r_aligned[i] > -50
+            exit_condition = not uptrend or breakout_down
         elif position == -1:
-            exit_condition = not downtrend or williams_r_aligned[i] < -50
+            exit_condition = not downtrend or breakout_up
         else:
             exit_condition = False
         
@@ -99,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Donchian_1dEMA34"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
