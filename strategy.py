@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend_Volume
-Hypothesis: Weekly Camarilla pivot (R3/S3) breakout on daily timeframe with weekly EMA20 trend filter and volume spike confirmation.
-Targets 10-25 trades/year to minimize fee drift while capturing strong trend moves in both bull and bear markets.
+6h_RSI_Extreme_4hTrend_Filter_VolumeSpike
+Hypothesis: On 6h timeframe, RSI(14) extremes (overbought/oversold) combined with 4h EMA20 trend filter and volume spike confirmation will capture mean-reversion opportunities in both bull and bear markets. The 4h EMA20 acts as a trend filter to avoid counter-trend trades, while volume spikes confirm institutional participation at extreme RSI levels. Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,15 +18,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # Calculate 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Calculate RSI(14) on 6h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,54 +43,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_20_weekly_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_20_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate weekly Camarilla pivot levels
-        # Need previous week's OHLC (weekly data)
-        week_idx = i // 480  # 480 = 20*24 (20 days per month approximation for weekly)
-        if week_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_week_idx = week_idx - 1
-        if prev_week_idx >= len(df_weekly):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous week's OHLC from weekly data
-        ph = df_weekly['high'].iloc[prev_week_idx]
-        pl = df_weekly['low'].iloc[prev_week_idx]
-        pc = df_weekly['close'].iloc[prev_week_idx]
-        
-        # Camarilla levels (R3 and S3)
-        range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)  # R3 level
-        s3 = pc - (range_val * 1.1 / 4)  # S3 level
-        
-        # Trend direction from weekly EMA20
-        trend_up = close[i] > ema_20_weekly_aligned[i]
-        trend_down = close[i] < ema_20_weekly_aligned[i]
+        # Trend direction from 4h EMA20
+        trend_up = close[i] > ema_20_4h_aligned[i]
+        trend_down = close[i] < ema_20_4h_aligned[i]
         
         # Volume confirmation: >2.0x 20-period MA
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Breakout conditions
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
+        # RSI extreme conditions
+        rsi_overbought = rsi[i] >= 70
+        rsi_oversold = rsi[i] <= 30
         
-        # Entry logic
-        long_entry = vol_confirm and trend_up and long_breakout
-        short_entry = vol_confirm and trend_down and short_breakout
+        # Entry logic: mean reversion at extremes with trend filter and volume confirmation
+        long_entry = rsi_oversold and trend_up and vol_confirm
+        short_entry = rsi_overbought and trend_down and vol_confirm
         
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        # Exit logic: RSI returns to neutral zone or trend reversal
+        long_exit = (rsi[i] >= 50) or (not trend_up)
+        short_exit = (rsi[i] <= 50) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -107,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_RSI_Extreme_4hTrend_Filter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
