@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_1wTrend_Filter
-Hypothesis: 4h price breaking above/below daily Camarilla R1/S1 levels with 1d EMA34 trend filter and weekly trend filter (EMA50) for direction.
-Volume confirmation (>2x 20-period MA) to avoid false breakouts. Works in bull markets (long breakouts in uptrend) and bear markets (short breakdowns in downtrend).
-Weekly trend filter prevents counter-trend trades during strong opposing weekly trends.
-Target: 20-50 trades/year to minimize fee drift while capturing strong directional moves.
+1d_KAMA_Trend_With_1wTrend_Filter
+Hypothesis: Daily KAMA direction filter with weekly trend confirmation. Uses KAMA's adaptive smoothing to reduce whipsaw in sideways markets and catch strong trends. Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals. Works in bull markets (long when both timeframes bullish) and bear markets (short when both bearish). Target: 15-30 trades/year to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
@@ -13,51 +10,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w data for weekly trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate KAMA on daily close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))  # |close(t) - close(t-10)|
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum |close(t) - close(t-1)| over 10 periods
+    # Fix dimensions: change starts at index 10, volatility from index 1 to 10
+    change_full = np.concatenate([np.full(10, np.nan), change])
+    volatility_full = np.concatenate([np.full(1, np.nan), volatility])
+    # Pad volatility to match length
+    if len(volatility_full) < len(close_1d):
+        volatility_full = np.concatenate([volatility_full, np.full(len(close_1d) - len(volatility_full), np.nan)])
+    elif len(volatility_full) > len(close_1d):
+        volatility_full = volatility_full[:len(close_1d)]
     
-    # Calculate 1w EMA50 for weekly trend filter
+    # Calculate ER, handling division by zero
+    er = np.where(volatility_full != 0, change_full / volatility_full, 0)
+    # Smoothing constants: fastest SC=2/(2+1)=0.667, slowest SC=2/(30+1)=0.0645
+    sc = (er * (0.667 - 0.0645) + 0.0645) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Start after 10 periods
+    for i in range(10, len(close_1d)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Align KAMA to daily timeframe (already daily, but use for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate weekly EMA34 for trend filter
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla formulas:
-    # R1 = close + 0.4 * (high - low)
-    # S1 = close - 0.4 * (high - low)
-    camarilla_r1 = close_1d + 0.4 * (high_1d - low_1d)
-    camarilla_s1 = close_1d - 0.4 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: >2x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,34 +67,26 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filters
-        daily_uptrend = close[i] > ema_34_1d_aligned[i]
-        daily_downtrend = close[i] < ema_34_1d_aligned[i]
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        # KAMA direction: price above/below KAMA
+        kama_bullish = close[i] > kama_aligned[i]
+        kama_bearish = close[i] < kama_aligned[i]
         
-        # Breakout conditions
-        breakout_r1 = close[i] > camarilla_r1_aligned[i]
-        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
+        # Weekly trend filter: price above/below weekly EMA34
+        weekly_bullish = close[i] > ema_34_1w_aligned[i]
+        weekly_bearish = close[i] < ema_34_1w_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        # Entry conditions: both timeframes aligned
+        long_entry = kama_bullish and weekly_bullish
+        short_entry = kama_bearish and weekly_bearish
         
-        # Entry logic: breakout in direction of BOTH daily and weekly trend with volume
-        long_entry = vol_confirm and daily_uptrend and weekly_uptrend and breakout_r1
-        short_entry = vol_confirm and daily_downtrend and weekly_downtrend and breakdown_s1
-        
-        # Exit logic: opposite breakout or trend change in either timeframe
-        long_exit = breakdown_s1 or (not daily_uptrend) or (not weekly_uptrend)
-        short_exit = breakout_r1 or (not daily_downtrend) or (not weekly_downtrend)
+        # Exit conditions: divergence between timeframes
+        long_exit = not kama_bullish or not weekly_bullish
+        short_exit = not kama_bearish or not weekly_bullish
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -118,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_1wTrend_Filter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
