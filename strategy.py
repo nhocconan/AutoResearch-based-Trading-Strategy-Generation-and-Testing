@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d ADX trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band and 1d ADX > 25 and volume > 2x 20-bar average.
-# Enter short when price breaks below Donchian(20) lower band and 1d ADX > 25 and volume > 2x 20-bar average.
-# Exit when price crosses Donchian midpoint or ADX < 20 (trend weakening).
-# Uses discrete position sizing (0.30) to balance risk and reward.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# Donchian channels provide clear breakout levels, ADX filters for trending markets, volume confirms conviction.
-# Works in both bull and bear markets by capturing strong directional moves.
+# Hypothesis: 4h Donchian breakout with 1d volatility regime filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band, 1d ATR ratio < 0.8 (low volatility regime), and volume > 1.5x 20-bar average.
+# Enter short when price breaks below Donchian(20) lower band under same conditions.
+# Exit when price crosses Donchian midpoint or ATR ratio > 1.2 (volatility expansion).
+# Uses discrete position sizing (0.25) to minimize fee churn.
+# Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag.
+# Low volatility regime filters for choppy markets where breakouts are more reliable; volatility expansion signals trend exhaustion.
 
-name = "12h_DonchianBreakout_1dADX25_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dATRRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,13 +25,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter (MTF structure)
+    # Get 1d data for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX
+    # Calculate 1d ATR(14) and ATR ratio (current ATR / 20-period average ATR)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -44,40 +43,28 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # 20-period average ATR for regime calculation
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
     
-    # DI values
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    # ATR ratio: current ATR relative to its 20-period average
+    atr_ratio = np.where(atr_ma_20 > 0, atr_14 / atr_ma_20, 1.0)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align 1d ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align 1d ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2
     
-    # Volume confirmation: >2x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -94,24 +81,25 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d ADX > 25
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20  # Exit condition
+        # Volatility regime: ATR ratio < 0.8 = low volatility (favorable for breakouts)
+        low_vol_regime = atr_ratio_aligned[i] < 0.8
+        # Volatility expansion: ATR ratio > 1.2 = exit condition
+        vol_expansion = atr_ratio_aligned[i] > 1.2
         
         # Donchian breakout conditions
         breakout_up = close[i] > highest_high[i-1]  # Break above previous period's high
         breakout_down = close[i] < lowest_low[i-1]  # Break below previous period's low
         
         # Exit conditions
-        exit_long = close[i] < donchian_mid[i] or weak_trend
-        exit_short = close[i] > donchian_mid[i] or weak_trend
+        exit_long = close[i] < donchian_mid[i] or vol_expansion
+        exit_short = close[i] > donchian_mid[i] or vol_expansion
         
         # Handle entries and exits
-        if breakout_up and strong_trend and vol_confirm and position <= 0:
-            signals[i] = 0.30
+        if breakout_up and low_vol_regime and vol_confirm and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif breakout_down and strong_trend and vol_confirm and position >= 0:
-            signals[i] = -0.30
+        elif breakout_down and low_vol_regime and vol_confirm and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -122,9 +110,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
