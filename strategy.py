@@ -1,106 +1,150 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hEMA20_Trend
-Hypothesis: Camarilla pivot points on 1h combined with 4h EMA20 trend filter and volume spike.
-In bull markets: long when price breaks above R1 with uptrend and volume confirmation.
-In bear markets: short when price breaks below S1 with downtrend and volume confirmation.
-Uses 4h for trend direction (reduces whipsaw) and 1h for precise entry timing.
-Target: 15-30 trades/year per symbol to avoid fee drag.
+6h_WeeklyPivot_Position_Action
+Hypothesis: Weekly pivot levels (PP, R1-R4, S1-S4) on 6h timeframe with price action confirmation.
+In bull markets: buy near S1/S2 with bullish rejection candles. In bear markets: sell near R1/R2 with bearish rejection.
+Uses 1d trend filter (EMA50) to avoid counter-trend trades and volume spike for confirmation.
+Targets 15-30 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points from previous week's OHLC"""
+    pp = (high + low + close) / 3.0
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (high - low)
+    s2 = pp - (high - low)
+    r3 = high + 2 * (pp - low)
+    s3 = low - 2 * (high - pp)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pp, r1, r2, r3, r4, s1, s2, s3, s4
+
+def is_bullish_rejection(open_price, high, low, close):
+    """Bullish rejection: long lower shadow, close near high"""
+    body = abs(close - open_price)
+    lower_shadow = min(open_price, close) - low
+    upper_shadow = high - max(open_price, close)
+    return lower_shadow > 2 * body and close > open_price
+
+def is_bearish_rejection(open_price, high, low, close):
+    """Bearish rejection: long upper shadow, close near low"""
+    body = abs(close - open_price)
+    lower_shadow = min(open_price, close) - low
+    upper_shadow = high - max(open_price, close)
+    return upper_shadow > 2 * body and close < open_price
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 for trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate weekly pivot points from previous week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla pivot points for 1h (using previous bar's OHLC)
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    typical_price = (high + low + close) / 3.0
-    range_hl = high - low
-    R1 = typical_price + (1.1 * range_hl) / 12.0
-    S1 = typical_price - (1.1 * range_hl) / 12.0
+    pp, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_weekly_pivot(
+        weekly_high, weekly_low, weekly_close
+    )
     
-    # Shift to avoid look-ahead: use previous bar's pivot levels
-    R1_prev = np.roll(R1, 1)
-    S1_prev = np.roll(S1, 1)
-    R1_prev[0] = np.nan
-    S1_prev[0] = np.nan
+    # Align weekly pivot levels to 6h timeframe (previous week's levels)
+    pp_6h = align_htf_to_ltf(prices, df_1w, pp)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1w, r4)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 1.5)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume spike: current volume > 1.5x 24-period average (4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (vol_ma_24 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_prev[i]) or np.isnan(S1_prev[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(pp_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 4h EMA20
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
+        # Price near pivot levels (within 0.5%)
+        near_s1 = abs(close[i] - s1_6h[i]) / s1_6h[i] < 0.005
+        near_s2 = abs(close[i] - s2_6h[i]) / s2_6h[i] < 0.005
+        near_r1 = abs(close[i] - r1_6h[i]) / r1_6h[i] < 0.005
+        near_r2 = abs(close[i] - r2_6h[i]) / r2_6h[i] < 0.005
         
-        # Breakout conditions with volume confirmation
-        breakout_long = close[i] > R1_prev[i] and volume_spike[i]
-        breakout_short = close[i] < S1_prev[i] and volume_spike[i]
+        # Trend filter from daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Price action confirmation
+        bullish_rej = is_bullish_rejection(open_price[i], high[i], low[i], close[i])
+        bearish_rej = is_bearish_rejection(open_price[i], high[i], low[i], close[i])
         
         # Entry conditions
-        long_entry = breakout_long and uptrend
-        short_entry = breakout_short and downtrend
+        long_entry = (near_s1 or near_s2) and volume_spike[i] and uptrend and bullish_rej
+        short_entry = (near_r1 or near_r2) and volume_spike[i] and downtrend and bearish_rej
         
-        # Exit on opposite breakout (reverse position)
-        long_exit = breakout_short and volume_spike[i]
-        short_exit = breakout_long and volume_spike[i]
+        # Exit on opposite signal or stop at opposite pivot
+        long_exit = (near_r1 or near_r2) and volume_spike[i]
+        short_exit = (near_s1 or near_s2) and volume_spike[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.20  # Reverse to short
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.20   # Reverse to long
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA20_Trend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Position_Action"
+timeframe = "6h"
 leverage = 1.0
