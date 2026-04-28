@@ -24,70 +24,62 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Bollinger Bands (20, 2.0) - volatility filter and squeeze detection
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + (2.0 * std_20)
-    bb_lower = sma_20 - (2.0 * std_20)
+    # 1d Donchian Channel (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Bollinger Band Width for squeeze detection
-    bb_width = (bb_upper - bb_lower) / sma_20
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma * 0.8  # Bollinger Band squeeze condition
+    # 1d EMA(50) - trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # 1d RSI(14) - momentum oscillator
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
-    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # 1d Volume spike detection
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 2.0)  # Volume spike: 2x average
-    
-    # Align HTF indicators to 6h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Align HTF indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 80  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(bb_squeeze_aligned[i]) or np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band squeeze breakout conditions
-        breakout_up = close[i] > bb_upper_aligned[i]
-        breakout_down = close[i] < bb_lower_aligned[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Momentum filter: RSI in favorable range
-        rsi_momentum_up = rsi_aligned[i] > 50
-        rsi_momentum_down = rsi_aligned[i] < 50
+        # Trend filter: price relative to EMA50
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
-        # Only trade during squeeze breakouts with momentum
-        squeeze_active = bb_squeeze_aligned[i]
-        vol_confirm = vol_spike_aligned[i]
+        # Volatility filter: ATR-based minimum move
+        min_move = 0.5 * atr_aligned[i]
+        significant_up = close[i] > donchian_high_aligned[i] + min_move
+        significant_down = close[i] < donchian_low_aligned[i] - min_move
         
-        # Entry conditions - Bollinger Band squeeze breakout with volume
-        long_entry = breakout_up and rsi_momentum_up and squeeze_active and vol_confirm
-        short_entry = breakout_down and rsi_momentum_down and squeeze_active and vol_confirm
+        # Entry conditions - Donchian breakout with trend and volatility filter
+        long_entry = significant_up and uptrend
+        short_entry = significant_down and downtrend
         
-        # Exit conditions: return to middle Bollinger Band or opposite breakout
-        long_exit = close[i] < sma_20_aligned[i] or breakout_down
-        short_exit = close[i] > sma_20_aligned[i] or breakout_up
+        # Exit conditions: return to middle Donchian or opposite breakout
+        long_exit = close[i] < donchian_mid_aligned[i] or breakout_down
+        short_exit = close[i] > donchian_mid_aligned[i] or breakout_up
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -96,11 +88,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = -0.25  # Close long
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.25   # Close short
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -112,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_Breakout_RSI_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA50_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
