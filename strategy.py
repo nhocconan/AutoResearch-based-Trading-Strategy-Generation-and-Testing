@@ -13,35 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for monthly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate monthly pivot using last 4 weeks
-    high_4w = pd.Series(high_1w).rolling(window=4, min_periods=4).max()
-    low_4w = pd.Series(low_1w).rolling(window=4, min_periods=4).min()
-    close_4w = pd.Series(close_1w).rolling(window=4, min_periods=4).last()
+    # Calculate daily pivot (classic)
+    pivot_daily = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_daily = pivot_daily + (range_1d * 1.0)
+    s1_daily = pivot_daily - (range_1d * 1.0)
     
-    pivot_monthly = (high_4w + low_4w + close_4w) / 3.0
-    range_4w = high_4w - low_4w
-    r3_monthly = pivot_monthly + (range_4w * 1.1 / 2.0)
-    s3_monthly = pivot_monthly - (range_4w * 1.1 / 2.0)
+    # Calculate daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate monthly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align daily indicators to 4h timeframe
+    r1_daily_aligned = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_daily_aligned = align_htf_to_ltf(prices, df_1d, s1_daily)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align monthly indicators to 12h timeframe
-    r3_monthly_aligned = align_htf_to_ltf(prices, df_1w, r3_monthly)
-    s3_monthly_aligned = align_htf_to_ltf(prices, df_1w, s3_monthly)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Calculate average volume over 4 periods (2 days on 12h)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Calculate volume filter (24-period MA on 4h = 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -55,9 +51,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_monthly_aligned[i]) or 
-            np.isnan(s3_monthly_aligned[i]) or
-            np.isnan(ema50_aligned[i]) or
+        if (np.isnan(r1_daily_aligned[i]) or 
+            np.isnan(s1_daily_aligned[i]) or
+            np.isnan(ema200_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,26 +63,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: price above/below EMA200
+        uptrend = close[i] > ema200_aligned[i]
+        downtrend = close[i] < ema200_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # Breakout conditions: price breaks monthly R3/S3 with volume and trend
-        long_breakout = close[i] > r3_monthly_aligned[i]
-        short_breakout = close[i] < s3_monthly_aligned[i]
+        # Breakout conditions: price breaks daily R1/S1 with volume and trend
+        long_breakout = close[i] > r1_daily_aligned[i]
+        short_breakout = close[i] < s1_daily_aligned[i]
         
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: price returns to monthly pivot level or trend reverses
-        pivot_monthly_series = pd.Series(pivot_monthly)
-        pivot_monthly_last = pivot_monthly_series.rolling(window=4, min_periods=4).last().values
-        pivot_monthly_aligned = align_htf_to_ltf(prices, df_1w, pivot_monthly_last)
-        long_exit = close[i] < pivot_monthly_aligned[i] or not uptrend
-        short_exit = close[i] > pivot_monthly_aligned[i] or not downtrend
+        # Exit conditions: price returns to daily pivot level or trend reverses
+        long_exit = close[i] < pivot_daily[i] or not uptrend
+        short_exit = close[i] > pivot_daily[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -111,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_MonthlyPivot_R3S3_Breakout_1wEMA50_Volume_v1"
-timeframe = "12h"
+name = "4h_DailyPivot_R1S1_Breakout_1dEMA200_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
