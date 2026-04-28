@@ -3,6 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h timeframe with 1-day Elder Ray power + trend filter.
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low.
+# Bullish when Bull Power > 0 and rising, Bearish when Bear Power > 0 and rising.
+# Use 1-day EMA(13) for Elder Ray, aligned to 6h.
+# Entry: Long when Bull Power > 0 and rising + price > EMA(34) trend filter.
+# Short when Bear Power > 0 and rising + price < EMA(34) trend filter.
+# Exit when power turns negative or trend fails.
+# Designed to work in both bull/bear by capturing institutional buying/selling pressure.
+# Target: 50-150 total trades over 4 years (12-37/year).
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -11,70 +21,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for daily trend and volatility
+    # Get 1-day data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Get weekly data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
+    # 1-day EMA(13) for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1-day EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Align to 6h timeframe
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Elder Ray components
+    bull_power = high_1d - ema_13_1d
+    bear_power = ema_13_1d - low_1d
+    
+    # Align Elder Ray components
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate Elder Ray slope (change from previous day)
+    bull_power_slope = np.diff(bull_power_aligned, prepend=bull_power_aligned[0])
+    bear_power_slope = np.diff(bear_power_aligned, prepend=bear_power_aligned[0])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 21)
+    start_idx = 34  # Need enough for EMA(34)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(bull_power_slope[i]) or np.isnan(bear_power_slope[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filters
-        daily_uptrend = close[i] > ema_34_1d_aligned[i]
-        daily_downtrend = close[i] < ema_34_1d_aligned[i]
-        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_21_1w_aligned[i]
+        # Trend filter from 1-day EMA(34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.7
+        # Elder Ray conditions: power positive AND rising
+        bull_strong = bull_power_aligned[i] > 0 and bull_power_slope[i] > 0
+        bear_strong = bear_power_aligned[i] > 0 and bear_power_slope[i] > 0
         
-        # Entry conditions: require alignment of daily and weekly trend
-        long_entry = daily_uptrend and weekly_uptrend and vol_filter
-        short_entry = daily_downtrend and weekly_downtrend and vol_filter
+        # Entry conditions
+        long_entry = bull_strong and uptrend
+        short_entry = bear_strong and downtrend
         
-        # Exit conditions: trend reversal or volatility collapse
+        # Exit conditions: power turns negative or trend fails
         if position == 1:
-            exit_condition = not daily_uptrend or not weekly_uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not bull_strong or not uptrend
         elif position == -1:
-            exit_condition = not daily_downtrend or not weekly_downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not bear_strong or not downtrend
         else:
             exit_condition = False
         
@@ -99,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA34_EMA21_Trend_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_Power_Trend"
+timeframe = "6h"
 leverage = 1.0
