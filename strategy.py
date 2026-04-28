@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-Hypothesis: Use 1h for entry timing at daily Camarilla R1/S1 levels with 4h trend filter and volume confirmation. 
-Targets 15-37 trades/year by combining multiple confluence factors (breakout, 4h trend, volume) to reduce false signals.
-Works in bull markets (breakouts with trend) and bear markets (mean reversion at extreme levels).
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: Breakouts at weekly Camarilla R3/S3 levels (strong support/resistance) with 1d trend filter and volume confirmation on 6h timeframe.
+Targets 15-25 trades/year by requiring multiple confluence factors, suitable for 6h timeframe to avoid overtrading. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
 import numpy as np
@@ -20,41 +19,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (from previous day)
+    # Get weekly data for Camarilla levels (R3/S3)
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate Camarilla R3 and S3 levels from previous week
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
+    prev_close_w = df_1w['close'].shift(1).values
+    
+    # Camarilla R3 and S3 levels (using 1.1 multiplier for wider bands)
+    R3 = prev_close_w + (prev_high_w - prev_low_w) * 1.1 * 6 / 12  # R3 level
+    S3 = prev_close_w - (prev_high_w - prev_low_w) * 1.1 * 6 / 12  # S3 level
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all higher timeframe data to 1h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align all higher timeframe data to 6h
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    h4_uptrend = close > ema_50_4h_aligned
-    h4_downtrend = close < ema_50_4h_aligned
+    d1_uptrend = close > ema_50_1d_aligned
+    d1_downtrend = close < ema_50_1d_aligned
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Volume confirmation: current volume > 1.8x 30-period average (slightly lower for 6h)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_surge = volume > (vol_ma_30 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,49 +63,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R1 + 4h uptrend + volume surge
-        long_entry = (close[i] > R1_aligned[i] and 
-                     h4_uptrend[i] and 
+        # Long: price breaks above R3 + 1d uptrend + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     d1_uptrend[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S1 + 4h downtrend + volume surge
-        short_entry = (close[i] < S1_aligned[i] and 
-                      h4_downtrend[i] and 
+        # Short: price breaks below S3 + 1d downtrend + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      d1_downtrend[i] and 
                       volume_surge[i])
         
         # Exit on opposite level break with volume surge
-        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.20  # Reverse to short
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.20   # Reverse to long
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
