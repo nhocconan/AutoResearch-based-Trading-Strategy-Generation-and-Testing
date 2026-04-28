@@ -13,37 +13,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for trend filter and ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # 14-day ATR for volatility filter
+    tr1 = np.maximum(df_1d['high'].values[1:], df_1d['close'].values[:-1]) - np.minimum(df_1d['low'].values[1:], df_1d['close'].values[:-1])
+    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
+    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Camarilla levels: R3 and S3 (primary entry levels)
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for price channel calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_channel = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,31 +51,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 34  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr14_aligned[i]) or 
+            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter
-        trend_up = close[i] > ema50_1w_aligned[i]
-        trend_down = close[i] < ema50_1w_aligned[i]
+        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_down = close[i] < ema34_1d_aligned[i]
+        
+        # Volatility filter: only trade when volatility is elevated
+        vol_filter = atr14_aligned[i] > np.nanpercentile(atr14_aligned[:i+1], 50) if i > 33 else False
         
         # Entry conditions
-        # Long: break above R3 with upward trend and volume
-        long_breakout = close[i] > r3_aligned[i]
-        long_entry = long_breakout and trend_up and volume_filter[i]
+        # Long: break above upper channel with upward trend and volume
+        long_breakout = close[i] > upper_aligned[i]
+        long_entry = long_breakout and trend_up and volume_filter[i] and vol_filter
         
-        # Short: break below S3 with downward trend and volume
-        short_breakout = close[i] < s3_aligned[i]
-        short_entry = short_breakout and trend_down and volume_filter[i]
+        # Short: break below lower channel with downward trend and volume
+        short_breakout = close[i] < lower_aligned[i]
+        short_entry = short_breakout and trend_down and volume_filter[i] and vol_filter
         
-        # Exit conditions: opposite S3/R3 levels
-        long_exit = close[i] < s3_aligned[i] and position == 1
-        short_exit = close[i] > r3_aligned[i] and position == -1
+        # Exit conditions: opposite channel levels
+        long_exit = close[i] < lower_aligned[i] and position == 1
+        short_exit = close[i] > upper_aligned[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -102,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeVolFilter"
+timeframe = "4h"
 leverage = 1.0
