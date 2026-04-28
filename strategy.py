@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Range_Breakout_Filter
-Hypothesis: Breakouts from weekly range (Monday high/low) with volume confirmation and weekly trend filter.
-Targets 15-30 trades/year on daily timeframe to minimize fee drag while capturing strong directional moves.
-Uses weekly trend to filter direction, Monday range as breakout levels, and volume spike for confirmation.
-Works in both bull and bear by following weekly trend direction.
+12h_WilliamsAlligator_BullishTrend_Filter
+Hypothesis: Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe with 1d trend filter and volume confirmation to capture trend-following entries. Designed for low trade frequency (12-37/year) to minimize fee decay while capturing strong directional moves. Works in bull/bear by following 1d trend direction. Targets 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,61 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Monday range
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for Williams Alligator
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 13:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Williams Alligator on 12h
+    median_price_12h = (df_12h['high'] + df_12h['low']) / 2
+    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate Monday high/low from weekly data (weekly candles start at Monday 00:00 UTC)
-    # For weekly data, the open is Monday 00:00, high/low are for the week
-    # We'll use the weekly high/low as breakout levels (simplified approach)
-    week_high = df_1w['high'].values
-    week_low = df_1w['low'].values
-    week_high_aligned = align_htf_to_ltf(prices, df_1w, week_high)
-    week_low_aligned = align_htf_to_ltf(prices, df_1w, week_low)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: >1.5x 24-period MA (12h * 24 = 12 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for EMA20 and volume MA to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(week_high_aligned[i]) or
-            np.isnan(week_low_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Williams Alligator signals: Lips > Teeth > Jaw = bullish alignment
+        bullish_align = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_align = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation (>1.5x average)
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_24[i])
         
-        # Breakout conditions at weekly high/low
-        long_breakout = close[i] > week_high_aligned[i] and vol_confirm and uptrend
-        short_breakout = close[i] < week_low_aligned[i] and vol_confirm and downtrend
+        # Entry conditions
+        long_entry = bullish_align and uptrend and vol_confirm
+        short_entry = bearish_align and downtrend and vol_confirm
         
-        # Exit conditions: return to weekly midpoint
-        week_mid = (week_high_aligned[i] + week_low_aligned[i]) / 2
-        long_exit = close[i] < week_mid
-        short_exit = close[i] > week_mid
+        # Exit conditions: Alligator lines cross (Lips crosses Teeth)
+        long_exit = lips_aligned[i] < teeth_aligned[i]  # Lips crossing below Teeth
+        short_exit = lips_aligned[i] > teeth_aligned[i]  # Lips crossing above Teeth
         
-        if long_breakout and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -95,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Weekly_Range_Breakout_Filter"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_BullishTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
