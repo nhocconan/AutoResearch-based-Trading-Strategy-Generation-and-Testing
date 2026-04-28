@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 1-day ATR-based volatility filter and volume confirmation.
-# Donchian(20) captures breakouts from price channels, which work well in trending markets.
-# ATR filter ensures we only trade when volatility is expanding (avoiding choppy markets).
-# Volume confirmation ensures breakouts have participation. Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-# Works in both bull and bear markets by filtering for volatility expansion and using symmetric long/short logic.
+# Hypothesis: 12h Donchian breakout with 1-week trend filter and volume confirmation.
+# Donchian(20) breakouts capture breakout momentum. 1-week EMA50 provides trend filter to avoid false breakouts.
+# Volume confirmation ensures breakouts have participation. Works in both bull and bear markets by filtering
+# breakouts that align with the higher timeframe trend. Targets 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
@@ -19,41 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for ATR calculation
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # ATR using Wilder's smoothing (equivalent to RMA)
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate ATR ratio: current ATR / 20-period average ATR
-    # Values > 1 indicate expanding volatility
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
-    
-    # Volatility filter: ATR ratio > 1.2 (expanding volatility)
-    vol_filter = atr_ratio > 1.2
-    
-    # Align volatility filter to 4h timeframe
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
-    
-    # Donchian channels (20-period) on 4h data
+    # Donchian channels (20-period) on 12h data
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -64,31 +39,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Wait for sufficient warmup
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vol_filter_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is expanding
-        vol_expanding = vol_filter_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i-1]  # Break above 20-period high
-        breakout_down = close[i] < lowest_low[i-1]  # Break below 20-period low
+        breakout_up = high[i] > highest_high[i-1]  # Current high above previous period's high
+        breakout_down = low[i] < lowest_low[i-1]   # Current low below previous period's low
         
         # Entry conditions with volume confirmation
-        long_entry = vol_expanding and breakout_up and volume_filter[i]
-        short_entry = vol_expanding and breakout_down and volume_filter[i]
+        long_entry = uptrend and breakout_up and volume_filter[i]
+        short_entry = downtrend and breakout_down and volume_filter[i]
         
-        # Exit conditions: when price returns to the opposite Donchian boundary
-        # Exit long when price touches or crosses below the lower band
-        long_exit = position == 1 and close[i] <= lowest_low[i]
-        # Exit short when price touches or crosses above the upper band
-        short_exit = position == -1 and close[i] >= highest_high[i]
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or (not uptrend)
+        short_exit = breakout_up or (not downtrend)
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -114,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dATR_VolFilter_Volume"
-timeframe = "4h"
+name = "12h_DonchianBreakout_1wEMA50_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
