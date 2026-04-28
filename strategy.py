@@ -26,15 +26,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (H4/L4 for breakouts)
+    # Calculate 1d Camarilla pivot levels (H3/L3 for exits, H4/L4 for entries)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
     H4 = close_1d + (range_hl * 1.1 / 2)
     L4 = close_1d - (range_hl * 1.1 / 2)
+    H3 = close_1d + (range_hl * 1.1 / 4)
+    L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
     # Volume confirmation: current volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +53,9 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(H4_aligned[i]) or 
             np.isnan(L4_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(H3_aligned[i]) or
+            np.isnan(L3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +63,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
+        # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
@@ -68,11 +74,6 @@ def generate_signals(prices):
         short_entry = downtrend and short_breakout and volume_filter
         
         # Exit conditions: Close below/above opposite Camarilla level (H3/L3 for exits)
-        H3 = close_1d + (range_hl * 1.1 / 4)
-        L3 = close_1d - (range_hl * 1.1 / 4)
-        H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-        L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-        
         long_exit = close[i] < L3_aligned[i]
         short_exit = close[i] > H3_aligned[i]
         
@@ -97,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_v6"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v7"
+timeframe = "4h"
 leverage = 1.0
