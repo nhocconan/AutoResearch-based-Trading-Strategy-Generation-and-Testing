@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses 1-day Camarilla pivot levels (R1/S1 for mean reversion, R4/S4 for breakout) on the 4-hour timeframe.
-Trades in the direction of the 1-day EMA50 trend with volume spike confirmation to filter false breakouts.
-Designed to work in both bull and bear markets by adapting to price action relative to daily pivots and trend.
-Targets 20-50 trades per year to minimize fee dust.
+4h_KAMA_Trend_DualTF_Confirmation
+Hypothesis: Combines Kaufman Adaptive Moving Average (KAMA) on 4h for trend direction with 1d Williams %R for momentum and 1w EMA200 for long-term trend filter. Uses volume spike confirmation to filter false signals. Designed to capture trends in both bull and bear markets by requiring alignment across multiple timeframes. Targets 20-40 trades per year to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,87 +18,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivots and trend filter
+    # Get 1-day and 1-week data for multi-timeframe confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate KAMA on 4h close (trend indicator)
+    # Efficiency Ratio: |close - close[10]| / sum(|close - close[-1]|) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of absolute changes
+    # Handle the array shapes properly
+    change_padded = np.concatenate([np.full(10, np.nan), change])
+    volatility_padded = np.concatenate([np.full(1, np.nan), volatility])
     
-    # Calculate Camarilla levels from previous 1-day bar
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_1d = df_1d['high'] - df_1d['low']
+    # Calculate rolling sums for volatility
+    volatility_sum = np.convolve(np.abs(np.diff(close, n=1)), np.ones(10), 'same')
+    volatility_sum[:9] = np.nan  # Not enough data for first 9 periods
     
-    # Camarilla levels
-    R4 = typical_price + (range_1d * 1.1 / 2)
-    R3 = typical_price + (range_1d * 1.1 / 4)
-    R1 = typical_price + (range_1d * 1.1 / 12)
-    S1 = typical_price - (range_1d * 1.1 / 12)
-    S3 = typical_price - (range_1d * 1.1 / 4)
-    S4 = typical_price - (range_1d * 1.1 / 2)
+    er = np.where(volatility_sum != 0, change / volatility_sum, 0)
+    # Fill NaNs from the beginning
+    er = np.concatenate([np.full(9, np.nan), er[9:]])
     
-    # Align Camarilla levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # For EMA(2)
+    slow_sc = 2 / (30 + 1)  # For EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Calculate volume spike (>1.8x 20-period MA for stricter filtering)
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start with close after enough data for ER
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate Williams %R on 1-day (momentum oscillator)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) != 0, williams_r, -50)
+    
+    # Calculate EMA200 on 1-week (long-term trend filter)
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align all indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # Already on 4h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Calculate volume spike (>2.0x 20-period MA for strong confirmation)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_ma_20)
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = max(100, 200)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1-day EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Price relative to KAMA (trend)
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
+        
+        # Williams %R conditions (oversold/overbought)
+        wr_oversold = williams_r_aligned[i] < -80
+        wr_overbought = williams_r_aligned[i] > -20
+        
+        # Long-term trend filter (1-week EMA200)
+        long_term_uptrend = close[i] > ema_200_1w_aligned[i]
+        long_term_downtrend = close[i] < ema_200_1w_aligned[i]
         
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # Price relative to Camarilla levels
-        price_above_R1 = close[i] > R1_aligned[i]
-        price_below_S1 = close[i] < S1_aligned[i]
-        price_above_R3 = close[i] > R3_aligned[i]
-        price_below_S3 = close[i] < S3_aligned[i]
-        price_above_R4 = close[i] > R4_aligned[i]
-        price_below_S4 = close[i] < S4_aligned[i]
-        
         # Entry logic:
-        # Long: Mean reversion from S1/S3 OR breakout above R4 in uptrend
-        long_entry = vol_confirm and trend_up and (
-            (price_below_S1 and close[i] > S1_aligned[i-1]) or  # Rejection of S1
-            (price_below_S3 and close[i] > S3_aligned[i-1]) or  # Rejection of S3
-            (price_above_R4 and close[i-1] <= R4_aligned[i-1])   # Breakout above R4
-        )
+        # Long: Price above KAMA (uptrend) + Williams %R oversold + long-term uptrend + volume spike
+        long_entry = vol_confirm and price_above_kama and wr_oversold and long_term_uptrend
         
-        # Short: Mean reversion from R1/R3 OR breakdown below S4 in downtrend
-        short_entry = vol_confirm and trend_down and (
-            (price_above_R1 and close[i] < R1_aligned[i-1]) or  # Rejection of R1
-            (price_above_R3 and close[i] < R3_aligned[i-1]) or  # Rejection of R3
-            (price_below_S4 and close[i-1] >= S4_aligned[i-1])   # Breakdown below S4
-        )
+        # Short: Price below KAMA (downtrend) + Williams %R overbought + long-term downtrend + volume spike
+        short_entry = vol_confirm and price_below_kama and wr_overbought and long_term_downtrend
         
-        # Exit logic: Opposite level rejection or trend reversal
-        long_exit = (price_above_R3 and close[i] < R3_aligned[i-1]) or not trend_up
-        short_exit = (price_below_S1 and close[i] > S1_aligned[i-1]) or not trend_down
+        # Exit logic: Opposite conditions or loss of momentum
+        long_exit = (price_below_kama or not wr_oversold or not long_term_uptrend)
+        short_exit = (price_above_kama or not wr_overbought or not long_term_downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -126,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike"
+name = "4h_KAMA_Trend_DualTF_Confirmation"
 timeframe = "4h"
 leverage = 1.0
