@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d indicators
@@ -24,24 +24,18 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d ATR(14) for volatility filter
+    # 1d ATR(14)
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1d Bollinger Bands for range detection
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * bb_std_dev)
-    lower_band = sma - (bb_std * bb_std_dev)
-    bb_width = (upper_band - lower_band) / sma  # Normalized width
+    # 1d EMA(50) for trend
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d RSI for momentum confirmation
+    # 1d RSI(14)
     delta = pd.Series(close_1d).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -51,43 +45,37 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     
     # Align HTF indicators to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    sma_aligned = align_htf_to_ltf(prices, df_1d, sma)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(bb_width_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(sma_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Range filter: only trade when Bollinger Bands are narrow (low volatility)
-        range_condition = bb_width_aligned[i] < 0.03  # Tight bands = low volatility
+        # Trend filter: price above/below EMA50
+        trend_up = close[i] > ema_50_aligned[i]
+        trend_down = close[i] < ema_50_aligned[i]
         
-        # Momentum filter: RSI not in extreme overbought/oversold
-        momentum_condition = (rsi_aligned[i] > 30) and (rsi_aligned[i] < 70)
+        # Momentum filter: RSI in favorable range
+        rsi_momentum_up = rsi_aligned[i] > 50
+        rsi_momentum_down = rsi_aligned[i] < 50
         
-        # Breakout conditions
-        long_breakout = close[i] > upper_band_aligned[i]
-        short_breakout = close[i] < lower_band_aligned[i]
+        # Entry conditions
+        long_entry = trend_up and rsi_momentum_up
+        short_entry = trend_down and rsi_momentum_down
         
-        # Entry conditions: breakout during low volatility + momentum filter
-        long_entry = long_breakout and range_condition and momentum_condition
-        short_entry = short_breakout and range_condition and momentum_condition
-        
-        # Exit conditions: return to middle band or volatility expansion
-        long_exit = close[i] < sma_aligned[i] or bb_width_aligned[i] > 0.06
-        short_exit = close[i] > sma_aligned[i] or bb_width_aligned[i] > 0.06
+        # Exit conditions: opposite trend or RSI reversal
+        long_exit = not trend_up or rsi_aligned[i] < 50
+        short_exit = not trend_down or rsi_aligned[i] > 50
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -112,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BollingerBreakout_RangeFilter"
+name = "12h_EMA50_RSI_Trend_Momentum"
 timeframe = "12h"
 leverage = 1.0
