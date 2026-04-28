@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 AND Bear Power increasing (less negative) AND price > 1d EMA50 AND volume > 1.5x 20-bar avg
-# Short when Bear Power < 0 AND Bull Power decreasing (less positive) AND price < 1d EMA50 AND volume > 1.5x 20-bar avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 6h.
-# Works in bull markets by capturing buying strength, works in bear by identifying selling exhaustion.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exits when price retouches the opposite Camarilla level (S3 for longs, R3 for shorts)
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h.
+# Works in bull markets by trading breakouts with trend, works in bear by requiring volume spikes
+# which often accompany panic selling/buying climaxes that precede reversals.
 
-name = "6h_ElderRay_1dEMA50_Trend_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +25,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 and Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    if len(df_1d) < 34:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
+    # Calculate EMA(34) on 1d close
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate EMA(13) for Elder Ray on 6h close (primary timeframe)
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels from previous 1d OHLC
+    # We need the OHLC of the completed 1d bar to calculate levels for current period
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA(13)
-    bear_power = low - ema_13   # Bear Power: Low - EMA(13)
+    # Calculate Camarilla levels: R3, S3
+    # R3 = close + ((high - low) * 1.1/4)
+    # S3 = close - ((high - low) * 1.1/4)
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
     
-    # Calculate momentum of Elder Ray (change from previous bar)
-    bull_power_momentum = bull_power - np.roll(bull_power, 1)
-    bear_power_momentum = bear_power - np.roll(bear_power, 1)
-    # Set first bar momentum to 0 (no previous bar)
-    bull_power_momentum[0] = 0
-    bear_power_momentum[0] = 0
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d Camarilla levels to 12h timeframe (use completed 1d bar's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: >1.5x 20-bar average volume (moderate filter)
+    # Volume confirmation: >2.0x 20-bar average volume (strict filter to reduce trades)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 13)  # Need sufficient history for all indicators
+    start_idx = max(34, 20)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
         curr_close = close[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
-        bull_mom = bull_power_momentum[i]
-        bear_mom = bear_power_momentum[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND Bear Power increasing (less negative) 
-            # AND price > 1d EMA50 AND volume confirmation
-            if (curr_bull > 0 and bear_mom > 0 and curr_close > ema_trend and vol_conf):
+            # Long when price breaks above R3 AND close > 1d EMA34 AND volume confirmation
+            if curr_close > r3_level and curr_close > ema_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Bear Power < 0 AND Bull Power decreasing (less positive)
-            # AND price < 1d EMA50 AND volume confirmation
-            elif (curr_bear < 0 and bull_mom < 0 and curr_close < ema_trend and vol_conf):
+            # Short when price breaks below S3 AND close < 1d EMA34 AND volume confirmation
+            elif curr_close < s3_level and curr_close < ema_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when Bull Power turns negative OR Bear Power > 0
-            if curr_bull <= 0 or curr_bear >= 0:
+        elif position == 1:  # Long - exit when price retouches S3 (opposite level)
+            if curr_close <= s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when Bear Power turns positive OR Bull Power < 0
-            if curr_bear >= 0 or curr_bull <= 0:
+        elif position == -1:  # Short - exit when price retouches R3 (opposite level)
+            if curr_close >= r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
