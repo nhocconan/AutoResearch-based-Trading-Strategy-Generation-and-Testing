@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R for overbought/oversold conditions with 12h EMA50 trend filter and volume confirmation.
-# Enter long when Williams %R < -80 (oversold) with volume spike and price above 12h EMA50.
-# Enter short when Williams %R > -20 (overbought) with volume spike and price below 12h EMA50.
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years.
+# Hypothesis: 12h strategy using 1d Williams Fractal breakout with volume confirmation and 1w EMA50 trend filter.
+# Enter long when price breaks above recent bullish fractal high with volume spike and above 1w EMA50.
+# Enter short when price breaks below recent bearish fractal low with volume spike and below 1w EMA50.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
 
-name = "6h_WilliamsR_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,51 +22,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R
+    # Get daily data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R on 1d data
+    # Calculate Williams Fractals on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
     n_1d = len(high_1d)
-    williams_r = np.full(n_1d, np.nan)
     
-    for i in range(13, n_1d):
-        highest_high = np.max(high_1d[i-13:i+1])
-        lowest_low = np.min(low_1d[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    bullish_fractal = np.full(n_1d, np.nan)  # High of bullish fractal
+    bearish_fractal = np.full(n_1d, np.nan)  # Low of bearish fractal
     
-    # Forward fill to get most recent Williams %R
-    williams_r = pd.Series(williams_r).ffill().values
+    for i in range(2, n_1d - 2):
+        # Bullish fractal: middle bar has highest high
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bullish_fractal[i] = high_1d[i]
+        
+        # Bearish fractal: middle bar has lowest low
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bearish_fractal[i] = low_1d[i]
     
-    # Align 1d Williams %R to 6h timeframe with 1-bar delay for confirmation
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Forward fill to get most recent fractal levels
+    bullish_fractal = pd.Series(bullish_fractal).ffill().values
+    bearish_fractal = pd.Series(bearish_fractal).ffill().values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Align 1d Fractal levels to 12h timeframe with 2-bar delay for confirmation (fractals need 2 future bars)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
     
-    if len(df_12h) < 50:
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align EMA to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align EMA to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 6h volume spike: >2.0x 20-bar average volume
+    # Calculate 12h volume spike: >1.8x 30-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_ma_30 = volume_series.rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > 1.8 * volume_ma_30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,29 +80,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(bullish_fractal_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_30[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        above_ema = close[i] > ema_50_12h_aligned[i]
-        below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price relative to 1w EMA50
+        above_ema = close[i] > ema_50_1w_aligned[i]
+        below_ema = close[i] < ema_50_1w_aligned[i]
         
-        # Williams %R conditions with volume confirmation
-        long_condition = williams_r_aligned[i] < -80 and volume_spike[i]
-        short_condition = williams_r_aligned[i] > -20 and volume_spike[i]
+        # Fractal breakout conditions with volume confirmation
+        long_breakout = close[i] > bullish_fractal_aligned[i] and volume_spike[i]
+        short_breakout = close[i] < bearish_fractal_aligned[i] and volume_spike[i]
         
-        # Exit conditions: opposite Williams %R level or trend reversal
-        long_exit = williams_r_aligned[i] > -20 or below_ema
-        short_exit = williams_r_aligned[i] < -80 or above_ema
+        # Exit conditions: opposite fractal level or trend reversal
+        long_exit = close[i] < bearish_fractal_aligned[i] or below_ema
+        short_exit = close[i] > bullish_fractal_aligned[i] or above_ema
         
         # Handle entries and exits
-        if long_condition and above_ema and position <= 0:
+        if long_breakout and above_ema and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_condition and below_ema and position >= 0:
+        elif short_breakout and below_ema and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
