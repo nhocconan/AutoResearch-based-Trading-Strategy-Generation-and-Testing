@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,34 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for multiple timeframe analysis
+    # Get 1d data for trend and volatility filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d Williams %R for momentum and reversal signals
+    # 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # 1d RSI for overbought/oversold confirmation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # 1d ATR for volatility filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -49,41 +35,78 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume confirmation: current volume > 1.3x average volume
+    # Get 1w data for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
+    
+    # 1w EMA(21) for higher timeframe trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Get 4h data for breakout signals (ATR-based breakout)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    open_4h = df_4h['open'].values
+    
+    # 4h ATR(14) for breakout threshold
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1_4h[0] = tr2_4h[0] = tr3_4h[0] = 0
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_4h_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    
+    # Breakout threshold: 0.5 * ATR(14) from open
+    upper_breakout = open_4h + 0.5 * atr_4h_14
+    lower_breakout = open_4h - 0.5 * atr_4h_14
+    upper_breakout_aligned = align_htf_to_ltf(prices, df_4h, upper_breakout)
+    lower_breakout_aligned = align_htf_to_ltf(prices, df_4h, lower_breakout)
+    
+    # Volume confirmation: current volume > 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma * 1.3
+    volume_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R signals: oversold < -80, overbought > -20
-        wr_oversold = williams_r_aligned[i] < -80
-        wr_overbought = williams_r_aligned[i] > -20
-        
-        # RSI confirmation: avoid extreme momentum without follow-through
-        rsi_not_extreme = (rsi_aligned[i] > 30) & (rsi_aligned[i] < 70)
+        # Trend filter from 1d EMA (primary) and 1w EMA (higher timeframe)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        htf_uptrend = close[i] > ema_21_1w_aligned[i]
+        htf_downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-30):i+1]) * 0.7
+        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
-        # Entry conditions
-        long_entry = wr_oversold and rsi_not_extreme and vol_filter and volume_confirm[i]
-        short_entry = wr_overbought and rsi_not_extreme and vol_filter and volume_confirm[i]
+        # Breakout conditions: price breaks 0.5*ATR from 4h open
+        long_breakout = close[i] > upper_breakout_aligned[i]
+        short_breakout = close[i] < lower_breakout_aligned[i]
+        
+        # Entry conditions: require alignment of 1d and 1w trends
+        long_entry = long_breakout and uptrend and htf_uptrend and vol_filter and volume_confirm[i]
+        short_entry = short_breakout and downtrend and htf_downtrend and vol_filter and volume_confirm[i]
         
         # Exit conditions: reverse signal or volatility collapse
         if position == 1:
-            exit_condition = wr_overbought or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not uptrend or not htf_uptrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         elif position == -1:
-            exit_condition = wr_oversold or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
+            exit_condition = not downtrend or not htf_downtrend or (atr_14_aligned[i] < np.mean(atr_14_aligned[max(0, i-20):i+1]) * 0.5)
         else:
             exit_condition = False
         
@@ -108,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_RSI_VolumeFilter"
-timeframe = "6h"
+name = "12h_ATRBreakout_1dEMA34_1wEMA21_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
