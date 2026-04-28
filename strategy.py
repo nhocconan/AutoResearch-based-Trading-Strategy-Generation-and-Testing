@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with weekly trend filter (1w EMA34) and volume confirmation
-# Camarilla pivot levels (R3/S3) act as strong intraday support/resistance. Breakouts above R3 or below S3
-# with volume confirmation indicate strong momentum. Weekly EMA34 filter ensures we only trade in the
-# direction of the higher-timeframe trend, avoiding counter-trend whipsaws. This structure has proven
-# effective on ETHUSDT and SOLUSDT in both bull and bear markets. Target 12-37 trades/year to minimize fee drag.
+# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions. In strong trends (price > 1d EMA34 for longs,
+# price < 1d EMA34 for shorts), extreme %R readings often precede continuation moves rather than reversals.
+# Volume spike (>2.0x 20-bar average) confirms institutional participation. This avoids counter-trend
+# trading in choppy markets. Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and weekly trend
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior day's OHLC
-    # R3 = Close + 1.1 * (High - Low) / 2
-    # S3 = Close - 1.1 * (High - Low) / 2
-    df_1d = df_1d.copy()
-    df_1d['R3'] = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 2.0
-    df_1d['S3'] = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 2.0
-    R3_vals = df_1d['R3'].values
-    S3_vals = df_1d['S3'].values
+    # Calculate 1d EMA34
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Camarilla levels to 12h timeframe (completed prior day only)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_vals)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_vals)
-    
-    # Weekly trend filter: EMA34 on weekly close
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Williams %R (14-period) on 4h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -54,61 +48,41 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, 34)  # volume MA20, weekly EMA34
+    start_idx = max(14, 20)  # Williams %R14, volume MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
+        wr = williams_r[i]
         price = close[i]
-        R3_val = R3_aligned[i]
-        S3_val = S3_aligned[i]
-        weekly_ema = ema_34_1w_aligned[i]
+        ema_34_val = ema_34_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > weekly EMA34 (bullish trend) AND volume spike
-            if price > R3_val and price > weekly_ema and vol_confirm:
+            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish trend) AND volume spike
+            if wr < -80 and price > ema_34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short entry: price breaks below S3 AND price < weekly EMA34 (bearish trend) AND volume spike
-            elif price < S3_val and price < weekly_ema and vol_confirm:
+            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish trend) AND volume spike
+            elif wr > -20 and price < ema_34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or breakdown below S3 (trend reversal)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 12h ATR)
-            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
-            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr = np.maximum(np.maximum(tr1, tr2), tr3)
-            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or price breaks below S3 (trend reversal)
-            if price < stop_loss or price < S3_val:
+        elif position == 1:  # Long - exit when Williams %R > -50 (momentum fading) OR volume dries up
+            if wr > -50 or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or breakout above R3 (trend reversal)
-            # ATR-based stoploss: 2.0 * ATR above entry
-            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
-            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
-            tr = np.maximum(np.maximum(tr1, tr2), tr3)
-            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or price breaks above R3 (trend reversal)
-            if price > stop_loss or price > R3_val:
+        elif position == -1:  # Short - exit when Williams %R < -50 (momentum fading) OR volume dries up
+            if wr < -50 or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
