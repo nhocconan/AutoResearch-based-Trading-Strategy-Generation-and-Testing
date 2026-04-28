@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels (R3/S3) from daily data for structure, 12h EMA50 for trend filter, and volume >2.0x 20-bar average for momentum
-# Exits on opposite Camarilla level (R3/S3) touch or ATR-based stoploss (2.5x)
-# Designed to capture strong intraday trends while filtering chop via volume and trend
-# Target: 25-40 trades/year via tight Camarilla breakout conditions + volume + trend filter
+# Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and volume confirmation
+# Uses RSI extremes for mean reversion entries, 4h EMA50 for primary trend filter, and volume spike (>1.5x) for momentum confirmation
+# Exits on RSI returning to neutral zone (40-60) or ATR-based stoploss (2.0x)
+# Designed to capture mean reversion moves within the primary trend while avoiding choppy markets
+# Target: 15-35 trades/year via tight RSI conditions + volume + trend filter + session filter (08-20 UTC)
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_RSI14_MeanRev_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,100 +23,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (R3/S3 levels)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4  # R3 level
-    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4   # S3 level
+    # Calculate EMA50 on 4h close for trend filter
+    close_4h = pd.Series(df_4h['close'])
+    ema50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily Camarilla levels to 4h timeframe (completed 1d candles only)
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align 4h EMA50 to 1h timeframe (completed 4h candles only)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # RSI(14) on 1h close
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Fill NaN with 50 (neutral)
     
-    # Calculate EMA50 on 12h close for trend filter
-    close_12h = pd.Series(df_12h['close'])
-    ema50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 12h EMA50 to 4h timeframe (completed 12h candles only)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # Need sufficient history for volume MA
+    start_idx = 20  # Need sufficient history for RSI and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        upper = camarilla_high_aligned[i]  # R3 level
-        lower = camarilla_low_aligned[i]   # S3 level
-        ema50_val = ema50_12h_aligned[i]
+        rsi_val = rsi[i]
+        ema50_val = ema50_4h_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R3 AND 12h EMA50 uptrend AND volume spike
-            if price > upper and price > ema50_val and vol_confirm:
-                signals[i] = 0.25
+            # Long mean reversion: RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) AND volume spike
+            if rsi_val < 30 and price > ema50_val and vol_confirm:
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S3 AND 12h EMA50 downtrend AND volume spike
-            elif price < lower and price < ema50_val and vol_confirm:
-                signals[i] = -0.25
+            # Short mean reversion: RSI > 70 (overbought) AND price < 4h EMA50 (downtrend) AND volume spike
+            elif rsi_val > 70 and price < ema50_val and vol_confirm:
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price touches S3 (opposite Camarilla level)
-            # ATR-based stoploss: 2.5 * ATR below entry (using 4h ATR)
+        elif position == 1:  # Long - exit on RSI returning to neutral or stoploss
+            # ATR-based stoploss: 2.0 * ATR below entry (using 1h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.5 * atr_val
-            # Exit on stoploss or price < lower (S3 level touch)
-            if price < stop_loss or price < lower:
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on RSI >= 40 (returning to neutral) or stoploss hit
+            if rsi_val >= 40 or price < stop_loss:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price touches R3 (opposite Camarilla level)
-            # ATR-based stoploss: 2.5 * ATR above entry
+                signals[i] = 0.20
+        elif position == -1:  # Short - exit on RSI returning to neutral or stoploss
+            # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.5 * atr_val
-            # Exit on stoploss or price > upper (R3 level touch)
-            if price > stop_loss or price > upper:
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on RSI <= 60 (returning to neutral) or stoploss hit
+            if rsi_val <= 60 or price > stop_loss:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
