@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrend_Volume
-Hypothesis: Elder Ray's Bull/Bear Power combined with 1-day trend and volume filter.
-Works in both bull and bear by trading with the higher timeframe trend.
-Targets 20-50 trades/year to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Camarilla pivot (R1/S1) breakout on 4h with 12h EMA50 trend filter and volume spike confirmation.
+Trades with the trend in both bull and bear markets using 12h EMA50 as trend filter.
+Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,59 +20,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter and EMA13 for Elder Ray
+    # Get 1-day data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Volume filter: >1.5x 20-period MA
+    # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_13[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1-day EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Calculate Camarilla pivot levels for current day
+        # Need previous day's OHLC (1d data)
+        day_idx = i // 96  # 96 = 24*4 (4h bars per day)
+        if day_idx < 1:
+            signals[i] = 0.0
+            continue
+            
+        prev_day_idx = day_idx - 1
+        if prev_day_idx >= len(df_1d):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC from 1d data
+        ph = df_1d['high'].iloc[prev_day_idx]
+        pl = df_1d['low'].iloc[prev_day_idx]
+        pc = df_1d['close'].iloc[prev_day_idx]
         
-        # Volume confirmation
-        vol_confirm = vol_filter[i]
+        # Camarilla levels
+        range_val = ph - pl
+        r1 = pc + (range_val * 1.1 / 12)
+        s1 = pc - (range_val * 1.1 / 12)
         
-        # Elder Ray signals
-        bull_signal = bull_power[i] > 0 and bull_power[i] > bull_power[i-1]
-        bear_signal = bear_power[i] < 0 and bear_power[i] < bear_power[i-1]
+        # Trend direction from 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Entry logic:
-        # Long: Bull power rising + uptrend + volume
-        long_entry = vol_confirm and trend_up and bull_signal
-        # Short: Bear power falling + downtrend + volume
-        short_entry = vol_confirm and trend_down and bear_signal
+        # Volume confirmation: >2.0x 20-period MA
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Exit logic: Opposite Elder Ray signal or trend reversal
-        long_exit = bear_signal or not trend_up
-        short_exit = bull_signal or not trend_down
+        # Breakout conditions
+        long_breakout = close[i] > r1
+        short_breakout = close[i] < s1
+        
+        # Entry logic
+        long_entry = vol_confirm and trend_up and long_breakout
+        short_entry = vol_confirm and trend_down and short_breakout
+        
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = (close[i] < s1) or (not trend_up)
+        short_exit = (close[i] > r1) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
