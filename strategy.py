@@ -21,7 +21,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = high_1d - low_1d
@@ -32,13 +31,13 @@ def generate_signals(prices):
     atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily ATR(14) moving average for volatility regime detection
-    atr_ma_1d = pd.Series(atr14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ma_1d = pd.Series(atr14_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 6h timeframe
+    # Align daily indicators to 4h timeframe
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -66,7 +65,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: daily ATR above its 50-period average (avoid low volatility periods)
+        # Volatility filter: daily ATR above its 20-period average (avoid low volatility periods)
         vol_regime = atr14_aligned[i] > atr_ma_aligned[i]
         
         # Donchian breakout conditions
@@ -104,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyATR_VolumeRegime_Donchian20_Breakout_v1"
-timeframe = "6h"
+name = "4h_DailyATR_VolRegime_Donchian20_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
