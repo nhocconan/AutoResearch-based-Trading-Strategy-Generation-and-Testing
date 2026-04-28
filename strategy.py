@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Uses Camarilla R3/S3 levels from daily chart with 1-day trend filter (EMA50) and volume spike (>1.5x average) to capture strong breakouts. R3/S3 levels are stronger support/resistance, reducing false breakouts. Works in bull/bear by following trend direction. Targets 12-37 trades/year via strict R3/S3 breakout conditions. Uses 12h timeframe to reduce overtrading and improve generalization.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses Camarilla R3/S3 levels from daily chart with daily trend filter (EMA34) and volume spike (>2x average) to capture strong breakouts. R3/S3 levels are stronger support/resistance, reducing false breakouts. Works in bull/bear by following trend direction. Targets 20-30 trades/year via strict R3/S3 breakout conditions.
 """
 
 import numpy as np
@@ -20,13 +20,13 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels from previous day
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
@@ -34,33 +34,33 @@ def generate_signals(prices):
     R3 = typical_price + (range_ * 1.1 / 2)
     S3 = typical_price - (range_ * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Volume confirmation: >1.5x 12-period MA (1.5 days of 12h bars)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: >2x 24-period MA (4 days of 4h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 35  # Wait for EMA34 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(R3_aligned[i]) or
             np.isnan(S3_aligned[i]) or
-            np.isnan(vol_ma_12[i])):
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>1.5x average)
-        vol_confirm = volume[i] > (1.5 * vol_ma_12[i])
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
         
         # Breakout conditions at R3/S3
         long_breakout = close[i] > R3_aligned[i] and vol_confirm and uptrend
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
