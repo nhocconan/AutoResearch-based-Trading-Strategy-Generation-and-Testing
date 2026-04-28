@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1
-Hypothesis: Use daily Camarilla R3/S3 levels as key support/resistance on 12h timeframe.
-Requires alignment with 1d EMA50 trend and volume surge (>2x 20-period average) for entry.
-Designed for low trade frequency (12-37/year) to minimize fee drag while capturing sustained moves
-in both bull and bear markets by requiring trend alignment and volume confirmation.
+4h_TrueRangeBreakout_12hATR_Volume_Confirmation
+Hypothesis: Breakouts beyond true range with 12h ATR filter and volume confirmation capture strong momentum in both bull and bear markets.
+Uses tight entry conditions (breakout > 12h ATR) to limit trades (target 30-50/year) and reduce fee drag. Works by filtering out low-volatility breakouts
+and requiring volume surge, avoiding whipsaws in ranging conditions.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,63 +20,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for ATR and trend
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate True Range and ATR(14) on 12h
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_12h = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla R3 and S3 levels
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # 12h EMA25 for trend filter
+    ema_25_12h = pd.Series(df_12h['close']).ewm(span=25, adjust=False, min_periods=25).mean().values
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align all higher timeframe data to 4h
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
     
-    # Align all higher timeframe data to 12h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Trend filter: price > EMA25 = bullish, < EMA25 = bearish
+    h12_uptrend = close > ema_25_12h_aligned
+    h12_downtrend = close < ema_25_12h_aligned
     
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    d1_uptrend = close > ema_50_1d_aligned
-    d1_downtrend = close < ema_50_1d_aligned
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 200  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(atr_12h_aligned[i]) or np.isnan(ema_25_12h_aligned[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R3 + daily uptrend + volume surge
-        long_entry = (close[i] > R3_aligned[i] and 
-                     d1_uptrend[i] and 
+        # Entry conditions: breakout beyond 12h ATR + trend alignment + volume surge
+        # Long: price breaks above high + ATR + trend + volume
+        long_entry = (close[i] > (high[i-1] + atr_12h_aligned[i]) and 
+                     h12_uptrend[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S3 + daily downtrend + volume surge
-        short_entry = (close[i] < S3_aligned[i] and 
-                      d1_downtrend[i] and 
+        # Short: price breaks below low - ATR + trend + volume
+        short_entry = (close[i] < (low[i-1] - atr_12h_aligned[i]) and 
+                      h12_downtrend[i] and 
                       volume_surge[i])
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
+        # Exit on opposite breakout with volume surge
+        long_exit = close[i] < (low[i-1] - atr_12h_aligned[i]) and volume_surge[i]
+        short_exit = close[i] > (high[i-1] + atr_12h_aligned[i]) and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -102,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1"
-timeframe = "12h"
+name = "4h_TrueRangeBreakout_12hATR_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
