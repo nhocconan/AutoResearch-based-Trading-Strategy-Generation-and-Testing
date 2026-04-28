@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
-# Enter long when price breaks above 1d Camarilla R3 with volume spike and chop < 61.8 (trending regime).
-# Enter short when price breaks below 1d Camarilla S3 with volume spike and chop < 61.8.
+# Hypothesis: 4h strategy using 1d Williams %R extreme levels with volume confirmation and chop regime filter.
+# Enter long when 1d Williams %R < -80 (oversold) with volume spike and chop < 61.8 (trending regime).
+# Enter short when 1d Williams %R > -20 (overbought) with volume spike and chop < 61.8.
 # Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
-# Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, chop filter avoids ranging markets.
-# Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
+# Williams %R provides mean-reversion edge from higher timeframe, volume confirms reversal strength, chop filter avoids ranging markets.
+# Works in bull (mean reversion in uptrend) and bear (mean reversion in downtrend) markets.
 
-name = "4h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v2"
+name = "4h_WilliamsR_1d_Extreme_Volume_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,38 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 1d data for Williams %R (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivots (using previous bar's high, low, close)
+    # Calculate 1d Williams %R (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     n_1d = len(high_1d)
-    camarilla_r3 = np.full(n_1d, np.nan)
-    camarilla_s3 = np.full(n_1d, np.nan)
+    williams_r = np.full(n_1d, np.nan)
     
-    for i in range(1, n_1d):
-        # Use previous bar to avoid look-ahead
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        pivot = (phigh + plow + pclose) / 3.0
-        rng = phigh - plow
-        camarilla_r3[i] = pivot + rng * 1.1 / 4.0
-        camarilla_s3[i] = pivot - rng * 1.1 / 4.0
+    for i in range(14, n_1d):
+        highest_high = np.max(high_1d[i-14:i+1])
+        lowest_low = np.min(low_1d[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50.0
     
-    # Forward fill Camarilla levels
-    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
-    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
+    # Forward fill Williams %R
+    williams_r = pd.Series(williams_r).ffill().values
     
     # Align 1d indicators to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
@@ -101,24 +96,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and chop filter
-        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i] and chop_trending[i]
-        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i] and chop_trending[i]
+        # Williams %R extreme conditions with volume confirmation and chop filter
+        long_signal = williams_r_aligned[i] < -80 and volume_spike[i] and chop_trending[i]
+        short_signal = williams_r_aligned[i] > -20 and volume_spike[i] and chop_trending[i]
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] < camarilla_s3_aligned[i]
-        short_exit = close[i] > camarilla_r3_aligned[i]
+        # Exit conditions: opposite extreme
+        long_exit = williams_r_aligned[i] > -50  # Exit long when back above midline
+        short_exit = williams_r_aligned[i] < -50  # Exit short when back below midline
         
         # Handle entries and exits
-        if long_breakout and position <= 0:
+        if long_signal and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_signal and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
