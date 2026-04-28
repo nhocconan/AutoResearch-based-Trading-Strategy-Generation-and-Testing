@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,31 +13,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 120 EMA trend filter and volume MA
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 120:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA120 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema120_1d = close_1d_series.ewm(span=120, adjust=False, min_periods=120).mean().values
-    ema120_1d_aligned = align_htf_to_ltf(prices, df_1d, ema120_1d)
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily volume MA(20) for volume filter
-    volume_1d_series = pd.Series(df_1d['volume'].values)
-    vol_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Get 6-hour RSI(14) for mean reversion entries
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(100).values
+    # Camarilla levels: R3, R2, R1, S1, S2, S3
+    R3 = pivot + range_1d * 1.1
+    R2 = pivot + range_1d * 0.55
+    R1 = pivot + range_1d * 0.275
+    S1 = pivot - range_1d * 0.275
+    S2 = pivot - range_1d * 0.55
+    S3 = pivot - range_1d * 1.1
+    
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Get weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    # Weekly EMA34 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -45,12 +61,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 120  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema120_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(rsi_values[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -67,26 +84,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: current volume above daily average
-        vol_filter = volume[i] > vol_ma_1d_aligned[i]
+        # Volume filter: above average volume
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below daily EMA120
-        trend_up = close[i] > ema120_1d_aligned[i]
-        trend_down = close[i] < ema120_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA34
+        trend_up = close[i] > ema34_1w_aligned[i]
+        trend_down = close[i] < ema34_1w_aligned[i]
         
-        # RSI conditions for mean reversion
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        # Entry conditions: 
+        # Long: break above S1 with upward trend and volume
+        # Short: break below R1 with downward trend and volume
+        long_breakout = close[i] > S1_aligned[i]
+        short_breakout = close[i] < R1_aligned[i]
         
-        # Entry conditions:
-        # Long: RSI oversold + above daily EMA120 + volume
-        # Short: RSI overbought + below daily EMA120 + volume
-        long_entry = rsi_oversold and trend_up and vol_filter
-        short_entry = rsi_overbought and trend_down and vol_filter
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
         
-        # Exit conditions: RSI returns to neutral zone (40-60)
-        long_exit = rsi_values[i] > 40 and position == 1
-        short_exit = rsi_values[i] < 60 and position == -1
+        # Exit conditions: opposite S1/R1 level touch
+        long_exit = (close[i] < S1_aligned[i]) and position == 1
+        short_exit = (close[i] > R1_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -111,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI14_EMA120_Volume_MeanReversion"
-timeframe = "6h"
+name = "12h_Camarilla_S1R1_1wEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
