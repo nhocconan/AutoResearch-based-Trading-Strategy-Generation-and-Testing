@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,70 +13,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and moving averages
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate weekly ATR(10) for trend filter
+    tr1 = np.maximum(high_1w[1:], low_1w[:-1]) - np.minimum(high_1w[1:], low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate 6-day EMA for trend filter (shorter for responsiveness)
-    ema6_1d = pd.Series(close_1d).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Calculate weekly close SMA(20) for trend direction
+    sma20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 14-day EMA for trend filter (longer for confirmation)
-    ema14_1d = pd.Series(close_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly ATR and SMA to daily
+    atr_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    sma20_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
     
-    # Align daily ATR and EMAs to 6h
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema6_aligned = align_htf_to_ltf(prices, df_1d, ema6_1d)
-    ema14_aligned = align_htf_to_ltf(prices, df_1d, ema14_1d)
+    # Calculate daily Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Calculate daily volume SMA(20) for volume filter
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_aligned[i]) or 
-            np.isnan(ema6_aligned[i]) or 
-            np.isnan(ema14_aligned[i])):
+            np.isnan(sma20_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
+        # Trend filter: price above/below weekly SMA20 with ATR buffer
+        uptrend = close[i] > sma20_aligned[i] + 0.5 * atr_aligned[i]
+        downtrend = close[i] < sma20_aligned[i] - 0.5 * atr_aligned[i]
         
-        # Trend filter: EMA6 > EMA14 for uptrend, EMA6 < EMA14 for downtrend
-        uptrend = ema6_aligned[i] > ema14_aligned[i]
-        downtrend = ema6_aligned[i] < ema14_aligned[i]
+        # Volume filter: volume above average
+        vol_filter = volume[i] > vol_sma[i]
         
-        # Volatility filter: only trade when ATR is above its 20-day average (avoid low volatility chop)
-        atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean()
-        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
-        vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
+        # Breakout conditions
+        long_breakout = high[i] > highest_high[i-1]  # break above previous 20-day high
+        short_breakout = low[i] < lowest_low[i-1]    # break below previous 20-day low
         
-        # Long conditions: uptrend + volatility filter + price above EMA6
-        long_condition = uptrend and vol_filter and close[i] > ema6_aligned[i]
+        # Long conditions: uptrend + volume + long breakout
+        long_condition = uptrend and vol_filter and long_breakout
         
-        # Short conditions: downtrend + volatility filter + price below EMA6
-        short_condition = downtrend and vol_filter and close[i] < ema6_aligned[i]
+        # Short conditions: downtrend + volume + short breakout
+        short_condition = downtrend and vol_filter and short_breakout
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -84,11 +82,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: trend reversal or volatility collapse
-        elif position == 1 and (not uptrend or not vol_filter):
+        # Exit conditions: opposite breakout or trend reversal
+        elif position == 1 and (downtrend or short_breakout):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (not downtrend or not vol_filter):
+        elif position == -1 and (uptrend or long_breakout):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -102,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA6_EMA14_VolumeFilter_Trend"
-timeframe = "6h"
+name = "1d_WeeklyTrend_Donchian20_Volume"
+timeframe = "1d"
 leverage = 1.0
