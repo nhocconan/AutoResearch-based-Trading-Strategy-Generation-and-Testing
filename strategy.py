@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and trend
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_DailyTrend_Volume_Session"
-timeframe = "12h"
+name = "4h_DonchianBreakout_DailyTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
