@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullPower_BearPower_1dTrend_Volume
-Hypothesis: Uses Elder Ray (Bull Power/Bear Power) with 1d trend filter and volume spike to capture high-probability momentum moves. Elder Ray measures bullish/bearish power relative to EMA13. Works in both bull and bear by following 1d trend. Targets 15-25 trades/year via strict conditions.
+4h_KAMA_Trend_VolumeSpike_RSI4060
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a strong trend filter in both bull and bear markets. Combined with volume spike (2x 20-bar average) and RSI in 40-60 range (avoiding extremes), this strategy captures trending moves while avoiding chop. Uses 1d trend filter for higher timeframe confirmation. Targets 20-30 trades/year via strict conditions.
 """
 
 import numpy as np
@@ -18,63 +18,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (1d)
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Elder Ray components
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = ema13_1d - df_1d['low'].values
+    # Calculate KAMA (20, 2, 30) on close
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # Proper volatility calculation: sum of absolute changes over ER period
+    er_period = 10
+    change_arr = np.abs(np.diff(close, prepend=close[0]))
+    volatility_arr = np.convolve(change_arr, np.ones(er_period), 'same')  # sum of abs changes over er_period
+    volatility_arr[:er_period-1] = np.nan  # not enough data
+    er = np.where(volatility_arr != 0, change_arr / volatility_arr, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2  # fast SC=2/(2+1)=0.6645, slow SC=2/(30+1)=0.0645
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: >2x 20-period MA (5 days of 6h bars)
+    # Volume confirmation: >2x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 34  # Wait for EMA34 and KAMA to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(kama[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        
+        # KAMA direction: price above/below KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # RSI in neutral zone (40-60) to avoid extremes
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
         
         # Volume confirmation (>2x average)
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Elder Ray conditions: strong bullish/bearish power
-        long_signal = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and vol_confirm and uptrend
-        short_signal = bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and vol_confirm and downtrend
+        # Entry conditions
+        long_entry = uptrend & price_above_kama & rsi_neutral & vol_confirm
+        short_entry = downtrend & price_below_kama & rsi_neutral & vol_confirm
         
-        # Exit conditions: power weakening or opposite signal
-        long_exit = bull_power_aligned[i] <= 0
-        short_exit = bear_power_aligned[i] <= 0
+        # Exit conditions: opposite KAMA cross
+        long_exit = price_below_kama
+        short_exit = price_above_kama
         
-        if long_signal and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -94,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullPower_BearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Trend_VolumeSpike_RSI4060"
+timeframe = "4h"
 leverage = 1.0
