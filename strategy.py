@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot breakouts with 1d trend filter and volume confirmation.
-# Enter long when price breaks above Camarilla R3 level and 1d close > 1d EMA34 and volume > 2x 20-bar average.
-# Enter short when price breaks below Camarilla S3 level and 1d close < 1d EMA34 and volume > 2x 20-bar average.
-# Exit when price reaches opposite Camarilla level (R1 for longs, S1 for shorts) or trend weakens.
-# Uses discrete position sizing (0.25) to manage risk and minimize fee churn.
-# Camarilla levels provide precise intraday support/resistance, EMA34 filters trend direction, volume confirms conviction.
-# Works in bull markets (breakout continuation) and bear markets (mean reversion at extreme levels).
+# Hypothesis: 4h strategy using Donchian channel breakouts with 1d ADX trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band and 1d ADX > 25 and volume > 1.5x 20-bar average.
+# Enter short when price breaks below Donchian(20) lower band and 1d ADX > 25 and volume > 1.5x 20-bar average.
+# Exit when price crosses Donchian midpoint or ADX < 20 (trend weakening).
+# Uses discrete position sizing (0.25) to reduce fee drag and improve risk-adjusted returns.
+# Target: 80-160 total trades over 4 years (20-40/year) to avoid fee drag.
+# Donchian channels provide clear breakout levels, ADX filters for trending markets, volume confirms conviction.
+# Works in both bull and bear markets by capturing strong directional moves.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_DonchianBreakout_1dADX25_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,92 +26,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (MTF structure)
+    # Get 1d data for ADX trend filter (MTF structure)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d ADX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Get 12h data for Camarilla pivots (MTF structure)
-    df_12h = get_htf_data(prices, '12h')
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    if len(df_12h) < 10:
-        return np.zeros(n)
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # DI values
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # Typical price for Camarilla calculation
-    typical_price = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels (based on previous 12h bar)
-    # R4 = close + range * 1.1/2
-    # R3 = close + range * 1.1/4
-    # R2 = close + range * 1.1/6
-    # R1 = close + range * 1.1/12
-    # S1 = close - range * 1.1/12
-    # S2 = close - range * 1.1/6
-    # S3 = close - range * 1.1/4
-    # S4 = close - range * 1.1/2
-    camarilla_r3 = close_12h + range_12h * 1.1 / 4.0
-    camarilla_s3 = close_12h - range_12h * 1.1 / 4.0
-    camarilla_r1 = close_12h + range_12h * 1.1 / 12.0
-    camarilla_s1 = close_12h - range_12h * 1.1 / 12.0
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align 12h Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    # Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # Volume confirmation: >2x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume (less strict than 2x to increase trade frequency slightly)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34)  # Ensure sufficient history for EMA34
+    start_idx = max(50, lookback)  # Ensure sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d close vs EMA34
-        uptrend = close[i] > ema_34_aligned[i]
-        downtrend = close[i] < ema_34_aligned[i]
+        # Trend filter: 1d ADX > 25
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit condition
         
-        # Camarilla breakout conditions
-        breakout_up = close[i] > r3_aligned[i-1]  # Break above previous period's R3
-        breakout_down = close[i] < s3_aligned[i-1]  # Break below previous period's S3
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # Break above previous period's high
+        breakout_down = close[i] < lowest_low[i-1]  # Break below previous period's low
         
         # Exit conditions
-        exit_long = close[i] < r1_aligned[i] or (not uptrend and position == 1)
-        exit_short = close[i] > s1_aligned[i] or (not downtrend and position == -1)
+        exit_long = close[i] < donchian_mid[i] or weak_trend
+        exit_short = close[i] > donchian_mid[i] or weak_trend
         
         # Handle entries and exits
-        if breakout_up and uptrend and vol_confirm and position <= 0:
+        if breakout_up and strong_trend and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif breakout_down and downtrend and vol_confirm and position >= 0:
+        elif breakout_down and strong_trend and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
