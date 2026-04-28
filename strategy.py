@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,13 +15,13 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
+    # 1d EMA(20) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Get 4h data for Donchian breakout signals
     df_4h = get_htf_data(prices, '4h')
@@ -44,24 +44,24 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
-            np.isnan(donch_low_20_aligned[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        uptrend = close[i] > ema_20_1d_aligned[i]
+        downtrend = close[i] < ema_20_1d_aligned[i]
         
         # Breakout conditions: price breaks Donchian(20) channel
         long_breakout = close[i] > donch_high_20_aligned[i]
         short_breakout = close[i] < donch_low_20_aligned[i]
         
-        # Entry conditions: require alignment of 1d trend and breakout
+        # Entry conditions: require alignment of 1d trend and breakout with volume confirmation
         long_entry = long_breakout and uptrend and volume_confirm[i]
         short_entry = short_breakout and downtrend and volume_confirm[i]
         
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeFilter"
+name = "4h_Donchian20_1dEMA20_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
