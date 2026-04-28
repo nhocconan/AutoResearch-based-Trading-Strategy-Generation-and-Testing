@@ -24,12 +24,25 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Donchian channel (20) - standard for breakouts
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # 1d Williams %R (14) - momentum oscillator
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
     
-    # 1d EMA50 - trend confirmation
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d RSI (14) - momentum confirmation
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # 1d EMA21 - trend filter
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # 1d ATR14 - volatility filter
     tr1 = high_1d[1:] - low_1d[1:]
@@ -38,14 +51,14 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align HTF indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume ratio for confirmation (15-period MA)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=15, min_periods=15).mean().values
+    # Volume ratio for confirmation (20-period MA)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume_1d / vol_ma_1d
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
@@ -56,35 +69,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
             np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Williams %R conditions: oversold (< -80) for long, overbought (> -20) for short
+        wr_oversold = williams_r_aligned[i] < -80
+        wr_overbought = williams_r_aligned[i] > -20
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # RSI conditions: not extreme, momentum confirmation
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
+        rsi_bullish = rsi_aligned[i] > 50
+        rsi_bearish = rsi_aligned[i] < 50
+        
+        # Trend filter: price above/below 1d EMA21
+        trend_up = close[i] > ema_21_1d_aligned[i]
+        trend_down = close[i] < ema_21_1d_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
+        vol_filter = atr_14_aligned[i] > 0.005 * close[i]  # ATR > 0.5% of price
         
         # Volume confirmation: require above-average volume
-        vol_confirm = vol_ratio_aligned[i] > 1.2
+        vol_confirm = vol_ratio_aligned[i] > 1.3
         
-        # Entry conditions - optimized for 4h timeframe
-        # Long: upward breakout + uptrend + vol filter + volume confirmation
-        long_entry = breakout_up and trend_up and vol_filter and vol_confirm
-        # Short: downward breakout + downtrend + vol filter + volume confirmation
-        short_entry = breakout_down and trend_down and vol_filter and vol_confirm
+        # Entry conditions - Williams %R mean reversion with trend filter
+        # Long: oversold Williams + bullish RSI + uptrend + vol filter + volume confirmation
+        long_entry = wr_oversold and rsi_bullish and trend_up and vol_filter and vol_confirm
+        # Short: overbought Williams + bearish RSI + downtrend + vol filter + volume confirmation
+        short_entry = wr_overbought and rsi_bearish and trend_down and vol_filter and vol_confirm
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: Williams %R reverses or trend changes
+        long_exit = (williams_r_aligned[i] > -50) or (not trend_up)
+        short_exit = (williams_r_aligned[i] < -50) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_Volume_Filter"
-timeframe = "4h"
+name = "6h_WilliamsRSI_MeanReversion_1dEMA21_Trend"
+timeframe = "6h"
 leverage = 1.0
