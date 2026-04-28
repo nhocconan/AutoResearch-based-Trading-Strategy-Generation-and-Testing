@@ -13,30 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data once for HTF context
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Daily high/low/close for calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h high/low/close for calculations
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily range for pivot calculations
-    daily_range = high_1d - low_1d
+    # Calculate 12h range for pivot calculations
+    daily_range_12h = high_12h - low_12h
     
-    # Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    # Camarilla pivot levels (based on previous 12h bar)
+    camarilla_r3 = close_12h + daily_range_12h * 1.1 / 4
+    camarilla_s3 = close_12h - daily_range_12h * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # Daily trend filter: EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h trend filter: EMA20
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -72,19 +72,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below daily EMA34
-        price_above_ema = close[i] > ema_34_aligned[i]
-        price_below_ema = close[i] < ema_34_aligned[i]
+        # Trend filter: price above/below 12h EMA20
+        price_above_ema = close[i] > ema_20_aligned[i]
+        price_below_ema = close[i] < ema_20_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above R4 with volume and uptrend
-        # Short: price breaks below S4 with volume and downtrend
-        long_entry = (close[i] > r4_aligned[i]) and price_above_ema and vol_filter
-        short_entry = (close[i] < s4_aligned[i]) and price_below_ema and vol_filter
+        # Long: price breaks above R3 with volume and uptrend
+        # Short: price breaks below S3 with volume and downtrend
+        long_entry = (close[i] > r3_aligned[i]) and price_above_ema and vol_filter
+        short_entry = (close[i] < s3_aligned[i]) and price_below_ema and vol_filter
         
-        # Exit conditions: price returns to opposite S4/R4 levels or trend reversal
-        long_exit = (close[i] < s4_aligned[i]) or (not price_above_ema)
-        short_exit = (close[i] > r4_aligned[i]) or (not price_below_ema)
+        # Exit conditions: price returns to opposite S3/R3 levels or trend reversal
+        long_exit = (close[i] < s3_aligned[i]) or (not price_above_ema)
+        short_exit = (close[i] > r3_aligned[i]) or (not price_below_ema)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_EMA34"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA20_Volume"
+timeframe = "4h"
 leverage = 1.0
