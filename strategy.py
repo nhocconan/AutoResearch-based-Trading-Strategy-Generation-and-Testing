@@ -43,7 +43,7 @@ def generate_signals(prices):
     S3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
     S4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    # Align daily indicators to 6h
+    # Align daily indicators to 12h
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
@@ -51,8 +51,8 @@ def generate_signals(prices):
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Calculate 6-period moving average of volume for volume filter
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Calculate 12-period moving average of volume for volume filter
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -69,7 +69,7 @@ def generate_signals(prices):
         if (np.isnan(atr_aligned[i]) or 
             np.isnan(ema34_aligned[i]) or 
             np.isnan(R4_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or
             np.isnan(S3_aligned[i]) or
             np.isnan(S4_aligned[i]) or
             np.isnan(vol_ma[i])):
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S4_BreakoutFade_VolumeTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S4_BreakoutFade_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
