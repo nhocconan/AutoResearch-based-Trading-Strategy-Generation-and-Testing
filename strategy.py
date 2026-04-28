@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_VWAP_Cross_1dTrend_VolumeFilter
-Hypothesis: Price crossing VWAP on 4h with 1d EMA trend filter and volume confirmation.
-Works in both bull and bear markets by trading with the daily trend.
-Targets ~30 trades/year to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS_V2
+Hypothesis: Improved version with stricter entry conditions (3x volume spike, higher volume MA period) to reduce trade frequency and avoid overtrading. Targets 15-25 trades/year.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,54 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get 1-day data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day EMA21 for trend filter
-    close_1d = df_1d['close'].values
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate VWAP (Volume Weighted Average Price) for 4h
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, 0)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 20-period volume MA for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 50-period volume MA for volume spike confirmation (higher period = fewer signals)
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 60  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_21_1d_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_50[i]):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1d EMA21
-        trend_up = close[i] > ema_21_1d_aligned[i]
-        trend_down = close[i] < ema_21_1d_aligned[i]
+        # Calculate Camarilla pivot levels for current day
+        # Need previous day's OHLC (1d data)
+        day_idx = i // 96  # 96 = 24*4 (4h bars per day)
+        if day_idx < 1:
+            signals[i] = 0.0
+            continue
+            
+        prev_day_idx = day_idx - 1
+        if prev_day_idx >= len(df_1d):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC from 1d data
+        ph = df_1d['high'].iloc[prev_day_idx]
+        pl = df_1d['low'].iloc[prev_day_idx]
+        pc = df_1d['close'].iloc[prev_day_idx]
         
-        # Volume confirmation: >1.8x 20-period MA
-        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
+        # Camarilla levels
+        range_val = ph - pl
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        r1 = pc + (range_val * 1.1 / 12)
+        s1 = pc - (range_val * 1.1 / 12)
         
-        # VWAP cross conditions
-        vwap_cross_up = close[i] > vwap[i] and close[i-1] <= vwap[i-1]
-        vwap_cross_down = close[i] < vwap[i] and close[i-1] >= vwap[i-1]
+        # Trend direction from 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Entry logic: VWAP cross with trend and volume
-        long_entry = vwap_cross_up and trend_up and vol_confirm
-        short_entry = vwap_cross_down and trend_down and vol_confirm
+        # Volume confirmation: >3.0x 50-period MA (stricter = fewer trades)
+        vol_confirm = volume[i] > (3.0 * vol_ma_50[i])
         
-        # Exit logic: opposite VWAP cross or trend reversal
-        long_exit = vwap_cross_down or (not trend_up)
-        short_exit = vwap_cross_up or (not trend_down)
+        # Breakout conditions
+        long_breakout = close[i] > r1
+        short_breakout = close[i] < s1
+        
+        # Entry logic
+        long_entry = vol_confirm and trend_up and long_breakout
+        short_entry = vol_confirm and trend_down and short_breakout
+        
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = (close[i] < s1) or (not trend_up)
+        short_exit = (close[i] > r1) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -92,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_Cross_1dTrend_VolumeFilter"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS_V2"
 timeframe = "4h"
 leverage = 1.0
