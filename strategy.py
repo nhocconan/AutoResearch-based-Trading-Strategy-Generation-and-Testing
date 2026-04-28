@@ -24,11 +24,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Donchian channel (20) - standard length
+    # 1d Donchian channel (20)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA34 - trend confirmation (from top performers)
+    # 1d EMA34 - trend confirmation
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # 1d ATR14 - volatility filter
@@ -38,15 +38,15 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume confirmation: current volume > 2.5x 20-period average (4h) - from top performers
+    # Volume confirmation: current volume > 2.0x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Volume_Surge25"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA34_Volume_Surge20"
+timeframe = "12h"
 leverage = 1.0
