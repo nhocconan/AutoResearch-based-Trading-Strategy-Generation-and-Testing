@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,52 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily EMA34 (HTF trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
     
-    # Get 12h data for Donchian channels (12-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 12:
-        return np.zeros(n)
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Daily Donchian channels (20-period)
+    highest_high_20d = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20d = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    highest_high_12h = pd.Series(high_12h).rolling(window=12, min_periods=12).max().values
-    lowest_low_12h = pd.Series(low_12h).rolling(window=12, min_periods=12).min().values
-    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
-    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
-    
-    # Volume confirmation: current volume > 1.5x 12h average volume (use 20-period MA)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma_12h * 1.5
+    # Volume confirmation: current volume > 1.3x average volume (20-day average)
+    vol_ma_20d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma_20d * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 12, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(highest_high_12h_aligned[i]) or
-            np.isnan(lowest_low_12h_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(highest_high_20d[i]) or
+            np.isnan(lowest_low_20d[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from weekly EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout conditions from 12h Donchian
-        breakout_up = close[i] > highest_high_12h_aligned[i]
-        breakout_down = close[i] < lowest_low_12h_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > highest_high_20d[i]
+        breakout_down = close[i] < lowest_low_20d[i]
         
         # Entry conditions: require trend + breakout + volume confirmation
         long_entry = uptrend and breakout_up and volume_confirm[i]
@@ -93,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian12_1dEMA34_Volume"
-timeframe = "12h"
+name = "1d_1wDonchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
