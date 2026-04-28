@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Time-of-Day volatility breakout combined with 1-day ATR filter.
-# During high volatility periods (UTC 12:00-20:00), price breaks often have follow-through.
-# Uses ATR(14) from daily chart to set dynamic breakout thresholds, avoiding false breakouts in low volatility.
-# Volatility filter ensures trades occur only when market has sufficient movement potential.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets by focusing on volatility expansion rather than direction.
+# Hypothesis: 12h Donchian channel breakout with 1-day ADX trend filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets, while ADX>25 filters for strong trends
+# to avoid whipsaws in ranging markets. Volume confirmation ensures breakouts have participation.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by filtering for strong trends via ADX.
 
 import numpy as np
 import pandas as pd
@@ -19,14 +18,13 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get daily data for ATR filter
+    # Get daily data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for ATR calculation
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
+    # Calculate daily ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,80 +36,102 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Wilder's smoothing (equivalent to RMA)
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Align ATR to 6h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Pre-calculate hour of day for each bar (vectorized)
-    hours = pd.to_datetime(open_time).hour
+    # Smoothed values
+    def _smma(array, period):
+        """Smoothed Moving Average (SMMA)"""
+        if len(array) < period:
+            return np.full_like(array, np.nan, dtype=float)
+        result = np.full_like(array, np.nan, dtype=float)
+        # First value is simple moving average
+        result[period-1] = np.mean(array[:period])
+        # Subsequent values: SMMA = (prev_smma * (period-1) + current) / period
+        for i in range(period, len(array)):
+            result[i] = (result[i-1] * (period-1) + array[i]) / period
+        return result
     
-    # Volatility breakout parameters
-    breakout_mult = 0.5  # ATR multiplier for breakout threshold
-    vol_threshold = 0.5  # Minimum ATR ratio to consider volatile enough
+    atr = _smma(tr, 14)
+    plus_di_smoothed = _smma(plus_dm, 14)
+    minus_di_smoothed = _smma(minus_dm, 14)
     
-    # Calculate ATR ratio (current ATR / 20-period ATR average) for volatility regime
-    atr_ma = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = np.where(atr_ma > 0, atr_aligned / atr_ma, 0)
+    # DI values
+    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
+    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = _smma(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Donchian channel (20-period) on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = max(30, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(atr_aligned[i]) or np.isnan(atr_ma[i]) or 
-            np.isnan(atr_ratio[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Time filter: UTC 12:00-20:00 (high volatility period for crypto)
-        hour = hours[i]
-        in_volatile_hours = 12 <= hour <= 20
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Volatility filter: only trade when ATR is above average
-        volatile_enough = atr_ratio[i] > vol_threshold
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Break above upper band
+        breakout_down = close[i] < donchian_low[i-1]  # Break below lower band
         
-        # Skip if not in trading hours or not volatile enough
-        if not (in_volatile_hours and volatile_enough):
+        # Entry conditions with volume confirmation
+        long_entry = strong_trend and breakout_up and volume_filter[i]
+        short_entry = strong_trend and breakout_down and volume_filter[i]
+        
+        # Exit conditions: when trend weakens or opposite breakout occurs
+        long_exit = (not strong_trend) or breakout_down
+        short_exit = (not strong_trend) or breakout_up
+        
+        # Handle entries and exits
+        if long_entry and position <= 0:
+            signals[i] = 0.25
+            position = 1
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit and position == 1:
             signals[i] = 0.0
-            continue
-        
-        # Calculate dynamic breakout levels based on previous bar
-        if i > 0:
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            
-            # Breakout thresholds
-            upper_break = prev_high + breakout_mult * atr_aligned[i-1]
-            lower_break = prev_low - breakout_mult * atr_aligned[i-1]
-            
-            # Breakout conditions
-            breakout_up = close[i] > upper_break
-            breakout_down = close[i] < lower_break
-            
-            # Additional confirmation: close must be beyond the midpoint of the range
-            range_mid = (prev_high + prev_low) / 2
-            confirmation_up = close[i] > range_mid
-            confirmation_down = close[i] < range_mid
-            
-            # Entry signals
-            if breakout_up and confirmation_up:
+            position = 0
+        elif short_exit and position == -1:
+            signals[i] = 0.0
+            position = 0
+        else:
+            # Hold current position
+            if position == 1:
                 signals[i] = 0.25
-            elif breakout_down and confirmation_down:
+            elif position == -1:
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:
-            signals[i] = 0.0
     
     return signals
 
-name = "6h_TimeOfDay_VolatilityBreakout_1dATR_Filter"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1dADX_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
