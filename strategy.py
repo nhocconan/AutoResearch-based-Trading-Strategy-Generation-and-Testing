@@ -13,92 +13,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivots (HTF)
+    # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d Pivot points (standard calculation)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # 1d ATR(14) for volatility filter
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Align all pivot levels
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume confirmation: current volume > 1.3x average volume (6-period average for 6h)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_confirm = volume > vol_ma * 1.3
+    # 12h Donchian(20) channel breakout (primary signal)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 6)
+    start_idx = max(100, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1d EMA(50)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Fade at extreme pivot levels (S3/R3) in ranging markets
-        # Breakout at moderate levels (S2/R2) in trending markets
-        fade_long = close[i] <= s3_aligned[i] and uptrend
-        fade_short = close[i] >= r3_aligned[i] and downtrend
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_14_1d_aligned[i] > 0
         
-        breakout_long = close[i] >= r2_aligned[i] and uptrend
-        breakout_short = close[i] <= s2_aligned[i] and downtrend
+        # Donchian breakout conditions
+        breakout_long = close[i] > donch_high[i-1] and uptrend and vol_filter
+        breakout_short = close[i] < donch_low[i-1] and downtrend and vol_filter
         
-        # Entry conditions: require volume confirmation
-        long_entry = (fade_long or breakout_long) and volume_confirm[i]
-        short_entry = (fade_short or breakout_short) and volume_confirm[i]
-        
-        # Exit conditions: when price reaches opposite pivot level or trend reverses
+        # Exit conditions: opposite Donchian band or trend reversal
         if position == 1:
-            exit_condition = (close[i] >= r1_aligned[i]) or (not uptrend and close[i] < pivot_aligned[i])
+            exit_condition = close[i] < donch_low[i-1] or not uptrend
         elif position == -1:
-            exit_condition = (close[i] <= s1_aligned[i]) or (not downtrend and close[i] > pivot_aligned[i])
+            exit_condition = close[i] > donch_high[i-1] or not downtrend
         else:
             exit_condition = False
         
         # Handle entries and exits
-        if long_entry and position <= 0:
+        if breakout_long and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif breakout_short and position >= 0:
             signals[i] = -0.25
             position = -1
         elif exit_condition and position != 0:
@@ -115,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PivotFadeBreakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_ATR_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
