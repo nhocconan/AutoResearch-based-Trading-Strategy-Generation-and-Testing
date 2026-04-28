@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation.
-# Donchian(20) breakouts capture breakout momentum; ADX(14) > 25 on 1d confirms strong trend direction.
-# Volume spike (1.5x 24-period average) filters false breakouts.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Targets 20-50 total trades over 4 years (5-12.5/year) with discrete position sizing to minimize fee drag.
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Camarilla levels (R4/S4) represent extreme intraday support/resistance; breaks indicate strong momentum.
+# EMA50 on 1d filters for higher timeframe trend alignment, avoiding counter-trend trades.
+# Volume spike (2x 24-period average of 4h bars = 4 days) confirms breakout validity.
+# Works in bull markets (catching uptrends via R4 breakouts) and bear markets (catching downtrends via S4 breakdowns).
+# Targets 30-80 total trades over 4 years (8-20/year) with discrete position sizing to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -19,110 +20,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(50)
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Calculate Camarilla levels from prior 1d OHLC
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    # We use R4/S4 as entry triggers for stronger breakouts
+    cam_high = df_1d['high'].values
+    cam_low = df_1d['low'].values
+    cam_close = df_1d['close'].values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    camarilla_width = (cam_high - cam_low) * 1.1
+    r4 = cam_close + camarilla_width / 2
+    s4 = cam_close - camarilla_width / 2
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period])  # Skip first NaN in tr
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1]/period) + data[i]
-        return result
+    # Align Camarilla levels to 4h timeframe (wait for prior day's close)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    tr_smooth = wilders_smooth(tr, 14)
-    dm_plus_smooth = wilders_smooth(dm_plus, 14)
-    dm_minus_smooth = wilders_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= 14:
-        adx[13] = np.nanmean(dx[1:14])  # First ADX is average of first 14 DX
-        for i in range(14, len(dx)):
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align ADX to 4h timeframe (wait for completed 1d bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian channels (20-period) on 4h data
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(lookback-1, len(high)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Volume filter: volume > 1.5x 24-period average (4 days of 4h bars)
-    volume_ma = np.full_like(volume, np.nan)
-    for i in range(23, len(volume)):
-        volume_ma[i] = np.mean(volume[i-23:i+1])
-    volume_spike = volume > (volume_ma * 1.5)
+    # Volume filter: volume > 2x 24-period average (4 days of 4h bars)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback-1, 23)  # Wait for Donchian and volume MA
+    start_idx = max(50, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: price above/below 1d EMA(50)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > highest_high[i-1]  # Break above upper band
-        breakdown_down = low[i] < lowest_low[i-1]  # Break below lower band
+        # Camarilla breakout conditions
+        breakout_r4 = high[i] > r4_aligned[i-1]  # Break above R4
+        breakdown_s4 = low[i] < s4_aligned[i-1]  # Break below S4
         
         # Entry conditions with volume spike confirmation
-        long_entry = strong_trend and breakout_up and volume_spike[i]
-        short_entry = strong_trend and breakdown_down and volume_spike[i]
+        long_entry = uptrend and breakout_r4 and volume_spike[i]
+        short_entry = downtrend and breakdown_s4 and volume_spike[i]
         
-        # Exit conditions: trend weakness or opposite Donchian break
-        long_exit = (not strong_trend) or breakdown_down
-        short_exit = (not strong_trend) or breakout_up
+        # Exit conditions: trend reversal or opposite Camarilla break
+        long_exit = (not uptrend) or breakdown_s4
+        short_exit = (not downtrend) or breakout_r4
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -133,14 +93,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DonchianBreakout_1dADX25_TrendFilter_Volume"
+name = "4h_Camarilla_R4_S4_Breakout_1dEMA50_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
