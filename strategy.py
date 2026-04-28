@@ -1,3 +1,9 @@
+# 12h_Camarilla_R3S3_Breakout_1wTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with 1w trend filter and volume confirmation
+# Targets breakouts in trending markets while filtering low-volume moves.
+# Uses only daily pivots and weekly EMA for robust structure across bull/bear cycles.
+# Designed for low trade frequency (target: 20-50/year) to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,46 +19,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily ATR(14)
+    # Calculate daily Camarilla pivot levels (R3, S3, R1, S1)
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pivot point
+    pivot_d = (high_d + low_d + close_d) / 3
+    range_d = high_d - low_d
+    
+    # Camarilla levels
+    r3_d = close_d + range_d * 1.1 / 2
+    s3_d = close_d - range_d * 1.1 / 2
+    r1_d = close_d + range_d * 1.1 / 4
+    s1_d = close_d - range_d * 1.1 / 4
+    
+    # Align to 12h timeframe
+    r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly EMA40 for trend filter
+    # Weekly EMA20 for trend filter
     close_1w_series = pd.Series(df_1w['close'].values)
-    ema40_1w = close_1w_series.ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: above average volume (30-period)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_d[i]) if i < len(atr_d) else True) or np.isnan(ema40_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -72,36 +89,22 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below weekly EMA40
-        trend_up = close[i] > ema40_1w_aligned[i]
-        trend_down = close[i] < ema40_1w_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
-        # Calculate current 6-bar range for volatility breakout
-        if i >= 5:
-            high_6bar = np.max(high[i-5:i+1])
-            low_6bar = np.min(low[i-5:i+1])
-            range_6bar = high_6bar - low_6bar
-            
-            # Volatility breakout: break above/below 6-bar range with expansion
-            upper_break = close[i] > high_6bar + 0.3 * atr_d[i] * (6/24)  # scale ATR to 6h
-            lower_break = close[i] < low_6bar - 0.3 * atr_d[i] * (6/24)
-            
-            # Entry conditions: volatility breakout with trend and volume
-            long_entry = upper_break and vol_filter and trend_up
-            short_entry = lower_break and vol_filter and trend_down
-        else:
-            long_entry = False
-            short_entry = False
+        # Entry conditions: 
+        # Long: break above daily S3 with upward trend and volume
+        # Short: break below daily R3 with downward trend and volume
+        long_breakout = close[i] > s3_d_aligned[i]
+        short_breakout = close[i] < r3_d_aligned[i]
         
-        # Exit conditions: opposite 3-bar extreme touch
-        if i >= 2:
-            low_3bar = np.min(low[i-2:i+1])
-            high_3bar = np.max(high[i-2:i+1])
-            long_exit = close[i] < low_3bar and position == 1
-            short_exit = close[i] > high_3bar and position == -1
-        else:
-            long_exit = False
-            short_exit = False
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
+        
+        # Exit conditions: opposite R1/S1 level touch
+        long_exit = (close[i] < s1_d_aligned[i]) and position == 1
+        short_exit = (close[i] > r1_d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -126,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolatilityBreakout_WeeklyTrend_Volume_Session"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
