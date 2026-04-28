@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
+    # Calculate 1d Camarilla pivot levels (H3/L3 for exits, H4/L4 for entries)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
     H4 = close_1d + (range_hl * 1.1 / 2)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -43,7 +43,7 @@ def generate_signals(prices):
     # Volume confirmation: current volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR-based volatility filter: avoid extreme volatility periods
+    # ATR-based volatility filter: avoid high volatility periods
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -76,7 +76,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
+        # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
         # Entry conditions: Camarilla H4/L4 breakout with volume, trend, and volatility filter
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_ATRFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
