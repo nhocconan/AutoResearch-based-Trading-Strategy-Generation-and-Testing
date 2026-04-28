@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_Filter_VolumeSpike
-Hypothesis: Use 4h Camarilla pivot (R1/S1) breakout for signal direction on 1h timeframe.
-Filter with 4h EMA50 trend and volume spike confirmation. 1h timeframe provides entry timing
-precision while 4h trend reduces whipsaw. Target 15-37 trades/year to stay within fee limits.
-Works in bull/bear markets by following 4h trend direction.
+12h_Alligator_T123_Gator_Bands
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe with Gator Bands and volume confirmation.
+Uses Alligator jaws (13-period SMMA shifted 8 bars), teeth (8-period SMMA shifted 5 bars), lips (5-period SMMA shifted 3 bars).
+Long when Lips > Teeth > Jaw (bullish alignment), short when Lips < Teeth < Jaw (bearish alignment).
+Adds Gator Bands (ATR-based bands around SMMA) for volatility filtering and volume spike confirmation.
+Designed for 12h timeframe to capture medium-term trends in both bull and bear markets.
+Target: 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(series, period):
+    """Smoothed Moving Average (SMMA) - also known as RMA or Wilder's MA"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    result = np.full_like(series, np.nan, dtype=float)
+    # First value is simple average
+    result[period-1] = np.mean(series[:period])
+    # Subsequent values: (prev * (period-1) + current) / period
+    for i in range(period, len(series)):
+        result[i] = (result[i-1] * (period-1) + series[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,90 +35,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1-day data for ATR calculation (for Gator Bands)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate ATR(14) on daily data for Gator Bands
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period volume MA for volume spike confirmation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 12h data for Alligator components
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # Calculate Alligator components (SMMA with specific periods and shifts)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    median_price_12h = (high_12h := (df_12h['high'].values + df_12h['low'].values) / 2)
+    jaw_raw = smma(median_price_12h, 13)
+    jaw = np.roll(jaw_raw, 8)  # Shift 8 bars forward
+    jaw[:8] = np.nan  # First 8 values invalid after shift
+    
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    teeth_raw = smma(median_price_12h, 8)
+    teeth = np.roll(teeth_raw, 5)  # Shift 5 bars forward
+    teeth[:5] = np.nan  # First 5 values invalid after shift
+    
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    lips_raw = smma(median_price_12h, 5)
+    lips = np.roll(lips_raw, 3)  # Shift 3 bars forward
+    lips[:3] = np.nan  # First 3 values invalid after shift
+    
+    # Align Alligator components to lower timeframe (12h -> 12h is identity but required for consistency)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Calculate Gator Bands: ATR-based bands around SMMA (using teeth as base)
+    # Using ATR from daily data scaled to 12h (approximate)
+    atr_scaled = atr_14 * np.sqrt(12/24)  # Scale daily ATR to 12h approximation
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_scaled)
+    
+    # Gator Bands: Upper and Lower bands around teeth
+    gator_upper = teeth_aligned + (atr_aligned * 1.5)
+    gator_lower = teeth_aligned - (atr_aligned * 1.5)
+    
+    # Volume confirmation: 20-period volume MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(gator_upper[i]) or np.isnan(gator_lower[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate 4h Camarilla pivot levels using previous day's OHLC
-        # Convert 1h index to 4h bar index
-        hour_4h_idx = i // 4  # 4 1h bars per 4h bar
-        # Convert to daily index: 6 4h bars per day
-        day_idx = hour_4h_idx // 6
-        if day_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_day_idx = day_idx - 1
-        if prev_day_idx >= len(df_4h):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC from 4h data (resampled daily)
-        # We need to get the OHLC for the previous day from 4h bars
-        start_bar = prev_day_idx * 6
-        end_bar = start_bar + 6
-        if end_bar > len(df_4h):
-            signals[i] = 0.0
-            continue
-            
-        # Get the 4h bars for previous day
-        day_high = np.max(df_4h['high'].iloc[start_bar:end_bar])
-        day_low = np.min(df_4h['low'].iloc[start_bar:end_bar])
-        day_close = df_4h['close'].iloc[end_bar - 1]  # Last 4h bar of previous day
+        # Alligator alignment conditions
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
         
-        # Camarilla levels
-        range_val = day_high - day_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        r1 = day_close + (range_val * 1.1 / 12)
-        s1 = day_close - (range_val * 1.1 / 12)
+        # Gator Bands conditions (price outside bands indicates strong trend)
+        price_above_upper = close[i] > gator_upper[i]
+        price_below_lower = close[i] < gator_lower[i]
         
-        # Trend direction from 4h EMA50
-        trend_up = close[i] > ema_50_4h_aligned[i]
-        trend_down = close[i] < ema_50_4h_aligned[i]
-        
-        # Volume confirmation: >2.0x 20-period MA
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
-        
-        # Breakout conditions
-        long_breakout = close[i] > r1
-        short_breakout = close[i] < s1
+        # Volume confirmation: >1.8x 20-period MA
+        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
         
         # Entry logic
-        long_entry = vol_confirm and trend_up and long_breakout
-        short_entry = vol_confirm and trend_down and short_breakout
+        long_entry = bullish_alignment and price_above_upper and vol_confirm
+        short_entry = bearish_alignment and price_below_lower and vol_confirm
         
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s1) or (not trend_up)
-        short_exit = (close[i] > r1) or (not trend_down)
+        # Exit logic: opposite alignment or price returns to teeth (middle line)
+        long_exit = (not bullish_alignment) or (close[i] < teeth_aligned[i])
+        short_exit = (not bearish_alignment) or (close[i] > teeth_aligned[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -115,14 +140,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Filter_VolumeSpike"
-timeframe = "1h"
+name = "12h_Alligator_T123_Gator_Bands"
+timeframe = "12h"
 leverage = 1.0
