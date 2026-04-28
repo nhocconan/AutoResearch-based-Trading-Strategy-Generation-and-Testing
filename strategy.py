@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Uses Camarilla R3/S3 levels (1.0x range) with 1d EMA34 trend filter and volume spike (2x 24-bar avg) to capture high-probability breakouts on 12h timeframe. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing strong directional moves. Works in both bull and bear by following 1d trend direction. Targets 50-150 total trades over 4 years.
+12h_Trix_Crossover_VolumeSpike_1dTrend
+Hypothesis: Uses TRIX (15-period) crossovers on 12h timeframe with 1d EMA34 trend filter and volume spike (2x 24-bar avg) to capture momentum shifts. TRIX filters noise and works in both bull/bear markets by following 1d trend. Targets 50-150 total trades over 4 years with low trade frequency to minimize fee drag.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -28,15 +28,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels (R3/S3: 1.0x range)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
-    R3 = typical_price + (range_ * 1.0 / 4)
-    S3 = typical_price - (range_ * 1.0 / 4)
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    # Calculate TRIX (15-period) on 12h close
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3 - np.roll(ema3, 1)
+    trix[0] = 0  # First value has no previous
     
     # Volume confirmation: >2x 24-period MA (4 days of 12h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -44,13 +42,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 to stabilize
+    start_idx = 45  # Wait for TRIX to stabilize (3*15)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
+            np.isnan(trix[i]) or
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -62,19 +59,22 @@ def generate_signals(prices):
         # Volume confirmation (>2x average)
         vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
         
-        # Breakout conditions at R3/S3
-        long_breakout = close[i] > R3_aligned[i] and vol_confirm and uptrend
-        short_breakout = close[i] < S3_aligned[i] and vol_confirm and downtrend
+        # TRIX crossover signals
+        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
         
-        # Exit conditions: return to midpoint of R3/S3
-        midpoint = (R3_aligned[i] + S3_aligned[i]) / 2
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Entry conditions
+        long_entry = trix_cross_up and vol_confirm and uptrend
+        short_entry = trix_cross_down and vol_confirm and downtrend
         
-        if long_breakout and position <= 0:
+        # Exit conditions: opposite TRIX cross
+        long_exit = trix_cross_down
+        short_exit = trix_cross_up
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
+name = "12h_Trix_Crossover_VolumeSpike_1dTrend"
 timeframe = "12h"
 leverage = 1.0
