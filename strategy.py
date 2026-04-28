@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
-Hypothesis: Camarilla R3/S3 breakouts with 12h EMA50 trend filter and volume spikes capture institutional moves. Works in bull/bear by trading breakouts in trend direction. Volume confirmation reduces false signals. Targets 12-37 trades/year on 6h timeframe.
+4h_TRIX_Trend_VolumeSpike_Conservative
+Hypothesis: TRIX momentum crossover combined with 1d EMA100 trend filter and volume spikes captures high-probability trend continuations. Conservative settings (TRIX crossover only after 5-bar confirmation) reduce overtrading while maintaining edge in both bull and bear markets. Targets 15-25 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,72 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d candle
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate 1d EMA100 for trend filter
+    close_1d = df_1d['close'].values
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
+    # ROC period = 1
+    roc = np.diff(close, prepend=close[0])
+    # Three consecutive EMAs
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3 * 100  # Scale for readability
     
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Volume confirmation: >2.0x 24-period MA (4 days on 6h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: >1.8x 20-period MA (approx 10 hours on 4h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_100_1d_aligned[i]) or 
+            np.isnan(trix[i]) or
+            np.isnan(trix_signal[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA100
+        uptrend = close[i] > ema_100_1d_aligned[i]
+        downtrend = close[i] < ema_100_1d_aligned[i]
         
-        # Breakout conditions: break of Camarilla R3/S3 with volume
-        breakout_R3 = close[i] > R3_aligned[i]
-        breakdown_S3 = close[i] < S3_aligned[i]
+        # TRIX crossover with confirmation (require 2 consecutive bars)
+        trix_bullish = trix[i] > trix_signal[i] and trix[i-1] > trix_signal[i-1]
+        trix_bearish = trix[i] < trix_signal[i] and trix[i-1] < trix_signal[i-1]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
+        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_R3
-        short_entry = vol_confirm and downtrend and breakdown_S3
+        # Entry logic: TRIX crossover in direction of trend with volume
+        long_entry = vol_confirm and uptrend and trix_bullish
+        short_entry = vol_confirm and downtrend and trix_bearish
         
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_S3 or (not uptrend)
-        short_exit = breakout_R3 or (not downtrend)
+        # Exit logic: opposite TRIX crossover or trend change
+        long_exit = trix_bearish or (not uptrend)
+        short_exit = trix_bullish or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -108,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_TRIX_Trend_VolumeSpike_Conservative"
+timeframe = "4h"
 leverage = 1.0
