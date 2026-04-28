@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation.
-# Enter long when price breaks above 1d Camarilla R3 level with volume > 1.8x average and close > 1d EMA34 (bullish bias).
-# Enter short when price breaks below 1d Camarilla S3 level with volume > 1.8x average and close < 1d EMA34 (bearish bias).
+# Hypothesis: 4h strategy using 1d Camarilla R3/S3 levels (breakout) with volume confirmation and 4h EMA50 trend filter.
+# Enter long when price breaks above 1d Camarilla R3 level with volume > 1.8x average and close > 4h EMA50 (bullish bias).
+# Enter short when price breaks below 1d Camarilla S3 level with volume > 1.8x average and close < 4h EMA50 (bearish bias).
 # Exit when price returns to the 1d Camarilla midpoint (P) or touches the opposite level (S3 for long exit, R3 for short exit).
-# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 50-150 total trades over 4 years.
+# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 100-180 total trades over 4 years.
 # Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
-# Uses 1d Camarilla for structure (more stable than lower TF) and 1d EMA34 for trend filter (reduces whipsaws).
-# This is a proven pattern: Camarilla pivot + volume spike + trend filter has shown strong test performance in DB.
+# Uses 1d Camarilla for structure (more stable than lower TF) and 4h EMA50 for trend filter (reduces whipsaws).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_4hEMA50_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,10 +25,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA34 (MTF structure and trend)
+    # Get 1d data for Camarilla pivot calculation (MTF structure)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels (using previous bar's OHLC)
@@ -51,14 +50,21 @@ def generate_signals(prices):
     r3 = camarilla_pivot + camarilla_range * 1.1 / 4
     s3 = camarilla_pivot - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 4h data for EMA50 trend filter (MTF trend)
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -73,16 +79,16 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d EMA34 bias
-        bullish_bias = close[i] > ema_34_1d_aligned[i]
-        bearish_bias = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: 4h EMA50 bias
+        bullish_bias = close[i] > ema_50_4h_aligned[i]
+        bearish_bias = close[i] < ema_50_4h_aligned[i]
         
         # Camarilla breakout conditions
         long_breakout = close[i] > r3_aligned[i]
