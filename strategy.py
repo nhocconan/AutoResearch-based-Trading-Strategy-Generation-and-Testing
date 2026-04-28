@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and pivot calculation
+    # Get 1d data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -21,64 +21,84 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    open_1d = df_1d['open'].values
     
-    # Daily EMA(34) for trend filter
+    # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily ATR(14) for volatility and position sizing
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate daily pivot points (standard)
+    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
-    R1 = pivot + (range_hl * 1.0)
-    S1 = pivot - (range_hl * 1.0)
-    R2 = pivot + (range_hl * 2.0)
-    S2 = pivot - (range_hl * 2.0)
+    H4 = close_1d + (range_hl * 1.1 / 2)
+    L4 = close_1d - (range_hl * 1.1 / 2)
+    H3 = close_1d + (range_hl * 1.1 / 4)
+    L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    # Align pivot levels to 12h
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Get 12h data for volume and volatility
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
+    
+    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Volume ratio (current 12h volume / 20-period average)
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    
+    # ATR(14) for volatility filter
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 14)
+    start_idx = max(100, 34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from daily EMA
+        # Trend filter from 1d EMA
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
+        # Volume filter: current 12h volume above average
+        volume_filter = volume_12h[i] > vol_ma_20_aligned[i]
+        
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_1d_aligned[i] > 0.005 * close[i]  # At least 0.5% ATR
+        vol_filter = atr_12h_aligned[i] > 0.001 * close[i]  # At least 0.1% ATR
         
-        # Entry conditions: pivot breakouts with trend and volatility filter
-        long_entry = uptrend and close[i] > R1_aligned[i] and vol_filter
-        short_entry = downtrend and close[i] < S1_aligned[i] and vol_filter
+        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
+        long_breakout = close[i] > H4_aligned[i]
+        short_breakout = close[i] < L4_aligned[i]
         
-        # Exit conditions: return to pivot or opposite S1/R1
-        long_exit = close[i] < pivot_aligned[i] or close[i] > R2_aligned[i]
-        short_exit = close[i] > pivot_aligned[i] or close[i] < S2_aligned[i]
+        long_entry = uptrend and long_breakout and volume_filter and vol_filter
+        short_entry = downtrend and short_breakout and volume_filter and vol_filter
+        
+        # Exit conditions: Camarilla H3/L3 retracement
+        long_exit = close[i] < H3_aligned[i]
+        short_exit = close[i] > L3_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -101,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1S1_Breakout_DailyEMA34"
-timeframe = "4h"
+name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
