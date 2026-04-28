@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot calculation
+    # Get daily data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -23,11 +23,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     open_1d = df_1d['open'].values
     
-    # 1d EMA(34) for trend filter
+    # Daily EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
+    # Calculate daily Camarilla pivot levels (H4/L4 for entries, H3/L3 for exits)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_hl = high_1d - low_1d
     H4 = close_1d + (range_hl * 1.1 / 2)
@@ -35,7 +35,7 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 4h
+    # Align pivot levels to 1h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -47,7 +47,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     volume_4h = df_4h['volume'].values
-    close_4h = df_4h['close'].values
     
     # Volume ratio (current 4h volume / 20-period average)
     vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
@@ -66,6 +65,9 @@ def generate_signals(prices):
     atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -81,7 +83,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
+        # Apply session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            # Outside session: maintain position but reduce exposure
+            if position == 1:
+                signals[i] = 0.10  # Reduced long exposure
+            elif position == -1:
+                signals[i] = -0.10  # Reduced short exposure
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Trend filter from daily EMA
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
@@ -104,10 +118,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -115,14 +129,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "1h_Camarilla_H4L4_Breakout_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
