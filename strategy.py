@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Uses 1w Donchian levels for strong weekly support/resistance.
-# Breakout above 1w Donchian upper (long) or below 1w Donchian lower (short) with volume spike (>1.5x 20-bar average).
-# 1w EMA50 as trend filter to avoid counter-trend trades in strong weekly trends.
-# Position size 0.30 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d (within proven winning range).
+# Hypothesis: 6h strategy using 1d Williams Alligator (jaw/teeth/lips) with 6h Donchian(20) breakout and volume confirmation.
+# Williams Alligator defines market regime: when lines are intertwined (chop) vs aligned (trend).
+# In choppy regimes (Alligator sleeping): fade Donchian breakouts at 20-period levels.
+# In trending regimes (Alligator awake): continue Donchian breakouts in direction of trend.
+# Uses 1d Alligator for higher-timeframe regime filter to reduce false breakouts on 6h.
+# Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h (within proven winning range).
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_Donchian20_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian levels and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Williams Alligator regime filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate 1w Donchian(20) levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    high_ma_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Williams Alligator: SMA(close, 13), SMA(close, 8), SMA(close, 5) with offsets
+    close_1d = df_1d['close'].values
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values  # Blue line
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values   # Red line
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values    # Green line
     
-    # Align Donchian levels to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, high_ma_20)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, low_ma_20)
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Alligator regime: TRUE when intertwined (chop/sleeping), FALSE when aligned (trend/awake)
+    # Chop condition: max - min of the three lines < 0.5% of price (tightly coiled)
+    max_line = np.maximum(np.maximum(jaw_aligned, teeth_aligned), lips_aligned)
+    min_line = np.minimum(np.minimum(jaw_aligned, teeth_aligned), lips_aligned)
+    alligator_range = max_line - min_line
+    price_level = (jaw_aligned + teeth_aligned + lips_aligned) / 3
+    chop_threshold = 0.005 * price_level  # 0.5% of price
+    is_chop = alligator_range < chop_threshold  # TRUE = chop/sleeping, FALSE = trend/awake
     
-    # Align EMA to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 6h Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d volume spike: >1.5x 20-bar average volume (moderate to balance frequency)
+    # Calculate 6h volume confirmation: >1.8x 30-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
+    volume_ma_30 = volume_series.rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > 1.8 * volume_ma_30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient history for indicators
+    start_idx = 100  # Ensure sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_30[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1w EMA50
-        above_ema = close[i] > ema_50_1w_aligned[i]
-        below_ema = close[i] < ema_50_1w_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i] and volume_spike[i]
+        short_breakout = close[i] < donchian_low[i] and volume_spike[i]
         
-        # Donchian breakout conditions with volume confirmation
-        long_breakout = close[i] > donchian_upper_aligned[i] and volume_spike[i]
-        short_breakout = close[i] < donchian_lower_aligned[i] and volume_spike[i]
-        
-        # Exit conditions: opposite Donchian level or trend reversal
-        long_exit = close[i] < donchian_lower_aligned[i] or below_ema
-        short_exit = close[i] > donchian_upper_aligned[i] or above_ema
+        # Regime-based logic
+        if is_chop[i]:  # Alligator sleeping -> chop regime -> fade breakouts
+            # In chop: fade Donchian breakouts (expect reversion to mean)
+            long_entry = short_breakout  # Short on upside breakout
+            short_entry = long_breakout  # Long on downside breakout
+            # Exit when price returns to Alligator midline (teeth)
+            long_exit = close[i] > teeth_aligned[i]
+            short_exit = close[i] < teeth_aligned[i]
+        else:  # Alligator awake -> trend regime -> continue breakouts
+            # In trend: continue Donchian breakouts in direction of Alligator alignment
+            # Determine trend direction from Alligator alignment (lips > teeth > jaw = uptrend)
+            is_uptrend = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+            is_downtrend = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+            long_entry = long_breakout and is_uptrend
+            short_entry = short_breakout and is_downtrend
+            # Exit when trend weakens (Alligator lines start to intertwine) or opposite Donchian breakout
+            long_exit = is_chop[i] or short_breakout
+            short_exit = is_chop[i] or long_breakout
         
         # Handle entries and exits
-        if long_breakout and above_ema and position <= 0:
-            signals[i] = 0.30
+        if long_entry and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_breakout and below_ema and position >= 0:
-            signals[i] = -0.30
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -91,9 +110,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
