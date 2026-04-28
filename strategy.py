@@ -1,10 +1,3 @@
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as dynamic support/resistance.
-# Breakouts above R1 or below S1 with volume confirmation and daily EMA34 trend filter capture
-# institutional moves. Works in bull/bear because it trades breakouts with trend alignment.
-# Low trade frequency due to strict breakout + volume + trend requirements.
-# Target: 20-50 trades/year per symbol.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -22,29 +15,38 @@ def generate_signals(prices):
     
     # Get 1d data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate 1d indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) on daily
-    # Formula: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    cam_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    cam_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Weekly pivot points from prior week
+    # Calculate prior week's high, low, close
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(5)  # Prior week's high
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(5)    # Prior week's low
+    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(5)  # Prior week's close
     
-    # EMA34 on daily for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate pivot and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # Align to 4h timeframe
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.8)
+    volume_surge = volume > (vol_ma_20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,26 +55,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions at Camarilla levels
-        breakout_up = close[i] > cam_r1_aligned[i]
-        breakout_down = close[i] < cam_s1_aligned[i]
-        
-        # Trend filter: price above/below 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
-        
         # Entry conditions
-        long_entry = breakout_up and trend_up and volume_surge[i]
-        short_entry = breakout_down and trend_down and volume_surge[i]
+        # Long: price crosses above S3 with volume surge (mean reversion from extreme)
+        long_entry = (close[i] > s3_aligned[i]) and (close[i-1] <= s3_aligned[i-1]) and volume_surge[i]
+        # Short: price crosses below R3 with volume surge (mean reversion from extreme)
+        short_entry = (close[i] < r3_aligned[i]) and (close[i-1] >= r3_aligned[i-1]) and volume_surge[i]
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: return to pivot or opposite extreme
+        long_exit = (close[i] < pivot_aligned[i]) or (close[i] > r3_aligned[i])
+        short_exit = (close[i] > pivot_aligned[i]) or (close[i] < s3_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_S3_R3_MeanReversion_Volume"
+timeframe = "6h"
 leverage = 1.0
