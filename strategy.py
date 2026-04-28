@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_WoodieCCI_Trend_Reversal_1wTrend
-Hypothesis: Woodie CCI (Commodity Channel Index) on daily timeframe identifies overbought/oversold conditions in trending markets. 
-Combined with 1-week EMA trend filter and volume confirmation to catch reversals in both bull and bear markets. 
-Target: 15-25 trades/year with strict entry conditions to minimize fee drag.
+1h_4HTrend_1DVolume_MeanReversion
+Hypothesis: Mean reversion on 1h during overextended moves against 4h trend, confirmed by 1d volume spike. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). Targets 20-35 trades/year.
 """
 
 import numpy as np
@@ -20,85 +18,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Woodie CCI on daily data (using daily high/low/close)
-    # First get daily data for CCI calculation
+    # Get 1d data for volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Typical Price for Woodie CCI
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    
-    # 14-period CCI (Woodie uses 14, not 20)
-    cci_period = 14
-    ma_tp = pd.Series(tp_1d).rolling(window=cci_period, min_periods=cci_period).mean()
-    md_tp = pd.Series(tp_1d).rolling(window=cci_period, min_periods=cci_period).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    
-    # Woodie CCI formula: (TP - SMA) / (0.015 * Mean Deviation)
-    cci_1d = (tp_1d - ma_tp.values) / (0.015 * md_tp.values)
-    
-    # Align CCI to 1d timeframe (already daily, but need to align to lower timeframe)
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d.values)
-    
-    # Volume confirmation: >1.3x 20-period MA on daily volume
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # 1d volume MA20 for spike detection
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # 1h RSI2 for mean reversion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(cci_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(rsi[i])):
+            signals[i] = 0.0
+            continue
         
-        # Woodie CCI signals: >100 overbought, <-100 oversold
-        cci_overbought = cci_1d_aligned[i] > 100
-        cci_oversold = cci_1d_aligned[i] < -100
+        # Trend and volume conditions
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        vol_spike = volume[i] > (2.0 * vol_ma_20_1d_aligned[i])
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (1.3 * vol_ma_20_1d_aligned[i])
+        # Mean reversion signals
+        rsi_oversold = rsi[i] < 20
+        rsi_overbought = rsi[i] > 80
         
-        # Entry logic: reversal from extreme CCI levels with volume, counter to weekly trend
-        # In uptrend, look for oversold (buy dip); in downtrend, look for overbought (sell rally)
-        long_entry = vol_confirm and cci_oversold and uptrend  # Buy dip in uptrend
-        short_entry = vol_confirm and cci_overbought and downtrend  # Sell rally in downtrend
+        # Entry: mean reversion in direction of trend with volume spike
+        long_entry = vol_spike and uptrend_4h and rsi_oversold
+        short_entry = vol_spike and downtrend_4h and rsi_overbought
         
-        # Exit logic: CCI returns to neutral zone or trend reversal
-        long_exit = (cci_1d_aligned[i] >= 0) or (not uptrend)
-        short_exit = (cci_1d_aligned[i] <= 0) or (not downtrend)
+        # Exit: RSI returns to neutral or trend change
+        long_exit = (rsi[i] > 50) or (not uptrend_4h)
+        short_exit = (rsi[i] < 50) or (not downtrend_4h)
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -107,16 +97,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             position = 0
         else:
-            # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WoodieCCI_Trend_Reversal_1wTrend"
-timeframe = "1d"
+name = "1h_4HTrend_1DVolume_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
