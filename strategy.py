@@ -44,7 +44,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_RSI_Volume_Session"
-timeframe = "12h"
+name = "4h_EMA34_RSI_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
