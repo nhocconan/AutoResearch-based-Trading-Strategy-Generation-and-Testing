@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels calculated from 1d data (R3/S3 for mean reversion fade, R4/S4 for breakout continuation)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels calculated from 1d data (R3/S3 for mean reversion exit, R4/S4 for breakout entry)
 # Only takes breakout trades in direction of 1d EMA34 trend with volume confirmation (>2.0x average)
 # Designed to work in both bull and bear markets by combining pivot structure with trend filter
-# Target: 12-37 trades/year via tight Camarilla breakout conditions + volume + trend filter
+# Target: 19-50 trades/year via tight Camarilla breakout conditions + volume + trend filter
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,9 +28,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # Using previous day's OHLC for current day's levels (no look-ahead)
+    # Calculate Camarilla levels from 1d OHLC (previous day's data to avoid look-ahead)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -39,23 +37,24 @@ def generate_signals(prices):
     high_1d_prev = np.roll(high_1d, 1)
     low_1d_prev = np.roll(low_1d, 1)
     close_1d_prev = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), but min_periods will handle alignment
     
-    # Calculate Camarilla levels
+    # Calculate Camarilla levels using previous day's OHLC
     camarilla_r4 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 2)
     camarilla_r3 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 4)
     camarilla_s3 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 4)
     camarilla_s4 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 2)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d Camarilla levels and EMA34 to 12h timeframe (completed 1d candles only)
+    # Align 1d Camarilla levels to 4h timeframe (completed 1d candles only)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: >2.0x 20-bar average volume
@@ -99,7 +98,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long - exit on stoploss or price falls below R3 (mean reversion)
-            # ATR-based stoploss: 2.5 * ATR below entry (using 12h ATR)
+            # ATR-based stoploss: 2.5 * ATR below entry (using 4h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
