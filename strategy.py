@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extremes with 1d EMA34 trend filter and volume confirmation.
-# Enter long when Williams %R < -80 (oversold), 1d EMA34 trending up, and volume > 1.5x 20-bar average.
-# Enter short when Williams %R > -20 (overbought), 1d EMA34 trending down, and volume > 1.5x 20-bar average.
-# Exit when Williams %R crosses above -50 for longs or below -50 for shorts.
-# Uses discrete position sizing (0.25) to balance return and fee drag.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based stoploss.
+# Enter long when price breaks above 20-period high + volume > 1.5x 20-bar average.
+# Enter short when price breaks below 20-period low + volume > 1.5x 20-bar average.
+# Exit on ATR(14) trailing stop: long exits when price < highest_high_since_entry - 2.5*ATR,
+# short exits when price > lowest_low_since_entry + 2.5*ATR.
+# Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
 # Target: 80-150 total trades over 4 years (20-38/year) to avoid excessive fee churn.
-# Williams %R identifies reversal points in ranging markets; EMA34 filters for 1d trend alignment; volume confirms momentum.
+# Donchian channels provide structural breakout levels; volume confirms breakout strength;
+# ATR stoploss adapts to volatility and limits drawdown in ranging/bear markets.
 
-name = "4h_WilliamsR_Extremes_1dEMA34_Trend_VolumeConfirm_v1"
+name = "4h_Donchian20_Breakout_VolumeConfirm_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,78 +27,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Align Williams %R to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Donchian(20) channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.5 * volume_ma_20
     
+    # ATR(14) for volatility and stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = max(34, 20)  # Ensure sufficient history for indicators
+    start_idx = max(20, 14)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 1d EMA34 trend: slope over 3 periods
-        if i >= 3:
-            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
-            ema_trend_up = ema_slope > 0
-            ema_trend_down = ema_slope < 0
-        else:
-            ema_trend_up = False
-            ema_trend_down = False
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Use previous bar's high to avoid look-ahead
+        breakout_down = close[i] < donchian_low[i-1]  # Use previous bar's low
         
-        # Williams %R conditions
-        wr = williams_r_aligned[i]
-        wr_oversold = wr < -80
-        wr_overbought = wr > -20
-        wr_exit_long = wr > -50  # Exit long when %R crosses above -50
-        wr_exit_short = wr < -50  # Exit short when %R crosses below -50
+        # ATR-based trailing stoploss
+        if position == 1:  # Long position
+            highest_since_entry = max(highest_since_entry, high[i])
+            exit_level = highest_since_entry - 2.5 * atr[i]
+            exit_long = close[i] < exit_level
+        elif position == -1:  # Short position
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            exit_level = lowest_since_entry + 2.5 * atr[i]
+            exit_short = close[i] > exit_level
+        else:
+            exit_long = False
+            exit_short = False
         
         # Handle entries and exits
-        if wr_oversold and ema_trend_up and vol_confirm and position <= 0:
+        if breakout_up and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif wr_overbought and ema_trend_down and vol_confirm and position >= 0:
+            entry_bar = i
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+        elif breakout_down and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif position == 1 and wr_exit_long:
+            entry_bar = i
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+        elif position == 1 and exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and wr_exit_short:
+        elif position == -1 and exit_short:
             signals[i] = 0.0
             position = 0
         else:
