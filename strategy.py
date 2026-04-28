@@ -37,13 +37,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume surge: current volume > 2.0x 20-period average (4h)
+    # Volume surge: current volume > 2.0x 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_surge = volume > (vol_ma_20 * 2.0)
     
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Volume_Surge20"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA34_Volume_Surge20"
+timeframe = "12h"
 leverage = 1.0
