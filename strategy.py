@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 12-hour Camarilla R1/S1 breakout with daily ADX trend filter and volume confirmation.
-# Uses 12h timeframe to capture multi-day moves while avoiding excessive trading.
-# Long when price breaks above R1 with ADX>25 and volume surge.
-# Short when price breaks below S1 with ADX>25 and volume surge.
-# Exit when price reverts to pivot or trend weakens.
-# Designed for 12h to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear markets by requiring strong trend (ADX>25) and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
+# Donchian breakouts capture breakouts from volatility contractions, which often precede strong moves.
+# EMA filter ensures we trade in the direction of the higher timeframe trend, avoiding counter-trend trades.
+# Volume confirmation ensures breakouts have institutional participation, reducing false breakouts.
+# Works in bull markets (catching uptrends) and bear markets (catching downtrends) by using EMA direction.
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
@@ -21,111 +20,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Pivot = (H+L+C)/3
-    # We use previous day's values to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA(50)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Shift by 1 to use previous day's data
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    close_prev = np.roll(close_1d, 1)
-    high_prev[0] = high_1d[0]  # First day uses same day
-    low_prev[0] = low_1d[0]
-    close_prev[0] = close_1d[0]
+    # Calculate Donchian channels (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot and levels
-    pivot = (high_prev + low_prev + close_prev) / 3
-    camarilla_range = (high_prev - low_prev) * 1.1 / 12
-    r1 = pivot + camarilla_range
-    s1 = pivot - camarilla_range
-    
-    # Calculate daily ADX (14-period) for trend filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    plus_di_smoothed = wilders_smoothing(plus_dm, 14)
-    minus_di_smoothed = wilders_smoothing(minus_dm, 14)
-    
-    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
-    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align daily data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 2.0x 24-period average (2 days)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (volume_ma * 2.0)
+    # Volume filter: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 24)  # Wait for sufficient warmup
+    start_idx = max(30, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: price above/below 12h EMA(50)
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Breakout conditions
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
-        
-        # Reversion conditions (exit when price returns to pivot area)
-        # We'll exit when price crosses back below R1 for longs or above S1 for shorts
-        # But also add a time-based exit or pivot reversion
+        # Donchian breakout conditions
+        breakout_up = high[i] > highest_high[i-1]  # Current high exceeds prior period's highest high
+        breakout_down = low[i] < lowest_low[i-1]   # Current low is below prior period's lowest low
         
         # Entry conditions with volume confirmation
-        long_entry = strong_trend and breakout_long and volume_filter[i]
-        short_entry = strong_trend and breakout_short and volume_filter[i]
+        long_entry = uptrend and breakout_up and volume_filter[i]
+        short_entry = downtrend and breakout_down and volume_filter[i]
         
-        # Exit conditions
-        # Exit long when price falls below R1 or trend weakens
-        long_exit = (not strong_trend) or (close[i] < r1_aligned[i]) or (position == 1 and close[i] < (r1_aligned[i] + s1_aligned[i])/2)
-        # Exit short when price rises above S1 or trend weakens
-        short_exit = (not strong_trend) or (close[i] > s1_aligned[i]) or (position == -1 and close[i] > (r1_aligned[i] + s1_aligned[i])/2)
+        # Exit conditions: when trend reverses or opposite breakout occurs
+        long_exit = (not uptrend) or breakout_down
+        short_exit = (not downtrend) or breakout_up
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -151,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dADX_TrendFilter_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_12hEMA50_TrendFilter_Volume"
+timeframe = "4h"
 leverage = 1.0
