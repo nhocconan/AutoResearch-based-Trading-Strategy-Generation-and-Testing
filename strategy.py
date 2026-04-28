@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,91 +13,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channel and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    # Get daily data for Donchian and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily Donchian channel (20)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA(21) for trend filter
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily ATR(14)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily Donchian channels (20)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily EMA(50) for trend filter
-    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily volume SMA(20) for confirmation
+    vol_sma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # Align weekly trend to daily
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Calculate average volume over 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily indicators to 1d timeframe (self-alignment)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20)
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Align to 1d timeframe (since we're using 1d timeframe)
+    # For 1d timeframe, we need to align to 1d bars
+    upper_aligned = upper_20_aligned
+    lower_aligned = lower_20_aligned
+    vol_sma_aligned = vol_sma_20_aligned
     
+    # Calculate signal only at daily close (we'll use close price)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
+    # Start after warmup
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr_aligned[i]) or
-            np.isnan(ema50_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema21_1w_aligned[i]) or 
+            np.isnan(upper_aligned[i]) or
+            np.isnan(lower_aligned[i]) or
+            np.isnan(vol_sma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Skip if outside session
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_aligned[i]
-        downtrend = close[i] < ema50_aligned[i]
+        # Trend filter: price above/below weekly EMA21
+        uptrend = close[i] > ema21_1w_aligned[i]
+        downtrend = close[i] < ema21_1w_aligned[i]
         
         # Volume filter: current volume above average
-        vol_filter = volume[i] > vol_ma[i]
+        vol_filter = volume[i] > vol_sma_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Breakout conditions
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
         
-        # Entry conditions
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: ATR-based stop or trend reversal
-        long_exit = False
-        short_exit = False
-        
-        if position == 1:
-            # Long exit: price drops below Donchian low OR trend reverses OR ATR stop
-            atr_stop = donchian_high_aligned[i] - 1.5 * atr_aligned[i]  # Trail from entry area
-            long_exit = (close[i] < donchian_low_aligned[i]) or (not uptrend) or (close[i] < atr_stop)
-        elif position == -1:
-            # Short exit: price rises above Donchian high OR trend reverses OR ATR stop
-            atr_stop = donchian_low_aligned[i] + 1.5 * atr_aligned[i]  # Trail from entry area
-            short_exit = (close[i] > donchian_high_aligned[i]) or (not downtrend) or (close[i] > atr_stop)
+        # Exit conditions: return to middle of channel or trend reversal
+        mid_channel = (upper_aligned[i] + lower_aligned[i]) / 2.0
+        long_exit = close[i] < mid_channel[i] or not uptrend
+        short_exit = close[i] > mid_channel[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA50_Volume_ATRStop"
-timeframe = "4h"
+name = "1d_Donchian20_WeeklyEMA21_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
