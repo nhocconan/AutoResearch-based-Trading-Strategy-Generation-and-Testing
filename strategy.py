@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter
-# Elder Ray measures bull/bear power vs EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND ADX > 25 (trending) AND EMA13 rising
-# Short when Bear Power < 0 AND ADX > 25 AND EMA13 falling
-# Uses 1d EMA13 for Elder Ray calculation and 1d ADX for regime filter
-# Exits when power reverses or ADX < 20 (range regime)
-# Designed to work in both bull and bear markets by adapting to trend strength via ADX
-# Target: 12-35 trades/year via strict trend + power confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels from 1d for structure, 1d EMA34 for primary trend filter, and volume spike (>2.0x 50-bar avg) for momentum
+# Exits on opposite Camarilla level touch (R4/S4) or ATR-based stoploss (2.0x)
+# Designed to capture strong trends while avoiding choppy markets via volume and trend filters
+# Target: 19-50 trades/year via tight Camarilla breakout conditions + volume + trend filter
 
-name = "6h_ElderRay_Power_1dADX25_Regime_EMA13Trend_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,113 +21,101 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # Get 1d data for Elder Ray and ADX calculation
+    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA13 on 1d close for Elder Ray
+    # Calculate EMA34 on 1d close for trend filter
     close_1d = pd.Series(df_1d['close'])
-    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA13 to 6h timeframe (completed 1d candles only)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Bull Power and Bear Power on 1d
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    # Calculate Camarilla pivot levels from 1d data
+    # Typical price = (high + low + close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Camarilla levels
+    R4 = typical_price + (df_1d['high'] - df_1d['low']) * 1.1 / 2
+    R3 = typical_price + (df_1d['high'] - df_1d['low']) * 1.1 / 4
+    S3 = typical_price - (df_1d['high'] - df_1d['low']) * 1.1 / 4
+    S4 = typical_price - (df_1d['high'] - df_1d['low']) * 1.1 / 2
     
-    # Align powers to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align Camarilla levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
     
-    # Calculate ADX on 1d for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    # ATR (14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed DM and ATR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_smooth
-    di_minus = 100 * dm_minus_smooth / atr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume confirmation: >2.0x 50-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_50 = volume_series.rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > 2.0 * volume_ma_50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 50  # Need sufficient history for ADX smoothing
+    start_idx = 50  # Need sufficient history for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema13_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma_50[i])):
             signals[i] = 0.0
             continue
         
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        ema13 = ema13_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        
-        # Check EMA13 trend direction (using 3-bar momentum)
-        if i >= 3:
-            ema13_rising = ema13_1d_aligned[i] > ema13_1d_aligned[i-3]
-            ema13_falling = ema13_1d_aligned[i] < ema13_1d_aligned[i-3]
-        else:
-            ema13_rising = False
-            ema13_falling = False
+        vol_confirm = volume_spike[i]
+        price = close[i]
+        r4 = R4_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        s4 = S4_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND ADX > 25 (strong trend) AND EMA13 rising
-            if bull > 0 and adx_val > 25 and ema13_rising:
+            # Long breakout: price breaks above R3 AND 1d EMA34 uptrend AND volume spike
+            if price > r3 and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND ADX > 25 (strong trend) AND EMA13 falling
-            elif bear < 0 and adx_val > 25 and ema13_falling:
+                entry_price = price
+            # Short breakout: price breaks below S3 AND 1d EMA34 downtrend AND volume spike
+            elif price < s3 and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on power reversal or weak trend
-            # Exit if Bull Power <= 0 OR ADX < 20 (losing trend strength) OR EMA13 falling
-            if bull <= 0 or adx_val < 20 or ema13_falling:
+        elif position == 1:  # Long - exit on stoploss or price touches S4 (opposite level)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or price < S4 (opposite level touch)
+            if price < stop_loss or price < s4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on power reversal or weak trend
-            # Exit if Bear Power >= 0 OR ADX < 20 OR EMA13 rising
-            if bear >= 0 or adx_val < 20 or ema13_rising:
+        elif position == -1:  # Short - exit on stoploss or price touches R4 (opposite level)
+            # ATR-based stoploss: 2.0 * ATR above entry
+            tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
+            tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
+            tr = np.maximum(np.maximum(tr1, tr2), tr3)
+            atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or price > R4 (opposite level touch)
+            if price > stop_loss or price > r4:
                 signals[i] = 0.0
                 position = 0
             else:
