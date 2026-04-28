@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,32 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily Donchian channels (20-day)
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly EMA(20) for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly EMA to 12h timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Align daily indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    # Calculate weekly RSI(14) for momentum filter
+    delta_1w = pd.Series(close_1w).diff()
+    gain_1w = delta_1w.clip(lower=0)
+    loss_1w = -delta_1w.clip(upper=0)
+    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w_values = rsi_1w.fillna(50).values
     
-    # Calculate 4h volume average (20-period)
+    # Align weekly RSI to 12h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    
+    # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
@@ -49,13 +50,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr14_aligned[i]) or
+        if (np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -65,24 +65,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR must be above its 50-period average (avoid low volatility)
-        atr_ma = pd.Series(atr14_aligned).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr14_aligned[i] > atr_ma[i]
+        # Trend filter: price above/below weekly EMA20
+        uptrend = close[i] > ema20_1w_aligned[i]
+        downtrend = close[i] < ema20_1w_aligned[i]
+        
+        # Momentum filter: RSI in favorable range
+        rsi_ok_long = rsi_1w_aligned[i] > 50
+        rsi_ok_short = rsi_1w_aligned[i] < 50
         
         # Volume filter: current volume above average
-        vol_filter_vol = volume[i] > vol_ma[i]
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Breakout conditions: price breaks daily Donchian levels
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Entry conditions: price crosses weekly EMA20 with momentum and volume
+        long_entry = (close[i] > ema20_1w_aligned[i] and 
+                     close[i-1] <= ema20_1w_aligned[i-1] and  # crossed above
+                     rsi_ok_long and vol_filter)
+        short_entry = (close[i] < ema20_1w_aligned[i] and 
+                      close[i-1] >= ema20_1w_aligned[i-1] and  # crossed below
+                      rsi_ok_short and vol_filter)
         
-        # Entry conditions: breakout with volume and volatility filters
-        long_entry = long_breakout and vol_filter and vol_filter_vol
-        short_entry = short_breakout and vol_filter and vol_filter_vol
-        
-        # Exit conditions: price returns to the opposite Donchian level
-        long_exit = close[i] < donchian_low_aligned[i]
-        short_exit = close[i] > donchian_high_aligned[i]
+        # Exit conditions: opposite crossover or momentum reversal
+        long_exit = (close[i] < ema20_1w_aligned[i] or 
+                    rsi_1w_aligned[i] < 40)
+        short_exit = (close[i] > ema20_1w_aligned[i] or 
+                     rsi_1w_aligned[i] > 60)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -107,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATR_VolumeFilter"
-timeframe = "4h"
+name = "12h_WeeklyEMA20_RSI_Momentum"
+timeframe = "12h"
 leverage = 1.0
