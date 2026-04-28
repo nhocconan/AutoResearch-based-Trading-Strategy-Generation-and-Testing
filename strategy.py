@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Fade_1dTrend
-Hypothesis: Fade at Camarilla R3/S3 levels on 6h with 1d EMA34 trend filter.
-In bull markets, buy dips to S3; in bear markets, sell rallies to R3.
-Uses volume confirmation to avoid false signals. Targets 20-40 trades/year.
-Works in both bull and bear via trend-adaptive mean reversion.
+4h_KAMA_Trend_RSI_And_Volume_Spice
+Hypothesis: 4h KAMA trend direction + RSI(14) pullback + volume spike confirmation.
+Uses KAMA for adaptive trend filtering, enters on RSI pullbacks with volume confirmation.
+Designed for fewer trades (15-30/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,72 +20,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) - trend filter
+    def kama(price, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(price, n=period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=1)
+        er = np.zeros_like(price)
+        er[period:] = change[period-1:] / (volatility[period-1:] + 1e-10)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(price)
+        kama[period] = price[period]
+        for i in range(period+1, len(price)):
+            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
+        return kama
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    kama_values = kama(close, period=10, fast=2, slow=30)
     
-    # Calculate 20-period volume MA for volume spike confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI(14)
+    def rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close_prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
+    
+    rsi_values = rsi(close, period=14)
+    
+    # Volume spike confirmation (2.0x 20-period average)
+    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma_20[:10] = np.nan
+    vol_ma_20[-10:] = np.nan
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_values[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla pivot levels for current day
-        # Need previous day's OHLC (1d data)
-        day_idx = i // 4  # 4 = 24h / 6h (6h bars per day)
-        if day_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_day_idx = day_idx - 1
-        if prev_day_idx >= len(df_1d):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC from 1d data
-        ph = df_1d['high'].iloc[prev_day_idx]
-        pl = df_1d['low'].iloc[prev_day_idx]
-        pc = df_1d['close'].iloc[prev_day_idx]
+        # KAMA trend direction
+        trend_up = close[i] > kama_values[i]
+        trend_down = close[i] < kama_values[i]
         
-        # Camarilla levels
-        range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)   # R3 = C + 1.1*(H-L)/4
-        s3 = pc - (range_val * 1.1 / 4)   # S3 = C - 1.1*(H-L)/4
+        # RSI conditions for pullback entries
+        rsi_oversold = rsi_values[i] < 30
+        rsi_overbought = rsi_values[i] > 70
         
-        # Trend direction from 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Entry logic: trend + RSI pullback + volume spike
+        long_entry = trend_up and rsi_oversold and vol_spike[i]
+        short_entry = trend_down and rsi_overbought and vol_spike[i]
         
-        # Volume confirmation: >1.5x 20-period MA
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Exit logic: opposite RSI extreme or trend reversal
+        long_exit = rsi_values[i] > 70 or not trend_up
+        short_exit = rsi_values[i] < 30 or not trend_down
         
-        # Fade logic: long at S3 in uptrend, short at R3 in downtrend
-        long_setup = close[i] <= s3 and trend_up and vol_confirm
-        short_setup = close[i] >= r3 and trend_down and vol_confirm
-        
-        # Exit logic: mean reversion to midpoint or trend breakdown
-        midpoint = (ph + pl) / 2
-        long_exit = close[i] >= midpoint or not trend_up
-        short_exit = close[i] <= midpoint or not trend_down
-        
-        if long_setup and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_setup and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -107,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Fade_1dTrend"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_And_Volume_Spice"
+timeframe = "4h"
 leverage = 1.0
