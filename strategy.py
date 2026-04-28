@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
-# Enter long when price breaks above 1d Camarilla R3 with volume spike and chop < 61.8 (trending regime).
-# Enter short when price breaks below 1d Camarilla S3 with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.30) to balance return and drawdown. Target: 20-50 trades/year.
-# Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, chop filter avoids ranging markets.
+# Hypothesis: 1d strategy using 1w Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
+# Enter long when price breaks above 1w Camarilla R3 with volume spike and chop < 61.8 (trending regime).
+# Enter short when price breaks below 1w Camarilla S3 with volume spike and chop < 61.8.
+# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 10-25 trades/year.
+# Camarilla levels from weekly timeframe provide strong structure, volume confirms breakout strength, chop filter avoids ranging markets.
 # Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
 
-name = "4h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_Volume_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for Camarilla pivots (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivots (using previous bar's high, low, close)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Camarilla pivots (using previous bar's high, low, close)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    n_1d = len(high_1d)
-    camarilla_r3 = np.full(n_1d, np.nan)
-    camarilla_s3 = np.full(n_1d, np.nan)
+    n_1w = len(high_1w)
+    camarilla_r3 = np.full(n_1w, np.nan)
+    camarilla_s3 = np.full(n_1w, np.nan)
     
-    for i in range(1, n_1d):
+    for i in range(1, n_1w):
         # Use previous bar to avoid look-ahead
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
+        phigh = high_1w[i-1]
+        plow = low_1w[i-1]
+        pclose = close_1w[i-1]
         pivot = (phigh + plow + pclose) / 3.0
         rng = phigh - plow
         camarilla_r3[i] = pivot + rng * 1.1 / 4.0
@@ -53,11 +53,11 @@ def generate_signals(prices):
     camarilla_r3 = pd.Series(camarilla_r3).ffill().values
     camarilla_s3 = pd.Series(camarilla_s3).ffill().values
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1w indicators to 1d timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
+    # Calculate 1d chop regime: EHLERS CHOPPINESS INDEX (14)
     def choppiness_index(high, low, close, length=14):
         atr_sum = np.zeros_like(close)
         true_range = np.zeros_like(close)
@@ -89,7 +89,7 @@ def generate_signals(prices):
     chop = choppiness_index(high, low, close, 14)
     chop_trending = chop < 61.8  # Trending regime when chop < 61.8
     
-    # Calculate 4h volume spike: >2.0x 20-bar average volume
+    # Calculate 1d volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -116,10 +116,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_breakout and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_breakout and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -127,9 +127,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
