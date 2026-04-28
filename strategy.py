@@ -50,7 +50,7 @@ def generate_signals(prices):
     # Weekly EMA21 for trend
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align Camarilla levels and weekly EMA to 6h timeframe
+    # Align Camarilla levels and weekly EMA to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     r4_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_w)
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_WeeklyContext_EMA21"
-timeframe = "6h"
+name = "4h_Camarilla_R4S4_WeeklyContext_EMA21"
+timeframe = "4h"
 leverage = 1.0
