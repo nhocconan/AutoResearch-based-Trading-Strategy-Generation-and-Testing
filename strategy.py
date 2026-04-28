@@ -13,34 +13,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for daily pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily pivot levels using previous day's data
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*Pivot - Low
-    r1 = 2 * pivot - low_1d
-    # S1 = 2*Pivot - High
-    s1 = 2 * pivot - high_1d
-    # R2 = Pivot + (High - Low)
-    r2 = pivot + (high_1d - low_1d)
-    # S2 = Pivot - (High - Low)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate daily pivot using last 2 days (24h)
+    high_2d = pd.Series(high_12h).rolling(window=2, min_periods=2).max()
+    low_2d = pd.Series(low_12h).rolling(window=2, min_periods=2).min()
+    close_2d = pd.Series(close_12h).rolling(window=2, min_periods=2).last()
     
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    pivot_daily = (high_2d + low_2d + close_2d) / 3.0
+    range_2d = high_2d - low_2d
+    r2_daily = pivot_daily + (range_2d * 0.5)  # R2 = Pivot + 0.5 * Range
+    s2_daily = pivot_daily - (range_2d * 0.5)  # S2 = Pivot - 0.5 * Range
     
-    # Align daily indicators to 12h timeframe
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    r2_daily_aligned = align_htf_to_ltf(prices, df_12h, r2_daily)
+    s2_daily_aligned = align_htf_to_ltf(prices, df_12h, s2_daily)
+    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Calculate volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,9 +56,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_12h[i]) or 
-            np.isnan(s2_12h[i]) or
-            np.isnan(ema50_12h[i]) or
+        if (np.isnan(r2_daily_aligned[i]) or 
+            np.isnan(s2_daily_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
@@ -71,22 +69,23 @@ def generate_signals(prices):
             continue
         
         # Trend filter: price above/below EMA50
-        uptrend = close[i] > ema50_12h[i]
-        downtrend = close[i] < ema50_12h[i]
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volume filter: current volume above 1.8x average
         vol_filter = vol_ratio[i] > 1.8
         
         # Breakout conditions: price breaks daily R2/S2 with volume and trend
-        long_breakout = close[i] > r2_12h[i]
-        short_breakout = close[i] < s2_12h[i]
+        long_breakout = close[i] > r2_daily_aligned[i]
+        short_breakout = close[i] < s2_daily_aligned[i]
         
         long_entry = long_breakout and uptrend and vol_filter
         short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: price returns to daily S2/R2 level or trend reverses
-        long_exit = close[i] < s2_12h[i] or not uptrend
-        short_exit = close[i] > r2_12h[i] or not downtrend
+        # Exit conditions: price returns to daily pivot level or trend reverses
+        pivot_daily_aligned = align_htf_to_ltf(prices, df_12h, pivot_daily)
+        long_exit = close[i] < pivot_daily_aligned[i] or not uptrend
+        short_exit = close[i] > pivot_daily_aligned[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -111,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_R2S2_Breakout_1dEMA50_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_DailyPivot_R2S2_Breakout_12hEMA50_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
