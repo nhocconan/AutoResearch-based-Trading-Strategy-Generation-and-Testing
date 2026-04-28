@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme reversal with volume confirmation and chop regime filter.
-# Enter long when 1d Williams %R < -80 (oversold) and price closes above 4h EMA20 with volume spike and chop < 61.8.
-# Enter short when 1d Williams %R > -20 (overbought) and price closes below 4h EMA20 with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
-# Williams %R provides mean-reversion edge from higher timeframe, volume confirms momentum, chop filter avoids ranging markets.
-# Works in bull (oversold bounces) and bear (overbought reversals) markets.
+# Hypothesis: 1d strategy using 1w Williams %R extreme readings with volume confirmation and ADX trend filter.
+# Enter long when weekly Williams %R < -80 (oversold) with volume spike and ADX > 25 (trending).
+# Enter short when weekly Williams %R > -20 (overbought) with volume spike and ADX > 25.
+# Uses discrete position sizing (0.30) to balance return and drawdown. Target: 15-25 trades/year.
+# Williams %R provides mean reversion edge in ranging markets, volume confirms participant interest,
+# ADX filter ensures we trade in trending conditions where reversals are more likely to sustain.
+# Works in bull (buy oversold dips) and bear (sell overbought rallies) markets.
 
-name = "4h_WilliamsR_1d_OversoldOverbought_Volume_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_Extreme_Volume_ADXFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,68 +25,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R (HTF)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for Williams %R (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Williams %R (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    n_1d = len(high_1d)
-    williams_r = np.full(n_1d, np.nan)
+    n_1w = len(high_1w)
+    williams_r = np.full(n_1w, np.nan)
     
-    for i in range(14, n_1d):
-        highest_high = np.max(high_1d[i-14:i+1])
-        lowest_low = np.min(low_1d[i-14:i+1])
+    for i in range(14, n_1w):
+        highest_high = np.max(high_1w[i-14:i+1])
+        lowest_low = np.min(low_1w[i-14:i+1])
         if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+            williams_r[i] = (highest_high - close_1w[i]) / (highest_high - lowest_low) * -100
         else:
             williams_r[i] = -50.0
     
-    # Align 1d Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Forward fill Williams %R
+    williams_r = pd.Series(williams_r).ffill().values
     
-    # Calculate 4h EMA20 for trend filter
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate 1d ADX (14-period) for trend strength
+    def calculate_adx(high, low, close, length=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            
+            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=length, adjust=False, min_periods=length).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=length, adjust=False, min_periods=length).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=length, adjust=False, min_periods=length).mean().values / atr
+        
+        dx = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
+        
+        adx = pd.Series(dx).ewm(span=length, adjust=False, min_periods=length).mean().values
+        return adx
     
-    # Calculate 4h chop regime: EHLERS CHOPPINESS INDEX (14)
-    def choppiness_index(high, low, close, length=14):
-        atr_sum = np.zeros_like(close)
-        true_range = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            true_range[i] = tr
-            if i >= length:
-                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
-            else:
-                atr_sum[i] = atr_sum[i-1] + tr
-        atr = atr_sum / length
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < length:
-                max_high[i] = np.max(high[:i+1])
-                min_low[i] = np.min(low[:i+1])
-            else:
-                max_high[i] = np.max(high[i-length+1:i+1])
-                min_low[i] = np.min(low[i-length+1:i+1])
-        chop = np.zeros_like(close)
-        for i in range(length-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
-            else:
-                chop[i] = 50.0
-        return chop
+    adx = calculate_adx(high, low, close, 14)
+    adx_trending = adx > 25  # Strong trend when ADX > 25
     
-    chop = choppiness_index(high, low, close, 14)
-    chop_trending = chop < 61.8  # Trending regime when chop < 61.8
-    
-    # Calculate 4h volume spike: >2.0x 20-bar average volume
+    # Calculate 1d volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
@@ -97,25 +93,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R extreme conditions with volume confirmation and chop filter
-        long_condition = williams_r_aligned[i] < -80 and close[i] > ema_20[i] and volume_spike[i] and chop_trending[i]
-        short_condition = williams_r_aligned[i] > -20 and close[i] < ema_20[i] and volume_spike[i] and chop_trending[i]
+        # Williams %R extreme conditions with volume confirmation and ADX trend filter
+        long_signal = williams_r[i] < -80 and volume_spike[i] and adx_trending[i]
+        short_signal = williams_r[i] > -20 and volume_spike[i] and adx_trending[i]
         
-        # Exit conditions: opposite extreme or EMA cross
-        long_exit = williams_r_aligned[i] > -20 or close[i] < ema_20[i]
-        short_exit = williams_r_aligned[i] < -80 or close[i] > ema_20[i]
+        # Exit conditions: Williams %R returns to neutral territory
+        long_exit = williams_r[i] > -50
+        short_exit = williams_r[i] < -50
         
         # Handle entries and exits
-        if long_condition and position <= 0:
-            signals[i] = 0.25
+        if long_signal and position <= 0:
+            signals[i] = 0.30
             position = 1
-        elif short_condition and position >= 0:
-            signals[i] = -0.25
+        elif short_signal and position >= 0:
+            signals[i] = -0.30
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -123,9 +119,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
