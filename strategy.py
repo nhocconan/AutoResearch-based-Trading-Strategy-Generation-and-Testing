@@ -1,10 +1,3 @@
-#2025-06-14: 4h RSI Mean Reversion with Volume Confirmation and Trend Filter
-#Hypothesis: RSI mean reversion works in both bull and bear markets when filtered by trend and volume.
-#In bull markets, buy oversold dips in uptrends; in bear markets, sell overbought rallies in downtrends.
-#Volume confirms conviction; RSI avoids chasing extremes.
-#Timeframe: 4h balances trade frequency (~20-50/year) and signal quality.
-#Uses 1d trend filter (EMA50) for multi-timeframe alignment.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,27 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for ATR and close
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # RSI(14) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily ATR(14)
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr14 = tr.rolling(window=14, min_periods=14).mean().values
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly EMA20 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,8 +49,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr14_aligned[i]) or np.isnan(ema20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,22 +66,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: above average volume
-        vol_filter = volume[i] > vol_ma[i]
+        # ATR filter: avoid extremely low volatility (choppy) conditions
+        atr_filter = atr14_aligned[i] > np.nanpercentile(atr14_aligned[max(0, i-100):i+1], 30)
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema50_1d_aligned[i]
-        trend_down = close[i] < ema50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: RSI < 30 (oversold) in uptrend + volume
-        # Short: RSI > 70 (overbought) in downtrend + volume
-        long_entry = (rsi[i] < 30) and vol_filter and trend_up
-        short_entry = (rsi[i] > 70) and vol_filter and trend_down
+        # Long: pullback to EMA in uptrend with sufficient volatility
+        # Short: rally to EMA in downtrend with sufficient volatility
+        long_entry = (close[i] <= ema20_1w_aligned[i] + 0.5 * atr14_aligned[i]) and trend_up and atr_filter
+        short_entry = (close[i] >= ema20_1w_aligned[i] - 0.5 * atr14_aligned[i]) and trend_down and atr_filter
         
-        # Exit conditions: RSI returns to neutral zone (40-60)
-        long_exit = (rsi[i] >= 40) and position == 1
-        short_exit = (rsi[i] <= 60) and position == -1
+        # Exit conditions: opposite EMA touch
+        long_exit = (close[i] >= ema20_1w_aligned[i]) and position == 1
+        short_exit = (close[i] <= ema20_1w_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -110,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_DailyTrend_Volume"
+name = "4h_EMAPullback_ATRFilter_WeeklyTrend_Session"
 timeframe = "4h"
 leverage = 1.0
