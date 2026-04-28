@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,25 +26,20 @@ def generate_signals(prices):
     # Calculate daily range for pivot calculations
     daily_range = high_1d - low_1d
     
-    # Calculate daily pivot levels (previous day)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = (2 * pivot) - low_1d
-    s1 = (2 * pivot) - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Camarilla pivot levels (based on previous day)
+    camarilla_r4 = close_1d + daily_range * 1.1 / 2
+    camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align pivot levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume filter: above average volume (24-period)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Daily EMA21 for trend
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,14 +47,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_21_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,15 +72,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions: 
-        # Long: price breaks above R3 with volume
-        # Short: price breaks below S3 with volume
-        long_entry = (close[i] > r3_aligned[i]) and vol_filter
-        short_entry = (close[i] < s3_aligned[i]) and vol_filter
+        # Daily trend filter: price above/below daily EMA21
+        price_above_daily_ema = close[i] > ema_21_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema_21_1d_aligned[i]
         
-        # Exit conditions: price returns to opposite S1/R1 levels
-        long_exit = close[i] < s1_aligned[i]
-        short_exit = close[i] > r1_aligned[i]
+        # Entry conditions: 
+        # Long: price breaks above daily R4 with volume and daily uptrend
+        # Short: price breaks below daily S4 with volume and daily downtrend
+        long_entry = (close[i] > r4_aligned[i]) and price_above_daily_ema and vol_filter
+        short_entry = (close[i] < s4_aligned[i]) and price_below_daily_ema and vol_filter
+        
+        # Exit conditions: price returns to opposite daily S4/R4 levels or trend reversal
+        long_exit = (close[i] < s4_aligned[i]) or (not price_above_daily_ema)
+        short_exit = (close[i] > r4_aligned[i]) or (not price_below_daily_ema)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -112,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R3S3_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_DailyContext_EMA21"
+timeframe = "4h"
 leverage = 1.0
