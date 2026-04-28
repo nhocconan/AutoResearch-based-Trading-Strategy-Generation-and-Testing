@@ -3,70 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R for overbought/oversold and 6h Donchian breakout for entry.
-# Williams %R identifies extremes (below -80 = oversold, above -20 = overbought) while Donchian breakout confirms momentum.
-# Works in bull (buy oversold breakouts in uptrend) and bear (sell overbought breakouts in downtrend) regimes.
-# Target: 50-150 trades over 4 years (12-37/year). Size: 0.25.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Donchian breakouts capture strong momentum moves. EMA50 on 1d ensures trading in direction of daily trend.
+# Volume spike (>1.5x 20-bar avg) confirms breakout strength. Works in bull (long breakouts above EMA50)
+# and bear (short breakouts below EMA50) regimes. Target: 75-200 trades over 4 years (19-50/year). Size: 0.25.
 
-name = "6h_WilliamsR1d_DonchianBreakout_Extreme_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Williams %R
+    # Get 1d data for EMA50 (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R(14)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero (when high == low)
-    williams_r_1d[highest_high_14 == lowest_low_14] = -50
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Williams %R to 6h
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # 4h ATR(14) for volume-adjusted breakout threshold (not used directly but for regime)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h Donchian(20) for breakout levels
+    # 4h Donchian(20) for breakout levels
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4h volume spike: >1.5x 20-bar average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 20  # Donchian(20) needs 20 bars
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(highest_high_20[i]) or
-            np.isnan(lowest_low_20[i])):
+            np.isnan(lowest_low_20[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions
-        oversold = williams_r_1d_aligned[i] < -80
-        overbought = williams_r_1d_aligned[i] > -20
+        # Trend filter: 1d EMA50 direction
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         # Breakout conditions
         long_breakout = close[i] > highest_high_20[i]
         short_breakout = close[i] < lowest_low_20[i]
         
-        long_entry = oversold and long_breakout
-        short_entry = overbought and short_breakout
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
+        
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
         # Exit: opposite Donchian breakout (10-bar for faster exit)
         highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
