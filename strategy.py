@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
-# Uses 4-hour Donchian channel (20-period high/low) for breakout signals.
-# Confirms with 1-day EMA(50) trend filter and volume spike (1.5x 20-period average).
-# Designed to capture strong trends while avoiding false breakouts in choppy markets.
-# Target: 20-50 trades per year (~80-200 over 4 years) to minimize fee drag.
+# Hypothesis: 4h Bollinger Bands squeeze breakout with 1d trend filter and volume confirmation.
+# Uses Bollinger Bands width to identify low volatility periods (squeeze), then breaks out in the direction
+# of the 1d EMA(50) trend. Volume confirmation (1.5x 20-period average) filters false breakouts.
+# Designed for 4h timeframe with ~50-150 total trades over 4 years to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -29,31 +28,33 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std_dev * bb_std)
+    lower_band = sma - (bb_std_dev * bb_std)
+    bb_width = upper_band - lower_band
     
-    # Volatility filter: ATR(14) for dynamic thresholds
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Band squeeze: width below 50-period average
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze = bb_width < bb_width_ma
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for EMA and Donchian
+    start_idx = max(bb_period, 50, 20)  # Wait for BB, EMA, and volume
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(sma[i]) or 
+            np.isnan(bb_std_dev[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_ma[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -61,20 +62,16 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous low
+        # Entry conditions: breakout from squeeze in trend direction with volume
+        long_breakout = close[i] > upper_band[i]
+        short_breakout = close[i] < lower_band[i]
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr[i] > np.mean(atr[max(0, i-30):i+1])  # Above recent average volatility
+        long_entry = squeeze[i] and long_breakout and uptrend and volume_confirm[i]
+        short_entry = squeeze[i] and short_breakout and downtrend and volume_confirm[i]
         
-        # Entry conditions
-        long_entry = breakout_up and uptrend and volume_spike[i] and vol_filter
-        short_entry = breakout_down and downtrend and volume_spike[i] and vol_filter
-        
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or (not uptrend)
-        short_exit = breakout_up or (not downtrend)
+        # Exit conditions: opposite breakout or loss of trend
+        long_exit = (close[i] < sma[i]) or (not uptrend)
+        short_exit = (close[i] > sma[i]) or (not downtrend)
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dEMA50_VolumeSpike"
+name = "4h_BollingerSqueeze_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
