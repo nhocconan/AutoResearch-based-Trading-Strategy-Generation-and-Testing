@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,93 +13,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context (ATR-based volatility filter)
+    # Get daily data for HTF context (Camarilla levels and volatility)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    
-    # Calculate daily ATR for volatility regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    
-    # ATR(14) - Daily volatility measure
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Weekly EMA21 for trend filter
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Calculate daily range for pivot calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    daily_range = high_1d - low_1d
     
-    # 4h Bollinger Bands (20, 2) for mean reversion signals
-    close_series = pd.Series(close)
-    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
+    # Daily Camarilla pivot levels (based on previous day)
+    camarilla_r3 = close_1d + daily_range * 1.1 / 4
+    camarilla_s3 = close_1d - daily_range * 1.1 / 4
     
-    # Hour filter: 8-20 UTC (most active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align Daily Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Weekly trend filter: price above/below weekly SMA20
+    close_1w_series = pd.Series(df_1w['close'].values)
+    sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    
+    # Volatility filter: daily ATR ratio (current vs 20-day average)
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
+    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
+    tr_1d = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_1d
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Hour filter: 0-24 UTC (trade all hours for 12h timeframe)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 200  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema21_1w_aligned[i]) or 
-            np.isnan(sma20[i]) or np.isnan(std20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(sma20_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Volatility filter: only trade when volatility is elevated (above average)
+        vol_filter = atr_ratio_aligned[i] > 1.0
         
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Trend filter: price above/below weekly SMA20
+        trend_up = close[i] > sma20_1w_aligned[i]
+        trend_down = close[i] < sma20_1w_aligned[i]
         
-        # Volatility filter: only trade when volatility is elevated (ATR > 1.5 * 50-period average)
-        atr_ma_50 = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr_14_aligned[i] > 1.5 * atr_ma_50[i] if not np.isnan(atr_ma_50[i]) else False
+        # Entry conditions: 
+        # Long: price breaks above daily R3 with volatility and trend up
+        # Short: price breaks below daily S3 with volatility and trend down
+        long_entry = (close[i] > r3_aligned[i]) and vol_filter and trend_up
+        short_entry = (close[i] < s3_aligned[i]) and vol_filter and trend_down
         
-        # Trend filter: price above/below weekly EMA21
-        trend_up = close[i] > ema21_1w_aligned[i]
-        trend_down = close[i] < ema21_1w_aligned[i]
-        
-        # Mean reversion signals: Bollinger Band touches
-        bb_touch_upper = close[i] >= upper_bb[i]
-        bb_touch_lower = close[i] <= lower_bb[i]
-        
-        # Entry conditions:
-        # Long: Price touches lower BB in uptrend with elevated volatility
-        # Short: Price touches upper BB in downtrend with elevated volatility
-        long_entry = bb_touch_lower and trend_up and vol_filter
-        short_entry = bb_touch_upper and trend_down and vol_filter
-        
-        # Exit conditions: Return to middle (SMA20) or opposite band touch
-        long_exit = close[i] >= sma20[i] or bb_touch_upper
-        short_exit = close[i] <= sma20[i] or bb_touch_lower
+        # Exit conditions: price returns to opposite daily S3/R3 levels
+        long_exit = (close[i] < s3_aligned[i])
+        short_exit = (close[i] > r3_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -124,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BB_Touch_Volatility_Trend_Filter"
-timeframe = "4h"
+name = "12h_DailyCamarilla_R3S3_WeeklyTrend_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
