@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
-# Donchian breakout provides objective trend-following entry with clear structure.
-# 1d EMA34 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume confirmation (>1.5x 20-bar average) filters weak breakouts.
-# Exit on opposite Donchian band touch or retracement to midpoint.
-# Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR regime filter + volume confirmation
+# Donchian breakouts capture trending moves; ATR regime filter avoids whipsaws in low volatility.
+# Volume confirmation ensures breakout legitimacy. Works in bull/bear by trading breakout direction.
+# Discrete position sizing (0.25) limits drawdown and fee churn.
 # Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConf_v1"
+name = "4h_Donchian20_Breakout_1dATR_Regime_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,23 +23,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -52,44 +54,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure sufficient history for Donchian and EMA
+    start_idx = max(lookback, 20)  # Ensure sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volatility regime: only trade when ATR is above its 50-period median (avoid low volatility chop)
+        if i >= 50:
+            atr_ma_50 = pd.Series(atr_1d_aligned[:i+1]).rolling(window=50, min_periods=50).median().iloc[-1]
+            vol_regime = atr_1d_aligned[i] > atr_ma_50
+        else:
+            vol_regime = True  # Not enough history for regime filter, allow trade
+        
         vol_confirm = volume_confirm[i]
-        
-        # 1d EMA trend filter
-        ema_trend_up = close[i] > ema_34_1d_aligned[i]
-        ema_trend_down = close[i] < ema_34_1d_aligned[i]
-        
         price = close[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > Donchian high, 1d EMA34 uptrend, volume confirm
-            if price > donchian_high[i] and ema_trend_up and vol_confirm:
+            # Long entry: Price breaks above Donchian high, volume confirm, volatility regime
+            if price > highest_high[i] and vol_confirm and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price < Donchian low, 1d EMA34 downtrend, volume confirm
-            elif price < donchian_low[i] and ema_trend_down and vol_confirm:
+            # Short entry: Price breaks below Donchian low, volume confirm, volatility regime
+            elif price < lowest_low[i] and vol_confirm and vol_regime:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on retracement to midpoint or below Donchian low
-            if price < donchian_mid[i] or price < donchian_low[i]:
+        elif position == 1:  # Long - exit on retracement to Donchian low
+            if price < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on retracement to midpoint or above Donchian high
-            if price > donchian_mid[i] or price > donchian_high[i]:
+        elif position == -1:  # Short - exit on retracement to Donchian high
+            if price > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
