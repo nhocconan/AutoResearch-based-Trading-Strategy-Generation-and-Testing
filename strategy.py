@@ -1,9 +1,10 @@
-# 4h_Stochastic_Momentum_Index_Signal_With_Volume_Confirmation
-# Hypothesis: SMI captures overbought/oversold momentum with less whipsaw than RSI. 
-# Uses SMI crosses at extreme levels (< -40 for long, > 40 for short) with volume confirmation and 
-# 1-day trend filter to align with higher timeframe momentum. Designed for 4h timeframe to 
-# balance trade frequency (~25-40 trades/year) and signal quality. Works in bull/bear markets 
-# by taking both long and short signals based on momentum extremes.
+#!/usr/bin/env python3
+"""
+1d_200EMA_RSI_Trend_Volume
+Hypothesis: Uses 200-day EMA for long-term trend direction, RSI(14) for momentum confirmation, and volume spikes for entry timing.
+Trades long when price is above 200EMA with RSI > 50 and volume spike, short when below 200EMA with RSI < 50 and volume spike.
+Designed to capture major trends while avoiding choppy markets. Targets 7-25 trades per year to minimize fee drag.
+"""
 
 import numpy as np
 import pandas as pd
@@ -19,67 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get 1-day data for 200EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50 for trend filter
+    # Calculate 1-day EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Stochastic Momentum Index (SMI) with length=10, smooth_k=3, smooth_d=3
-    # SMI = (Close - Median of HL range) / (0.5 * Range of HL) * 100, then smoothed
-    hl_range = high - low
-    hh = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    ll = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    diff = close - (hh + ll) / 2.0  # Distance from midpoint of HL range
-    abs_diff = np.abs(diff)
-    hl_range_sum = pd.Series(hh - ll).rolling(window=10, min_periods=10).sum().values
+    # Calculate RSI(14) on 1-day data
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
     
-    # Avoid division by zero
-    smi_raw = np.where(hl_range_sum != 0, (diff * 2) / hl_range_sum * 100, 0)
-    
-    # Smooth with double smoothing (3-period SMA twice)
-    smi_k = pd.Series(smi_raw).rolling(window=3, min_periods=3).mean().values
-    smi_d = pd.Series(smi_k).rolling(window=3, min_periods=3).mean().values
-    
-    # Calculate volume spike (>1.5x 20-period MA)
+    # Calculate volume spike (>1.5x 20-period MA for entry timing)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 200  # Wait for EMA200 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(smi_d[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 1-day EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend direction from 1-day EMA200
+        trend_up = close[i] > ema_200_1d_aligned[i]
+        trend_down = close[i] < ema_200_1d_aligned[i]
+        
+        # Momentum from RSI
+        rsi_bullish = rsi_1d_aligned[i] > 50
+        rsi_bearish = rsi_1d_aligned[i] < 50
         
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # SMI signals at extreme levels
-        smi_long_signal = smi_d[i] < -40 and smi_d[i-1] >= -40  # Cross above -40
-        smi_short_signal = smi_d[i] > 40 and smi_d[i-1] <= 40   # Cross below 40
-        
         # Entry logic:
-        # Long: SMI crosses above -40 (oversold recovery) with volume and uptrend
-        long_entry = vol_confirm and trend_up and smi_long_signal
-        # Short: SMI crosses below 40 (overbought rejection) with volume and downtrend
-        short_entry = vol_confirm and trend_down and smi_short_signal
+        # Long: Above 200EMA, RSI > 50, volume spike
+        long_entry = vol_confirm and trend_up and rsi_bullish
+        # Short: Below 200EMA, RSI < 50, volume spike
+        short_entry = vol_confirm and trend_down and rsi_bearish
         
-        # Exit logic: Opposite SMI extreme or trend reversal
-        long_exit = smi_d[i] > 20 or not trend_up  # Exit when SMI rises above 20 or trend down
-        short_exit = smi_d[i] < -20 or not trend_down  # Exit when SMI falls below -20 or trend up
+        # Exit logic: Opposite trend or RSI extreme
+        long_exit = not trend_up or rsi_1d_aligned[i] < 30  # Exit on trend change or oversold
+        short_exit = not trend_down or rsi_1d_aligned[i] > 70  # Exit on trend change or overbought
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Stochastic_Momentum_Index_Signal_With_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_200EMA_RSI_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
