@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
-Hypothesis: Camarilla pivot (R3/S3) breakout on 6h with 1d EMA34 trend filter and volume spike confirmation.
-Targets 15-35 trades/year to minimize fee drift. Works in bull via R3 breakouts and bear via S3 breakdowns.
+6h_KAMA_Trend_RSI_Filter_Volume
+Hypothesis: Kaufman's Adaptive Moving Average (KAMA) adapts to market noise, providing a dynamic trend filter.
+Combined with RSI extremes for mean reversion in ranging markets and volume confirmation for breakout strength.
+Works in both bull and bear markets by adapting trend sensitivity and using RSI for reversals.
+Targets 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -19,15 +21,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
+    # Get daily data for trend filter and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate KAMA on daily close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency ratio: |change| / sum(|changes|)
+    change = np.abs(np.diff(close_1d))
+    abs_change = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        if i >= 10:
+            direction = np.abs(close_1d[i] - close_1d[i-10])
+            volatility = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+            if volatility > 0:
+                er[i] = direction / volatility
+            else:
+                er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate RSI on daily close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend first 14 values as NaN (not enough data)
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,50 +73,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla pivot levels for current day
-        # Need previous day's OHLC (1d data)
-        day_idx = i // 4  # 4 = 24/6 (6h bars per day)
-        if day_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_day_idx = day_idx - 1
-        if prev_day_idx >= len(df_1d):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC from 1d data
-        ph = df_1d['high'].iloc[prev_day_idx]
-        pl = df_1d['low'].iloc[prev_day_idx]
-        pc = df_1d['close'].iloc[prev_day_idx]
+        # Trend direction from KAMA
+        trend_up = close[i] > kama_aligned[i]
+        trend_down = close[i] < kama_aligned[i]
         
-        # Camarilla levels
-        range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)
-        s3 = pc - (range_val * 1.1 / 4)
+        # RSI conditions: oversold (<30) or overbought (>70)
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
         
-        # Trend direction from 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
-        
-        # Volume confirmation: >2.0x 20-period MA
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
-        
-        # Breakout conditions
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
+        # Volume confirmation: >1.5x 20-period MA
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
         # Entry logic
-        long_entry = vol_confirm and trend_up and long_breakout
-        short_entry = vol_confirm and trend_down and short_breakout
+        long_entry = vol_confirm and rsi_oversold and trend_up
+        short_entry = vol_confirm and rsi_overbought and trend_down
         
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        # Exit logic: RSI returns to neutral range or trend reversal
+        long_exit = (rsi_aligned[i] > 50) or (not trend_up)
+        short_exit = (rsi_aligned[i] < 50) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -107,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
+name = "6h_KAMA_Trend_RSI_Filter_Volume"
 timeframe = "6h"
 leverage = 1.0
