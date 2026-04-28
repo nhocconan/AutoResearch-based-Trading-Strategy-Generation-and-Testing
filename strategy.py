@@ -32,13 +32,13 @@ def generate_signals(prices):
     r3_weekly = pivot_weekly + (range_5d * 1.1 / 2.0)
     s3_weekly = pivot_weekly - (range_5d * 1.1 / 2.0)
     
-    # Calculate weekly EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate weekly EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align weekly indicators to 12h timeframe
     r3_weekly_aligned = align_htf_to_ltf(prices, df_1d, r3_weekly)
     s3_weekly_aligned = align_htf_to_ltf(prices, df_1d, s3_weekly)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate average volume over 3 periods (1.5 days on 12h)
     vol_ma = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
@@ -57,7 +57,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(r3_weekly_aligned[i]) or 
             np.isnan(s3_weekly_aligned[i]) or
-            np.isnan(ema200_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,9 +67,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA200
-        uptrend = close[i] > ema200_aligned[i]
-        downtrend = close[i] < ema200_aligned[i]
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v8"
+name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA50_Volume_v9"
 timeframe = "12h"
 leverage = 1.0
