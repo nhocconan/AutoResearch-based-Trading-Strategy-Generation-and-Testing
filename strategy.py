@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume spike confirmation.
-# Uses Camarilla levels from 1d pivots for stronger structure with 4h EMA34 for trend.
-# Long when price breaks above R3 with volume and price > 4h EMA34 (uptrend).
-# Short when price breaks below S3 with volume and price < 4h EMA34 (downtrend).
-# Volume spike (>2.0x 12-bar average) confirms breakout strength.
+# Hypothesis: 4h strategy using 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla levels from 1d pivots for daily structure with 1w EMA34 for primary trend.
+# Long when price breaks above R3 with volume and price > 1w EMA34 (uptrend).
+# Short when price breaks below S3 with volume and price < 1w EMA34 (downtrend).
+# Volume spike (>2.0x 24-bar average) confirms breakout strength.
 # Session filter: 08-20 UTC to reduce noise trades outside active market hours.
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 80-120 total trades over 4 years = 20-30/year for 12h.
+# Target: 100-180 total trades over 4 years = 25-45/year for 4h.
 
-name = "12h_Camarilla_R3S3_4hEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,16 +37,16 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data for EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA34 for trend filter
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate 1d Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
@@ -61,14 +61,14 @@ def generate_signals(prices):
     R3 = pivot + range_1d * 1.1 / 4.0
     S3 = pivot - range_1d * 1.1 / 4.0
     
-    # Align to 12h timeframe (use previous 1d bar's levels)
+    # Align to 4h timeframe (use previous 1d bar's levels)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Calculate 12h volume spike: >2.0x 12-bar average volume (more conservative)
+    # Calculate 4h volume spike: >2.0x 24-bar average volume (more conservative)
     volume_series = pd.Series(volume)
-    volume_ma_12 = volume_series.rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > 2.0 * volume_ma_12
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,25 +77,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
-            np.isnan(volume_ma_12[i]) or
+            np.isnan(volume_ma_24[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h EMA34 direction (price above/below EMA34)
-        price_above_ema = close[i] > ema_34_4h_aligned[i]
-        price_below_ema = close[i] < ema_34_4h_aligned[i]
+        # Trend filter: 1w EMA34 direction (price above/below EMA34)
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
         # Camarilla breakout conditions with volume confirmation
         long_breakout = close[i] > R3_aligned[i] and volume_spike[i]
         short_breakout = close[i] < S3_aligned[i] and volume_spike[i]
         
         # Exit conditions: opposite Camarilla level or trend reversal
-        long_exit = close[i] < S3_aligned[i] or close[i] < ema_34_4h_aligned[i]
-        short_exit = close[i] > R3_aligned[i] or close[i] > ema_34_4h_aligned[i]
+        long_exit = close[i] < S3_aligned[i] or close[i] < ema_34_1w_aligned[i]
+        short_exit = close[i] > R3_aligned[i] or close[i] > ema_34_1w_aligned[i]
         
         # Handle entries and exits
         if long_breakout and price_above_ema and position <= 0:
