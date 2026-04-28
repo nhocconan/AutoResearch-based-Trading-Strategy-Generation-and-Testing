@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extremes with 1d EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. Long when %R crosses above -80 from below (oversold bounce),
-# short when %R crosses below -20 from above (overbought rejection). 1d EMA50 filters counter-trend trades.
-# Volume spike (>1.8x 20-bar average) confirms breakout strength. Position size 0.25 balances return and drawdown.
-# Designed to work in both bull (catching bounces in uptrend) and bear (fading rallies in downtrend) markets.
+# Hypothesis: 12h strategy using 1d Williams %R extreme levels with 1d EMA50 trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions on daily timeframe.
+# Long when %R crosses above -80 from below (oversold bounce) with volume spike and price above 1d EMA50.
+# Short when %R crosses below -20 from above (overbought rejection) with volume spike and price below 1d EMA50.
+# Volume spike >2.0x 20-bar average confirms momentum.
+# Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h (within proven winning range).
 
 name = "12h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
 timeframe = "12h"
@@ -38,8 +40,6 @@ def generate_signals(prices):
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Align Williams %R to 12h timeframe
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
@@ -50,10 +50,10 @@ def generate_signals(prices):
     # Align EMA to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h volume spike: >1.8x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume (stricter to reduce trade frequency)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,22 +68,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Williams %R conditions
+        williams_r_curr = williams_r_aligned[i]
+        williams_r_prev = williams_r_aligned[i-1]
+        
+        # Oversold bounce: %R crosses above -80 from below
+        oversold_bounce = (williams_r_prev <= -80) and (williams_r_curr > -80)
+        # Overbought rejection: %R crosses below -20 from above
+        overbought_rejection = (williams_r_prev >= -20) and (williams_r_curr < -20)
+        
         # Trend filter: price relative to 1d EMA50
         above_ema = close[i] > ema_50_1d_aligned[i]
         below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Williams %R extreme conditions with volume confirmation
-        # Long: %R crosses above -80 from below (exiting oversold)
-        williams_r_long_signal = williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80
-        # Short: %R crosses below -20 from above (exiting overbought)
-        williams_r_short_signal = williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20
-        
-        long_entry = williams_r_long_signal and volume_spike[i] and above_ema
-        short_entry = williams_r_short_signal and volume_spike[i] and below_ema
+        # Entry conditions with volume confirmation
+        long_entry = oversold_bounce and above_ema and volume_spike[i]
+        short_entry = overbought_rejection and below_ema and volume_spike[i]
         
         # Exit conditions: opposite Williams %R extreme or trend reversal
-        long_exit = williams_r_aligned[i] < -20 or below_ema  # Exit when overbought or trend turns down
-        short_exit = williams_r_aligned[i] > -80 or above_ema  # Exit when oversold or trend turns up
+        long_exit = (williams_r_curr >= -20) or below_ema
+        short_exit = (williams_r_curr <= -80) or above_ema
         
         # Handle entries and exits
         if long_entry and position <= 0:
