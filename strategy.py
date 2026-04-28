@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
-Hypothesis: 4-hour breakouts at daily-derived Camarilla R3/S3 levels with daily trend filter and volume confirmation. Targets 20-50 trades/year by requiring strong breakouts, daily trend alignment, and volume surge to reduce false signals and work in both bull and bear markets.
+4h_Keltner_Touch_WeeklyTrend_Volume
+Hypothesis: 4-hour touches at Keltner Channel bands with weekly trend filter and volume confirmation. Targets 20-50 trades/year by requiring price touches at volatility-based bands with trend alignment and volume surge. Works in both bull (long at lower band in uptrend) and bear (short at upper band in downtrend) markets.
 """
 
 import numpy as np
@@ -23,35 +23,32 @@ def generate_signals(prices):
     if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 4h bar
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    prev_close = df_4h['close'].shift(1).values
+    # Calculate Keltner Channel (20, 2.0) from 4h data
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
+    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean()
+    upper = ema_20 + (atr * 2.0)
+    lower = ema_20 - (atr * 2.0)
     
-    # Camarilla R3 and S3 levels (stronger support/resistance)
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align all higher timeframe data to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper.values)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower.values)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,25 +57,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R3 + daily uptrend + volume surge
-        long_entry = (close[i] > R3_aligned[i] and 
+        # Long: price touches lower band + weekly uptrend + volume surge
+        long_entry = (close[i] <= lower_aligned[i] and 
                      trend_up[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S3 + daily downtrend + volume surge
-        short_entry = (close[i] < S3_aligned[i] and 
+        # Short: price touches upper band + weekly downtrend + volume surge
+        short_entry = (close[i] >= upper_aligned[i] and 
                       trend_down[i] and 
                       volume_surge[i])
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
+        # Exit on opposite band touch with volume surge
+        long_exit = close[i] >= upper_aligned[i] and volume_surge[i]
+        short_exit = close[i] <= lower_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -103,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+name = "4h_Keltner_Touch_WeeklyTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
