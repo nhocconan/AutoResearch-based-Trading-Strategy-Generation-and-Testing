@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_With_WeeklyTrend_Filter
-Hypothesis: KAMA adapts to market noise, providing smooth trend direction. Combined with weekly trend filter (price > weekly SMA50 for longs, < for shorts), it avoids counter-trend trades in strong trends. Weekly filter reduces whipsaws in ranging markets, improving win rate in both bull and bear phases. Targets ~20 trades/year on 4h.
+4h_MACD_TrendFilter_12hVolumeSpike
+Hypothesis: MACD crossover aligned with 12h trend (EMA100) and confirmed by 12h volume spikes captures strong trend continuations with low frequency. Volume spikes filter out false breakouts, while the 12h EMA100 trend filter ensures trades align with the dominant trend. Targets 15-25 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -18,68 +18,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter and volume spike
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 100:
         return np.zeros(n)
     
-    # Calculate weekly SMA50 for trend filter
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Calculate 12h EMA100 for trend filter
+    close_12h = df_12h['close'].values
+    ema_100_12h = pd.Series(close_12h).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_100_12h)
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # needs correction
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 12h volume MA20 for volume spike detection
+    volume_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
-    # Volume confirmation: >1.5x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate MACD (12,26,9)
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    macd_signal = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - macd_signal
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma_50_1w_aligned[i]) or 
-            np.isnan(kama[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_100_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_12h_aligned[i]) or
+            np.isnan(macd_line[i]) or
+            np.isnan(macd_signal[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly SMA50
-        above_weekly = close[i] > sma_50_1w_aligned[i]
-        below_weekly = close[i] < sma_50_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA100
+        uptrend = close[i] > ema_100_12h_aligned[i]
+        downtrend = close[i] < ema_100_12h_aligned[i]
         
-        # KAMA direction: price above/below KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
+        # MACD crossover
+        macd_bullish = macd_line[i] > macd_signal[i] and macd_line[i-1] <= macd_signal[i-1]
+        macd_bearish = macd_line[i] < macd_signal[i] and macd_line[i-1] >= macd_signal[i-1]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Volume confirmation: >2.0x 20-period MA on 12h (significant spike)
+        vol_spike = volume[i] > (2.0 * vol_ma_20_12h_aligned[i])
         
-        # Entry logic: KAMA direction aligned with weekly trend + volume
-        long_entry = vol_confirm and above_weekly and above_kama
-        short_entry = vol_confirm and below_weekly and below_kama
+        # Entry logic: MACD crossover in direction of trend with volume spike
+        long_entry = vol_spike and uptrend and macd_bullish
+        short_entry = vol_spike and downtrend and macd_bearish
         
-        # Exit logic: opposite KAMA cross or weekly trend change
-        long_exit = below_kama or (not above_weekly)
-        short_exit = above_kama or (not below_weekly)
+        # Exit logic: opposite MACD crossover
+        long_exit = macd_bearish
+        short_exit = macd_bullish
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_With_WeeklyTrend_Filter"
+name = "4h_MACD_TrendFilter_12hVolumeSpike"
 timeframe = "4h"
 leverage = 1.0
