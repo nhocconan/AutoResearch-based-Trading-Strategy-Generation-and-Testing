@@ -43,10 +43,22 @@ def generate_signals(prices):
     # Volume confirmation: current volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR-based volatility filter: avoid high volatility periods
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Normalize ATR by price to get percentage
+    atr_pct = atr / close
+    atr_ma = pd.Series(atr_pct).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr_pct < (atr_ma * 1.5)  # Avoid extreme volatility
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(34, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -55,7 +67,8 @@ def generate_signals(prices):
             np.isnan(L4_aligned[i]) or
             np.isnan(vol_ma_20[i]) or
             np.isnan(H3_aligned[i]) or
-            np.isnan(L3_aligned[i])):
+            np.isnan(L3_aligned[i]) or
+            np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
@@ -66,12 +79,12 @@ def generate_signals(prices):
         # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
-        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
+        # Entry conditions: Camarilla H4/L4 breakout with volume, trend, and volatility filter
         long_breakout = close[i] > H4_aligned[i]
         short_breakout = close[i] < L4_aligned[i]
         
-        long_entry = uptrend and long_breakout and volume_filter
-        short_entry = downtrend and short_breakout and volume_filter
+        long_entry = uptrend and long_breakout and volume_filter and volatility_filter[i]
+        short_entry = downtrend and short_breakout and volume_filter and volatility_filter[i]
         
         # Exit conditions: Close below/above opposite Camarilla level (H3/L3 for exits)
         long_exit = close[i] < L3_aligned[i]
@@ -98,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v8"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_ATRFilter_v1"
 timeframe = "4h"
 leverage = 1.0
