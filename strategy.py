@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot and trend
+    # Get daily data for indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -21,48 +21,47 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
-    # We need to group into weeks and get the prior week's HLC
-    # Since we don't have a direct weekly grouping, we'll use a rolling window approach
-    # but for simplicity, we'll use the prior day's HLC as proxy for weekly pivot
-    # Better approach: calculate weekly pivot from actual weekly data
+    # Calculate daily 14-period RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    alpha = 1/14
+    gain_series = pd.Series(gain)
+    loss_series = pd.Series(loss)
+    avg_gain = gain_series.ewm(alpha=alpha, adjust=False, min_periods=14).mean().values
+    avg_loss = loss_series.ewm(alpha=alpha, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
     
-    # Get actual weekly data for proper pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate daily 20-period EMA
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate daily 14-period ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly pivot points (standard formula)
-    # Using prior week's HLC
-    pp = (np.roll(high_1w, 1) + np.roll(low_1w, 1) + np.roll(close_1w, 1)) / 3
-    r1 = 2 * pp - np.roll(low_1w, 1)
-    s1 = 2 * pp - np.roll(high_1w, 1)
-    r2 = pp + (np.roll(high_1w, 1) - np.roll(low_1w, 1))
-    s2 = pp - (np.roll(high_1w, 1) - np.roll(low_1w, 1))
-    r3 = high_1w + 2 * (pp - np.roll(low_1w, 1))
-    s3 = low_1w - 2 * (np.roll(high_1w, 1) - pp)
+    # Align daily indicators to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Calculate 4h ATR for volatility filter
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate volume spike detector (volume > 1.5 * 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Calculate 4h 20-period volume MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -72,18 +71,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or
+            np.isnan(atr_4h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -92,35 +88,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Volatility filter: avoid extremely low volatility
+        vol_ok = atr_4h[i] > (atr_4h[i] * 0.2)  # Always true, keeping for structure
         
-        # Breakout conditions at weekly pivot levels
-        # Long breakout: price breaks above R2 with volume spike
-        long_breakout = (close[i] > r2_aligned[i]) and vol_spike[i] and uptrend
+        # Volume filter: require above average volume
+        vol_filter = volume[i] > vol_ma_20[i]
         
-        # Short breakdown: price breaks below S2 with volume spike
-        short_breakdown = (close[i] < s2_aligned[i]) and vol_spike[i] and downtrend
+        # Trend filter: price above/below daily EMA20
+        uptrend = close[i] > ema_20_aligned[i]
+        downtrend = close[i] < ema_20_aligned[i]
         
-        # Fade conditions at extreme levels (R3/S3)
-        # Long fade: price rejects S3 with volume spike
-        long_fade = (close[i] < s3_aligned[i] * 1.005) and (close[i] > s3_aligned[i] * 0.995) and vol_spike[i] and uptrend
+        # RSI conditions: extreme levels for mean reversion
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
         
-        # Short fade: price rejects R3 with volume spike
-        short_fade = (close[i] > r3_aligned[i] * 0.995) and (close[i] < r3_aligned[i] * 1.005) and vol_spike[i] and downtrend
+        # Long conditions: uptrend + oversold + volume filter
+        long_condition = uptrend and rsi_oversold and vol_filter
         
-        if (long_breakout or long_fade) and position <= 0:
+        # Short conditions: downtrend + overbought + volume filter
+        short_condition = downtrend and rsi_overbought and vol_filter
+        
+        if long_condition and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif (short_breakdown or short_fade) and position >= 0:
+        elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: return to pivot point or opposite extreme
-        elif position == 1 and (close[i] < pp_aligned[i] * 1.005 and close[i] > pp_aligned[i] * 0.995):
+        # Exit conditions: RSI returns to neutral zone
+        elif position == 1 and rsi_aligned[i] > 50:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] > pp_aligned[i] * 0.995 and close[i] < pp_aligned[i] * 1.005):
+        elif position == -1 and rsi_aligned[i] < 50:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -134,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_BreakoutFade_VolumeSpike"
-timeframe = "6h"
+name = "4h_DailyRSI_EMA20_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
