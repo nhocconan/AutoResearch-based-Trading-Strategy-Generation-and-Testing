@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_RSI14_Band
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI(14) for overbought/oversold conditions.
-Goes long when price > KAMA and RSI < 30 (oversold), short when price < KAMA and RSI > 70 (overbought).
-Exits when price crosses back across KAMA.
-Designed to work in both bull and bear markets by following adaptive trend while avoiding extremes.
-Targets ~25-35 trades/year via KAMA trend filter and RSI extreme conditions.
+6h_Weekly_Pivot_Breakout_DailyTrend_VolumeFilter
+Hypothesis: Combines weekly pivot point breakouts with daily trend filter (EMA50) and volume confirmation (>1.8x average) to capture strong directional moves. Works in bull/bear by following daily trend direction. Weekly pivots provide stronger support/resistance than daily, reducing false breakouts. Targets 10-20 trades/year via strict weekly pivot breakout conditions.
 """
 
 import numpy as np
@@ -14,76 +10,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA (ER=10, FAST=2, SLOW=30) for trend
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Get daily data for trend filter and weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Smoothing constants
-    fast = 2.0
-    slow = 30.0
-    sc = (er * (2.0/(fast+1) - 2.0/(slow+1)) + 2.0/(slow+1)) ** 2
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start after 10 periods
-    for i in range(10, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate weekly pivot points (using prior week's data)
+    # Group daily data into weeks: Monday=0, Sunday=6
+    df_1d = df_1d.copy()
+    df_1d['week_start'] = df_1d.index - pd.to_timedelta(df_1d.index.weekday, unit='D')
+    weekly = df_1d.groupby('week_start').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    if len(weekly) < 2:
+        return np.zeros(n)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate pivot points for each week (using prior week's data)
+    weekly['pp'] = (weekly['high'].shift(1) + weekly['low'].shift(1) + weekly['close'].shift(1)) / 3
+    weekly['r1'] = 2 * weekly['pp'] - weekly['low'].shift(1)
+    weekly['s1'] = 2 * weekly['pp'] - weekly['high'].shift(1)
+    weekly['r2'] = weekly['pp'] + (weekly['high'].shift(1) - weekly['low'].shift(1))
+    weekly['s2'] = weekly['pp'] - (weekly['high'].shift(1) - weekly['low'].shift(1))
     
-    for i in range(14, n):
-        if not np.isnan(avg_gain[i-1]) and not np.isnan(avg_loss[i-1]):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
+    # Forward fill weekly values to daily index
+    weekly_indexed = weekly.set_index('week_start')
+    # Reindex to daily frequency, forward filling weekly values
+    daily_index = df_1d.index
+    pp_daily = weekly_indexed['pp'].reindex(daily_index, method='ffill').values
+    r1_daily = weekly_indexed['r1'].reindex(daily_index, method='ffill').values
+    s1_daily = weekly_indexed['s1'].reindex(daily_index, method='ffill').values
+    r2_daily = weekly_indexed['r2'].reindex(daily_index, method='ffill').values
+    s2_daily = weekly_indexed['s2'].reindex(daily_index, method='ffill').values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_daily)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_daily)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_daily)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_daily)
+    
+    # Volume confirmation: >1.8x 30-period MA (5 days of 6h bars)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Wait for RSI to stabilize
+    start_idx = 50  # Wait for EMA50 and weekly data to stabilize
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = close[i] > kama[i] and rsi[i] < 30
-        short_entry = close[i] < kama[i] and rsi[i] > 70
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Exit when price crosses KAMA
-        long_exit = close[i] < kama[i]
-        short_exit = close[i] > kama[i]
+        # Volume confirmation (>1.8x average)
+        vol_confirm = volume[i] > (1.8 * vol_ma_30[i])
         
-        if long_entry and position <= 0:
+        # Breakout conditions at weekly R2/S2 (stronger breakout signals)
+        long_breakout = close[i] > r2_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < s2_aligned[i] and vol_confirm and downtrend
+        
+        # Exit conditions: return to weekly pivot point
+        long_exit = close[i] < pp_aligned[i]
+        short_exit = close[i] > pp_aligned[i]
+        
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -103,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_RSI14_Band"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Breakout_DailyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
