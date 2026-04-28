@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyTrend_Pullback_VolumeSpike
-Hypothesis: Combines 6h Donchian breakout with weekly trend filter and volume confirmation.
-In trending markets (price above/below weekly 20-bar SMA), pullbacks to the 6h Donchian
-channel midpoint offer high-probability entries. Volume spike filters false breakouts.
-Works in both bull (buy pullbacks in uptrend) and bear (sell pullbacks in downtrend).
-Target: 20-40 trades/year.
+4h_Donchian20_12hTrend_Filter_VolumeSpike
+Hypothesis: Uses 20-period Donchian channel breakouts on 4h with 12h EMA50 trend filter and volume spike confirmation.
+This combines trend following with volatility breakouts, designed to work in both trending and ranging markets by
+only taking breakouts in the direction of the 12h trend. Volume spikes filter false breakouts. Targets ~25-35 trades/year.
 """
 
 import numpy as np
@@ -22,71 +20,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    sma20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate 4h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
-    # Volume spike: >1.5x 20-period MA on 6h
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma20)
+    # Calculate volume spike (>1.5x 20-period MA)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma20_1w_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
+        # Trend direction from 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Trend filter: price above/below weekly SMA20
-        uptrend = close[i] > sma20_1w_aligned[i]
-        downtrend = close[i] < sma20_1w_aligned[i]
-        
-        # Donchian breakout with pullback to midpoint
-        breakout_up = (high[i] > highest_high[i-1])  # broke above prior period high
-        breakout_down = (low[i] < lowest_low[i-1])   # broke below prior period low
-        pullback_to_mid = abs(close[i] - donchian_mid[i]) < (highest_high[i] - lowest_low[i]) * 0.1
+        # Donchian breakout conditions
+        breakout_up = high[i] > high_max_20[i-1]  # Break above previous high
+        breakout_down = low[i] < low_min_20[i-1]  # Break below previous low
         
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # Entry logic
-        long_entry = uptrend and breakout_up and pullback_to_mid and vol_confirm
-        short_entry = downtrend and breakout_down and pullback_to_mid and vol_confirm
+        # Entry logic: Only take breakouts in direction of 12h trend
+        long_entry = breakout_up and trend_up and vol_confirm
+        short_entry = breakout_down and trend_down and vol_confirm
         
-        # Exit: opposite Donchian breakout
-        long_exit = breakout_down
-        short_exit = breakout_up
+        # Exit logic: Opposite Donchian breakout or trend reversal
+        long_exit = breakout_down or not trend_up
+        short_exit = breakout_up or not trend_down
         
-        if (long_entry or (position == 1 and not long_exit)) and position <= 0:
-            signals[i] = 0.25
+        if long_entry and position <= 0:
+            signals[i] = 0.30
             position = 1
-        elif (short_entry or (position == -1 and not short_exit)) and position >= 0:
-            signals[i] = -0.25
+        elif short_entry and position >= 0:
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -97,14 +84,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_WeeklyTrend_Pullback_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_12hTrend_Filter_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
