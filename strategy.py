@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses Camarilla pivot levels calculated from 1d data (R3/S3 for mean reversion, R4/S4 for breakout)
-# Only takes breakout trades in direction of 1d EMA34 trend with volume confirmation (>1.8x average)
-# Designed for both bull and bear markets by combining pivot structure with trend filter
+# Only takes breakout trades in direction of 1d EMA34 trend with volume confirmation (>2.0x average)
+# Designed to work in both bull and bear markets by combining pivot structure with trend filter
 # Target: 20-50 trades/year via tight Camarilla breakout conditions + volume + trend filter
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,23 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA34 trend
+    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d OHLC (no look-ahead)
+    # Calculate Camarilla levels from 1d OHLC (previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's data
+    # Shift by 1 to use previous day's data (avoid look-ahead)
     high_1d_prev = np.roll(high_1d, 1)
     low_1d_prev = np.roll(low_1d, 1)
     close_1d_prev = np.roll(close_1d, 1)
-    # First element will be invalid but min_periods in alignment handles this
+    # First value will be invalid (rolled from last), but min_periods will handle alignment
     
-    # Calculate Camarilla levels
+    # Calculate Camarilla levels: R4, R3, S3, S4
     camarilla_r4 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 2)
     camarilla_r3 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 4)
     camarilla_s3 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 4)
@@ -51,17 +51,17 @@ def generate_signals(prices):
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'])
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -99,13 +99,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long - exit on stoploss or price falls below R3 (mean reversion)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
+            # ATR-based stoploss: 2.5 * ATR below entry (using 4h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.0 * atr_val
+            stop_loss = entry_price - 2.5 * atr_val
             # Exit on stoploss or price < R3 (mean reversion back to pivot)
             if price < stop_loss or price < r3:
                 signals[i] = 0.0
@@ -113,13 +113,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short - exit on stoploss or price rises above S3 (mean reversion)
-            # ATR-based stoploss: 2.0 * ATR above entry
+            # ATR-based stoploss: 2.5 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.0 * atr_val
+            stop_loss = entry_price + 2.5 * atr_val
             # Exit on stoploss or price > S3 (mean reversion back to pivot)
             if price > stop_loss or price > s3:
                 signals[i] = 0.0
