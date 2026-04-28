@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_20_12hEMA50_Volume_Trend
-Hypothesis: Breakout of 20-period Donchian channel on 4h timeframe with 12h EMA50 trend filter and volume confirmation.
-Works in bull markets by capturing upward breakouts and in bear markets by capturing downward breakouts.
-Volume surge confirms institutional participation. Targets 20-40 trades/year to minimize fee drag.
+6h_Aroon_Trend_WeeklyPivot_Filter
+Hypothesis: Use Aroon oscillator (25-period) to detect strong trends on 6h, filtered by weekly pivot direction (bullish/bearish bias from weekly high/low). 
+Aroon > 50 indicates bullish momentum, Aroon < -50 bearish. Weekly pivot adds higher timeframe bias to avoid counter-trend trades.
+Works in bull markets by catching strong uptrends with bullish weekly bias, and in bear markets by catching strong downtrends with bearish weekly bias.
+Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -12,93 +13,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channel on 4h data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate Aroon oscillator (25-period) on 6h data
+    period = 25
+    high_period = pd.Series(high).rolling(window=period, min_periods=period).apply(lambda x: x.argmax(), raw=True)
+    low_period = pd.Series(low).rolling(window=period, min_periods=period).apply(lambda x: x.argmin(), raw=True)
+    aroon_up = ((period - high_period) / period) * 100
+    aroon_down = ((period - low_period) / period) * 100
+    aroon_osc = aroon_up - aroon_down  # ranges from -100 to 100
+    
+    # Get weekly high/low for pivot bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Get 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Weekly bias: 1 if close > weekly midpoint (bullish), -1 if close < weekly midpoint (bearish)
+    weekly_mid = (weekly_high + weekly_low) / 2.0
+    weekly_bias = np.where(close[-1] > weekly_mid[-1], 1, -1)  # using latest weekly close for bias
+    # For historical alignment, we need to compute bias per week
+    # Simplify: use weekly close > weekly midpoint as bullish bias for that week
+    weekly_close = df_1w['close'].values
+    weekly_bias_raw = np.where(weekly_close > weekly_mid, 1, -1)
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_raw)
     
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align higher timeframe data to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    # Aroon oscillator aligned to 6h (already on 6h, no alignment needed)
+    aroon_osc_aligned = aroon_osc  # same index as prices
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_surge[i])):
+        if np.isnan(aroon_osc_aligned[i]) or np.isnan(weekly_bias_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
-        
-        # Trend filter: price above/below 12h EMA50
-        trend_up = close[i] > ema_50_12h_aligned[i]
-        trend_down = close[i] < ema_50_12h_aligned[i]
+        aroon = aroon_osc_aligned[i]
+        bias = weekly_bias_aligned[i]
         
         # Entry conditions
-        # Long: upward breakout + uptrend + volume surge
-        long_entry = breakout_up and trend_up and volume_surge[i]
-        # Short: downward breakout + downtrend + volume surge
-        short_entry = breakout_down and trend_down and volume_surge[i]
+        # Long: strong bullish momentum (Aroon > 50) + bullish weekly bias
+        long_entry = aroon > 50 and bias == 1
+        # Short: strong bearish momentum (Aroon < -50) + bearish weekly bias
+        short_entry = aroon < -50 and bias == -1
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: momentum weakening or bias flip
+        long_exit = aroon < 0 or bias == -1
+        short_exit = aroon > 0 or bias == 1
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.30  # Reverse to short
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.30   # Reverse to long
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_20_12hEMA50_Volume_Trend"
-timeframe = "4h"
+name = "6h_Aroon_Trend_WeeklyPivot_Filter"
+timeframe = "6h"
 leverage = 1.0
