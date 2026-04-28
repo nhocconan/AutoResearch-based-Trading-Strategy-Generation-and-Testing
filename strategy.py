@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Divergence_Trend_Filter_v1
-Hypothesis: Use RSI divergence on 1h timeframe with 4h EMA trend filter and volume confirmation to capture reversals in both bull and bear markets.
-Targets 20-40 trades/year by requiring multiple confirmations, reducing false signals and fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1
+Hypothesis: Use daily Camarilla R3/S3 levels as key support/resistance on 12h timeframe.
+Requires alignment with 1d EMA50 trend and volume surge (>2x 20-period average) for entry.
+Designed for low trade frequency (12-37/year) to minimize fee drag while capturing sustained moves
+in both bull and bear markets by requiring trend alignment and volume confirmation.
 """
 
 import numpy as np
@@ -11,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,85 +21,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for RSI calculation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 1h
-    delta = pd.Series(df_1h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    # Camarilla R3 and S3 levels
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Calculate EMA(50) on 4h
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1h RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi_values)
+    # Align all higher timeframe data to 12h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    h4_uptrend = close > ema_50_4h_aligned
-    h4_downtrend = close < ema_50_4h_aligned
+    d1_uptrend = close > ema_50_1d_aligned
+    d1_downtrend = close < ema_50_1d_aligned
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.8)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_surge[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish RSI divergence: price makes lower low, RSI makes higher low
-        bullish_div = False
-        if i >= 5:
-            # Look for recent swing low in price
-            if low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i-3] and low[i] < low[i-4]:
-                # Check if this is a lower low compared to 5 periods ago
-                if low[i] < low[i-5]:
-                    # Check if RSI is making a higher low
-                    if rsi_aligned[i] > rsi_aligned[i-5] and rsi_aligned[i] < 40:
-                        bullish_div = True
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R3 + daily uptrend + volume surge
+        long_entry = (close[i] > R3_aligned[i] and 
+                     d1_uptrend[i] and 
+                     volume_surge[i])
         
-        # Bearish RSI divergence: price makes higher high, RSI makes lower high
-        bearish_div = False
-        if i >= 5:
-            # Look for recent swing high in price
-            if high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i-3] and high[i] > high[i-4]:
-                # Check if this is a higher high compared to 5 periods ago
-                if high[i] > high[i-5]:
-                    # Check if RSI is making a lower high
-                    if rsi_aligned[i] < rsi_aligned[i-5] and rsi_aligned[i] > 60:
-                        bearish_div = True
+        # Short: price breaks below S3 + daily downtrend + volume surge
+        short_entry = (close[i] < S3_aligned[i] and 
+                      d1_downtrend[i] and 
+                      volume_surge[i])
         
-        # Entry conditions
-        # Long: bullish RSI divergence + 4h uptrend + volume surge
-        long_entry = bullish_div and h4_uptrend[i] and volume_surge[i]
-        
-        # Short: bearish RSI divergence + 4h downtrend + volume surge
-        short_entry = bearish_div and h4_downtrend[i] and volume_surge[i]
-        
-        # Exit on opposite signal
-        long_exit = bearish_div and volume_surge[i]
-        short_exit = bullish_div and volume_surge[i]
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < S3_aligned[i] and volume_surge[i]
+        short_exit = close[i] > R3_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -122,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_Trend_Filter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Control_v1"
+timeframe = "12h"
 leverage = 1.0
