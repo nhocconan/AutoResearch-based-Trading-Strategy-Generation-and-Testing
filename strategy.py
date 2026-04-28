@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_MultiTimeframe_Trend_Follow
-Hypothesis: Use 1w EMA200 trend filter with 1d Donchian breakout entries and volume confirmation.
-Works in bull markets by capturing upward breakouts above long-term trend and in bear markets by capturing downward breakouts below long-term trend.
-Volume surge confirms institutional participation. Targets 15-25 trades/year to minimize fee drag on daily timeframe.
+6h_Rayleigh_Trend_Filter
+Hypothesis: Use Elder Ray (Bull/Bear Power) with 12h EMA13 trend filter and volume confirmation on 6h timeframe.
+Elder Ray measures bull/bear power relative to EMA13. In bull markets, buy when bull power > 0 and rising.
+In bear markets, sell when bear power < 0 and falling. Volume surge confirms institutional participation.
+Targets 15-30 trades/year to minimize fee drag. Works in both bull and bear via trend-adaptive logic.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,17 +21,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channel on 1d data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray on 6h data
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 200-period EMA on 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Calculate 12h EMA13 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 13:
         return np.zeros(n)
     
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema13_12h = pd.Series(df_12h['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema13_12h)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,32 +43,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema13_12h_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        # Trend filter: price above/below 12h EMA13
+        trend_up = close[i] > ema13_12h_aligned[i]
+        trend_down = close[i] < ema13_12h_aligned[i]
         
-        # Trend filter: price above/below 1w EMA200
-        trend_up = close[i] > ema_200_1w_aligned[i]
-        trend_down = close[i] < ema_200_1w_aligned[i]
+        # Elder Ray conditions with slope (using 3-bar change)
+        bull_power_rising = bull_power[i] > bull_power[i-3]
+        bear_power_falling = bear_power[i] < bear_power[i-3]
         
         # Entry conditions
-        # Long: upward breakout + uptrend + volume surge
-        long_entry = breakout_up and trend_up and volume_surge[i]
-        # Short: downward breakout + downtrend + volume surge
-        short_entry = breakout_down and trend_down and volume_surge[i]
+        # Long: bull power > 0 AND rising AND uptrend + volume surge
+        long_entry = (bull_power[i] > 0) and bull_power_rising and trend_up and volume_surge[i]
+        # Short: bear power < 0 AND falling AND downtrend + volume surge
+        short_entry = (bear_power[i] < 0) and bear_power_falling and trend_down and volume_surge[i]
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: opposite Elder Ray signal or trend reversal
+        long_exit = (bear_power[i] < 0) or not trend_up
+        short_exit = (bull_power[i] > 0) or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -89,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_MultiTimeframe_Trend_Follow"
-timeframe = "1d"
+name = "6h_Rayleigh_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
