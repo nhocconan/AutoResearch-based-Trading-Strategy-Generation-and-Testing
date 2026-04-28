@@ -13,39 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and ATR-based channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
+    # Weekly EMA20 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate daily pivot points (P, S1, S2, S3, R1, R2, R3)
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pivot_d = (high_d + low_d + close_d) / 3
+    r1_d = 2 * pivot_d - low_d
+    s1_d = 2 * pivot_d - high_d
+    r2_d = pivot_d + (high_d - low_d)
+    s2_d = pivot_d - (high_d - low_d)
+    r3_d = high_d + 2 * (pivot_d - low_d)
+    s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Calculate daily channels: upper = close + 1.5*ATR, lower = close - 1.5*ATR
-    upper_channel = close_d + 1.5 * atr_14
-    lower_channel = close_d - 1.5 * atr_14
-    
-    # Align to 4h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align to daily timeframe
+    r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -81,22 +81,22 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema50_1w_aligned[i]
-        trend_down = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: break above daily upper channel with upward trend and volume
-        # Short: break below daily lower channel with downward trend and volume
-        long_breakout = close[i] > upper_channel_aligned[i]
-        short_breakout = close[i] < lower_channel_aligned[i]
+        # Long: break above daily S3 with upward trend and volume
+        # Short: break below daily R3 with downward trend and volume
+        long_breakout = close[i] > s3_d_aligned[i]
+        short_breakout = close[i] < r3_d_aligned[i]
         
         long_entry = long_breakout and vol_filter and trend_up
         short_entry = short_breakout and vol_filter and trend_down
         
-        # Exit conditions: opposite channel touch
-        long_exit = (close[i] < lower_channel_aligned[i]) and position == 1
-        short_exit = (close[i] > upper_channel_aligned[i]) and position == -1
+        # Exit conditions: opposite S1/R1 level touch
+        long_exit = (close[i] < s1_d_aligned[i]) and position == 1
+        short_exit = (close[i] > r1_d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyATR_Channel_Breakout_WeeklyEMA50_Volume_Session"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyPivot_S3_R3_Breakout_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
