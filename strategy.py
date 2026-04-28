@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,12 +15,12 @@ def generate_signals(prices):
     
     # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Daily high/low/close for pivot calculation
@@ -36,41 +36,41 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to daily timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # 4h trend filter: price above/below 4h EMA20
-    close_4h_series = pd.Series(df_4h['close'].values)
-    ema20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Weekly trend filter: price above/below weekly EMA20
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Hour filter: 0-23 UTC (trade all day for daily timeframe)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
+        # Session filter: trade all day for daily timeframe
         hour = hours[i]
-        in_session = 8 <= hour <= 20
+        in_session = True  # Trade all hours for daily timeframe
         
         if not in_session:
             # Outside session: flatten position
@@ -84,9 +84,9 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 4h EMA20
-        trend_up = close[i] > ema20_4h_aligned[i]
-        trend_down = close[i] < ema20_4h_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
         # Long: price breaks above R4 with volume and trend up
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4_S4_4hEMA20_Trend_Volume_Session"
-timeframe = "4h"
+name = "1d_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
