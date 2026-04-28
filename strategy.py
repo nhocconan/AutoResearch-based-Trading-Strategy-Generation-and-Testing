@@ -1,19 +1,9 @@
-# The strategy has been implemented based on the research and guidelines.
-# It uses a 4h timeframe with a combination of RSI, ATR, and volume.
-# The strategy is designed to work in both bull and bear markets by using
-# RSI for overbought/oversold conditions and ATR for volatility filtering.
-# The code follows all the rules: uses mtf_data for multi-timeframe data,
-# avoids look-ahead, uses discrete position sizes, and includes proper
-# risk management via trailing stop based on ATR.
-
 #!/usr/bin/env python3
 """
-4h_RSI_ATR_Volume_Combo
-Hypothesis: Combines RSI(14) for overbought/oversold signals, ATR(14) for volatility filtering,
-and volume confirmation to capture mean-reversion moves in both bull and bear markets.
-The strategy uses discrete position sizing (0.25) to minimize fee churn and includes
-an ATR-based trailing stop to manage risk. Designed for 4h timeframe to target
-20-40 trades per year, avoiding overtrading.
+1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend
+Hypothesis: Weekly pivot (R3/S3) breakout on daily chart with weekly trend filter and volume confirmation.
+Trades with the trend in both bull and bear markets using weekly EMA50 as trend filter.
+Targets 15-25 trades/year to minimize fee drift and work in bear markets.
 """
 
 import numpy as np
@@ -30,99 +20,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Get weekly data for pivot calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate ATR(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 20-period volume MA for volume confirmation
+    # Calculate 20-period volume MA for volume spike confirmation (using daily volume)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0
-    lowest_low_since_entry = 0
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: >1.5x 20-period MA
-        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
+        # Calculate weekly pivot levels for current week
+        # Need previous week's OHLC (weekly data)
+        week_idx = i // (7 * 24 * 4)  # Assuming 4h bars per day, 7 days per week
+        if week_idx < 1:
+            signals[i] = 0.0
+            continue
+            
+        prev_week_idx = week_idx - 1
+        if prev_week_idx >= len(df_1w):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous week's OHLC from weekly data
+        ph = df_1w['high'].iloc[prev_week_idx]
+        pl = df_1w['low'].iloc[prev_week_idx]
+        pc = df_1w['close'].iloc[prev_week_idx]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Weekly Camarilla R3/S3 levels (more extreme than R1/S1)
+        range_val = ph - pl
+        r3 = pc + (range_val * 1.1 / 4)  # R3 level
+        s3 = pc - (range_val * 1.1 / 4)  # S3 level
         
-        # ATR-based trailing stop parameters
-        atr_multiplier = 2.5
+        # Trend direction from weekly EMA50
+        trend_up = close[i] > ema_50_1w_aligned[i]
+        trend_down = close[i] < ema_50_1w_aligned[i]
         
-        if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            # Check for trailing stop hit
-            if high[i] < highest_high_since_entry - atr_multiplier * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                highest_high_since_entry = 0
-            # Check for RSI exit (overbought)
-            elif rsi_overbought:
-                signals[i] = 0.0
-                position = 0
-                highest_high_since_entry = 0
-            else:
-                signals[i] = 0.25  # Hold long position
-                
-        elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            # Check for trailing stop hit
-            if low[i] > lowest_low_since_entry + atr_multiplier * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                lowest_low_since_entry = 0
-            # Check for RSI exit (oversold)
-            elif rsi_oversold:
-                signals[i] = 0.0
-                position = 0
-                lowest_low_since_entry = 0
-            else:
-                signals[i] = -0.25  # Hold short position
-                
-        else:  # No position, look for entry
-            # Long entry: RSI oversold + volume confirmation
-            if rsi_oversold and vol_confirm:
+        # Volume confirmation: >2.0x 20-period MA
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        
+        # Breakout conditions (using R3/S3 for stronger signals)
+        long_breakout = close[i] > r3
+        short_breakout = close[i] < s3
+        
+        # Entry logic
+        long_entry = vol_confirm and trend_up and long_breakout
+        short_entry = vol_confirm and trend_down and short_breakout
+        
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = (close[i] < s3) or (not trend_up)
+        short_exit = (close[i] > r3) or (not trend_down)
+        
+        if long_entry and position <= 0:
+            signals[i] = 0.25
+            position = 1
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
+            position = -1
+        elif long_exit and position == 1:
+            signals[i] = 0.0
+            position = 0
+        elif short_exit and position == -1:
+            signals[i] = 0.0
+            position = 0
+        else:
+            # Hold position
+            if position == 1:
                 signals[i] = 0.25
-                position = 1
-                highest_high_since_entry = high[i]
-            # Short entry: RSI overbought + volume confirmation
-            elif rsi_overbought and vol_confirm:
+            elif position == -1:
                 signals[i] = -0.25
-                position = -1
-                lowest_low_since_entry = low[i]
             else:
-                signals[i] = 0.0  # Stay flat
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_RSI_ATR_Volume_Combo"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
