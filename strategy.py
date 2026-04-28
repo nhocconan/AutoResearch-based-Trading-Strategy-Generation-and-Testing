@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume spike confirmation.
+# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter, volume spike confirmation, and session filter.
 # Uses 1h primary timeframe targeting 15-37 trades/year (60-150 total over 4 years).
 # Camarilla H3/L3 from 4h provide institutional pivot points with proven edge.
 # 4h EMA50 filters for trend alignment, reducing counter-trend trades in bear markets.
