@@ -1,3 +1,8 @@
+# [Experiment 103188] Hypothesis: 12h Donchian(15) breakout with 1w EMA40 trend filter and volume confirmation
+# Targets 20-30 trades/year on 12h timeframe to avoid fee drift. Uses weekly trend for multi-timeframe alignment.
+# Works in bull via breakouts, in bear via filtering out counter-trend noise.
+# Volume and volatility filters prevent whipsaws in low-momentum regimes.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,97 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for HTF context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data once for HTF trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate 1w indicators
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d Williams %R (14) - momentum oscillator
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
+    # 1w Donchian channel (15) - tighter for fewer, higher-quality signals
+    donchian_high = pd.Series(high_1w).rolling(window=15, min_periods=15).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=15, min_periods=15).min().values
     
-    # 1d RSI (14) - momentum confirmation
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 1w EMA40 - smooth trend filter
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
     
-    # 1d EMA21 - trend filter
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 1d ATR14 - volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # 1w ATR14 - volatility filter
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    # Volume ratio for confirmation (20-period MA)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume_1d / vol_ma_1d
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Volume ratio for confirmation (20-period MA on weekly)
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume_1w / vol_ma_1w
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_40_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or
             np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions: oversold (< -80) for long, overbought (> -20) for short
-        wr_oversold = williams_r_aligned[i] < -80
-        wr_overbought = williams_r_aligned[i] > -20
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
-        # RSI conditions: not extreme, momentum confirmation
-        rsi_not_overbought = rsi_aligned[i] < 70
-        rsi_not_oversold = rsi_aligned[i] > 30
-        rsi_bullish = rsi_aligned[i] > 50
-        rsi_bearish = rsi_aligned[i] < 50
-        
-        # Trend filter: price above/below 1d EMA21
-        trend_up = close[i] > ema_21_1d_aligned[i]
-        trend_down = close[i] < ema_21_1d_aligned[i]
+        # Trend filter: price above/below 1w EMA40
+        trend_up = close[i] > ema_40_1w_aligned[i]
+        trend_down = close[i] < ema_40_1w_aligned[i]
         
         # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_aligned[i] > 0.005 * close[i]  # ATR > 0.5% of price
+        vol_filter = atr_14_aligned[i] > 0.006 * close[i]  # ATR > 0.6% of price
         
         # Volume confirmation: require above-average volume
         vol_confirm = vol_ratio_aligned[i] > 1.3
         
-        # Entry conditions - Williams %R mean reversion with trend filter
-        # Long: oversold Williams + bullish RSI + uptrend + vol filter + volume confirmation
-        long_entry = wr_oversold and rsi_bullish and trend_up and vol_filter and vol_confirm
-        # Short: overbought Williams + bearish RSI + downtrend + vol filter + volume confirmation
-        short_entry = wr_overbought and rsi_bearish and trend_down and vol_filter and vol_confirm
+        # Entry conditions - optimized for 12h timeframe
+        # Long: upward breakout + uptrend + vol filter + volume confirmation
+        long_entry = breakout_up and trend_up and vol_filter and vol_confirm
+        # Short: downward breakout + downtrend + vol filter + volume confirmation
+        short_entry = breakout_down and trend_down and vol_filter and vol_confirm
         
-        # Exit conditions: Williams %R reverses or trend changes
-        long_exit = (williams_r_aligned[i] > -50) or (not trend_up)
-        short_exit = (williams_r_aligned[i] < -50) or (not trend_down)
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or not trend_up
+        short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -128,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsRSI_MeanReversion_1dEMA21_Trend"
-timeframe = "6h"
+name = "12h_Donchian15_Breakout_1wEMA40_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
