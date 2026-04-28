@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_3BarLowHigh_Breakout_WeeklyTrend_Volume
-Hypothesis: On daily timeframe, enter long when price breaks above the 3-day high with volume surge and weekly uptrend, short when price breaks below the 3-day low with volume surge and weekly downtrend. Exit on opposite breakout with volume. Uses 3-bar high/low for shorter-term structure while weekly trend filter ensures trend alignment. Volume surge confirms institutional participation. Designed for low trade frequency (~10-25/year) to minimize fee decay in both bull and bear markets.
+1h_4h1dTrend_Momentum_Entry
+Hypothesis: Use 4h trend (EMA21>EMA50) and 1d trend (price>EMA50) as directional filters, enter on 1h momentum bursts when RSI crosses above 60 (long) or below 40 (short) with volume > 1.5x 20-period average. Exit on opposite RSI cross. Designed for low trade frequency (~15-35/year) by requiring multi-timeframe alignment and volume confirmation, reducing noise in choppy markets while capturing momentum in trending regimes.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,75 +18,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 21:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly 8 and 21 EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 4h EMA21 and EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly EMAs to daily timeframe
-    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
-    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
+    # Align 4h EMAs to 1h timeframe
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Weekly trend: bullish when EMA8 > EMA21
-    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
-    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
+    # 4h trend: bullish when EMA21 > EMA50
+    trend_4h_bull = ema21_4h_aligned > ema50_4h_aligned
+    trend_4h_bear = ema21_4h_aligned < ema50_4h_aligned
     
-    # Calculate 3-day high and low (using previous 3 days, not including current)
-    high_3d = pd.Series(high).rolling(window=3, min_periods=3).max().shift(1).values
-    low_3d = pd.Series(low).rolling(window=3, min_periods=3).min().shift(1).values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Volume confirmation: current volume > 2.0x 50-day average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_surge = volume > (vol_ma_50 * 2.0)
+    # Calculate 1d EMA50 for trend
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA50 to 1h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 1d trend: bullish when price > EMA50
+    trend_1d_bull = close > ema50_1d_aligned
+    trend_1d_bear = close < ema50_1d_aligned
+    
+    # 1h RSI(14) for momentum entry
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
-            np.isnan(high_3d[i]) or np.isnan(low_3d[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with weekly trend alignment and volume surge
-        long_entry = close[i] > high_3d[i] and weekly_uptrend[i] and volume_surge[i]
-        short_entry = close[i] < low_3d[i] and weekly_downtrend[i] and volume_surge[i]
+        # Entry conditions: multi-timeframe trend alignment + momentum + volume
+        long_entry = (trend_4h_bull[i] and trend_1d_bull[i] and 
+                      rsi[i] > 60 and rsi[i-1] <= 60 and volume_surge[i])
+        short_entry = (trend_4h_bear[i] and trend_1d_bear[i] and 
+                       rsi[i] < 40 and rsi[i-1] >= 40 and volume_surge[i])
         
-        # Exit on opposite 3-day break with volume surge
-        long_exit = close[i] < low_3d[i] and volume_surge[i]
-        short_exit = close[i] > high_3d[i] and volume_surge[i]
+        # Exit on opposite RSI cross
+        long_exit = rsi[i] < 40 and rsi[i-1] >= 40
+        short_exit = rsi[i] > 60 and rsi[i-1] <= 60
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.20  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.20   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_3BarLowHigh_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "1h_4h1dTrend_Momentum_Entry"
+timeframe = "1h"
 leverage = 1.0
