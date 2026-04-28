@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_WeeklyTrend_v2
-Hypothesis: KAMA trend following on 1d with weekly trend filter and volume confirmation.
-Uses KAMA to filter whipsaws and weekly trend to avoid counter-trend trades.
-Volume spike (>2x 20-bar MA) confirms momentum. Designed for low trade frequency
-(7-25 trades/year) to minimize fee drag while capturing strong trends.
-Works in both bull and bear markets by following weekly trend direction.
+6h_WeeklyPivot_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Use weekly pivot points (R3/S3) on 6s timeframe with 1d EMA34 trend filter and volume spike confirmation.
+Goes long when price breaks above weekly R3 in uptrend, short when breaks below weekly S3 in downtrend.
+Weekly pivots provide stronger support/resistance than daily, reducing false breakouts.
+Volume spike (>2x 20-bar MA) confirms institutional interest. Designed for low trade frequency
+(12-37 trades/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,42 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get weekly data for pivot points (using Friday's close as weekly close)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate KAMA on 1d (approximated via close prices)
-    # Efficiency ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.subtract(close[10:], close[:-10]))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # Will adjust below
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Proper ER calculation
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if i >= 10:
-            price_change = np.abs(close[i] - close[i-10])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
-            if volatility_sum > 0:
-                er[i] = price_change / volatility_sum
-            else:
-                er[i] = 0
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Standard formula: PP = (H + L + C) / 3
+    # R3 = H + 2*(PP - L) = 3*H - 2*L
+    # S3 = L - 2*(H - PP) = 3*L - 2*H
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Weekly R3 and S3
+    weekly_r3 = 3 * high_w - 2 * low_w
+    weekly_s3 = 3 * low_w - 2 * high_w
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align weekly levels to 6h timeframe
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_w, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_w, weekly_s3)
     
     # Volume confirmation: >2x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,30 +63,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(kama[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(weekly_r3_aligned[i]) or 
+            np.isnan(weekly_s3_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # KAMA trend
-        kama_uptrend = close[i] > kama[i]
-        kama_downtrend = close[i] < kama[i]
+        # Breakout conditions
+        breakout_r3 = close[i] > weekly_r3_aligned[i]
+        breakdown_s3 = close[i] < weekly_s3_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Entry: KAMA aligned with weekly trend + volume
-        long_entry = vol_confirm and weekly_uptrend and kama_uptrend
-        short_entry = vol_confirm and weekly_downtrend and kama_downtrend
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_r3
+        short_entry = vol_confirm and downtrend and breakdown_s3
         
-        # Exit: opposite KAMA signal or weekly trend change
-        long_exit = kama_downtrend or (not weekly_uptrend)
-        short_exit = kama_uptrend or (not weekly_downtrend)
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakdown_s3 or (not uptrend)
+        short_exit = breakout_r3 or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -117,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_Filter_WeeklyTrend_v2"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
