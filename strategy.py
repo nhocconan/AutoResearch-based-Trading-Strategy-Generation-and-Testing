@@ -13,41 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation (using Monday of week)
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data
-    # Group by week: Monday to Friday (assuming 5 trading days per week)
-    # We'll use the prior week's high, low, close for current week pivot
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Daily Donchian channels (20-day high/low)
+    high_20d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly high/low/close using 5-day rolling window (prior week)
-    # Using minimum 3 days to avoid NaN issues
-    high_wk = pd.Series(high_d).rolling(window=5, min_periods=3).max().shift(1).values
-    low_wk = pd.Series(low_d).rolling(window=5, min_periods=3).min().shift(1).values
-    close_wk = pd.Series(close_d).rolling(window=5, min_periods=3).last().shift(1).values
+    # Align to 12h timeframe
+    high_20d_aligned = align_htf_to_ltf(prices, df_1d, high_20d)
+    low_20d_aligned = align_htf_to_ltf(prices, df_1d, low_20d)
     
-    # Weekly pivot point
-    pivot_wk = (high_wk + low_wk + close_wk) / 3
-    range_wk = high_wk - low_wk
-    
-    # Weekly support/resistance levels (using pivot formula)
-    r1_wk = pivot_wk + (high_wk - low_wk)
-    s1_wk = pivot_wk - (high_wk - low_wk)
-    r2_wk = pivot_wk + 2 * (high_wk - low_wk)
-    s2_wk = pivot_wk - 2 * (high_wk - low_wk)
-    
-    # Align to 6h timeframe
-    r2_wk_aligned = align_htf_to_ltf(prices, df_1d, r2_wk)
-    s2_wk_aligned = align_htf_to_ltf(prices, df_1d, s2_wk)
-    r1_wk_aligned = align_htf_to_ltf(prices, df_1d, r1_wk)
-    s1_wk_aligned = align_htf_to_ltf(prices, df_1d, s1_wk)
-    
-    # Get weekly data for trend filter (1w)
+    # Get weekly data for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -57,11 +36,11 @@ def generate_signals(prices):
     ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above average volume (30-period)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Session filter: 0-24 UTC (trade all hours for 6h timeframe)
-    # No session filter for 6h to capture global movements
+    # Session filter: 8-20 UTC (most active trading hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,9 +49,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_wk_aligned[i]) or np.isnan(s2_wk_aligned[i]) or 
+        if (np.isnan(high_20d_aligned[i]) or np.isnan(low_20d_aligned[i]) or 
             np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
         # Volume filter: above average volume
@@ -83,17 +75,17 @@ def generate_signals(prices):
         trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: break above weekly S2 with upward trend and volume
-        # Short: break below weekly R2 with downward trend and volume
-        long_breakout = close[i] > s2_wk_aligned[i]
-        short_breakout = close[i] < r2_wk_aligned[i]
+        # Long: break above 20-day high with upward trend and volume
+        # Short: break below 20-day low with downward trend and volume
+        long_breakout = close[i] > high_20d_aligned[i]
+        short_breakout = close[i] < low_20d_aligned[i]
         
         long_entry = long_breakout and vol_filter and trend_up
         short_entry = short_breakout and vol_filter and trend_down
         
-        # Exit conditions: opposite R1/S1 level touch
-        long_exit = (close[i] < s1_wk_aligned[i]) and position == 1
-        short_exit = (close[i] > r1_wk_aligned[i]) and position == -1
+        # Exit conditions: opposite Donchian level touch
+        long_exit = (close[i] < low_20d_aligned[i]) and position == 1
+        short_exit = (close[i] > high_20d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -118,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S2R2_Breakout_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA20_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
