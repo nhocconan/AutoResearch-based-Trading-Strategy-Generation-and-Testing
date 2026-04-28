@@ -35,13 +35,13 @@ def generate_signals(prices):
     # Calculate weekly EMA200 for trend filter
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align weekly indicators to daily timeframe
+    # Align weekly indicators to 12h timeframe
     r3_weekly_aligned = align_htf_to_ltf(prices, df_1d, r3_weekly)
     s3_weekly_aligned = align_htf_to_ltf(prices, df_1d, s3_weekly)
     ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate average volume over 10 periods (10 days)
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Calculate average volume over 2 periods (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v6"
-timeframe = "1d"
+name = "12h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v5"
+timeframe = "12h"
 leverage = 1.0
