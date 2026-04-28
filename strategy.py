@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_TrueRangeBreakout_12hATR_Volume_Confirmation
-Hypothesis: Breakouts beyond true range with 12h ATR filter and volume confirmation capture strong momentum in both bull and bear markets.
-Uses tight entry conditions (breakout > 12h ATR) to limit trades (target 30-50/year) and reduce fee drag. Works by filtering out low-volatility breakouts
-and requiring volume surge, avoiding whipsaws in ranging conditions.
+1d_Donchian20_Breakout_1wTrend_Filter
+Hypothesis: Daily Donchian(20) breakouts with weekly trend filter capture major trend moves.
+Works in bull markets (breakouts to new highs) and bear markets (breakdowns to new lows).
+Weekly trend filter avoids counter-trend trades. Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -12,92 +12,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for ATR and trend
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate True Range and ATR(14) on 12h
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_12h = tr.rolling(window=14, min_periods=14).mean().values
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 12h EMA25 for trend filter
-    ema_25_12h = pd.Series(df_12h['close']).ewm(span=25, adjust=False, min_periods=25).mean().values
-    
-    # Align all higher timeframe data to 4h
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
-    
-    # Trend filter: price > EMA25 = bullish, < EMA25 = bearish
-    h12_uptrend = close > ema_25_12h_aligned
-    h12_downtrend = close < ema_25_12h_aligned
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Daily Donchian channels (20-period)
+    # Use pandas rolling for efficiency
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 20  # Need at least 20 days for Donchian
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(atr_12h_aligned[i]) or np.isnan(ema_25_12h_aligned[i]) or 
-            np.isnan(volume_surge[i])):
+        # Skip if weekly trend data not available
+        if np.isnan(ema_20_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: breakout beyond 12h ATR + trend alignment + volume surge
-        # Long: price breaks above high + ATR + trend + volume
-        long_entry = (close[i] > (high[i-1] + atr_12h_aligned[i]) and 
-                     h12_uptrend[i] and 
-                     volume_surge[i])
+        # Determine weekly trend
+        weekly_uptrend = close > ema_20_1w_aligned[i]
+        weekly_downtrend = close < ema_20_1w_aligned[i]
         
-        # Short: price breaks below low - ATR + trend + volume
-        short_entry = (close[i] < (low[i-1] - atr_12h_aligned[i]) and 
-                      h12_downtrend[i] and 
-                      volume_surge[i])
+        # Donchian breakout conditions
+        breakout_high = high[i] > donchian_high[i-1]  # Break above previous period's high
+        breakdown_low = low[i] < donchian_low[i-1]    # Break below previous period's low
         
-        # Exit on opposite breakout with volume surge
-        long_exit = close[i] < (low[i-1] - atr_12h_aligned[i]) and volume_surge[i]
-        short_exit = close[i] > (high[i-1] + atr_12h_aligned[i]) and volume_surge[i]
-        
-        if long_entry and position <= 0:
-            signals[i] = 0.25
+        # Entry logic: only trade in direction of weekly trend
+        if breakout_high and weekly_uptrend and position <= 0:
+            signals[i] = 0.30
             position = 1
-        elif short_entry and position >= 0:
-            signals[i] = -0.25
+        elif breakdown_low and weekly_downtrend and position >= 0:
+            signals[i] = -0.30
             position = -1
-        elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+        # Exit when price crosses back through the opposite Donchian level
+        elif position == 1 and low[i] < donchian_low[i-1]:
+            signals[i] = -0.30  # Reverse to short
             position = -1
-        elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+        elif position == -1 and high[i] > donchian_high[i-1]:
+            signals[i] = 0.30   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_TrueRangeBreakout_12hATR_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
