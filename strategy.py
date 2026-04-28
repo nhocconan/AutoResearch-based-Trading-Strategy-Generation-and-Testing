@@ -4,15 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h strategy using Donchian channel breakouts with 1d ADX trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band and 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Enter short when price breaks below Donchian(20) lower band and 1d ADX > 25 and volume > 1.5x 20-bar average.
+# Enter long when price breaks above Donchian(20) upper band and 1d ADX > 25 and volume > 2x 20-bar average.
+# Enter short when price breaks below Donchian(20) lower band and 1d ADX > 25 and volume > 2x 20-bar average.
 # Exit when price crosses Donchian midpoint or ADX < 20 (trend weakening).
-# Uses discrete position sizing (0.25) to reduce fee drag and improve risk-adjusted returns.
-# Target: 80-160 total trades over 4 years (20-40/year) to avoid fee drag.
+# Uses discrete position sizing (0.30) to balance risk and reward.
+# Target: 100-180 total trades over 4 years (25-45/year) to avoid fee drag.
 # Donchian channels provide clear breakout levels, ADX filters for trending markets, volume confirms conviction.
 # Works in both bull and bear markets by capturing strong directional moves.
 
-name = "4h_DonchianBreakout_1dADX25_VolumeConfirm_v2"
+name = "4h_DonchianBreakout_1dADX25_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -74,10 +74,10 @@ def generate_signals(prices):
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2
     
-    # Volume confirmation: >1.5x 20-bar average volume (less strict than 2x to increase trade frequency slightly)
+    # Volume confirmation: >2x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -108,10 +108,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if breakout_up and strong_trend and vol_confirm and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif breakout_down and strong_trend and vol_confirm and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -122,9 +122,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
