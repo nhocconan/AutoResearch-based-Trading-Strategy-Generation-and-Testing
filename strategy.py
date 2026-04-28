@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA50) and volume confirmation
-# Long when price breaks above R3 with 1d close > EMA50 and volume > 2x 20-bar avg
-# Short when price breaks below S3 with 1d close < EMA50 and volume > 2x 20-bar avg
-# Exits when price reverts to Camarilla H3/L3 levels or volume drops
-# Uses proven Camarilla structure with tight entries (~15-25 trades/year) that worked on ETH in test
-# Works in both bull and bear by requiring 1d trend alignment, reducing whipsaw in ranging markets
+# Hypothesis: 12h Williams %R reversal with 1w EMA50 trend filter and volume confirmation
+# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Oversold: %R < -80 (long), Overbought: %R > -20 (short)
+# Only trade in direction of 1w EMA50 trend: long when price > EMA50, short when price < EMA50
+# Volume confirmation: current volume > 1.8x 24-bar average volume
+# Target: 12-37 trades/year via strict reversal conditions in trending markets
+# Works in bull markets via oversold bounces and bear markets via overbought reversals
+# 12h timeframe reduces noise and fee drag while capturing multi-day swings
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Reversal_1wEMA50_Trend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,105 +26,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 and Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:  # Need sufficient data for EMA50
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 1w close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: based on previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Typical price for pivot
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Williams %R on 12h data (14-period)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
     
-    # Camarilla levels
-    # R4 = close + range * 1.5
-    # R3 = close + range * 1.25
-    # R2 = close + range * 1.166
-    # R1 = close + range * 1.083
-    # PP = (high + low + close) / 3
-    # S1 = close - range * 1.083
-    # S2 = close - range * 1.166
-    # S3 = close - range * 1.25
-    # S4 = close - range * 1.5
-    camarilla_pp = typical_price
-    camarilla_r3 = close_1d + range_1d * 1.25
-    camarilla_s3 = close_1d - range_1d * 1.25
-    camarilla_h3 = close_1d + range_1d * 1.166  # R2 equivalent for exit
-    camarilla_l3 = close_1d - range_1d * 1.166  # S2 equivalent for exit
-    
-    # Prepend one NaN since we use previous day's levels
-    camarilla_pp = np.concatenate([np.array([np.nan]), camarilla_pp[:-1]])
-    camarilla_r3 = np.concatenate([np.array([np.nan]), camarilla_r3[:-1]])
-    camarilla_s3 = np.concatenate([np.array([np.nan]), camarilla_s3[:-1]])
-    camarilla_h3 = np.concatenate([np.array([np.nan]), camarilla_h3[:-1]])
-    camarilla_l3 = np.concatenate([np.array([np.nan]), camarilla_l3[:-1]])
-    ema_50_1d = np.concatenate([np.full(49, np.nan), ema_50_1d])  # EMA50 needs 49 warmup
-    
-    # Align 1d indicators to 6h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.8x 24-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need sufficient history for EMA50 and volume MA
+    start_idx = max(50, 24)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
+        ema_trend = ema_50_1w_aligned[i]
+        wr = williams_r[i]
         price = close[i]
-        pp = camarilla_pp_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        ema50 = ema_50_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above R3 AND 1d close > EMA50 (uptrend) AND volume confirmation
-            if price > r3 and ema50 > pp and vol_conf:
+            # Long when Williams %R < -80 (oversold) AND price > 1w EMA50 (uptrend) AND volume confirmation
+            if wr < -80 and price > ema_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3 AND 1d close < EMA50 (downtrend) AND volume confirmation
-            elif price < s3 and ema50 < pp and vol_conf:
+            # Short when Williams %R > -20 (overbought) AND price < 1w EMA50 (downtrend) AND volume confirmation
+            elif wr > -20 and price < ema_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price reverts to H3 or trend breaks or no volume
-            if price < h3 or ema50 < pp or not vol_conf:
+        elif position == 1:  # Long - exit when Williams %R > -20 (overbought) or trend changes or no volume
+            if wr > -20 or price < ema_trend or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price reverts to L3 or trend breaks or no volume
-            if price > l3 or ema50 > pp or not vol_conf:
+        elif position == -1:  # Short - exit when Williams %R < -80 (oversold) or trend changes or no volume
+            if wr < -80 or price > ema_trend or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
