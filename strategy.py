@@ -28,18 +28,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points (standard floor pivot)
+    # Calculate pivot points (Camarilla formula)
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    range_ = high_1d - low_1d
+    r3 = close_1d + range_ * 1.1 / 4
+    s3 = close_1d - range_ * 1.1 / 4
+    r4 = close_1d + range_ * 1.1 / 2
+    s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Align pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Weekly trend filter: price above/below weekly EMA20
@@ -60,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
@@ -88,14 +89,14 @@ def generate_signals(prices):
         trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above R1 with volume and trend up
-        # Short: price breaks below S1 with volume and trend down
-        long_entry = (close[i] > r1_aligned[i]) and vol_filter and trend_up
-        short_entry = (close[i] < s1_aligned[i]) and vol_filter and trend_down
+        # Long: price breaks above R4 with volume and trend up
+        # Short: price breaks below S4 with volume and trend down
+        long_entry = (close[i] > r4_aligned[i]) and vol_filter and trend_up
+        short_entry = (close[i] < s4_aligned[i]) and vol_filter and trend_down
         
-        # Exit conditions: price returns to opposite S1/R1 levels
-        long_exit = (close[i] < s1_aligned[i])
-        short_exit = (close[i] > r1_aligned[i])
+        # Exit conditions: price returns to opposite S3/R3 levels
+        long_exit = (close[i] < s3_aligned[i])
+        short_exit = (close[i] > r3_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -120,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1S1_WeeklyEMA20_Trend_Volume_Session"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
