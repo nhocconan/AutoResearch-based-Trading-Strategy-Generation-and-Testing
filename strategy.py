@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
-# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1.
+# Hypothesis: 4h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+# Camarilla R3/S3 levels represent stronger support/resistance than R1/S1.
 # Breakout above R3 (resistance 3) with 1d EMA34 uptrend and volume spike = long.
 # Breakdown below S3 (support 3) with 1d EMA34 downtrend and volume spike = short.
 # Exit on retracement to pivot point (PP) or opposite Camarilla level (S3/R3).
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-# Requires alignment with 1d trend to work in both bull and bear markets.
-# Volume confirmation filters weak breakouts and increases edge.
+# Target: 75-200 total trades over 4 years (19-50/year).
+# 1d EMA34 provides smoother trend filter than 12h EMA50, reducing whipsaw.
+# Volume confirmation filters weak breakouts.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation (requires daily OHLC)
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
@@ -51,7 +51,7 @@ def generate_signals(prices):
     r3 = prior_close + (prior_high - prior_low) * 1.1 / 4.0
     s3 = prior_close - (prior_high - prior_low) * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h (they change only when 1d bar closes)
+    # Align Camarilla levels to 4h (they change only when 1d bar closes)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
