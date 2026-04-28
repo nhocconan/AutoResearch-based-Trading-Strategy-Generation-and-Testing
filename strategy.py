@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Vortex_Trend_Plus_Volume
-Hypothesis: 12h Vortex indicator (VI+ > VI-) confirms trend direction, combined with volume spike (>2x 20-period MA) for entry.
-Vortex catches trends early with less whipsaw than MA crossovers. Works in bull (VI+ > VI-) and bear (VI- > VI+) markets.
-Target: 15-25 trades/year to minimize fee drag while capturing sustained trends.
+4h_Donchian_20_Breakout_Volume_Trend
+Hypothesis: 4h price breaking above/below 20-period Donchian channel with volume confirmation and 1d EMA50 trend filter.
+Works in bull markets (long breakouts in uptrend) and bear markets (short breakdowns in downtrend).
+Donchian provides clear support/resistance, volume confirms breakout strength, trend filter avoids counter-trend trades.
+Target: 20-50 trades/year to minimize fee drag while capturing strong directional moves.
 """
 
 import numpy as np
@@ -20,42 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Vortex calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Vortex Indicator (VI) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Donchian channel (20-period high/low)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Vortex movements
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
-    
-    # Smooth over 14 periods (standard VI period)
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_14 / tr_14
-    vi_minus = vm_minus_14 / tr_14
-    
-    # Align VI to 12h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    
-    # Volume confirmation: >2x 20-period MA on 12h
+    # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,26 +45,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vi_plus_aligned[i]) or 
-            np.isnan(vi_minus_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction: VI+ > VI- for uptrend, VI- > VI+ for downtrend
-        uptrend = vi_plus_aligned[i] > vi_minus_aligned[i]
-        downtrend = vi_minus_aligned[i] > vi_plus_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_max[i-1]  # Break above previous period high
+        breakout_down = close[i] < low_min[i-1]  # Break below previous period low
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: trend alignment with volume
-        long_entry = vol_confirm and uptrend
-        short_entry = vol_confirm and downtrend
+        # Entry logic: breakout in direction of trend with volume
+        long_entry = vol_confirm and uptrend and breakout_up
+        short_entry = vol_confirm and downtrend and breakout_down
         
-        # Exit logic: trend reversal
-        long_exit = not uptrend  # VI- crosses above VI+
-        short_exit = not downtrend  # VI+ crosses above VI-
+        # Exit logic: opposite breakout or trend change
+        long_exit = breakout_down or (not uptrend)
+        short_exit = breakout_up or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Vortex_Trend_Plus_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
