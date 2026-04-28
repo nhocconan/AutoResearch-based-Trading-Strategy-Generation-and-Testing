@@ -18,10 +18,10 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(20) for trend filter
+    # 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 4h data for Donchian breakout signals
     df_4h = get_htf_data(prices, '4h')
@@ -37,25 +37,25 @@ def generate_signals(prices):
     donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
     donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # Volume confirmation: current volume > 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma * 1.5
+    # Volume confirmation: current volume > 1.8x average volume
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(34, 30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter from 1d EMA
-        uptrend = close[i] > ema_20_1d_aligned[i]
-        downtrend = close[i] < ema_20_1d_aligned[i]
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Breakout conditions: price breaks Donchian(20) channel
         long_breakout = close[i] > donch_high_20_aligned[i]
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA20_VolumeConfirm"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
