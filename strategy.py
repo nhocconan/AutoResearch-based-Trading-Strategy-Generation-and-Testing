@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_MFI_Overbought_Oversold_1wTrend
-Hypothesis: Money Flow Index (MFI) identifies overbought (>80) and oversold (<20) conditions.
-In strong weekly trends, these extremes often reverse. Long when MFI crosses below 20 with
-weekly uptrend; short when MFI crosses above 80 with weekly downtrend. Uses volume-weighted
-RSI concept to capture exhaustion points with lower frequency than RSI alone.
-Designed for 20-30 trades/year to minimize fee drag while capturing mean reversion in trends.
-Works in both bull and bear by aligning with weekly trend direction.
+1d_Camarilla_Pivot_R1_S1_Breakout_1wTrend
+Hypothesis: Daily Camarilla pivot levels (R1/S1) act as strong support/resistance. 
+Breakouts above R1 or below S1 with volume confirmation and weekly trend alignment 
+provide high-probability trades. Weekly trend filter prevents trading against 
+major trend, reducing whipsaw in both bull and bear markets. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,7 +23,7 @@ def generate_signals(prices):
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Calculate weekly EMA50 for trend filter
@@ -33,56 +31,47 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate MFI (Money Flow Index) - 14 period
-    typical_price = (high + low + close) / 3
-    raw_money_flow = typical_price * volume
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R1 = C + (Range * 1.1 / 12)
+    # S1 = C - (Range * 1.1 / 12)
+    daily_pivot = (high + low + close) / 3.0
+    daily_range = high - low
+    r1 = close + (daily_range * 1.1 / 12.0)
+    s1 = close - (daily_range * 1.1 / 12.0)
     
-    # Positive and negative money flow
-    positive_flow = np.where(typical_price > np.roll(typical_price, 1), raw_money_flow, 0)
-    negative_flow = np.where(typical_price < np.roll(typical_price, 1), raw_money_flow, 0)
-    
-    # Handle first element
-    positive_flow[0] = 0
-    negative_flow[0] = 0
-    
-    # Calculate money flow ratio
-    positive_mf = pd.Series(positive_flow).rolling(window=14, min_periods=14).sum().values
-    negative_mf = pd.Series(negative_flow).rolling(window=14, min_periods=14).sum().values
-    
-    # Avoid division by zero
-    money_flow_ratio = np.divide(positive_mf, negative_mf, 
-                                out=np.full_like(positive_mf, 1.0), 
-                                where=negative_mf!=0)
-    mfi = 100 - (100 / (1 + money_flow_ratio))
+    # Volume spike: current volume > 2.0x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Wait for MFI to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(mfi[i]) or 
-            np.isnan(mfi[i-1]) or
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
             np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # MFI cross signals
-        mfi_cross_up_20 = (mfi[i-1] <= 20) and (mfi[i] > 20)
-        mfi_cross_down_80 = (mfi[i-1] >= 80) and (mfi[i] < 80)
+        # Breakout conditions
+        breakout_long = close[i] > r1[i-1]  # Break above previous day's R1
+        breakout_short = close[i] < s1[i-1]  # Break below previous day's S1
         
         # Trend filter from weekly EMA50
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry conditions
-        long_entry = mfi_cross_up_20 and uptrend
-        short_entry = mfi_cross_down_80 and downtrend
+        # Entry conditions with volume confirmation
+        long_entry = breakout_long and volume_spike[i] and uptrend
+        short_entry = breakout_short and volume_spike[i] and downtrend
         
-        # Exit on opposite extreme
-        long_exit = mfi_cross_down_80
-        short_exit = mfi_cross_up_20
+        # Exit on opposite breakout
+        long_exit = breakout_short and volume_spike[i]
+        short_exit = breakout_long and volume_spike[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -107,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_MFI_Overbought_Oversold_1wTrend"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_R1_S1_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
