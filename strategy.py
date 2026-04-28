@@ -1,15 +1,7 @@
-# State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
-# 6h Williams Fractal + Volume Confirmation + 12h Trend Filter
-# Williams Fractals identify potential reversal points at support/resistance.
-# In trending markets (12h EMA50), we trade breakouts in the trend direction.
-# In ranging markets, we fade extreme fractal touches with volume confirmation.
-# This adapts to both bull and bear regimes by using the 12h trend as regime filter.
-# Target: 50-150 total trades over 4 years = 12-37/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,33 +13,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Williams Fractals (requires 2-bar confirmation)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Williams Fractals: need 2 extra bars for confirmation
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Align with 2-bar additional delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get 4h data for Donchian breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 4h Donchian(20) channels
+    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
     # Volume confirmation: current volume > 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,42 +44,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 10)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 12h EMA
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter from 1d EMA
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Fractal signals: True if fractal formed at this bar
-        bearish_fractal_signal = bearish_fractal_aligned[i]
-        bullish_fractal_signal = bullish_fractal_aligned[i]
+        # Breakout conditions: price breaks Donchian(20) channel
+        long_breakout = close[i] > donch_high_20_aligned[i]
+        short_breakout = close[i] < donch_low_20_aligned[i]
         
-        # Entry conditions
-        # Long: bullish fractal at support in uptrend OR oversold bounce in downtrend with volume
-        long_entry = (
-            (bullish_fractal_signal and uptrend and volume_confirm[i]) or
-            (bullish_fractal_signal and not uptrend and volume_confirm[i] and close[i] < ema_50_12h_aligned[i] * 0.98)
-        )
+        # Entry conditions: require alignment of 1d trend and breakout
+        long_entry = long_breakout and uptrend and volume_confirm[i]
+        short_entry = short_breakout and downtrend and volume_confirm[i]
         
-        # Short: bearish fractal at resistance in downtrend OR overbought rejection in uptrend with volume
-        short_entry = (
-            (bearish_fractal_signal and downtrend and volume_confirm[i]) or
-            (bearish_fractal_signal and not downtrend and volume_confirm[i] and close[i] > ema_50_12h_aligned[i] * 1.02)
-        )
-        
-        # Exit conditions: opposite fractal or trend reversal
+        # Exit conditions: reverse signal
         if position == 1:
-            exit_condition = bearish_fractal_signal or not uptrend
+            exit_condition = not uptrend
         elif position == -1:
-            exit_condition = bullish_fractal_signal or not downtrend
+            exit_condition = not downtrend
         else:
             exit_condition = False
         
@@ -116,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsFractal_VolumeConfirm_12hTrend"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
