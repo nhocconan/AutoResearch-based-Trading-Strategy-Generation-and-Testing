@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend
-Hypothesis: Weekly pivot (R3/S3) breakout on daily chart with weekly trend filter and volume confirmation.
-Trades with the trend in both bull and bear markets using weekly EMA50 as trend filter.
-Targets 15-25 trades/year to minimize fee drift and work in bear markets.
+12h_Donchian20_1dTrend_VolumeSpike
+Hypothesis: Donchian(20) breakout on 12h with 1-day EMA50 trend filter and volume spike confirmation.
+Trades with the trend in both bull and bear markets using daily EMA50 as trend filter.
+Targets 12-37 trades/year to minimize fee drag. Uses 12h timeframe as requested.
 """
 
 import numpy as np
@@ -20,18 +20,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 20-period volume MA for volume spike confirmation (using daily volume)
+    # Calculate 20-period volume MA for volume spike confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Donchian(20) channels on 12h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -40,50 +44,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate weekly pivot levels for current week
-        # Need previous week's OHLC (weekly data)
-        week_idx = i // (7 * 24 * 4)  # Assuming 4h bars per day, 7 days per week
-        if week_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_week_idx = week_idx - 1
-        if prev_week_idx >= len(df_1w):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous week's OHLC from weekly data
-        ph = df_1w['high'].iloc[prev_week_idx]
-        pl = df_1w['low'].iloc[prev_week_idx]
-        pc = df_1w['close'].iloc[prev_week_idx]
-        
-        # Weekly Camarilla R3/S3 levels (more extreme than R1/S1)
-        range_val = ph - pl
-        r3 = pc + (range_val * 1.1 / 4)  # R3 level
-        s3 = pc - (range_val * 1.1 / 4)  # S3 level
-        
-        # Trend direction from weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Trend direction from 1-day EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation: >2.0x 20-period MA
         vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Breakout conditions (using R3/S3 for stronger signals)
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_20[i]
+        short_breakout = close[i] < low_20[i]
         
         # Entry logic
         long_entry = vol_confirm and trend_up and long_breakout
         short_entry = vol_confirm and trend_down and short_breakout
         
         # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        long_exit = (close[i] < low_20[i]) or (not trend_up)
+        short_exit = (close[i] > high_20[i]) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -108,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3_S3_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
