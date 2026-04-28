@@ -24,25 +24,41 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Donchian channel (20)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # 1d Williams Alligator (13,8,5) - trend identification
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values  # Blue line (13)
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values   # Red line (8)
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values   # Green line (5)
     
-    # 1d EMA50 - trend confirmation
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d ATR14 - volatility filter
+    # 1d ADX(14) - trend strength
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
     
-    # Align HTF indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    
+    adx_values = adx.values
+    
+    # 1d Volume ratio - volume confirmation
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume_1d / vol_ma
+    vol_ratio_values = vol_ratio.values
+    
+    # Align HTF indicators to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,29 +67,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Alligator alignment: jaws < teeth < lips = bearish, jaws > teeth > lips = bullish
+        bullish_alligator = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        bearish_alligator = jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_aligned[i] > 25
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_14_aligned[i] > 0.005 * close[i]  # ATR > 0.5% of price
+        # Volume confirmation: volume > 1.5x average
+        volume_confirm = vol_ratio_aligned[i] > 1.5
         
         # Entry conditions
-        long_entry = breakout_up and trend_up and vol_filter
-        short_entry = breakout_down and trend_down and vol_filter
+        long_entry = bullish_alligator and strong_trend and volume_confirm
+        short_entry = bearish_alligator and strong_trend and volume_confirm
         
-        # Exit conditions
-        long_exit = breakout_down or not trend_up
-        short_exit = breakout_up or not trend_down
+        # Exit conditions: loss of alignment or weak trend
+        long_exit = not bullish_alligator or adx_aligned[i] < 20
+        short_exit = not bearish_alligator or adx_aligned[i] < 20
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -82,10 +98,10 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25
+            signals[i] = -0.25  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25
+            signals[i] = 0.25   # Reverse to long
             position = 1
         else:
             # Hold current position
@@ -98,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1dEMA50_Volume_Filter"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_ADX_Volume_Confirm"
+timeframe = "6h"
 leverage = 1.0
