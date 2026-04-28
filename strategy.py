@@ -3,95 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1w EMA200 trend filter and volume confirmation.
-# Targets 6h timeframe with ~12-37 trades/year. Long when price breaks above Kumo cloud with Tenkan > Kijun and volume spike.
-# Short when price breaks below Kumo cloud with Tenkan < Kijun and volume spike.
-# 1w EMA200 filter ensures alignment with major trend to avoid counter-trend whipsaws.
-# Volume spike (>2.0x 20-bar average) confirms breakout strength.
-# Position size 0.25 for balance between return and drawdown control.
-# Discrete levels minimize fee churn. Works in both bull and bear via trend filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Targets 12h timeframe with ~12-37 trades/year. Long when price breaks above Camarilla R3 with volume spike and price > 1d EMA34.
+# Short when price breaks below Camarilla S3 with volume spike and price < 1d EMA34.
+# Uses discrete position sizing (0.25) to minimize fee churn. Works in both bull and bear via trend filter.
 
-name = "6h_Ichimoku_1wEMA200_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for EMA34 trend filter and Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # Calculate 6h volume spike: >2.0x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
+    
+    # Calculate 1d Camarilla levels (R3, S3) for breakout signals
+    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * camarilla_range * 1.1 / 4
+    camarilla_s3 = close_1d - 1.1 * camarilla_range * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Ensure sufficient history for Ichimoku (52-period)
+    start_idx = 34  # Ensure sufficient history for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(tenkan[i]) or 
-            np.isnan(kijun[i]) or 
-            np.isnan(upper_cloud[i]) or 
-            np.isnan(lower_cloud[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1w EMA200
-        price_above_ema = close[i] > ema_200_1w_aligned[i]
-        price_below_ema = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: 1d EMA34 direction (price above/below EMA34)
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Ichimoku breakout conditions with volume confirmation
-        # Long: price breaks above cloud AND Tenkan > Kijun (bullish momentum)
-        long_breakout = close[i] > upper_cloud[i] and tenkan[i] > kijun[i] and volume_spike[i]
-        # Short: price breaks below cloud AND Tenkan < Kijun (bearish momentum)
-        short_breakout = close[i] < lower_cloud[i] and tenkan[i] < kijun[i] and volume_spike[i]
+        # Camarilla breakout conditions with volume confirmation
+        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i]
+        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i]
         
-        # Exit conditions: price returns to cloud or trend reversal
-        long_exit = close[i] < lower_cloud[i] or close[i] < ema_200_1w_aligned[i]
-        short_exit = close[i] > upper_cloud[i] or close[i] > ema_200_1w_aligned[i]
+        # Exit conditions: opposite Camarilla level or trend reversal
+        long_exit = close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]
+        short_exit = close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]
         
         # Handle entries and exits
         if long_breakout and price_above_ema and position <= 0:
