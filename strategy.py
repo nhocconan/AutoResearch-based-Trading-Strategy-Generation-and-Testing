@@ -35,22 +35,33 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # 12h Donchian(20) for breakout signals
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h Donchian(20) for breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # 12h volume confirmation
-    volume_12h = df_12h['volume'].values
-    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    # 4h volume confirmation
+    volume_4h = df_4h['volume'].values
+    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    
+    # 1d RSI(14) for momentum filter
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.values
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,7 +72,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_ma_12h_aligned[i])):
+            np.isnan(volume_ma_4h_aligned[i]) or np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -72,16 +83,19 @@ def generate_signals(prices):
         # Volatility filter: avoid low volatility periods
         vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        vol_confirm = volume[i] > (volume_ma_12h_aligned[i] * 1.5)
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        vol_confirm = volume[i] > (volume_ma_4h_aligned[i] * 1.5)
+        
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        mom_filter = (rsi_14_aligned[i] > 30) & (rsi_14_aligned[i] < 70)
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high_aligned[i]
         short_breakout = close[i] < donchian_low_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and uptrend and vol_filter and vol_confirm
-        short_entry = short_breakout and downtrend and vol_filter and vol_confirm
+        long_entry = long_breakout and uptrend and vol_filter and vol_confirm and mom_filter
+        short_entry = short_breakout and downtrend and vol_filter and vol_confirm and mom_filter
         
         # Exit conditions: ATR-based trailing stop
         if position == 1:
@@ -120,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_ATR_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
