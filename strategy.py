@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h ATR-based breakout with 1d trend filter and volume confirmation.
-# The strategy uses ATR volatility breakouts (price moving beyond ATR-based thresholds) 
-# combined with 1d EMA trend direction to capture momentum in both bull and bear markets.
-# Volume confirmation (1.5x 24-period average) filters false breakouts.
-# ATR adapts to market volatility, making it effective across different market regimes.
-# Targets 50-150 total trades over 4 years with discrete position sizing to minimize fee drag.
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
+# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and strength.
+# Combines with 1d EMA(50) trend filter and volume spike (2x 20-period average) for confirmation.
+# Aims to capture strong trends while avoiding choppy markets. Designed for 4h timeframe
+# with ~50-150 total trades over 4 years to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,61 +21,79 @@ def generate_signals(prices):
     
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) for volatility-based breakout levels
+    # Williams Alligator: SMAs with specific offsets
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        sma = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            sma[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Apply shifts (Jaw: +8, Teeth: +5, Lips: +3)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Volatility filter: ATR(20) for dynamic thresholds
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate breakout levels: upper = close + 1.5*ATR, lower = close - 1.5*ATR
-    # Using prior close to avoid look-ahead
-    upper_break = np.roll(close, 1) + 1.5 * atr
-    lower_break = np.roll(close, 1) - 1.5 * atr
-    # Set first value to NaN since we don't have prior close
-    upper_break[0] = np.nan
-    lower_break[0] = np.nan
-    
-    # Volume filter: volume > 1.5x 24-period average (4 days of 6h bars)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Volume filter: volume > 2x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24, 14)  # Wait for EMA, volume MA, and ATR
+    start_idx = max(50, 20, 13)  # Wait for EMA, ATR, and Alligator
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_break[i]) or 
-            np.isnan(lower_break[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
+            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA(34)
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA(50)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # ATR breakout conditions
-        breakout_up = high[i] > upper_break[i]  # Break above upper level
-        breakout_down = low[i] < lower_break[i]  # Break below lower level
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, reverse = downtrend
+        alligator_long = lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]
+        alligator_short = lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]
         
-        # Entry conditions with volume spike confirmation
-        long_entry = uptrend and breakout_up and volume_spike[i]
-        short_entry = downtrend and breakout_down and volume_spike[i]
+        # Volatility-based entry filter: only trade when volatility is elevated
+        vol_filter = atr[i] > np.mean(atr[max(0, i-50):i+1])  # Above average volatility
         
-        # Exit conditions: trend reversal or opposite breakout
-        long_exit = (not uptrend) or breakout_down
-        short_exit = (not downtrend) or breakout_up
+        # Entry conditions
+        long_entry = uptrend and alligator_long and volume_spike[i] and vol_filter
+        short_entry = downtrend and alligator_short and volume_spike[i] and vol_filter
+        
+        # Exit conditions: trend reversal or Alligator reversal
+        long_exit = (not uptrend) or (not alligator_long)
+        short_exit = (not downtrend) or (not alligator_short)
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -102,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ATRBreakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
