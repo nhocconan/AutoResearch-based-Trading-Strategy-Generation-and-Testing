@@ -1,3 +1,9 @@
+# 1d_1wDonchian20_1dEMA34_Trend_VolumeConfirm
+# 1d primary timeframe with 1w trend filter, Donchian breakout, volume confirmation, and EMA trend filter
+# Designed to capture medium-term trends with controlled trade frequency to minimize fee drag
+# Uses 1-week EMA for trend, daily Donchian breakout for entry, and volume confirmation
+# Target: 30-100 trades over 4 years (7-25/year) to stay within fee drag limits
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,79 +19,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data for Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    highest_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    highest_high_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_high_1d)
+    lowest_low_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_1d)
     
-    # Get 12h data for volatility filter (ATR)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # 12h ATR(14) for volatility filter
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    
-    # 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
-    
-    # Volume confirmation: current volume > 1.5x average volume (4h average)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma_4h * 1.5
+    # Volume confirmation: current volume > 1.5x average volume (20-day average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 20)
+    start_idx = max(100, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_12h_aligned[i]) or
-            np.isnan(highest_high_4h_aligned[i]) or
-            np.isnan(lowest_low_4h_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(highest_high_1d_aligned[i]) or
+            np.isnan(lowest_low_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_12h_aligned[i] > 0
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > highest_high_4h_aligned[i]
-        breakout_down = close[i] < lowest_low_4h_aligned[i]
+        breakout_up = close[i] > highest_high_1d_aligned[i]
+        breakout_down = close[i] < lowest_low_1d_aligned[i]
         
-        # Entry conditions: require trend + breakout + volume confirmation + volatility filter
-        long_entry = uptrend and breakout_up and volume_confirm[i] and vol_filter
-        short_entry = downtrend and breakout_down and volume_confirm[i] and vol_filter
+        # Entry conditions: require trend + breakout + volume confirmation
+        long_entry = uptrend and breakout_up and volume_confirm[i]
+        short_entry = downtrend and breakout_down and volume_confirm[i]
         
         # Exit conditions: when trend reverses or opposite breakout
         if position == 1:
@@ -116,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_12hATR_Volume"
-timeframe = "4h"
+name = "1d_1wDonchian20_1dEMA34_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
