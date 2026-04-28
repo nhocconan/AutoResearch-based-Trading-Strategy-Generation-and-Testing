@@ -1,73 +1,86 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_ZScore_30d
-Hypothesis: Funding rate mean reversion provides edge in BTC/ETH perpetual futures. Extreme funding rates (Z-score > ±2) predict mean reversion. Works in both bull and bear markets as funding extremes occur during speculative frenzies and panic. Targets 15-25 trades/year via extreme Z-score filter.
+6h_ElderRay_BullPower_BearPower_1dTrend_Volume
+Hypothesis: Uses Elder Ray (Bull Power/Bear Power) with 1d trend filter and volume spike to capture high-probability momentum moves. Elder Ray measures bullish/bearish power relative to EMA13. Works in both bull and bear by following 1d trend. Targets 15-25 trades/year via strict conditions.
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 750:  # Need ~30 days of 1h data for funding Z-score calc (but we load funding separately)
+    if n < 50:
         return np.zeros(n)
-    
-    # Load funding rate data - this would normally come from data/processed/funding/
-    # For now, we'll simulate with a placeholder - in practice this loads actual funding data
-    # Since we don't have access to funding data in this environment, we'll use price-based proxy
-    # In real implementation: load funding rates and calculate Z-score
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Use price action as proxy for funding extremes when actual funding unavailable
-    # Extreme price moves often correlate with funding extremes
-    returns = np.diff(np.log(close), prepend=0)
-    vol_30d = pd.Series(returns).rolling(window=720, min_periods=720).std().values  # 30d of 1h bars
-    zscore_returns = (returns - pd.Series(returns).rolling(window=720, min_periods=720).mean().values) / (vol_30d + 1e-10)
+    # Get 1d data for Elder Ray and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Additional filters: volatility regime and volume
-    vol_ma_50 = pd.Series(returns).rolling(window=50, min_periods=50).std().values
-    vol_ratio = vol_ma_50 / (pd.Series(vol_ma_50).rolling(window=200, min_periods=200).mean().values + 1e-10)
+    # Calculate EMA13 for Elder Ray (1d)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
+    # Calculate Elder Ray components
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = ema13_1d - df_1d['low'].values
+    
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: >2x 20-period MA (5 days of 6h bars)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 750  # Wait for 30d lookback
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(zscore_returns[i]) or 
-            np.isnan(vol_ratio[i]) or
+        if (np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Extreme returns signal (proxy for funding extremes)
-        extreme_long = zscore_returns[i] < -2.0  # Very negative returns = potential funding extreme long
-        extreme_short = zscore_returns[i] > 2.0   # Very positive returns = potential funding extreme short
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Volatility filter: avoid low vol periods
-        vol_filter = vol_ratio[i] > 0.8  # Avoid extremely low volatility
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        # Elder Ray conditions: strong bullish/bearish power
+        long_signal = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and vol_confirm and uptrend
+        short_signal = bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and vol_confirm and downtrend
         
-        if extreme_long and vol_filter and vol_confirm and position <= 0:
+        # Exit conditions: power weakening or opposite signal
+        long_exit = bull_power_aligned[i] <= 0
+        short_exit = bear_power_aligned[i] <= 0
+        
+        if long_signal and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif extreme_short and vol_filter and vol_confirm and position >= 0:
+        elif short_signal and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif position == 1 and (zscore_returns[i] > -0.5 or not vol_filter):
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (zscore_returns[i] < 0.5 or not vol_filter):
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
@@ -81,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_FundingRate_MeanReversion_ZScore_30d"
-timeframe = "1d"
+name = "6h_ElderRay_BullPower_BearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
