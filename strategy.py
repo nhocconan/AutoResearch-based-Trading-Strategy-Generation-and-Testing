@@ -33,7 +33,7 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
