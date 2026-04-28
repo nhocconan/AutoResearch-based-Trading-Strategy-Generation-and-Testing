@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses Camarilla R3/S3 levels from 1d with 1d EMA50 trend filter and volume spike (2x 48-bar avg) to capture high-probability breakouts on 4h timeframe. Designed for low trade frequency (19-50/year) to minimize fee drag while capturing strong directional moves. Works in both bull and bear by following 1d trend direction.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Uses Camarilla R3/S3 levels from daily timeframe with 1d EMA50 trend filter and volume spike (2x 48-period MA) on 12h timeframe to capture high-probability breakouts. Designed for low trade frequency (12-37/year) to minimize fee drift while capturing strong directional moves. Works in both bull and bear by following 1d trend direction. Targets 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -18,27 +18,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla pivots
+    # Get daily data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily typical price and range for Camarilla pivots (R3/S3: 1.0x range)
+    # Calculate daily typical price and range for Camarilla R3/S3 (1.0x range)
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     range_ = df_1d['high'] - df_1d['low']
     R3 = typical_price + (range_ * 1.0 / 4)
     S3 = typical_price - (range_ * 1.0 / 4)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Volume confirmation: >2x 48-period MA (8 days of 4h bars)
+    # Volume confirmation: >2x 48-period MA (2 days of 12h bars)
     vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
