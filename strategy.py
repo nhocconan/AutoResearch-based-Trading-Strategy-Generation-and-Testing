@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,9 +22,8 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d ATR(14)
+    # 1d ATR(14) - true range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -49,25 +48,15 @@ def generate_signals(prices):
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate ATR for 12h timeframe for volatility filter
-    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_12h[0] = high[0] - low[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate volume ratio (current volume / 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_12h[i]) or 
-            np.isnan(volume_ratio[i])):
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,19 +68,13 @@ def generate_signals(prices):
         rsi_momentum_up = rsi_aligned[i] > 50 and rsi_aligned[i] < 70
         rsi_momentum_down = rsi_aligned[i] < 50 and rsi_aligned[i] > 30
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_12h[i] > np.nanpercentile(atr_12h[max(0, i-50):i+1], 30) if i >= 50 else True
+        # Entry conditions with stricter filters
+        long_entry = trend_up and rsi_momentum_up
+        short_entry = trend_down and rsi_momentum_down
         
-        # Volume filter: require above average volume
-        vol_filter = volume_ratio[i] > 1.2
-        
-        # Entry conditions - more restrictive to reduce trades
-        long_entry = trend_up and rsi_momentum_up and vol_filter
-        short_entry = trend_down and rsi_momentum_down and vol_filter
-        
-        # Exit conditions: opposite trend or RSI reversal to opposite extreme
-        long_exit = not trend_up or rsi_aligned[i] < 40
-        short_exit = not trend_down or rsi_aligned[i] > 60
+        # Exit conditions: trend reversal or RSI extreme
+        long_exit = not trend_up or rsi_aligned[i] >= 70
+        short_exit = not trend_down or rsi_aligned[i] <= 30
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -116,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_RSI_Volume_Filter"
+name = "12h_EMA50_RSI_Trend_Momentum_v2"
 timeframe = "12h"
 leverage = 1.0
