@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12-hour chart breakouts at daily-derived Camarilla R1/S1 levels with 1-day trend filter and volume confirmation. Designed to capture institutional breakouts while avoiding false signals, effective in both bull and bear markets by requiring trend alignment and volume surge.
+6h_ADX_Trend_Strength_EMA_Crossover
+Hypothesis: Uses 6h ADX to identify strong trending regimes (ADX > 25) and trades EMA crossovers (EMA12/EMA26) in the direction of the trend. Works in both bull and bear markets by only trading when trend strength is confirmed, avoiding whipsaws in ranging markets. Targets 15-35 trades/year by requiring strong trend confirmation.
 """
 
 import numpy as np
@@ -16,38 +16,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 6h data for ADX calculation (trend strength filter)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
+        return np.zeros(n)
+    
+    # Calculate ADX on 6h data
+    period = 14
+    # True Range
+    tr1 = df_6h['high'] - df_6h['low']
+    tr2 = abs(df_6h['high'] - df_6h['close'].shift(1))
+    tr3 = abs(df_6h['low'] - df_6h['close'].shift(1))
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = pd.Series(np.where((df_6h['high'] - df_6h['high'].shift(1)) > (df_6h['low'].shift(1) - df_6h['low']), 
+                                 np.maximum(df_6h['high'] - df_6h['high'].shift(1), 0), 0))
+    dm_minus = pd.Series(np.where((df_6h['low'].shift(1) - df_6h['low']) > (df_6h['high'] - df_6h['high'].shift(1)), 
+                                  np.maximum(df_6h['low'].shift(1) - df_6h['low'], 0), 0))
+    
+    # Smoothed values
+    atr = tr.ewm(alpha=1/period, adjust=False).mean()
+    dm_plus_smooth = dm_plus.ewm(alpha=1/period, adjust=False).mean()
+    dm_minus_smooth = dm_minus.ewm(alpha=1/period, adjust=False).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+    adx_values = adx.values
+    
+    # Strong trend filter: ADX > 25
+    strong_trend = adx_values > 25
+    
+    # Get 1d data for EMA calculation (entry signals)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous daily bar
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate EMAs on 1d data
+    ema_12 = pd.Series(df_1d['close']).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_26 = pd.Series(df_1d['close']).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Align all higher timeframe data to 6h
+    strong_trend_aligned = align_htf_to_ltf(prices, df_6h, strong_trend)
+    ema_12_aligned = align_htf_to_ltf(prices, df_1d, ema_12)
+    ema_26_aligned = align_htf_to_ltf(prices, df_1d, ema_26)
     
-    # Get 1d data for trend filter
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all higher timeframe data to 12h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    # EMA crossover signals
+    ema_cross_up = ema_12_aligned > ema_26_aligned  # Bullish crossover
+    ema_cross_down = ema_12_aligned < ema_26_aligned  # Bearish crossover
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,25 +78,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(strong_trend_aligned[i]) or 
+            np.isnan(ema_12_aligned[i]) or 
+            np.isnan(ema_26_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R1 + 1d uptrend + volume surge
-        long_entry = (close[i] > R1_aligned[i] and 
-                     trend_up[i] and 
-                     volume_surge[i])
+        # Entry conditions: strong trend + EMA crossover
+        # Long: strong trend + bullish EMA crossover
+        long_entry = strong_trend_aligned[i] and ema_cross_up[i]
         
-        # Short: price breaks below S1 + 1d downtrend + volume surge
-        short_entry = (close[i] < S1_aligned[i] and 
-                      trend_down[i] and 
-                      volume_surge[i])
+        # Short: strong trend + bearish EMA crossover
+        short_entry = strong_trend_aligned[i] and ema_cross_down[i]
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
+        # Exit when trend weakens or opposite crossover
+        long_exit = not strong_trend_aligned[i] or ema_cross_down[i]
+        short_exit = not strong_trend_aligned[i] or ema_cross_up[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -83,11 +102,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0  # Exit to flat
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0  # Exit to flat
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -99,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_ADX_Trend_Strength_EMA_Crossover"
+timeframe = "6h"
 leverage = 1.0
