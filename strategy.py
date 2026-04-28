@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels calculated from 1d data (R3/S3 for mean reversion exit, R4/S4 for breakout entry)
-# Only takes breakout trades in direction of 1d EMA34 trend with volume confirmation (>2.0x average)
-# Designed to work in both bull and bear markets by combining pivot structure with trend filter
-# Target: 19-50 trades/year via tight Camarilla breakout conditions + volume + trend filter
+# Hypothesis: 6h Williams %R Reversal with 1d EMA34 trend filter and volume confirmation
+# Uses Williams %R(14) on 6h for oversold/overbought reversal signals
+# Only takes longs when Williams %R < -80 AND price > 1d EMA34 AND volume > 1.5x average
+# Only takes shorts when Williams %R > -20 AND price < 1d EMA34 AND volume > 1.5x average
+# Designed to work in both bull and bear markets by combining mean reversion with trend filter
+# Target: 12-37 trades/year via tight Williams %R extremes + trend + volume confirmation
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_Trend_VolumeConfirmation_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,44 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC (previous day's data to avoid look-ahead)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    
-    # Calculate Camarilla levels using previous day's OHLC
-    camarilla_r4 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 2)
-    camarilla_r3 = close_1d_prev + ((high_1d_prev - low_1d_prev) * 1.1 / 4)
-    camarilla_s3 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 4)
-    camarilla_s4 = close_1d_prev - ((high_1d_prev - low_1d_prev) * 1.1 / 2)
-    
-    # Align 1d Camarilla levels to 4h timeframe (completed 1d candles only)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
     # Calculate EMA34 on 1d close for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = pd.Series(df_1d['close'])
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
+    # Align 1d EMA34 to 6h timeframe (completed 1d candles only)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Williams %R(14) on 6h: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          (highest_high - close) / (highest_high - lowest_low) * -100,
+                          -50)  # neutral when no range
+    
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,57 +56,54 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume_spike[i]
+        vol_confirm = volume_confirm[i]
+        wr = williams_r[i]
         price = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        r4 = camarilla_r4_aligned[i]
-        s4 = camarilla_s4_aligned[i]
         ema34_val = ema34_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R4 AND 1d EMA34 uptrend AND volume spike
-            if price > r4 and price > ema34_val and vol_confirm:
+            # Long reversal: Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume confirmation
+            if wr < -80 and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S4 AND 1d EMA34 downtrend AND volume spike
-            elif price < s4 and price < ema34_val and vol_confirm:
+            # Short reversal: Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume confirmation
+            elif wr > -20 and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price falls below R3 (mean reversion)
-            # ATR-based stoploss: 2.5 * ATR below entry (using 4h ATR)
+        elif position == 1:  # Long - exit on stoploss or Williams %R > -20 (overbought)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 6h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.5 * atr_val
-            # Exit on stoploss or price < R3 (mean reversion back to pivot)
-            if price < stop_loss or price < r3:
+            stop_loss = entry_price - 2.0 * atr_val
+            # Exit on stoploss or Williams %R > -20 (overbought) or price < EMA34 (trend change)
+            if price < stop_loss or wr > -20 or price < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price rises above S3 (mean reversion)
-            # ATR-based stoploss: 2.5 * ATR above entry
+        elif position == -1:  # Short - exit on stoploss or Williams %R < -80 (oversold)
+            # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.5 * atr_val
-            # Exit on stoploss or price > S3 (mean reversion back to pivot)
-            if price > stop_loss or price > s3:
+            stop_loss = entry_price + 2.0 * atr_val
+            # Exit on stoploss or Williams %R < -80 (oversold) or price > EMA34 (trend change)
+            if price > stop_loss or wr < -80 or price > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
