@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4hTrend_DMI_Filter
-Hypothesis: Uses 4h ADX > 25 as trend filter, 1h +DI/-DI crossovers for entries.
-Only trades in strong trends (ADX > 25) to avoid whipsaws in ranging markets.
-Designed for low trade frequency (<30/year) to minimize fee burn while capturing
-strong directional moves. Works in both bull and bear markets by following trend.
+12h_Pivot_Reversal_1dTrend_Volume
+Hypothesis: Combines 1d trend filter with 12-hour pivot point reversal signals.
+Uses volume confirmation to avoid false reversals. Designed for low trade frequency
+(12-37 trades/year) to minimize fee burn while capturing mean-reversion moves
+within the dominant daily trend. Works in both bull and bear markets by aligning
+with higher timeframe trend while exploiting short-term exhaustion at pivot levels.
 """
 
 import numpy as np
@@ -16,128 +17,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for ADX trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ADX(14) on 4h
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with index
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        plus_dm = np.concatenate([[0], plus_dm])
-        minus_dm = np.concatenate([[0], minus_dm])
-        
-        # Smooth TR, +DM, -DM using Wilder's smoothing (EMA alpha = 1/period)
-        alpha = 1.0 / period
-        atr = np.full_like(tr, np.nan)
-        plus_dm_smooth = np.full_like(plus_dm, np.nan)
-        minus_dm_smooth = np.full_like(minus_dm, np.nan)
-        
-        # Initialize first values
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1])
-        
-        # Wilder smoothing
-        for i in range(period + 1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        # Calculate DI
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # Calculate DX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        
-        # Calculate ADX (smoothed DX)
-        adx = np.full_like(dx, np.nan)
-        adx[2*period] = np.nansum(dx[period+1:2*period+1])
-        for i in range(2*period + 1, len(dx)):
-            adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
-        
-        return adx, plus_di, minus_di
+    # Get 12h data for pivot points
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    adx_4h, plus_di_4h, minus_di_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    # Calculate classic pivot points from previous 12h bar
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    plus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, plus_di_4h)
-    minus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, minus_di_4h)
+    pivot = (high_12h + low_12h + close_12h) / 3
+    r1 = 2 * pivot - low_12h
+    s1 = 2 * pivot - high_12h
+    r2 = pivot + (high_12h - low_12h)
+    s2 = pivot - (high_12h - low_12h)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align to lower timeframe (12h) - values from previous 12h bar's close
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    
+    # Volume confirmation: current volume > 1.5 * average volume (volume spike)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(plus_di_4h_aligned[i]) or
-            np.isnan(minus_di_4h_aligned[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_4h_aligned[i] > 25
+        # Trend filter: price relative to 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry signals: DI crossovers
-        bullish_cross = plus_di_4h_aligned[i] > minus_di_4h_aligned[i]
-        bearish_cross = plus_di_4h_aligned[i] < minus_di_4h_aligned[i]
+        # Volume confirmation: volume spike
+        vol_confirm = volume_spike[i]
         
-        # Exit signals: trend weakening or reverse crossover
-        trend_weakening = adx_4h_aligned[i] < 20
-        reverse_cross_bull = plus_di_4h_aligned[i] < minus_di_4h_aligned[i]
-        reverse_cross_bear = plus_di_4h_aligned[i] > minus_di_4h_aligned[i]
+        # Entry conditions: reversal at pivot levels with volume spike and trend alignment
+        # Long: price drops to S1/S2 in uptrend with volume spike
+        long_entry = ((close[i] <= s1_aligned[i]) or (close[i] <= s2_aligned[i])) and vol_confirm and uptrend
+        # Short: price rises to R1/R2 in downtrend with volume spike
+        short_entry = ((close[i] >= r1_aligned[i]) or (close[i] >= r2_aligned[i])) and vol_confirm and downtrend
         
-        if strong_trend and bullish_cross and position <= 0:
-            signals[i] = 0.20
+        # Exit conditions: price returns to pivot level
+        long_exit = close[i] >= pivot_aligned[i]
+        short_exit = close[i] <= pivot_aligned[i]
+        
+        if long_entry and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif strong_trend and bearish_cross and position >= 0:
-            signals[i] = -0.20
+        elif short_entry and position >= 0:
+            signals[i] = -0.25
             position = -1
-        elif (trend_weakening or reverse_cross_bull) and position == 1:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif (trend_weakening or reverse_cross_bear) and position == -1:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4hTrend_DMI_Filter"
-timeframe = "1h"
+name = "12h_Pivot_Reversal_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
