@@ -36,12 +36,11 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
     
-    # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align pivot levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Weekly trend filter: price above/below weekly EMA20
     close_1w_series = pd.Series(df_1w['close'].values)
@@ -61,10 +60,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -99,10 +97,10 @@ def generate_signals(prices):
         short_exit = (close[i] > r3_aligned[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +111,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
-timeframe = "6h"
+name = "12h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
