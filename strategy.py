@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR(14) volatility filter.
-# Uses daily primary timeframe targeting 7-25 trades/year (30-100 total over 4 years).
-# Long when price breaks above Donchian(20) high and price > 1w EMA50 (uptrend).
-# Short when price breaks below Donchian(20) low and price < 1w EMA50 (downtrend).
-# ATR(14) > 0.015 * price ensures sufficient volatility to avoid choppy markets.
-# Position size 0.25 for balance between return and drawdown control.
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d ADX25 regime filter and volume spike confirmation.
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13. Measures bull/bear strength relative to trend.
+# ADX > 25 indicates strong trend (use Elder Ray for continuation); ADX < 25 indicates ranging (fade extremes).
+# Volume spike (>2.0x 20-bar average) confirms institutional participation.
+# Position size 0.25 balances return and drawdown control.
 # Discrete levels (0.0, ±0.25) minimize fee churn.
-# Works in both bull and bear markets via trend filter + volatility filter.
+# Works in bull markets via trend continuation and bear markets via mean reversion in ranges.
+# Targets BTC and ETH primarily.
 
-name = "1d_Donchian20_1wEMA50_Trend_ATR_VolFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX25_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +24,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Donchian and ATR, 1w data for EMA50 trend
+    # Get 6h data for Elder Ray calculation and 1d data for ADX regime filter
+    df_6h = get_htf_data(prices, '6h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 50:
+    if len(df_6h) < 14 or len(df_1d) < 25:
         return np.zeros(n)
     
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian(20) channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 6h Elder Ray components
+    bull_power = high_6h - ema_13_6h  # Bull Power: High - EMA
+    bear_power = low_6h - ema_13_6h   # Bear Power: Low - EMA
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d ADX (14-period) for regime filter
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(high_1d) - pd.Series(close_1d).shift(1)
+    tr3 = pd.Series(close_1d).shift(1) - pd.Series(low_1d)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM and DI
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h volume spike: >2.0x 20-bar average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient history for EMA50
+    start_idx = 25  # Ensure sufficient history for ADX
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w EMA50 direction
-        price_above_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_ema = close[i] < ema_50_1w_aligned[i]
+        # Regime filter: 1d ADX > 25 = trending, < 25 = ranging
+        is_trending = adx_aligned[i] > 25
+        is_ranging = adx_aligned[i] < 25
         
-        # Donchian breakout conditions
-        breakout_high = close[i] > donchian_high[i-1]  # Break above previous period's high
-        breakout_low = close[i] < donchian_low[i-1]    # Break below previous period's low
+        # Elder Ray signals
+        bull_strong = bull_power_aligned[i] > 0
+        bear_strong = bear_power_aligned[i] < 0
         
-        # Volatility filter: ATR > 1.5% of price to avoid choppy markets
-        vol_filter = atr_14[i] > 0.015 * close[i]
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and breakout_high and vol_filter
-        short_entry = price_below_ema and breakout_low and vol_filter
+        # Trending regime: Elder Ray continuation
+        long_entry_trend = is_trending and bull_strong and vol_confirm
+        short_entry_trend = is_trending and bear_strong and vol_confirm
         
-        # Exit conditions: opposite Donchian breakout
-        long_exit = close[i] < donchian_low[i-1]  # Exit long when price breaks below Donchian low
-        short_exit = close[i] > donchian_high[i-1]  # Exit short when price breaks above Donchian high
+        # Ranging regime: Elder Ray mean reversion (fade extremes)
+        long_entry_range = is_ranging and (bear_power_aligned[i] < -np.std(bear_power_aligned[max(0,i-50):i+1])) and vol_confirm
+        short_entry_range = is_ranging and (bull_power_aligned[i] > np.std(bull_power_aligned[max(0,i-50):i+1])) and vol_confirm
+        
+        long_entry = long_entry_trend or long_entry_range
+        short_entry = short_entry_trend or short_entry_range
+        
+        # Exit conditions: opposing Elder Ray signal or regime change
+        long_exit = bear_power_aligned[i] > 0 or (is_trending and not is_trending)  # Bear power positive or regime shift
+        short_exit = bull_power_aligned[i] < 0 or (is_trending and not is_trending)  # Bull power negative or regime shift
         
         # Handle entries and exits
         if long_entry and position <= 0:
