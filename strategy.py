@@ -26,11 +26,11 @@ def generate_signals(prices):
     # Calculate daily range for pivot calculations
     daily_range = high_1d - low_1d
     
-    # Camarilla pivot levels (based on previous day)
+    # Camarilla pivot levels (based on previous day) - using R4 and S4
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
     camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
@@ -78,10 +78,10 @@ def generate_signals(prices):
         short_exit = (close[i] > r4_aligned[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -92,14 +92,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R4S4_Breakout_Volume_Session"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
