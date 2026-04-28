@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,35 +34,35 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Donchian channels (10-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # 12h Donchian channels (15-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 15:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # 4h Donchian channels (10-period)
-    highest_high_4h = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    # 12h Donchian channels (15-period)
+    highest_high_12h = pd.Series(high_12h).rolling(window=15, min_periods=15).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=15, min_periods=15).min().values
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
     
-    # Volume confirmation: current volume > 1.5x average volume (4h average)
-    vol_ma_4h = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_confirm = volume > vol_ma_4h * 1.5
+    # Volume confirmation: current volume > 1.5x average volume (12h average)
+    vol_ma_12h = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_confirm = volume > vol_ma_12h * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 10, 10)
+    start_idx = max(34, 15, 15)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(highest_high_4h_aligned[i]) or
-            np.isnan(lowest_low_4h_aligned[i])):
+            np.isnan(highest_high_12h_aligned[i]) or
+            np.isnan(lowest_low_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,8 +71,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > highest_high_4h_aligned[i]
-        breakout_down = close[i] < lowest_low_4h_aligned[i]
+        breakout_up = close[i] > highest_high_12h_aligned[i]
+        breakout_down = close[i] < lowest_low_12h_aligned[i]
         
         # Entry conditions: require trend + breakout + volume confirmation
         long_entry = uptrend and breakout_up and volume_confirm[i]
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian10_1dEMA34_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Donchian15_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
