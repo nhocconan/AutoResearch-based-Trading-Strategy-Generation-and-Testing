@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,34 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Weekly data for trend filter (EMA20)
+    # Daily ATR(14) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.inf
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Get weekly data for trend filter (EMA20)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
-    
-    # Williams %R(14) calculation on daily data
-    high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    close_1d = df_1d['close'].values
-    williams_r = -100 * ((high_14 - close_1d) / (high_14 - low_14))
-    # Handle division by zero
-    williams_r = np.where((high_14 - low_14) == 0, -50, williams_r)
     
     # Weekly EMA20 for trend filter
     close_1w_series = pd.Series(df_1w['close'].values)
     ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Get daily data for Donchian channel (10-period for more sensitivity)
+    if len(df_1d) < 10:
+        return np.zeros(n)
     
-    # Volume filter: volume above 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily Donchian(10) breakout levels
+    high_10 = pd.Series(df_1d['high'].values).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(df_1d['low'].values).rolling(window=10, min_periods=10).min().values
+    
+    # Align to 12h timeframe
+    high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
+    low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -48,12 +60,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_10_aligned[i]) or np.isnan(low_10_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,27 +82,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: only trade when volume is above average
-        vol_filter = volume[i] > vol_ma[i]
+        # Volatility filter: only trade when ATR is above its 50-period median (avoid chop)
+        if i >= 50:
+            atr_ma = np.median(atr_1d_aligned[i-49:i+1])
+            vol_filter = atr_1d_aligned[i] > atr_ma
+        else:
+            vol_buffer = True  # Not enough data for median, allow trade
         
         # Trend filter: price above/below weekly EMA20
         trend_up = close[i] > ema20_1w_aligned[i]
         trend_down = close[i] < ema20_1w_aligned[i]
         
-        # Williams %R levels: oversold < -80, overbought > -20
-        williams_r_val = williams_r_aligned[i]
-        oversold = williams_r_val < -80
-        overbought = williams_r_val > -20
-        
         # Entry conditions: 
-        # Long: Williams %R oversold with upward trend and volume
-        # Short: Williams %R overbought with downward trend and volume
-        long_entry = oversold and vol_filter and trend_up
-        short_entry = overbought and vol_filter and trend_down
+        # Long: break above daily Donchian high with upward trend and volatility
+        # Short: break below daily Donchian low with downward trend and volatility
+        long_breakout = close[i] > high_10_aligned[i]
+        short_breakout = close[i] < low_10_aligned[i]
         
-        # Exit conditions: opposite Williams %R level
-        long_exit = williams_r_val > -50 and position == 1  # Exit when crosses above midpoint
-        short_exit = williams_r_val < -50 and position == -1  # Exit when crosses below midpoint
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
+        
+        # Exit conditions: opposite Donchian level touch
+        long_exit = (close[i] < low_10_aligned[i]) and position == 1
+        short_exit = (close[i] > high_10_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -115,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_14_1wEMA20_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian10_1wEMA20_VolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
