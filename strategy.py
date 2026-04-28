@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Filter
-Hypothesis: Trade breakouts of daily Camarilla R4/S4 levels (stronger breakouts) with 1-day EMA trend filter and volume confirmation.
-Uses wider bands to reduce false breakouts, targeting 15-25 trades/year for low frequency and high win rate.
+12h_Camarilla_R4_S4_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts of daily Camarilla R4/S4 levels on 12h timeframe with 1-day EMA trend filter and volume confirmation.
+Uses 12h candles to reduce trade frequency (target 15-30 trades/year) while maintaining edge from strong breakouts in trending markets.
 Works in bull markets (long breakouts in uptrend) and bear markets (short breakdowns in downtrend).
 """
 
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,24 +41,24 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
     camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume confirmation: >1.8x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: >2.0x 30-period MA
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 60  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r4_aligned[i]) or 
             np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
@@ -71,7 +71,7 @@ def generate_signals(prices):
         breakdown_s4 = close[i] < camarilla_s4_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_30[i])
         
         # Entry logic: breakout in direction of trend with volume
         long_entry = vol_confirm and uptrend and breakout_r4
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
