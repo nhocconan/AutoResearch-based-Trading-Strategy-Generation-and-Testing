@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d EMA34 to capture primary trend direction. Breaks above R1 in uptrend or below S1 in downtrend
-# with volume confirmation provide high-probability entries. Target: 25-50 trades/year via tight R1/S1 breakout
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 1d EMA34 to capture intermediate trend direction. Breaks above R3 in uptrend or below S3 in downtrend
+# with volume confirmation provide high-probability entries. Target: 19-50 trades/year via tight R3/S3 breakout
 # conditions + volume + trend filter. Works in both bull (breakouts with trend) and bear (mean reversion at extremes).
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,15 +34,15 @@ def generate_signals(prices):
     # Calculate Camarilla levels from previous 1d bar's OHLC
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     hl_range = df_1d['high'] - df_1d['low']
-    r1 = typical_price + hl_range * 1.1 / 12
-    s1 = typical_price - hl_range * 1.1 / 12
+    r3 = typical_price + hl_range * 1.1 / 4
+    s3 = typical_price - hl_range * 1.1 / 4
     
     # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Align 1d Camarilla levels to 4h timeframe (completed 1d levels only)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -57,32 +57,32 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         ema34_val = ema34_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above R1 AND 1d EMA34 uptrend AND volume spike
-            if price > r1_val and price > ema34_val and vol_confirm:
+            # Long entry: price breaks above R3 AND 1d EMA34 uptrend AND volume spike
+            if price > r3_val and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price breaks below S1 AND 1d EMA34 downtrend AND volume spike
-            elif price < s1_val and price < ema34_val and vol_confirm:
+            # Short entry: price breaks below S3 AND 1d EMA34 downtrend AND volume spike
+            elif price < s3_val and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price falls below S1 (reversal)
+        elif position == 1:  # Long - exit on stoploss or price falls below S3 (reversal)
             # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
@@ -90,13 +90,13 @@ def generate_signals(prices):
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or price < S1 (reversal below support)
-            if price < stop_loss or price < s1_val:
+            # Exit on stoploss or price < S3 (reversal below support)
+            if price < stop_loss or price < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price rises above R1 (reversal)
+        elif position == -1:  # Short - exit on stoploss or price rises above R3 (reversal)
             # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
@@ -104,8 +104,8 @@ def generate_signals(prices):
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
             stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or price > R1 (reversal above resistance)
-            if price > stop_loss or price > r1_val:
+            # Exit on stoploss or price > R3 (reversal above resistance)
+            if price > stop_loss or price > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
