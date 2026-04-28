@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Uses weekly EMA50 to capture long-term trend direction (works in both bull/bear markets).
-# Breaks above R3 in uptrend or below S3 in downtrend with volume confirmation provide
-# high-probability entries. Weekly timeframe reduces noise and whipsaw.
-# Target: 12-37 trades/year via tight R3/S3 breakout conditions + volume + trend filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses daily EMA34 to capture intermediate trend direction. Breaks above R3 in uptrend or below S3 in downtrend
+# with volume confirmation provide high-probability entries. Target: 12-37 trades/year via tight R3/S3 breakout
+# conditions + volume + trend filter. Works in both bull (breakouts with trend) and bear (mean reversion at extremes).
 
-name = "6h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,19 +22,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on weekly close for trend filter
-    close_1w = pd.Series(df_1w['close'])
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for Camarilla levels (from previous day's OHLC)
+    # Get daily data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Calculate EMA34 on daily close for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate Camarilla levels from previous day's OHLC
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
@@ -43,10 +37,10 @@ def generate_signals(prices):
     r3 = typical_price + hl_range * 1.1 / 4
     s3 = typical_price - hl_range * 1.1 / 4
     
-    # Align weekly EMA50 to 6h timeframe (completed weekly candles only)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align daily EMA34 to 12h timeframe (completed daily candles only)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align daily Camarilla levels to 6h timeframe (completed daily levels only)
+    # Align daily Camarilla levels to 12h timeframe (completed daily levels only)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
@@ -59,12 +53,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50)  # volume MA20 and weekly EMA50 need sufficient history
+    start_idx = max(20, 34)  # volume MA20 and daily EMA34 need sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -72,24 +66,24 @@ def generate_signals(prices):
         price = close[i]
         r3_val = r3_aligned[i]
         s3_val = s3_aligned[i]
-        ema50_val = ema50_1w_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND weekly EMA50 uptrend AND volume spike
-            if price > r3_val and price > ema50_val and vol_confirm:
+            # Long entry: price breaks above R3 AND daily EMA34 uptrend AND volume spike
+            if price > r3_val and price > ema34_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short entry: price breaks below S3 AND weekly EMA50 downtrend AND volume spike
-            elif price < s3_val and price < ema50_val and vol_confirm:
+            # Short entry: price breaks below S3 AND daily EMA34 downtrend AND volume spike
+            elif price < s3_val and price < ema34_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long - exit on stoploss or price falls below S3 (reversal)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 6h ATR)
+            # ATR-based stoploss: 2.0 * ATR below entry (using 12h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
