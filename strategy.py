@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
-# Uses 4h for signal direction (breakout of 20-period high/low) and 1d for trend strength (ADX > 25).
-# 1h timeframe used only for entry timing precision. Volume filter ensures breakouts have participation.
-# Designed to work in both bull and bear markets by requiring strong trend (ADX) and avoiding false breakouts.
-# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h Donchian breakout with weekly pivot bias and volume confirmation.
+# Weekly pivot provides directional bias: price above weekly pivot = bullish bias (look for long breakouts),
+# price below weekly pivot = bearish bias (look for short breakouts). Donchian(20) breakouts capture
+# momentum in the direction of bias. Volume confirms breakout strength. Designed for 6h to target
+# 50-150 total trades over 4 years (12-37/year). Works in bull/bear by using pivot for directional filter.
 
 import numpy as np
 import pandas as pd
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,113 +19,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot calculation (bias)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Align Donchian levels to 1h timeframe (wait for 4h bar close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    pivot = (high_w + low_w + close_w) / 3
+    r1 = 2 * pivot - low_w
+    s1 = 2 * pivot - high_w
+    r2 = pivot + (high_w - low_w)
+    s2 = pivot - (high_w - low_w)
+    r3 = high_w + 2 * (pivot - low_w)
+    s3 = low_w - 2 * (high_w - pivot)
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Align weekly pivot to 6h (use prior week's values for bias)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian(20) channels on 6h
+    lookback = 20
+    highest = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    def _smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        res = np.full_like(arr, np.nan, dtype=float)
-        res[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            res[i] = (res[i-1] * (period-1) + arr[i]) / period
-        return res
-    
-    atr = _smma(tr, 14)
-    plus_di_smoothed = _smma(plus_dm, 14)
-    minus_di_smoothed = _smma(minus_dm, 14)
-    
-    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
-    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = _smma(dx, 14)
-    
-    # Align ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.8x 20-period average (strict to reduce trades)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_filter = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for sufficient warmup
+    start_idx = max(lookback, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(highest[i]) or 
+            np.isnan(lowest[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Apply filters
-        strong_trend = adx_aligned[i] > 25
-        in_session = session_filter[i]
-        vol_ok = volume_filter[i]
+        # Weekly bias: price above pivot = bullish bias, below = bearish bias
+        bullish_bias = close[i] > pivot_aligned[i]
+        bearish_bias = close[i] < pivot_aligned[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest[i-1]  # Break above prior period high
+        breakout_down = close[i] < lowest[i-1]  # Break below prior period low
         
-        # Entry conditions
-        long_entry = strong_trend and in_session and vol_ok and long_breakout
-        short_entry = strong_trend and in_session and vol_ok and short_breakout
+        # Entry conditions with bias and volume
+        long_entry = bullish_bias and breakout_up and volume_filter[i]
+        short_entry = bearish_bias and breakout_down and volume_filter[i]
         
-        # Exit conditions: opposite breakout or trend weakening
-        long_exit = short_breakout or (not strong_trend)
-        short_exit = long_breakout or (not strong_trend)
+        # Exit when price returns to pivot (mean reversion to bias level)
+        long_exit = position == 1 and close[i] <= pivot_aligned[i]
+        short_exit = position == -1 and close[i] >= pivot_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -136,14 +100,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_DonchianBreakout_4hChannel_1dADX_VolumeSession"
-timeframe = "1h"
+name = "6h_Donchian_WeeklyPivotBias_Volume"
+timeframe = "6h"
 leverage = 1.0
