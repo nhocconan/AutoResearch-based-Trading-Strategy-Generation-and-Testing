@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_HTF_Trend_Retracement_EMA
-Hypothesis: On daily timeframe, enter long when price retraces to EMA21 in weekly uptrend, short when price retraces to EMA21 in weekly downtrend. Use volume surge for confirmation. Exit when price crosses EMA50 in opposite direction. This strategy aims to capture trend continuation moves with low frequency by using higher timeframe trend and daily retracement entries, suitable for both bull and bear markets.
+6h_Premium_Index_Divergence_12hTrend
+Hypothesis: Use futures premium index (basis) as a sentiment indicator. When basis diverges from price action (price makes new high but basis makes lower high), it signals weakening momentum and potential reversal. Combined with 12h trend filter to avoid counter-trend trades. Works in both bull and bear markets by capturing exhaustion moves. Targets low trade frequency (~15-30/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -10,75 +10,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter and EMAs
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Calculate rolling premium index approximation (close - 20-period EMA)
+    # This approximates basis deviation from fair value
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    premium_index = close - ema20  # Positive = premium, Negative = discount
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Align weekly EMAs to daily timeframe
-    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # 12h trend: bullish when price > EMA34, bearish when price < EMA34
+    trend_bull = close > ema34_12h_aligned
+    trend_bear = close < ema34_12h_aligned
     
-    # Weekly trend: bullish when price > EMA21, bearish when price < EMA21
-    weekly_uptrend = close_weekly > ema21_weekly
-    weekly_downtrend = close_weekly < ema21_weekly
+    # Divergence detection: price makes new high/low but premium index doesn't confirm
+    # Bearish divergence: price makes higher high, premium index makes lower high
+    # Bullish divergence: price makes lower low, premium index makes higher low
     
-    # Align weekly trend to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
+    # Calculate rolling max/min for divergence detection (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    premium_max = pd.Series(premium_index).rolling(window=20, min_periods=20).max().values
+    premium_min = pd.Series(premium_index).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMAs for entry and exit
-    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_daily = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Bearish divergence: price at recent high but premium index below recent high
+    bear_div = (high == high_max) & (premium_index < premium_max)
+    # Bullish divergence: price at recent low but premium index above recent low
+    bull_div = (low == low_min) & (premium_index > premium_min)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 40  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema21_weekly_aligned[i]) or np.isnan(ema50_weekly_aligned[i]) or
-            np.isnan(ema21_daily[i]) or np.isnan(ema50_daily[i]) or
-            np.isnan(volume_surge[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(premium_index[i]) or
+            np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(premium_max[i]) or np.isnan(premium_min[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: price near daily EMA21 with weekly trend alignment and volume surge
-        near_ema21 = abs(close[i] - ema21_daily[i]) / ema21_daily[i] < 0.02  # Within 2% of EMA21
-        long_entry = near_ema21 and weekly_uptrend_aligned[i] > 0.5 and volume_surge[i] and close[i] > ema21_daily[i]
-        short_entry = near_ema21 and weekly_downtrend_aligned[i] > 0.5 and volume_surge[i] and close[i] < ema21_daily[i]
+        # Entry conditions: divergence + trend alignment
+        bearish_entry = bear_div[i] and trend_bear[i]  # Price high but weak momentum in downtrend
+        bullish_entry = bull_div[i] and trend_bull[i]  # Price low but strong momentum in uptrend
         
-        # Exit when price crosses EMA50 in opposite direction
-        long_exit = position == 1 and close[i] < ema50_daily[i]
-        short_exit = position == -1 and close[i] > ema50_daily[i]
+        # Exit when divergence disappears or trend changes
+        bearish_exit = ~bear_div[i] or ~trend_bear[i]
+        bullish_exit = ~bull_div[i] or ~trend_bull[i]
         
-        if long_entry and position <= 0:
+        if bullish_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif bearish_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif long_exit and position == 1:
+        elif bearish_exit and position == 1:
             signals[i] = -0.25  # Reverse to short
             position = -1
-        elif short_exit and position == -1:
+        elif bullish_exit and position == -1:
             signals[i] = 0.25   # Reverse to long
             position = 1
         else:
@@ -92,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_HTF_Trend_Retracement_EMA"
-timeframe = "1d"
+name = "6h_Premium_Index_Divergence_12hTrend"
+timeframe = "6h"
 leverage = 1.0
