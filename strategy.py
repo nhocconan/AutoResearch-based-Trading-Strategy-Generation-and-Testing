@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
+    # Get daily data for ATR and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -21,16 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate daily VWAP (Volume Weighted Average Price)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_1d = np.cumsum(typical_price_1d * volume_1d) / np.cumsum(volume_1d)
-    # Reset VWAP at day start (simplified - reset every day)
-    vwap_1d = np.where(np.arange(len(vwap_1d)) % 24 == 0, typical_price_1d, vwap_1d)
-    for i in range(1, len(vwap_1d)):
-        if i % 24 != 0:  # Not first bar of day
-            vwap_1d[i] = (vwap_1d[i-1] * np.cumsum(volume_1d)[i-1] + typical_price_1d[i] * volume_1d[i]) / np.cumsum(volume_1d)[i]
     
     # Calculate daily ATR(14) for volatility
     tr1 = high_1d - low_1d
@@ -54,9 +44,15 @@ def generate_signals(prices):
     rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
     
     # Align daily indicators to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h SMA(20) for trend filter
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -66,13 +62,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -81,27 +79,31 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility
+        # Trend filter: price above SMA20 for long, below for short
+        uptrend = close[i] > sma_20[i]
+        downtrend = close[i] < sma_20[i]
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # Break above previous high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous low
+        
+        # RSI momentum filter: avoid overbought/oversold extremes
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
+        
+        # Volatility filter: ensure sufficient ATR
         atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
         atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
         if np.isnan(atr_ma_aligned[i]):
             signals[i] = 0.0
             continue
-        vol_ok = atr_aligned[i] > (atr_ma_aligned[i] * 0.15)
+        vol_ok = atr_aligned[i] > (atr_ma_aligned[i] * 0.1)
         
-        # Price relative to VWAP
-        price_above_vwap = close[i] > vwap_aligned[i]
-        price_below_vwap = close[i] < vwap_aligned[i]
+        # Long conditions: uptrend + breakout up + RSI not overbought + volatility
+        long_condition = uptrend and breakout_up and rsi_not_overbought and vol_ok
         
-        # RSI conditions: overbought/oversold levels
-        rsi_overbought = rsi_aligned[i] > 70
-        rsi_oversold = rsi_aligned[i] < 30
-        
-        # Long conditions: price below VWAP (value) + oversold + volatility ok
-        long_condition = price_below_vwap and rsi_oversold and vol_ok
-        
-        # Short conditions: price above VWAP (premium) + overbought + volatility ok
-        short_condition = price_above_vwap and rsi_overbought and vol_ok
+        # Short conditions: downtrend + breakout down + RSI not oversold + volatility
+        short_condition = downtrend and breakout_down and rsi_not_oversold and vol_ok
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -109,11 +111,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: price returns to VWAP
-        elif position == 1 and close[i] >= vwap_aligned[i]:
+        # Exit conditions: opposite Donchian breakout
+        elif position == 1 and close[i] < low_20[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] <= vwap_aligned[i]:
+        elif position == -1 and close[i] > high_20[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -127,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_RSI_MeanReversion"
+name = "4h_Donchian20_Breakout_SMA20_RSI_Filter"
 timeframe = "4h"
 leverage = 1.0
