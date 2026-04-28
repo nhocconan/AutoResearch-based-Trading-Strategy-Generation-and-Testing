@@ -1,9 +1,4 @@
-# [Experiment #103882] 12h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Confirmation
-# Hypothesis: Camarilla R3/S3 levels on 1d timeframe act as strong support/resistance. 
-# Breakouts with 1d EMA34 trend alignment and volume confirmation reduce false signals.
-# Works in bull markets (breakouts with trend) and bear (mean-reversion at extremes).
-# Target: 12-37 trades/year on 12h timeframe to avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -33,7 +28,7 @@ def generate_signals(prices):
     close_prev = np.roll(close_1d, 1)
     close_prev[0] = close_1d[0]  # First day uses its own close
     
-    # Camarilla levels
+    # Camarilla levels - R3/S3 for stronger support/resistance
     r3 = close_prev + 1.1 * range_1d / 2
     s3 = close_prev - 1.1 * range_1d / 2
     r4 = close_prev + 1.1 * range_1d
