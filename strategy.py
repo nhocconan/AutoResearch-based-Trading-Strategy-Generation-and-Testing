@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-# Enter long when price breaks above 20-day Donchian high, weekly EMA34 trending up, and volume > 1.5x 20-bar average.
-# Enter short when price breaks below 20-day Donchian low, weekly EMA34 trending down, and volume > 1.5x 20-bar average.
-# Exit when price reaches opposite Donchian level or crosses the weekly EMA34.
-# Uses discrete position sizing (0.25) to balance return and fee drag.
-# Target: 50-100 total trades over 4 years (12-25/year) to avoid excessive fee churn.
-# Donchian channels provide robust trend-following structure; weekly EMA34 filters for higher-timeframe trend alignment;
-# Volume spike confirms institutional participation in breakouts.
-# This strategy should work in both bull and bear markets by following the higher-timeframe trend.
+# Hypothesis: 6h Williams %R extremes with 1d EMA34 trend filter and volume confirmation.
+# Enter long when Williams %R < -80 (oversold), price > 1d EMA34 (uptrend), and volume > 1.5x 20-bar average.
+# Enter short when Williams %R > -20 (overbought), price < 1d EMA34 (downtrend), and volume > 1.5x 20-bar average.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position sizing (0.25) to manage drawdown and reduce fee churn.
+# Target: 60-120 total trades over 4 years (15-30/year) to avoid excessive fee drag.
+# Williams %R identifies exhaustion points; 1d EMA34 filters for higher-timeframe trend alignment;
+# Volume confirmation ensures breakouts have participation.
 
-name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extremes_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,21 +26,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 34:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA34
-    close_1w = df_1w['close'].values
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Donchian(20) from 1d OHLC
-    # Need sufficient history for 20-period lookback
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -51,46 +53,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient history for Donchian
+    start_idx = max(34, 20, lookback)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 1w EMA34 trend: slope over 3 periods
-        if i >= 3:
-            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
-            ema_trend_up = ema_slope > 0
-            ema_trend_down = ema_slope < 0
-        else:
-            ema_trend_up = False
-            ema_trend_down = False
+        # Williams %R conditions
+        wr = williams_r[i]
+        wr_oversold = wr < -80
+        wr_overbought = wr > -20
+        wr_exit_long = wr > -50  # Exit long when crosses above -50
+        wr_exit_short = wr < -50  # Exit short when crosses below -50
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_max_20[i]
-        breakout_down = close[i] < low_min_20[i]
-        
-        # Exit conditions: price reaches opposite Donchian level or crosses 1w EMA34
-        exit_long = close[i] < low_min_20[i] or close[i] < ema_34_aligned[i]
-        exit_short = close[i] > high_max_20[i] or close[i] > ema_34_aligned[i]
+        # 1d EMA34 trend: price relative to EMA
+        price_above_ema = close[i] > ema_34_aligned[i]
+        price_below_ema = close[i] < ema_34_aligned[i]
         
         # Handle entries and exits
-        if breakout_up and ema_trend_up and vol_confirm and position <= 0:
+        if wr_oversold and price_above_ema and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
+        elif wr_overbought and price_below_ema and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif position == 1 and exit_long:
+        elif position == 1 and wr_exit_long:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and exit_short:
+        elif position == -1 and wr_exit_short:
             signals[i] = 0.0
             position = 0
         else:
