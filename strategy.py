@@ -44,17 +44,10 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 1h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate 4h Donchian(20)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 4h volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,8 +57,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -77,16 +69,9 @@ def generate_signals(prices):
         rsi_momentum_up = rsi_aligned[i] > 50
         rsi_momentum_down = rsi_aligned[i] < 50
         
-        # Breakout conditions
-        breakout_up = close[i] > highest_high[i]
-        breakout_down = close[i] < lowest_low[i]
-        
-        # Volume filter
-        volume_ok = volume[i] > vol_ma[i]
-        
         # Entry conditions
-        long_entry = trend_up and rsi_momentum_up and breakout_up and volume_ok
-        short_entry = trend_down and rsi_momentum_down and breakout_down and volume_ok
+        long_entry = trend_up and rsi_momentum_up
+        short_entry = trend_down and rsi_momentum_down
         
         # Exit conditions: opposite trend or RSI reversal
         long_exit = not trend_up or rsi_aligned[i] < 50
@@ -115,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_RSI_Volume"
-timeframe = "4h"
+name = "12h_EMA50_RSI_Trend_Momentum"
+timeframe = "12h"
 leverage = 1.0
