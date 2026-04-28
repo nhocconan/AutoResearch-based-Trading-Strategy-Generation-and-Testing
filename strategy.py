@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Reversal_1wTrend
-Hypothesis: On 12-hour timeframe, enter long when price touches Camarilla S1 level with bullish divergence (price > 1w EMA50) and volume spike; short when price touches R1 level with bearish divergence (price < 1w EMA50). Exit on opposite touch. Uses 1w EMA50 for trend filter and volume confirmation to reduce false signals. Targets 50-150 trades over 4 years to minimize fee drag while capturing reversals in ranging markets and continuations in trending markets.
+1h_PositionBased_4hTrend
+Hypothesis: On 1-hour timeframe, enter long when 4h EMA trend is bullish (close > EMA50) and price is near 1h VWAP support (within 0.3%), with volume confirmation. Enter short when 4h EMA trend is bearish (close < EMA50) and price is near 1h VWAP resistance (within 0.3%), with volume confirmation. Uses 4h trend for direction, 1h VWAP for precise entry, and volume filter to avoid false breakouts. Designed for low trade frequency (~20-40/year) to minimize fee decay while capturing trend continuations in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,36 +18,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 1h VWAP calculation (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, close)
     
-    # Focus on S1 and R1 for reversals
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all data to 12h timeframe
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: current volume > 2x 24-period average
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (vol_ma_24 * 2.0)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,46 +44,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(S1_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: bullish when price > 1w EMA50, bearish when price < 1w EMA50
-        bullish_trend = close[i] > ema_50_1w_aligned[i]
-        bearish_trend = close[i] < ema_50_1w_aligned[i]
+        # Calculate distance from VWAP as percentage
+        vwap_distance_pct = abs(close[i] - vwap[i]) / vwap[i] * 100
+        near_vwap = vwap_distance_pct <= 0.3  # Within 0.3% of VWAP
         
-        # Entry conditions: touch S1/R1 with trend alignment and volume spike
-        long_entry = (low[i] <= S1_aligned[i]) and bullish_trend and volume_spike[i]
-        short_entry = (high[i] >= R1_aligned[i]) and bearish_trend and volume_spike[i]
+        # Trend conditions
+        bullish_trend = close[i] > ema_50_aligned[i]
+        bearish_trend = close[i] < ema_50_aligned[i]
         
-        # Exit conditions: touch opposite level
-        long_exit = high[i] >= R1_aligned[i]
-        short_exit = low[i] <= S1_aligned[i]
+        # Entry conditions with 4h trend alignment and volume surge
+        long_entry = bullish_trend and near_vwap and volume_surge[i]
+        short_entry = bearish_trend and near_vwap and volume_surge[i]
+        
+        # Exit conditions: trend reversal or VWAP breach
+        long_exit = not bullish_trend or close[i] < vwap[i] * 0.997  # Below VWAP by 0.3%
+        short_exit = not bearish_trend or close[i] > vwap[i] * 1.003  # Above VWAP by 0.3%
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
+            signals[i] = -0.20  # Reverse to short
             position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
+            signals[i] = 0.20   # Reverse to long
             position = 1
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_Pivot_Reversal_1wTrend"
-timeframe = "12h"
+name = "1h_PositionBased_4hTrend"
+timeframe = "1h"
 leverage = 1.0
