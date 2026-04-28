@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_Strength_Trend_Filter_WeeklyPivot_Momentum
-Hypothesis: Use ADX to identify strong trending regimes (>25) and trade pullbacks to weekly pivot support/resistance in the direction of the weekly trend. This combines trend strength with institutional reference levels to work in both bull and bear markets by only taking trades when momentum is aligned with the weekly structure. Target: 20-35 trades/year per symbol to minimize fee decay.
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: Camarilla pivot breakouts at R3/S3 levels on 12h timeframe with 1-week EMA50 trend filter and volume spike work in both bull and bear markets. The 1-week trend filter reduces whipsaw from counter-trend breakouts, volume confirms institutional participation, and R3/S3 levels provide institutional-grade support/resistance. Target: 15-30 trades/year per symbol to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,143 +18,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and pivot levels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly ADX (trend strength)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range
-    tr1 = high_weekly[1:] - low_weekly[1:]
-    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
-    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Get 12h data for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Directional Movement
-    dm_plus = np.where((high_weekly[1:] - high_weekly[:-1]) > (low_weekly[:-1] - low_weekly[1:]), 
-                       np.maximum(high_weekly[1:] - high_weekly[:-1], 0), 0)
-    dm_minus = np.where((low_weekly[:-1] - low_weekly[1:]) > (high_weekly[1:] - high_weekly[:-1]), 
-                        np.maximum(low_weekly[:-1] - low_weekly[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period])  # skip first NaN
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]) and not np.isnan(result[i-1]):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate pivot point and ranges
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    atr_period = 14
-    tr_atr = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    # Camarilla levels: R3, R4, S3, S4
+    r3_12h = pivot_12h + range_12h * 1.1000 / 4.0
+    r4_12h = pivot_12h + range_12h * 1.1000 / 2.0
+    s3_12h = pivot_12h - range_12h * 1.1000 / 4.0
+    s4_12h = pivot_12h - range_12h * 1.1000 / 2.0
     
-    # DI+ and DI-
-    di_plus = np.where(tr_atr != 0, 100 * dm_plus_smooth / tr_atr, 0)
-    di_minus = np.where(tr_atr != 0, 100 * dm_minus_smooth / tr_atr, 0)
+    # Align Camarilla levels to 12h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)
-    
-    # Weekly pivot points (based on previous week)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
-    
-    # Weekly support/resistance levels
-    r1 = 2 * weekly_pivot - weekly_low
-    s1 = 2 * weekly_pivot - weekly_high
-    r2 = weekly_pivot + weekly_range
-    s2 = weekly_pivot - weekly_range
-    
-    # Align weekly indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
-    
-    # Determine weekly trend direction
-    weekly_uptrend = weekly_close > weekly_pivot
-    weekly_downtrend = weekly_close < weekly_pivot
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
-    
-    # 60-period EMA for 6x dynamic support/resistance
-    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
-    
-    # Volume filter: above average volume
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma_20
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 60  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or
-            np.isnan(ema_60[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or 
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Strong trend filter (ADX > 25 indicates strong trend)
-        strong_trend = adx_aligned[i] > 25
+        # Camarilla breakout conditions
+        breakout_long = close[i] > r3_12h_aligned[i-1]  # Break above R3
+        breakout_short = close[i] < s3_12h_aligned[i-1]  # Break below S3
         
-        # Price near weekly support/resistance (within 0.5% tolerance)
-        near_r1 = np.abs(close[i] - r1_aligned[i]) / close[i] < 0.005
-        near_s1 = np.abs(close[i] - s1_aligned[i]) / close[i] < 0.005
-        near_r2 = np.abs(close[i] - r2_aligned[i]) / close[i] < 0.005
-        near_s2 = np.abs(close[i] - s2_aligned[i]) / close[i] < 0.005
+        # Strong breakout confirmation (beyond R4/S4 for institutional interest)
+        strong_breakout_long = close[i] > r4_12h_aligned[i-1]
+        strong_breakout_short = close[i] < s4_12h_aligned[i-1]
         
-        # Pullback to weekly support in uptrend
-        pullback_to_support = (near_s1 or near_s2) and weekly_trend_up_aligned[i] > 0.5
+        # Trend filter from 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Pullback to weekly resistance in downtrend
-        pullback_to_resistance = (near_r1 or near_r2) and weekly_trend_down_aligned[i] > 0.5
+        # Entry conditions with volume confirmation and trend alignment
+        long_entry = breakout_long and volume_spike[i] and uptrend
+        short_entry = breakout_short and volume_spike[i] and downtrend
         
-        # Additional confirmation: price above/below 60 EMA
-        above_ema = close[i] > ema_60[i]
-        below_ema = close[i] < ema_60[i]
+        # Strong breakout entries (higher conviction)
+        strong_long_entry = strong_breakout_long and volume_spike[i] and uptrend
+        strong_short_entry = strong_breakout_short and volume_spike[i] and downtrend
         
-        # Entry conditions
-        long_entry = strong_trend and pullback_to_support and above_ema and volume_filter[i]
-        short_entry = strong_trend and pullback_to_resistance and below_ema and volume_filter[i]
+        # Exit on opposite breakout (reverse position)
+        long_exit = breakout_short and volume_spike[i]
+        short_exit = breakout_long and volume_spike[i]
         
-        # Exit conditions: trend weakening or opposite signal
-        trend_weakening = adx_aligned[i] < 20
-        opposite_signal = (pullback_to_resistance and weekly_trend_up_aligned[i] > 0.5) or \
-                         (pullback_to_support and weekly_trend_down_aligned[i] > 0.5)
-        
-        if long_entry and position <= 0:
+        if (long_entry or strong_long_entry) and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif (short_entry or strong_short_entry) and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif (trend_weakening or opposite_signal) and position != 0:
-            signals[i] = 0.0
-            position = 0
+        elif long_exit and position == 1:
+            signals[i] = -0.25  # Reverse to short
+            position = -1
+        elif short_exit and position == -1:
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -166,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_Strength_Trend_Filter_WeeklyPivot_Momentum"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
