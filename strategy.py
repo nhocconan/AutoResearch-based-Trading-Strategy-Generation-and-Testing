@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,16 +27,12 @@ def generate_signals(prices):
     daily_range = high_1d - low_1d
     
     # Camarilla pivot levels (based on previous day)
-    # R4 = Close + (High - Low) * 1.1 / 2
-    # R3 = Close + (High - Low) * 1.1 / 4
-    # S3 = Close - (High - Low) * 1.1 / 4
-    # S4 = Close - (High - Low) * 1.1 / 2
     camarilla_r3 = close_1d + daily_range * 1.1 / 4
     camarilla_s3 = close_1d - daily_range * 1.1 / 4
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
     camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
@@ -96,10 +92,10 @@ def generate_signals(prices):
         short_exit = (close[i] > r3_aligned[i]) or (not price_below_ema)
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -110,14 +106,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Camarilla_R4S4_Breakout_EMA34"
-timeframe = "1h"
+name = "6h_Camarilla_R4S4_Breakout_EMA34"
+timeframe = "6h"
 leverage = 1.0
