@@ -13,16 +13,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
     # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
@@ -41,9 +31,11 @@ def generate_signals(prices):
     r3_d = high_d + 2 * (pivot_d - low_d)
     s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Align to daily timeframe
+    # Align to 6h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
     s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
+    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
@@ -61,7 +53,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -81,18 +73,14 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below weekly EMA20
-        trend_up = close[i] > ema20_1w_aligned[i]
-        trend_down = close[i] < ema20_1w_aligned[i]
-        
         # Entry conditions: 
-        # Long: break above daily S3 with upward trend and volume
-        # Short: break below daily R3 with downward trend and volume
+        # Long: break above daily S3 with volume
+        # Short: break below daily R3 with volume
         long_breakout = close[i] > s3_d_aligned[i]
         short_breakout = close[i] < r3_d_aligned[i]
         
-        long_entry = long_breakout and vol_filter and trend_up
-        short_entry = short_breakout and vol_filter and trend_down
+        long_entry = long_breakout and vol_filter
+        short_entry = short_breakout and vol_filter
         
         # Exit conditions: opposite S1/R1 level touch
         long_exit = (close[i] < s1_d_aligned[i]) and position == 1
@@ -121,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_DailyPivot_S3_R3_Breakout_Volume_Session"
-timeframe = "1d"
+name = "6h_DailyPivot_S3_R3_Breakout_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
