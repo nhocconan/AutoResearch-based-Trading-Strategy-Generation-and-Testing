@@ -1,7 +1,6 @@
-#102419
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
 Hypothesis: Uses Camarilla R3/S3 levels from daily chart with 1-day trend filter (EMA34) and volume spike (>2x average) to capture strong breakouts. Works in bull/bear by following trend direction. Targets 15-25 trades/year via strict R3/S3 breakout conditions.
 """
 
@@ -35,11 +34,11 @@ def generate_signals(prices):
     R3 = typical_price + (range_ * 1.1 / 4)
     S3 = typical_price - (range_ * 1.1 / 4)
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Volume confirmation: >2x 24-period MA (4 days of 6h bars)
+    # Volume confirmation: >2x 24-period MA (4 days of 4h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -95,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
