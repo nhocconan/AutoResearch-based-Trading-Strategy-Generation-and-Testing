@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Trend_VolumeSpike_Conservative
-Hypothesis: TRIX momentum crossover combined with 1d EMA100 trend filter and volume spikes captures high-probability trend continuations. Conservative settings (TRIX crossover only after 5-bar confirmation) reduce overtrading while maintaining edge in both bull and bear markets. Targets 15-25 trades/year on 4h timeframe.
+4h_KAMA_Direction_With_WeeklyTrend_Filter
+Hypothesis: KAMA adapts to market noise, providing smooth trend direction. Combined with weekly trend filter (price > weekly SMA50 for longs, < for shorts), it avoids counter-trend trades in strong trends. Weekly filter reduces whipsaws in ranging markets, improving win rate in both bull and bear phases. Targets ~20 trades/year on 4h.
 """
 
 import numpy as np
@@ -18,63 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA100 for trend filter
-    close_1d = df_1d['close'].values
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    # Calculate weekly SMA50 for trend filter
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
-    # ROC period = 1
-    roc = np.diff(close, prepend=close[0])
-    # Three consecutive EMAs
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100  # Scale for readability
+    # Calculate KAMA (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # needs correction
+    # Recalculate volatility properly
+    volatility = np.zeros_like(close)
+    for i in range(10, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Volume confirmation: >1.8x 20-period MA (approx 10 hours on 4h)
+    # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_100_1d_aligned[i]) or 
-            np.isnan(trix[i]) or
-            np.isnan(trix_signal[i]) or
+        if (np.isnan(sma_50_1w_aligned[i]) or 
+            np.isnan(kama[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA100
-        uptrend = close[i] > ema_100_1d_aligned[i]
-        downtrend = close[i] < ema_100_1d_aligned[i]
+        # Trend filter: price relative to weekly SMA50
+        above_weekly = close[i] > sma_50_1w_aligned[i]
+        below_weekly = close[i] < sma_50_1w_aligned[i]
         
-        # TRIX crossover with confirmation (require 2 consecutive bars)
-        trix_bullish = trix[i] > trix_signal[i] and trix[i-1] > trix_signal[i-1]
-        trix_bearish = trix[i] < trix_signal[i] and trix[i-1] < trix_signal[i-1]
+        # KAMA direction: price above/below KAMA
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
         
         # Volume confirmation
-        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: TRIX crossover in direction of trend with volume
-        long_entry = vol_confirm and uptrend and trix_bullish
-        short_entry = vol_confirm and downtrend and trix_bearish
+        # Entry logic: KAMA direction aligned with weekly trend + volume
+        long_entry = vol_confirm and above_weekly and above_kama
+        short_entry = vol_confirm and below_weekly and below_kama
         
-        # Exit logic: opposite TRIX crossover or trend change
-        long_exit = trix_bearish or (not uptrend)
-        short_exit = trix_bullish or (not downtrend)
+        # Exit logic: opposite KAMA cross or weekly trend change
+        long_exit = below_kama or (not above_weekly)
+        short_exit = above_kama or (not below_weekly)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_Trend_VolumeSpike_Conservative"
+name = "4h_KAMA_Direction_With_WeeklyTrend_Filter"
 timeframe = "4h"
 leverage = 1.0
