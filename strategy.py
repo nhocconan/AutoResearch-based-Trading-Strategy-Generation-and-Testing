@@ -31,22 +31,18 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily ADX(14) for trend strength
-    # +DM and -DM calculation
     up_move = high_1d - np.roll(high_1d, 1)
     down_move = np.roll(low_1d, 1) - low_1d
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smooth TR, +DM, -DM
     tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
     minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate +DI and -DI
     plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
     minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
     
-    # Calculate DX and ADX
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
