@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Enter short when price breaks below 20-period low with 1d EMA34 downtrend and volume > 2.0x 20-bar average.
 # Exit when price retraces to the 10-period EMA.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Target: 50-150 total trades over 4 years (12-38/year).
 # Donchian channels provide robust trend structure; 1d EMA34 ensures higher timeframe alignment;
 # volume spike filters weak breakouts. Works in both bull (strong breakouts) and bear (strong breakdowns).
 
@@ -29,7 +29,7 @@ def generate_signals(prices):
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
