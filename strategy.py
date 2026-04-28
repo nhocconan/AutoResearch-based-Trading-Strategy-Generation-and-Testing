@@ -35,22 +35,32 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # 4h Donchian(20) for breakout signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 4h volume confirmation
-    volume_4h = df_4h['volume'].values
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    # 6h Donchian(20) for breakout signals
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    
+    # 6h volume confirmation
+    volume_6h = df_6h['volume'].values
+    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,21 +69,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_ma_4h_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Multi-timeframe trend filter: both 1d and 1w must agree
+        uptrend = (close[i] > ema_34_1d_aligned[i]) and (close[i] > ema_34_1w_aligned[i])
+        downtrend = (close[i] < ema_34_1d_aligned[i]) and (close[i] < ema_34_1w_aligned[i])
         
         # Volatility filter: avoid low volatility periods
         vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        vol_confirm = volume[i] > (volume_ma_4h_aligned[i] * 1.5)
+        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        vol_confirm = volume[i] > (volume_ma_6h_aligned[i] * 1.5)
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high_aligned[i]
@@ -120,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_ATR_Volume"
-timeframe = "4h"
+name = "6h_Donchian20_1d1wEMA34_ATR_Volume"
+timeframe = "6h"
 leverage = 1.0
