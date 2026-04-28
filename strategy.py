@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context (Camarilla levels)
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,7 +23,7 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily range for pivot calculations (previous day's range)
+    # Calculate daily range for pivot calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + daily_range * 1.1 / 2
     camarilla_s4 = close_1d - daily_range * 1.1 / 2
     
-    # Align Daily Camarilla levels to 12h timeframe
+    # Align Daily Camarilla levels to 1d timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
-timeframe = "12h"
+name = "1d_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
