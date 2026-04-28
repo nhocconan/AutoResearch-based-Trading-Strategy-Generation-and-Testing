@@ -1,10 +1,8 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_4hTrend_WeeklyVolumeBreakout
-Hypothesis: Uses 4h EMA20 trend and 1w volume spike to filter breakouts on daily timeframe.
-Enters long when price breaks above 4h EMA20 with weekly volume spike, short when breaks below.
-Designed to capture trend momentum while filtering false signals in both bull and bear markets.
-Targets 15-25 trades per year to minimize fee decay.
+6h_Ichimoku_Cloud_Breakout_Trend
+Hypothesis: Uses Ichimoku cloud (Tenkan-sen, Kijun-sen, Senkou Span A/B) on the daily timeframe to identify trend direction and momentum. Enters long when price breaks above the cloud with bullish TK cross in uptrend, short when price breaks below the cloud with bearish TK cross in downtrend. Uses volume spike confirmation to filter false breakouts. Designed to capture trend continuation moves in both bull and bear markets by trading with the higher timeframe Ichimoku trend. Targets 50-150 total trades over 4 years to minimize fee drag while capturing meaningful momentum.
 """
 
 import numpy as np
@@ -13,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,57 +19,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA20 trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get daily data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need at least 52 days for Senkou Span B
         return np.zeros(n)
     
-    # Calculate 4h EMA20
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 1w data for volume spike
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
     
-    # Calculate 1w volume 20-period MA
-    vol_1w = df_1w['volume'].values
-    vol_ma_20_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
     
-    # Volume spike: current 1d volume > 2.0x 1w volume MA
-    vol_spike = volume > (2.0 * vol_ma_20_1w_aligned)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
+    
+    # Align Ichimoku components to 6h timeframe (wait for daily close)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Calculate cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    # Determine trend: price above cloud = uptrend, below cloud = downtrend
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    
+    # TK Cross signals
+    tk_cross_bullish = tenkan_sen_aligned > kijun_sen_aligned
+    tk_cross_bearish = tenkan_sen_aligned < kijun_sen_aligned
+    
+    # Volume spike confirmation (>1.8x 20-period MA)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for Ichimoku to stabilize (52 + 26 shift)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_1w_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 4h EMA20
-        price_above_ema = close[i] > ema_20_4h_aligned[i]
-        price_below_ema = close[i] < ema_20_4h_aligned[i]
+        # Entry conditions
+        long_entry = (vol_spike[i] and 
+                     price_above_cloud[i] and 
+                     tk_cross_bullish[i] and 
+                     close[i] > close[i-1])  # Confirm with upward momentum
         
-        # Volume confirmation
-        vol_confirm = vol_spike[i]
+        short_entry = (vol_spike[i] and 
+                      price_below_cloud[i] and 
+                      tk_cross_bearish[i] and 
+                      close[i] < close[i-1])  # Confirm with downward momentum
         
-        # Entry logic:
-        # Long: price above EMA20 with volume spike
-        long_entry = price_above_ema and vol_confirm
-        # Short: price below EMA20 with volume spike
-        short_entry = price_below_ema and vol_confirm
-        
-        # Exit logic: price crosses back through EMA20
-        long_exit = price_below_ema
-        short_exit = price_above_ema
+        # Exit conditions: TK cross reversal or price returns to cloud
+        long_exit = (not tk_cross_bullish[i]) or (close[i] < cloud_top[i])
+        short_exit = (not tk_cross_bearish[i]) or (close[i] > cloud_bottom[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -96,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_4hTrend_WeeklyVolumeBreakout"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
