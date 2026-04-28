@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Trix_Crossover_VolumeSpike_1dTrend
-Hypothesis: Uses TRIX (15-period) crossovers on 12h timeframe with 1d EMA34 trend filter and volume spike (2x 24-bar avg) to capture momentum shifts. TRIX filters noise and works in both bull/bear markets by following 1d trend. Targets 50-150 total trades over 4 years with low trade frequency to minimize fee drag.
+6h_Rolling_Trend_Entropy_Regime
+Hypothesis: Uses rolling entropy of price changes (5-period) to detect regime shifts - low entropy = trending (follow trend), high entropy = ranging (mean revert). Combines with 1d EMA50 trend filter and volume spike (1.5x 24-bar avg) to enter trades. Designed for low trade frequency (12-37/year) to minimize fee drift while capturing regime-adaptive moves. Works in both bull and bear by adapting to market regime.
 """
 
 import numpy as np
 import pandas as pd
+from scipy.stats import entropy
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
@@ -18,58 +19,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate TRIX (15-period) on 12h close
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 - np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
+    # Calculate rolling entropy of price changes (5-period)
+    returns = np.diff(np.log(close), prepend=0)
+    abs_returns = np.abs(returns)
+    entropy_vals = np.full(n, np.nan)
     
-    # Volume confirmation: >2x 24-period MA (4 days of 12h bars)
+    for i in range(5, n):
+        window = abs_returns[i-4:i+1]
+        if np.sum(window) > 0:
+            probs = window / np.sum(window)
+            entropy_vals[i] = entropy(probs, base=2)
+        else:
+            entropy_vals[i] = 0
+    
+    # Volume confirmation: >1.5x 24-period MA (4 days of 6h bars)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 45  # Wait for TRIX to stabilize (3*15)
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(trix[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(entropy_vals[i]) or
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation (>2x average)
-        vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
+        # Volume confirmation (>1.5x average)
+        vol_confirm = volume[i] > (1.5 * vol_ma_24[i])
         
-        # TRIX crossover signals
-        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
-        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
+        # Regime detection: entropy < 0.8 = trending, entropy > 1.2 = ranging
+        trending_regime = entropy_vals[i] < 0.8
+        ranging_regime = entropy_vals[i] > 1.2
         
-        # Entry conditions
-        long_entry = trix_cross_up and vol_confirm and uptrend
-        short_entry = trix_cross_down and vol_confirm and downtrend
-        
-        # Exit conditions: opposite TRIX cross
-        long_exit = trix_cross_down
-        short_exit = trix_cross_up
+        # Entry logic: follow trend in trending regime, mean revert in ranging regime
+        long_entry = trending_regime and uptrend and vol_confirm
+        short_entry = trending_regime and downtrend and vol_confirm
+        long_exit = ranging_regime and close[i] < ema_50_1d_aligned[i]  # mean revert to trend
+        short_exit = ranging_regime and close[i] > ema_50_1d_aligned[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -94,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Trix_Crossover_VolumeSpike_1dTrend"
-timeframe = "12h"
+name = "6h_Rolling_Trend_Entropy_Regime"
+timeframe = "6h"
 leverage = 1.0
