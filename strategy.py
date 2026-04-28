@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR(14) for volatility
     tr1 = high_1d - low_1d
@@ -44,20 +43,16 @@ def generate_signals(prices):
     rsi_1d = 100 - (100 / (1 + rs))
     rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
     
-    # Calculate daily volume average for volume filter
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Calculate 12h Donchian channels (10-period - tighter for fewer trades)
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h EMA(25) for trend filter
-    ema_25 = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    # Calculate 4h SMA(50) for trend filter
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -67,16 +62,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_aligned[i]) or 
             np.isnan(rsi_aligned[i]) or 
-            np.isnan(high_10[i]) or 
-            np.isnan(low_10[i]) or 
-            np.isnan(ema_25[i]) or
-            np.isnan(vol_avg_aligned[i])):
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(sma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -85,25 +79,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above EMA25 for long, below for short
-        uptrend = close[i] > ema_25[i]
-        downtrend = close[i] < ema_25[i]
+        # Trend filter: price above SMA50 for long, below for short
+        uptrend = close[i] > sma_50[i]
+        downtrend = close[i] < sma_50[i]
         
         # Donchian breakout conditions
-        breakout_up = close[i] > high_10[i-1]  # Break above previous high
-        breakout_down = close[i] < low_10[i-1]  # Break below previous low
+        breakout_up = close[i] > high_20[i-1]  # Break above previous high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous low
         
         # RSI momentum filter: avoid overbought/oversold extremes
         rsi_not_overbought = rsi_aligned[i] < 70
         rsi_not_oversold = rsi_aligned[i] > 30
         
-        # Volume filter: ensure sufficient volume
-        vol_ok = volume[i] > vol_avg_aligned[i] * 0.5
+        # Volatility filter: ensure sufficient ATR
+        atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+        if np.isnan(atr_ma_aligned[i]):
+            signals[i] = 0.0
+            continue
+        vol_ok = atr_aligned[i] > (atr_ma_aligned[i] * 0.1)
         
-        # Long conditions: uptrend + breakout up + RSI not overbought + volume
+        # Long conditions: uptrend + breakout up + RSI not overbought + volatility
         long_condition = uptrend and breakout_up and rsi_not_overbought and vol_ok
         
-        # Short conditions: downtrend + breakout down + RSI not oversold + volume
+        # Short conditions: downtrend + breakout down + RSI not oversold + volatility
         short_condition = downtrend and breakout_down and rsi_not_oversold and vol_ok
         
         if long_condition and position <= 0:
@@ -113,10 +112,10 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         # Exit conditions: opposite Donchian breakout
-        elif position == 1 and close[i] < low_10[i-1]:
+        elif position == 1 and close[i] < low_20[i-1]:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and close[i] > high_10[i-1]:
+        elif position == -1 and close[i] > high_20[i-1]:
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -130,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian10_Breakout_EMA25_RSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_SMA50_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
