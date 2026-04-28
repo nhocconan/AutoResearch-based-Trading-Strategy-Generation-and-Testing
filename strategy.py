@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1w Supertrend trend filter with 1d Camarilla R4/S4 breakout and volume confirmation.
+# Hypothesis: 12h strategy using 1w Supertrend trend filter with 1d Camarilla R3/S3 breakout and volume confirmation.
 # Uses weekly Supertrend for strong trend filter (works in both bull/bear markets).
-# Breakout at 1d Camarilla R4/S4 levels (extreme levels = fewer false breakouts).
-# Volume spike (>1.8x 20-bar average) confirms breakout strength.
-# Position size 0.28 balances return and drawdown. Discrete levels minimize fee churn.
-# Target: 80-150 total trades over 4 years = 20-38/year for 4h.
+# Breakout at 1d Camarilla R3/S3 levels (balanced breakout structure).
+# Volume spike (>2.0x 20-bar average) confirms breakout strength.
+# Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h.
 
-name = "4h_Camarilla_R4S4_1wSupertrend_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1wSupertrend_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -73,7 +73,7 @@ def generate_signals(prices):
         else:
             supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Align Supertrend and direction to 4h timeframe
+    # Align Supertrend and direction to 12h timeframe
     supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
     direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
@@ -86,18 +86,18 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d_prev) / 3.0
     # Range = H - L
     range_1d = high_1d - low_1d
-    # Camarilla levels (R4/S4 provide stronger breakout structure)
-    R4 = pivot + range_1d * 1.1 / 2.0
-    S4 = pivot - range_1d * 1.1 / 2.0
+    # Camarilla levels (R3/S3 provide balanced breakout structure)
+    R3 = pivot + range_1d * 1.1 / 4.0
+    S3 = pivot - range_1d * 1.1 / 4.0
     
-    # Align to 4h timeframe (use previous 1d bar's levels)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align to 12h timeframe (use previous 1d bar's levels)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Calculate 4h volume spike: >1.8x 20-bar average volume
+    # Calculate 12h volume spike: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * volume_ma_20
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -108,8 +108,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(supertrend_aligned[i]) or 
             np.isnan(direction_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or 
-            np.isnan(S4_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -119,19 +119,19 @@ def generate_signals(prices):
         downtrend = direction_aligned[i] == -1
         
         # Camarilla breakout conditions with volume confirmation
-        long_breakout = close[i] > R4_aligned[i] and volume_spike[i]
-        short_breakout = close[i] < S4_aligned[i] and volume_spike[i]
+        long_breakout = close[i] > R3_aligned[i] and volume_spike[i]
+        short_breakout = close[i] < S3_aligned[i] and volume_spike[i]
         
         # Exit conditions: opposite Camarilla level or trend reversal
-        long_exit = close[i] < S4_aligned[i] or direction_aligned[i] == -1
-        short_exit = close[i] > R4_aligned[i] or direction_aligned[i] == 1
+        long_exit = close[i] < S3_aligned[i] or direction_aligned[i] == -1
+        short_exit = close[i] > R3_aligned[i] or direction_aligned[i] == 1
         
         # Handle entries and exits
         if long_breakout and uptrend and position <= 0:
-            signals[i] = 0.28
+            signals[i] = 0.25
             position = 1
         elif short_breakout and downtrend and position >= 0:
-            signals[i] = -0.28
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -139,9 +139,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.28
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.28
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
