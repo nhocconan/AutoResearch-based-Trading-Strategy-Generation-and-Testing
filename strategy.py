@@ -38,7 +38,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 1d timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -67,7 +67,7 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility periods
         vol_filter = atr_14_aligned[i] > 0.008 * close[i]  # ATR > 0.8% of price
         
-        # Entry conditions - balanced for 12h timeframe
+        # Entry conditions - balanced for 1d timeframe
         # Long: upward breakout + uptrend + vol filter
         long_entry = breakout_up and trend_up and vol_filter
         # Short: downward breakout + downtrend + vol filter
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA50_Volume_Filter"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1dEMA50_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
