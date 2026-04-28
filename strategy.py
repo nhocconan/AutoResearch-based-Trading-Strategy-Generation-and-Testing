@@ -13,45 +13,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data once for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data once for HTF context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly indicators
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Calculate 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(21) for trend
-    ema_21_w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 1d EMA(50) for trend
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly ATR(14) for volatility
-    tr1_w = high_1w - low_1w
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w[0] = tr1_w[0]
-    atr_14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
+    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align HTF indicators to daily timeframe
-    ema_21_w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_w)
-    atr_14_w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_w)
+    # 1d ATR(14) for volatility
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA(50) for additional trend confirmation
-    ema_50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align HTF indicators to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Daily ATR(14) for volatility-based sizing
-    tr1_d = high - low
-    tr2_d = np.abs(high - np.roll(close, 1))
-    tr3_d = np.abs(low - np.roll(close, 1))
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    tr_d[0] = tr1_d[0]
-    atr_14_d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: above average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Hour filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,28 +58,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_w_aligned[i]) or np.isnan(atr_14_w_aligned[i]) or 
-            np.isnan(ema_50_d[i]) or np.isnan(atr_14_d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above weekly EMA21 and daily EMA50
-        trend_up = close[i] > ema_21_w_aligned[i] and close[i] > ema_50_d[i]
-        trend_down = close[i] < ema_21_w_aligned[i] and close[i] < ema_50_d[i]
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        # Volatility filter: avoid extremely high volatility periods
-        vol_filter = atr_14_d[i] < 2.0 * atr_14_w_aligned[i]
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Trend filter: price above/below EMA50
+        trend_up = close[i] > ema_50_aligned[i]
+        trend_down = close[i] < ema_50_aligned[i]
+        
+        # Momentum filter: RSI in moderate range (avoid extremes)
+        rsi_bullish = rsi_aligned[i] > 40 and rsi_aligned[i] < 60
+        rsi_bearish = rsi_aligned[i] < 60 and rsi_aligned[i] > 40
         
         # Volume filter: above average volume
-        vol_filter_volume = volume[i] > vol_ma[i]
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions - selective to reduce trades
-        long_entry = trend_up and vol_filter and vol_filter_volume
-        short_entry = trend_down and vol_filter and vol_filter_volume
+        # Entry conditions - more selective to reduce trades
+        long_entry = trend_up and rsi_bullish and vol_filter
+        short_entry = trend_down and rsi_bearish and vol_filter
         
-        # Exit conditions: opposite trend or volatility spike
-        long_exit = not trend_up or (atr_14_d[i] > 2.5 * atr_14_w_aligned[i])
-        short_exit = not trend_down or (atr_14_d[i] > 2.5 * atr_14_w_aligned[i])
+        # Exit conditions: opposite conditions or volatility spike
+        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
+        long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
+        short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -106,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA21_Trend_VolumeFilter"
-timeframe = "1d"
+name = "6h_EMA50_RSI_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
