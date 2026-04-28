@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     # Calculate daily pivot points (P, S1, S2, S3, R1, R2, R3)
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r3_d = high_d + 2 * (pivot_d - low_d)
     s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
     s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
     r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
@@ -41,7 +41,7 @@ def generate_signals(prices):
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Weekly EMA20 for trend filter
@@ -58,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 20  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume_Session"
-timeframe = "4h"
+name = "12h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
