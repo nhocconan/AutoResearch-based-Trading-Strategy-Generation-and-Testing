@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extremes with 12h EMA50 trend filter and volume confirmation.
-# Enter long when 1d Williams %R < -80 (oversold) with volume > 2.0x average and close > 12h EMA50 (bullish bias).
-# Enter short when 1d Williams %R > -20 (overbought) with volume > 2.0x average and close < 12h EMA50 (bearish bias).
-# Exit when Williams %R returns to -50 (mean reversion) or opposite extreme is reached.
-# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 50-120 total trades over 4 years.
-# Works in bull markets (oversold bounces in uptrend) and bear markets (overbought rejections in downtrend).
-# Uses 1d Williams %R for extreme reversal signals (proven edge in BTC/ETH) and 12h EMA50 for trend filter (reduces whipsaws).
+# Hypothesis: 1d strategy using 1w Camarilla R4/S4 levels with 1d EMA50 trend filter and volume confirmation.
+# Enter long when price breaks above 1w Camarilla R4 level with volume > 2.0x average and close > 1d EMA50 (bullish bias).
+# Enter short when price breaks below 1w Camarilla S4 level with volume > 2.0x average and close < 1d EMA50 (bearish bias).
+# Exit when price returns to the 1w Camarilla midpoint (P) or touches the opposite level (S4 for long exit, R4 for short exit).
+# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 30-100 total trades over 4 years.
+# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
+# Uses 1w Camarilla for structure (more stable than 1d) and 1d EMA50 for trend filter (slower, fewer whipsaws).
 
-name = "4h_WilliamsR_Extremes_12hEMA50_VolumeConfirm_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R4S4_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation (primary signal)
+    # Get 1w data for Camarilla pivot calculation (MTF structure)
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Calculate 1w Camarilla levels (using previous bar's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True range for Camarilla calculation
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - close_1w)
+    tr3 = np.abs(low_1w - close_1w)
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Camarilla levels (based on previous bar's close and range)
+    camarilla_pivot = close_1w  # Pivot is previous close
+    camarilla_range = high_1w - low_1w
+    
+    # R4 and S4 levels (extreme breakout levels for very few trades)
+    r4 = camarilla_pivot + camarilla_range * 1.1 / 2
+    s4 = camarilla_pivot - camarilla_range * 1.1 / 2
+    
+    # Align Camarilla levels to 1d timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close_1d) / (highest_high - lowest_low)) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Get 12h data for EMA50 trend filter (HTF trend)
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -65,29 +78,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Williams %R conditions
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
-        mean_reversion_exit = abs(williams_r_aligned[i] + 50) < 5  # Near -50
+        # Trend filter: 1d EMA50 bias
+        bullish_bias = close[i] > ema_50_1d_aligned[i]
+        bearish_bias = close[i] < ema_50_1d_aligned[i]
         
-        # Trend filter: 12h EMA50 bias
-        bullish_bias = close[i] > ema_50_12h_aligned[i]
-        bearish_bias = close[i] < ema_50_12h_aligned[i]
+        # Camarilla breakout conditions
+        long_breakout = close[i] > r4_aligned[i]
+        short_breakout = close[i] < s4_aligned[i]
+        
+        # Exit conditions: return to pivot or touch opposite level
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Entry conditions
-        long_entry = oversold and vol_confirm and bullish_bias
-        short_entry = overbought and vol_confirm and bearish_bias
-        
-        # Exit conditions: mean reversion or opposite extreme
-        long_exit = mean_reversion_exit or williams_r_aligned[i] > -20
-        short_exit = mean_reversion_exit or williams_r_aligned[i] < -80
+        long_entry = long_breakout and vol_confirm and bullish_bias
+        short_entry = short_breakout and vol_confirm and bearish_bias
         
         # Handle entries and exits
         if long_entry and position <= 0:
