@@ -82,8 +82,8 @@ def generate_signals(prices):
         trend_down = close[i] < ema_50_aligned[i]
         
         # Momentum filter: RSI in moderate range (avoid extremes)
-        rsi_bullish = rsi_aligned[i] > 40 and rsi_aligned[i] < 60
-        rsi_bearish = rsi_aligned[i] < 60 and rsi_aligned[i] > 40
+        rsi_bullish = rsi_aligned[i] > 45 and rsi_aligned[i] < 55
+        rsi_bearish = rsi_aligned[i] < 55 and rsi_aligned[i] > 45
         
         # Volume filter: above average volume
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
