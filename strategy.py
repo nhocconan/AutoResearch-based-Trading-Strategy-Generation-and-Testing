@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Volume_Weighted_CCI_Divergence
-Hypothesis: Uses 1h CCI (20) for momentum and volume-weighted CCI for divergence detection. 
-Trades only during 8-20 UTC session with EMA(50) trend filter on 1h to avoid counter-trend whipsaws. 
-Designed for low frequency (15-35 trades/year) by requiring both CCI divergence and volume confirmation. 
-Works in bull/bear by following 1h EMA50 trend direction. Targets 60-140 total trades over 4 years.
+12h_Donchian_Breakout_1dTrend_Volume
+Hypothesis: Uses 12h Donchian channel (20-period) breakouts with 1d EMA50 trend filter and volume spike (2x 48-period average) to capture high-probability breakouts. Designed for low trade frequency (12-37/year) to minimize fee decay while capturing strong directional moves. Works in both bull and bear by following 1d trend direction. Entry only on breakout with volume confirmation and trend alignment. Exit when price returns to Donchian midpoint.
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,77 +18,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate typical price
-    tp = (high + low + close) / 3.0
+    # Get 12h data for Donchian channel
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # CCI(20) calculation
-    cci_period = 20
-    sma_tp = pd.Series(tp).rolling(window=cci_period, min_periods=cci_period).mean().values
-    mad = pd.Series(tp).rolling(window=cci_period, min_periods=cci_period).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # Calculate 12h Donchian channel (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Volume-weighted CCI (VWCCI) for divergence
-    vw_tp = tp * volume
-    vw_sma_tp = pd.Series(vw_tp).rolling(window=cci_period, min_periods=cci_period).sum().values / \
-                pd.Series(volume).rolling(window=cci_period, min_periods=cci_period).sum().values
-    vw_mad = pd.Series(vw_tp).rolling(window=cci_period, min_periods=cci_period).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values / np.where(
-        pd.Series(volume).rolling(window=cci_period, min_periods=cci_period).sum().values == 0,
-        1,
-        pd.Series(volume).rolling(window=cci_period, min_periods=cci_period).sum().values
-    )
-    vw_cci = (vw_tp - vw_sma_tp) / (0.015 * vw_mad)
-    vw_cci = np.where(np.isnan(vw_cci), 0, vw_cci)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # EMA(50) trend filter on 1h
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Session filter: 8-20 UTC
-    hours = pd.to_datetime(prices['open_time']).hour
+    # Volume confirmation: >2x 48-period MA (2 days of 12h bars)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and CCI to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
-        # Session filter
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(vw_cci[i]) or 
-            np.isnan(ema_50[i]) or np.isnan(cci[i-1]) or np.isnan(vw_cci[i-1])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        uptrend = close[i] > ema_50[i]
-        downtrend = close[i] < ema_50[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # CCI divergence conditions
-        # Bullish divergence: price makes lower low, CCI makes higher low
-        bull_div = (low[i] < low[i-1]) and (cci[i] > cci[i-1]) and (vw_cci[i] > vw_cci[i-1])
-        # Bearish divergence: price makes higher high, CCI makes lower high
-        bear_div = (high[i] > high[i-1]) and (cci[i] < cci[i-1]) and (vw_cci[i] < vw_cci[i-1])
+        # Volume confirmation (>2x average)
+        vol_confirm = volume[i] > (2.0 * vol_ma_48[i])
         
-        # Entry conditions with trend alignment
-        long_entry = bull_div and uptrend and (cci[i] < -50)  # Oversold bullish divergence
-        short_entry = bear_div and downtrend and (cci[i] > 50)  # Overbought bearish divergence
+        # Breakout conditions at Donchian levels
+        long_breakout = close[i] > donchian_high_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < donchian_low_aligned[i] and vol_confirm and downtrend
         
-        # Exit conditions: CCI crosses zero or opposite divergence
-        long_exit = (cci[i] > 0) or (high[i] > high[i-1] and cci[i] < cci[i-1])
-        short_exit = (cci[i] < 0) or (low[i] < low[i-1] and cci[i] > cci[i-1])
+        # Exit conditions: return to Donchian midpoint
+        midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
-        if long_entry and position <= 0:
-            signals[i] = 0.20
+        if long_breakout and position <= 0:
+            signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
-            signals[i] = -0.20
+        elif short_breakout and position >= 0:
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -102,14 +89,14 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Volume_Weighted_CCI_Divergence"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
