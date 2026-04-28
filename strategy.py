@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian channel breakout with 12h trend filter and volume confirmation.
-# Uses Donchian(20) to identify breakouts, filters by 12h EMA(50) trend direction,
-# and requires volume > 1.8x 20-period average to confirm. Designed for 6h timeframe
-# with 50-150 total trades over 4 years to minimize fee drag. Works in bull/bear via trend filter.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,51 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for ATR and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20)
-    donch_period = 20
-    upper_donch = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
-    lower_donch = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
+    # Calculate 1d ATR(14) for volatility filter and stop loss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_series = pd.Series(close_1d)
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
     
-    # Volume filter: volume > 1.8x 20-period average
+    tr1 = high_1d_series - low_1d_series
+    tr2 = abs(high_1d_series - close_1d_series.shift(1))
+    tr3 = abs(low_1d_series - close_1d_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # 4h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std_dev * bb_std)
+    lower_band = sma - (bb_std_dev * bb_std)
+    bb_width = upper_band - lower_band
+    
+    # Bollinger Band squeeze: width below 50-period average
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze = bb_width < bb_width_ma
+    
+    # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.8)
+    volume_confirm = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donch_period, 50, 20)  # Wait for Donchian, EMA, and volume
+    start_idx = max(bb_period, 50, 20)  # Wait for BB, EMA, and volume
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_donch[i]) or 
-            np.isnan(lower_donch[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(sma[i]) or 
+            np.isnan(bb_std_dev[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_ma[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA(50)
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA(50)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: breakout from Donchian in trend direction with volume
-        long_breakout = close[i] > upper_donch[i]
-        short_breakout = close[i] < lower_donch[i]
+        # Entry conditions: breakout from squeeze in trend direction with volume
+        long_breakout = close[i] > upper_band[i]
+        short_breakout = close[i] < lower_band[i]
         
-        long_entry = long_breakout and uptrend and volume_confirm[i]
-        short_entry = short_breakout and downtrend and volume_confirm[i]
+        long_entry = squeeze[i] and long_breakout and uptrend and volume_confirm[i]
+        short_entry = squeeze[i] and short_breakout and downtrend and volume_confirm[i]
         
-        # Exit conditions: opposite Donchian breakout or loss of trend
-        long_exit = (close[i] < lower_donch[i]) or (not uptrend)
-        short_exit = (close[i] > upper_donch[i]) or (not downtrend)
+        # Exit conditions: opposite breakout or loss of trend or ATR-based stop
+        long_exit = (close[i] < sma[i]) or (not uptrend) or (position == 1 and close[i] < (high[i] - 2.0 * atr_14_1d_aligned[i]))
+        short_exit = (close[i] > sma[i]) or (not downtrend) or (position == -1 and close[i] > (low[i] + 2.0 * atr_14_1d_aligned[i]))
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -88,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DonchianBreakout_12hEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "4h_BollingerSqueeze_1dEMA50_VolumeConfirm_ATRStop"
+timeframe = "4h"
 leverage = 1.0
