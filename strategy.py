@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_R3S3_Breakout_DailyTrend_VolumeSpike
-Hypothesis: Weekly pivot R3/S3 levels act as strong support/resistance. Breakouts with daily trend (EMA34) and volume spike confirmation capture momentum in both bull and bear markets. Weekly timeframe reduces noise, daily trend filters direction, volume confirms conviction. Targets 15-25 trades/year to minimize fee drag.
+4h_Three_Sigma_Exit_12hTrend_VolumeFilter
+Hypothesis: Exit positions when price moves 3 standard deviations away from 20-period mean (mean reversion in ranging markets), 
+enter only when aligned with 12h EMA50 trend and volume confirmation. Works in both bull/bear by following higher timeframe trend.
+Targets ~30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -9,7 +11,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
@@ -18,22 +20,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
-        return np.zeros(n)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily EMA34 for trend filter
-    close_daily = df_daily['close'].values
-    ema_34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_34_daily)
+    # Calculate 20-period statistics for mean reversion exit
+    close_series = pd.Series(close)
+    mean_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_series.rolling(window=20, min_periods=20).std().values
     
-    # Calculate 20-period volume MA for volume spike confirmation
+    # Calculate 20-period volume MA for volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -43,51 +45,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_34_daily_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(mean_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate weekly pivot levels for current week
-        # Need previous week's OHLC (weekly data)
-        week_idx = i // (7 * 24 * 60 // 6)  # 7 days * 24 hours * 60 minutes / 6 min per bar = 168 bars per week
-        if week_idx < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_week_idx = week_idx - 1
-        if prev_week_idx >= len(df_weekly):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous week's OHLC from weekly data
-        ph = df_weekly['high'].iloc[prev_week_idx]
-        pl = df_weekly['low'].iloc[prev_week_idx]
-        pc = df_weekly['close'].iloc[prev_week_idx]
+        # Trend direction from 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Weekly pivot levels (standard calculation)
-        pivot = (ph + pl + pc) / 3.0
-        range_val = ph - pl
-        r3 = pivot + range_val * 1.1
-        s3 = pivot - range_val * 1.1
+        # Volume confirmation: >1.8x 20-period MA
+        vol_confirm = volume[i] > (1.8 * vol_ma_20[i])
         
-        # Trend direction from daily EMA34
-        trend_up = close[i] > ema_34_daily_aligned[i]
-        trend_down = close[i] < ema_34_daily_aligned[i]
+        # Mean reversion bands
+        upper_band = mean_20[i] + (3.0 * std_20[i])
+        lower_band = mean_20[i] - (3.0 * std_20[i])
         
-        # Volume confirmation: >2.0x 20-period MA
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        # Entry conditions: trend-aligned with volume confirmation
+        long_entry = trend_up and vol_confirm and (close[i] < lower_band)
+        short_entry = trend_down and vol_confirm and (close[i] > upper_band)
         
-        # Breakout conditions
-        long_breakout = close[i] > r3
-        short_breakout = close[i] < s3
-        
-        # Entry logic
-        long_entry = vol_confirm and trend_up and long_breakout
-        short_entry = vol_confirm and trend_down and short_breakout
-        
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < s3) or (not trend_up)
-        short_exit = (close[i] > r3) or (not trend_down)
+        # Exit conditions: price reverts to mean (3-sigma band touch/reversal)
+        long_exit = (close[i] >= mean_20[i]) or (not trend_up)
+        short_exit = (close[i] <= mean_20[i]) or (not trend_down)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -112,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout_DailyTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Three_Sigma_Exit_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
