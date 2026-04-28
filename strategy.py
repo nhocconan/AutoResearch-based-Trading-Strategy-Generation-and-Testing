@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volume spike filter
-# Long when price breaks above R1 AND 4h close > EMA50 AND 1d volume > 1.8x 20-bar avg
-# Short when price breaks below S1 AND 4h close < EMA50 AND 1d volume > 1.8x 20-bar avg
-# Uses 4h/1d for signal direction, 1h only for entry timing precision
-# Session filter: 08-20 UTC to avoid low-volume Asian session
-# Target: 15-37 trades/year via tight entry conditions and multi-timeframe confluence
-# Works in bull markets via breakouts with trend, in bear via mean reversion at S1/R1 in ranging markets
+# Hypothesis: 6h Bollinger Band Width Regime + 1d Donchian Breakout + Volume Spike
+# Bollinger Band Width < 20th percentile = low volatility squeeze (range regime)
+# Donchian(20) breakout on 1d with volume > 2x 20-bar average = expansion signal
+# Long when 1d price breaks above Donchian upper band AND 6h BBW < 20th percentile AND volume spike
+# Short when 1d price breaks below Donchian lower band AND 6h BBW < 20th percentile AND volume spike
+# BBW regime filter ensures we only trade breakouts after low volatility periods, reducing false breakouts
+# Works in both bull and bear markets by capturing expansion after contraction
+# Target: 12-30 trades/year via tight regime + breakout + volume confluence
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Trend_1dVolumeSpike_v1"
-timeframe = "1h"
+name = "6h_BBW_Regime_1dDonchian20_Breakout_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,96 +21,93 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    if len(df_4h) < 50 or len(df_1d) < 30:
+    # Get 1d data for Donchian calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for Donchian(20)
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # 1h Camarilla pivot points (based on previous day's OHLC)
+    # Calculate Donchian(20) on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1_1d = close_1d + camarilla_range
-    s1_1d = close_1d - camarilla_range
+    # Donchian upper and lower bands (20-period)
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 1h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Prepend zeros for alignment (since we lost first 19 bars in calculations)
+    donch_high_20 = np.concatenate([np.full(19, np.nan), donch_high_20])
+    donch_low_20 = np.concatenate([np.full(19, np.nan), donch_low_20])
     
-    # 1d volume spike filter: >1.8x 20-bar average
-    volume_1d = df_1d['volume'].values
-    volume_series = pd.Series(volume_1d)
+    # Align 1d Donchian bands to 6h timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    
+    # Calculate Bollinger Band Width on 6h data (20, 2)
+    close_s = pd.Series(close)
+    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20 * 100  # Percentage width
+    
+    # Calculate 20th percentile of BBW for regime filter (using 100-bar lookback)
+    bbw_series = pd.Series(bb_width)
+    bbw_percentile_20 = bbw_series.rolling(window=100, min_periods=100).quantile(0.20).values
+    
+    # Volume confirmation: >2x 20-bar average volume
+    volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > 1.8 * volume_ma_20
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike, additional_delay_bars=0)
-    
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1h price data
-    open_1h = prices['open'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
+    volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 30)  # Need sufficient history for HTF indicators
+    start_idx = max(120, 20)  # Need sufficient history for all indicators (100 for BBW percentile + 20 for others)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(bbw_percentile_20[i]) or np.isnan(sma_20[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current 1h bar levels
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        vol_spike = volume_spike_aligned[i]
-        ema_50 = ema_50_4h_aligned[i]
-        close_price = close_1h[i]
+        vol_spike = volume_spike[i]
+        bbw_regime = bb_width[i] < bbw_percentile_20[i]  # Low volatility squeeze regime
+        close_price = close[i]
+        donch_high = donch_high_20_aligned[i]
+        donch_low = donch_low_20_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above R1 AND 4h close > EMA50 (uptrend) AND volume spike
-            if close_price > r1 and ema_50 > 0 and close_price > ema_50 and vol_spike:
-                signals[i] = 0.20
+            # Long when price breaks above Donchian upper band AND BBW regime (low vol) AND volume spike
+            if close_price > donch_high and bbw_regime and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S1 AND 4h close < EMA50 (downtrend) AND volume spike
-            elif close_price < s1 and ema_50 > 0 and close_price < ema_50 and vol_spike:
-                signals[i] = -0.20
+            # Short when price breaks below Donchian lower band AND BBW regime (low vol) AND volume spike
+            elif close_price < donch_low and bbw_regime and vol_spike:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price breaks below S1 or trend changes
-            if close_price < s1 or close_price < ema_50:
+        elif position == 1:  # Long - exit when price returns to middle of Donchian channel or volatility expands
+            donch_mid = (donch_high + donch_low) / 2
+            if close_price < donch_mid or not bbw_regime:  # Exit when price retracs to mid or volatility expands
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:  # Short - exit when price breaks above R1 or trend changes
-            if close_price > r1 or close_price > ema_50:
+                signals[i] = 0.25
+        elif position == -1:  # Short - exit when price returns to middle of Donchian channel or volatility expands
+            donch_mid = (donch_high + donch_low) / 2
+            if close_price > donch_mid or not bbw_regime:  # Exit when price retracs to mid or volatility expands
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
