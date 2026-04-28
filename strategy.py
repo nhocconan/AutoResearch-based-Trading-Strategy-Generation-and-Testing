@@ -1,7 +1,27 @@
 #!/usr/bin/env python3
+# Hypothesis: 6h Williams Alligator with 1-day ADX trend filter and volume confirmation.
+# Williams Alligator (JAW=TEETH=LIPS) uses smoothed moving averages to identify trends.
+# In trending markets (ADX>25), the three lines diverge: green (Lips) > red (Teeth) > blue (Jaw) for uptrend,
+# and reversed for downtrend. This avoids whipsaws in ranging markets.
+# Volume confirmation ensures breakouts have participation.
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by filtering for strong trends via ADX.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def _smma(array, period):
+    """Smoothed Moving Average (SMMA)"""
+    if len(array) < period:
+        return np.full_like(array, np.nan, dtype=float)
+    result = np.full_like(array, np.nan, dtype=float)
+    # First value is simple moving average
+    result[period-1] = np.mean(array[:period])
+    # Subsequent values: SMMA = (prev_smma * (period-1) + current_close) / period
+    for i in range(period, len(array)):
+        result[i] = (result[i-1] * (period-1) + array[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -13,103 +33,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points and trend filter
+    # Get daily data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough for EMA34
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot points
+    # Calculate daily ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Standard Camarilla calculation
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # First day uses its own close
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Camarilla levels
-    r3 = close_prev + 1.1 * range_1d / 2
-    s3 = close_prev - 1.1 * range_1d / 2
-    r4 = close_prev + 1.1 * range_1d
-    s4 = close_prev - 1.1 * range_1d
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Smoothed values
+    atr = _smma(tr, 14)
+    plus_di_smoothed = _smma(plus_dm, 14)
+    minus_di_smoothed = _smma(minus_dm, 14)
+    
+    # DI values
+    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
+    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = _smma(dx, 14)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Williams Alligator on 6h data
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars ahead
+    # Teeth (Red): 8-period SMMA, shifted 5 bars ahead  
+    # Lips (Green): 5-period SMMA, shifted 3 bars ahead
+    jaw = _smma(close, 13)
+    teeth = _smma(close, 8)
+    lips = _smma(close, 5)
+    
+    # Apply shifts (future leakage prevention - using only past data)
+    # For signal at bar i, we use values that were available at bar i
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    # Fill initial shifted values with NaN to avoid look-ahead
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
     # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (volume_ma * 1.5)
     
-    # Choppiness regime filter (daily)
-    # CHOP > 61.8 = range, CHOP < 38.2 = trending
-    atr_period = 14
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high_1d).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(atr_period)
-    chop = pd.Series(chop).rolling(window=atr_period, min_periods=atr_period).mean().values
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Regime: trending (CHOP < 38.2) or range (CHOP > 61.8)
-    trending_regime = chop_aligned < 38.2
-    range_regime = chop_aligned > 61.8
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = max(30, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_shifted[i]) or 
+            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Entry conditions based on regime
-        # In trending regime: breakout trades
-        # In range regime: mean reversion at S3/R3
+        # Alligator conditions
+        # Uptrend: Lips > Teeth > Jaw (all diverging upward)
+        # Downtrend: Jaw > Teeth > Lips (all diverging downward)
+        lips_val = lips_shifted[i]
+        teeth_val = teeth_shifted[i]
+        jaw_val = jaw_shifted[i]
         
-        if trending_regime[i]:
-            # Trending: breakout trades
-            long_breakout = close[i] > r3_aligned[i]
-            short_breakout = close[i] < s3_aligned[i]
-            
-            long_entry = long_breakout and trend_up and volume_filter[i]
-            short_entry = short_breakout and trend_down and volume_filter[i]
-            
-            # Exit on opposite level
-            long_exit = close[i] < s3_aligned[i] and position == 1
-            short_exit = close[i] > r3_aligned[i] and position == -1
-            
-        else:  # range regime
-            # Range: mean reversion at extremes
-            long_entry = (close[i] < s3_aligned[i]) and trend_up and volume_filter[i]
-            short_entry = (close[i] > r3_aligned[i]) and trend_down and volume_filter[i]
-            
-            # Exit at middle (mean reversion target)
-            long_exit = close[i] > (r3_aligned[i] + s3_aligned[i]) / 2 and position == 1
-            short_exit = close[i] < (r3_aligned[i] + s3_aligned[i]) / 2 and position == -1
+        # Check for valid alignment (no crossovers)
+        uptrend_aligned = lips_val > teeth_val and teeth_val > jaw_val
+        downtrend_aligned = jaw_val > teeth_val and teeth_val > lips_val
+        
+        # Entry conditions with volume confirmation
+        long_entry = strong_trend and uptrend_aligned and volume_filter[i]
+        short_entry = strong_trend and downtrend_aligned and volume_filter[i]
+        
+        # Exit conditions: when trend weakens or Alligator lines converge
+        # Exit long when trend weakens or Lips crosses below Teeth
+        long_exit = (not strong_trend) or (lips_val <= teeth_val) or (position == 1 and close[i] < lips_val)
+        # Exit short when trend weakens or Lips crosses above Teeth
+        short_exit = (not strong_trend) or (lips_val >= teeth_val) or (position == -1 and close[i] > lips_val)
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -118,10 +141,10 @@ def generate_signals(prices):
         elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif long_exit:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif short_exit:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
@@ -135,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_RegimeAdaptive_VolumeFilter"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dADX_TrendFilter_Volume"
+timeframe = "6h"
 leverage = 1.0
