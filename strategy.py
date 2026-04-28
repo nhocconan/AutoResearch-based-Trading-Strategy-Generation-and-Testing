@@ -1,7 +1,9 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h_ADX_Trend_Strength_EMA_Crossover
-Hypothesis: Uses 6h ADX to identify strong trending regimes (ADX > 25) and trades EMA crossovers (EMA12/EMA26) in the direction of the trend. Works in both bull and bear markets by only trading when trend strength is confirmed, avoiding whipsaws in ranging markets. Targets 15-35 trades/year by requiring strong trend confirmation.
+4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume
+Hypothesis: Weekly pivot R4/S4 breakouts with 1d EMA50 trend filter and volume confirmation.
+Targets 20-50 trades/year by combining strong weekly support/resistance with daily trend alignment.
+Works in bull markets (buy R4 breaks in uptrend) and bear markets (sell S4 breaks in downtrend).
 """
 
 import numpy as np
@@ -16,60 +18,43 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h data for ADX calculation (trend strength filter)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 6h data
-    period = 14
-    # True Range
-    tr1 = df_6h['high'] - df_6h['low']
-    tr2 = abs(df_6h['high'] - df_6h['close'].shift(1))
-    tr3 = abs(df_6h['low'] - df_6h['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    # Calculate weekly pivot points (standard formula)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Directional Movement
-    dm_plus = pd.Series(np.where((df_6h['high'] - df_6h['high'].shift(1)) > (df_6h['low'].shift(1) - df_6h['low']), 
-                                 np.maximum(df_6h['high'] - df_6h['high'].shift(1), 0), 0))
-    dm_minus = pd.Series(np.where((df_6h['low'].shift(1) - df_6h['low']) > (df_6h['high'] - df_6h['high'].shift(1)), 
-                                  np.maximum(df_6h['low'].shift(1) - df_6h['low'], 0), 0))
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r4 = weekly_high + 3 * (pivot - weekly_low)
+    s4 = weekly_low - 3 * (weekly_high - pivot)
     
-    # Smoothed values
-    atr = tr.ewm(alpha=1/period, adjust=False).mean()
-    dm_plus_smooth = dm_plus.ewm(alpha=1/period, adjust=False).mean()
-    dm_minus_smooth = dm_minus.ewm(alpha=1/period, adjust=False).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.ewm(alpha=1/period, adjust=False).mean()
-    adx_values = adx.values
-    
-    # Strong trend filter: ADX > 25
-    strong_trend = adx_values > 25
-    
-    # Get 1d data for EMA calculation (entry signals)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMAs on 1d data
-    ema_12 = pd.Series(df_1d['close']).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = pd.Series(df_1d['close']).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all higher timeframe data to 6h
-    strong_trend_aligned = align_htf_to_ltf(prices, df_6h, strong_trend)
-    ema_12_aligned = align_htf_to_ltf(prices, df_1d, ema_12)
-    ema_26_aligned = align_htf_to_ltf(prices, df_1d, ema_26)
+    # Align all higher timeframe data to 4h
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # EMA crossover signals
-    ema_cross_up = ema_12_aligned > ema_26_aligned  # Bullish crossover
-    ema_cross_down = ema_12_aligned < ema_26_aligned  # Bearish crossover
+    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
+    trend_up = close > ema_50_1d_aligned
+    trend_down = close < ema_50_1d_aligned
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,22 +63,26 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(strong_trend_aligned[i]) or 
-            np.isnan(ema_12_aligned[i]) or 
-            np.isnan(ema_26_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: strong trend + EMA crossover
-        # Long: strong trend + bullish EMA crossover
-        long_entry = strong_trend_aligned[i] and ema_cross_up[i]
+        # Entry conditions with trend alignment and volume surge
+        # Long: price breaks above R4 + 1d uptrend + volume surge
+        long_entry = (close[i] > r4_aligned[i] and 
+                     trend_up[i] and 
+                     volume_surge[i])
         
-        # Short: strong trend + bearish EMA crossover
-        short_entry = strong_trend_aligned[i] and ema_cross_down[i]
+        # Short: price breaks below S4 + 1d downtrend + volume surge
+        short_entry = (close[i] < s4_aligned[i] and 
+                      trend_down[i] and 
+                      volume_surge[i])
         
-        # Exit when trend weakens or opposite crossover
-        long_exit = not strong_trend_aligned[i] or ema_cross_down[i]
-        short_exit = not strong_trend_aligned[i] or ema_cross_up[i]
+        # Exit on opposite pivot level break with volume surge
+        long_exit = close[i] < s4_aligned[i] and volume_surge[i]
+        short_exit = close[i] > r4_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -102,11 +91,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = 0.0  # Exit to flat
-            position = 0
+            signals[i] = -0.25  # Reverse to short
+            position = -1
         elif short_exit and position == -1:
-            signals[i] = 0.0  # Exit to flat
-            position = 0
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -118,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_Trend_Strength_EMA_Crossover"
-timeframe = "6h"
+name = "4h_WeeklyPivot_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
