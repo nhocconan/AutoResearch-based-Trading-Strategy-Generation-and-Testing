@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from 1d for structure, 1d EMA34 for primary trend filter, and volume spike (>2.0x 50-bar avg) for momentum
-# Exits on opposite Camarilla level touch (R4/S4) or ATR-based stoploss (2.0x)
-# Designed to capture strong trends while avoiding choppy markets via volume and trend filters
-# Target: 19-50 trades/year via tight Camarilla breakout conditions + volume + trend filter
+# Hypothesis: 6h Donchian(20) breakout with 1d ADX25 trend filter and volume confirmation
+# Uses Donchian channels for breakout structure, 1d ADX>25 for primary trend filter, and volume spike (>1.8x 20-bar avg) for momentum
+# Exits on opposite Donchian level touch or ATR-based stoploss (2.5x)
+# Designed to capture strong trends while avoiding whipsaw via ADX filter and volume confirmation
+# Target: 12-37 trades/year via tight Donchian breakout conditions + ADX + volume filter
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_TrendFilter_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dADX25_TrendFilter_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,100 +22,106 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate ADX on 1d data (period=14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d candles only)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # True Range
+    tr1 = pd.Series(high_1d[1:] - low_1d[1:])
+    tr2 = pd.Series(np.abs(high_1d[1:] - close_1d[:-1]))
+    tr3 = pd.Series(np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean()
     
-    # Calculate Camarilla pivot levels from 1d data
-    # Typical price = (high + low + close) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Camarilla levels
-    R4 = typical_price + (df_1d['high'] - df_1d['low']) * 1.1 / 2
-    R3 = typical_price + (df_1d['high'] - df_1d['low']) * 1.1 / 4
-    S3 = typical_price - (df_1d['high'] - df_1d['low']) * 1.1 / 4
-    S4 = typical_price - (df_1d['high'] - df_1d['low']) * 1.1 / 2
+    # Directional Movement
+    up_move = pd.Series(high_1d[1:] - high_1d[:-1])
+    down_move = pd.Series(low_1d[:-1] - low_1d[1:])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align Camarilla levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_1d
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = dx.rolling(window=14, min_periods=14).mean()
     
-    # Volume confirmation: >2.0x 50-bar average volume
+    # Align 1d ADX to 6h timeframe (completed 1d candles only)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d.values)
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_50 = volume_series.rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > 2.0 * volume_ma_50
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # Need sufficient history for EMA and volume MA
+    start_idx = max(50, lookback)  # Need sufficient history
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma_50[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        r4 = R4_aligned[i]
-        r3 = R3_aligned[i]
-        s3 = S3_aligned[i]
-        s4 = S4_aligned[i]
-        ema34_val = ema34_1d_aligned[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
+        adx_val = adx_1d_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R3 AND 1d EMA34 uptrend AND volume spike
-            if price > r3 and price > ema34_val and vol_confirm:
+            # Long breakout: price breaks above upper Donchian AND 1d ADX>25 (trending) AND volume spike
+            if price > upper and adx_val > 25 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S3 AND 1d EMA34 downtrend AND volume spike
-            elif price < s3 and price < ema34_val and vol_confirm:
+            # Short breakout: price breaks below lower Donchian AND 1d ADX>25 (trending) AND volume spike
+            elif price < lower and adx_val > 25 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit on stoploss or price touches S4 (opposite level)
-            # ATR-based stoploss: 2.0 * ATR below entry (using 4h ATR)
+        elif position == 1:  # Long - exit on stoploss or price touches lower Donchian (opposite level)
+            # ATR-based stoploss: 2.5 * ATR below entry (using 6h ATR)
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.0 * atr_val
-            # Exit on stoploss or price < S4 (opposite level touch)
-            if price < stop_loss or price < s4:
+            stop_loss = entry_price - 2.5 * atr_val
+            # Exit on stoploss or price < lower (opposite level touch)
+            if price < stop_loss or price < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit on stoploss or price touches R4 (opposite level)
-            # ATR-based stoploss: 2.0 * ATR above entry
+        elif position == -1:  # Short - exit on stoploss or price touches upper Donchian (opposite level)
+            # ATR-based stoploss: 2.5 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.0 * atr_val
-            # Exit on stoploss or price > R4 (opposite level touch)
-            if price > stop_loss or price > r4:
+            stop_loss = entry_price + 2.5 * atr_val
+            # Exit on stoploss or price > upper (opposite level touch)
+            if price > stop_loss or price > upper:
                 signals[i] = 0.0
                 position = 0
             else:
