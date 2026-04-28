@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
-# Bull Power = High - EMA(close), Bear Power = EMA(close) - Low.
-# Enter long when Bull Power > 0 and rising, price > 1d EMA34 (uptrend), and volume > 1.5x 20-bar average.
-# Enter short when Bear Power > 0 and rising, price < 1d EMA34 (downtrend), and volume > 1.5x 20-bar average.
-# Exit when power becomes negative or price crosses EMA34.
-# Uses discrete position sizing (0.25) to manage drawdown in volatile markets.
-# Target: 80-120 total trades over 4 years (20-30/year) to minimize fee drag.
-# Elder Ray measures buying/selling pressure relative to trend; combining with 1d EMA34 ensures alignment with higher timeframe trend;
-# volume confirmation filters weak breakouts. Works in bull (strong buying pressure) and bear (strong selling pressure).
+# Hypothesis: 12h Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation.
+# Enter long when price breaks above Camarilla R3 level, 1d EMA34 trending up, and volume > 2.0x 20-bar average.
+# Enter short when price breaks below Camarilla S3 level, 1d EMA34 trending down, and volume > 2.0x 20-bar average.
+# Exit when price returns to Camarilla Pivot level (midpoint).
+# Uses discrete position sizing (0.25) to limit drawdown in bear markets like 2022.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Camarilla levels identify key support/resistance; 1d EMA34 ensures alignment with higher timeframe trend;
+# high volume threshold confirms institutional participation. Works in both bull (breakouts) and bear (breakdowns).
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,32 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Camarilla pivot calculation (based on previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Shift by 1 to use previous day's data (no look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla levels
+    diff = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    camarilla_r3 = prev_close + diff * 1.25 / 2
+    camarilla_s3 = prev_close - diff * 1.25 / 2
+    camarilla_r4 = prev_close + diff * 1.5 / 2
+    camarilla_s4 = prev_close - diff * 1.5 / 2
+    camarilla_s1 = prev_close - diff * 1.05 / 2
+    camarilla_r1 = prev_close + diff * 1.05 / 2
+    
+    # Align Camarilla levels to 12h
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    
+    # Get 1d data for EMA34 trend filter (same timeframe as Camarilla)
     close_1d = df_1d['close'].values
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align EMA34 to 6h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate EMA of close for 6h (needed for Elder Ray)
-    # Use sufficient history for EMA calculation
-    close_series = pd.Series(close)
-    ema_close = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_close  # Buying pressure
-    bear_power = ema_close - low   # Selling pressure
-    
-    # Volume confirmation: >1.5x 20-bar average (moderate to balance frequency)
+    # Volume confirmation: >2.0x 20-bar average volume (strict to reduce trades)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,35 +81,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Elder Ray momentum: rising power (current > previous)
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_rising = bear_power[i] > bear_power[i-1]
+        # 1d EMA34 trend: slope over 3 periods
+        if i >= 3:
+            ema_slope = (ema_34_aligned[i] - ema_34_aligned[i-3]) / 3
+            ema_trend_up = ema_slope > 0
+            ema_trend_down = ema_slope < 0
+        else:
+            ema_trend_up = False
+            ema_trend_down = False
         
-        # Price relative to 1d EMA34
-        price_above_ema = close[i] > ema_34_aligned[i]
-        price_below_ema = close[i] < ema_34_aligned[i]
+        # Price action
+        price = close[i]
         
-        # Entry conditions
-        enter_long = bull_power[i] > 0 and bull_power_rising and price_above_ema and vol_confirm
-        enter_short = bear_power[i] > 0 and bear_power_rising and price_below_ema and vol_confirm
+        # Breakout conditions
+        breakout_long = price > camarilla_r3_aligned[i]
+        breakout_short = price < camarilla_s3_aligned[i]
         
-        # Exit conditions: power turns negative or price crosses EMA34
-        exit_long = bull_power[i] <= 0 or not price_above_ema
-        exit_short = bear_power[i] <= 0 or not price_below_ema
+        # Exit conditions: return to pivot level
+        exit_long = price < camarilla_pp_aligned[i]
+        exit_short = price > camarilla_pp_aligned[i]
         
         # Handle entries and exits
-        if enter_long and position <= 0:
+        if breakout_long and ema_trend_up and vol_confirm and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif enter_short and position >= 0:
+        elif breakout_short and ema_trend_down and vol_confirm and position >= 0:
             signals[i] = -0.25
             position = -1
         elif position == 1 and exit_long:
