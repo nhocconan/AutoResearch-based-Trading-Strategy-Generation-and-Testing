@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_1dVolume_Spike_And_1wTrend_Filter
-Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 12h to capture trend direction.
-Enters long when price crosses above KAMA with 1d volume spike confirmation and 1w uptrend.
-Enters short when price crosses below KAMA with 1d volume spike confirmation and 1w downtrend.
-Uses 1d volume spike (>2.0x 20-period MA) to filter false signals.
-Designed to work in both bull and bear markets by following the adaptive trend.
-Targets 12-37 trades per year to minimize fee drag while capturing meaningful moves.
+4h_Chaikin_Oscillator_RSI_Divergence
+Hypothesis: Uses Chaikin Oscillator (3,10) for money flow confirmation combined with RSI divergence on 4h timeframe.
+Enters long when CO > 0 and bullish RSI divergence occurs; short when CO < 0 and bearish RSI divergence.
+Includes volume confirmation and ADX trend filter to avoid whipsaws.
+Designed for 4h timeframe with target 20-40 trades per year to minimize fee drag while capturing meaningful momentum shifts.
+Works in both bull and bear markets by following institutional money flow and divergence signals.
 """
 
 import numpy as np
@@ -23,78 +22,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate Chaikin Oscillator (3,10) - measures money flow
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    mfv = mfm * volume
+    # ADL = cumulative sum of MFV
+    adl = np.cumsum(mfv)
+    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
+    adl_series = pd.Series(adl)
+    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3 - ema10
     
-    # Calculate 1d volume spike (>2.0x 20-period MA)
-    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_20)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Calculate RSI(14) for divergence detection
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss != 0, avg_loss, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate ADX(14) for trend strength filter
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate KAMA on 12h close
-    # KAMA parameters: ER = 10, Fast = 2, Slow = 30
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / np.where(tr14 != 0, tr14, 1e-10)
+    di_minus = 100 * dm_minus_14 / np.where(tr14 != 0, tr14, 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation - volume above 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > vol_ma_20
+    
+    # Detect RSI divergences (lookback 5 periods)
+    def detect_bullish_divergence(rsi_arr, price_arr, lookback=5):
+        bullish = np.zeros_like(rsi_arr, dtype=bool)
+        for i in range(lookback, len(rsi_arr)):
+            if np.isnan(rsi_arr[i]) or np.isnan(rsi_arr[i-lookback]):
+                continue
+            # Check if price made lower low but RSI made higher low
+            if (price_arr[i] < price_arr[i-lookback] and 
+                rsi_arr[i] > rsi_arr[i-lookback]):
+                bullish[i] = True
+        return bullish
+    
+    def detect_bearish_divergence(rsi_arr, price_arr, lookback=5):
+        bearish = np.zeros_like(rsi_arr, dtype=bool)
+        for i in range(lookback, len(rsi_arr)):
+            if np.isnan(rsi_arr[i]) or np.isnan(rsi_arr[i-lookback]):
+                continue
+            # Check if price made higher high but RSI made lower high
+            if (price_arr[i] > price_arr[i-lookback] and 
+                rsi_arr[i] < rsi_arr[i-lookback]):
+                bearish[i] = True
+        return bearish
+    
+    bullish_div = detect_bullish_divergence(rsi, close)
+    bearish_div = detect_bearish_divergence(rsi, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(chaikin[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Price relative to KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Filter: only trade when ADX > 20 (trending market)
+        strong_trend = adx[i] > 20
         
-        # 1w trend filter
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Entry conditions
+        long_entry = (chaikin[i] > 0) and bullish_div[i] and vol_confirm[i] and strong_trend
+        short_entry = (chaikin[i] < 0) and bearish_div[i] and vol_confirm[i] and strong_trend
         
-        # Volume confirmation
-        vol_confirm = vol_spike_1d_aligned[i]
-        
-        # Entry logic:
-        # Long: Price crosses above KAMA with volume spike and 1w uptrend
-        long_entry = vol_confirm and price_above_kama and not (close[i-1] > kama[i-1]) and trend_up
-        # Short: Price crosses below KAMA with volume spike and 1w downtrend
-        short_entry = vol_confirm and price_below_kama and not (close[i-1] < kama[i-1]) and trend_down
-        
-        # Exit logic: Opposite cross of KAMA
-        long_exit = price_below_kama and (close[i-1] > kama[i-1])
-        short_exit = price_above_kama and (close[i-1] < kama[i-1])
+        # Exit conditions - reverse signals or loss of momentum
+        long_exit = (chaikin[i] < 0) or not bullish_div[i] or not vol_confirm[i]
+        short_exit = (chaikin[i] > 0) or not bearish_div[i] or not vol_confirm[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -119,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_With_1dVolume_Spike_And_1wTrend_Filter"
-timeframe = "12h"
+name = "4h_Chaikin_Oscillator_RSI_Divergence"
+timeframe = "4h"
 leverage = 1.0
