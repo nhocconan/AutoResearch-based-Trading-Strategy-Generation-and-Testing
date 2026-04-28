@@ -13,57 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Choppiness Index calculation
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], tr_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # ER (Efficiency Ratio)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate sum of true ranges for numerator
-    sum_tr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Calculate max(high) - min(low) over 14 days for denominator
-    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14_1d = max_high_1d - min_low_1d
-    
-    # Choppiness Index: CHOP = 100 * log10(sum_tr / range) / log10(14)
-    chop_1d = 100 * np.log10(sum_tr_1d / range_14_1d) / np.log10(14)
-    
-    # Chop > 61.8 = ranging market (mean revert), Chop < 38.2 = trending
-    chop_range = chop_1d > 61.8
-    chop_trend = chop_1d < 38.2
-    
-    # Align Chop indicators to 4h timeframe
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
-    
-    # Calculate 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 4h Bollinger Bands (20, 2)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate 12h momentum filter (price vs 12-period ago)
+    mom_12 = np.zeros_like(close)
+    mom_12[:12] = 0
+    mom_12[12:] = close[12:] - close[:-12]
     
-    # Calculate volume average
+    # Align daily indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
@@ -78,11 +67,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_range_aligned[i]) or 
-            np.isnan(chop_trend_aligned[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(bb_upper[i]) or
-            np.isnan(bb_lower[i]) or
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(mom_12[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -92,13 +79,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Mean reversion in ranging markets: buy at lower BB, sell at upper BB
-        long_entry = chop_range_aligned[i] and close[i] <= bb_lower[i] and volume[i] > vol_ma[i]
-        short_entry = chop_range_aligned[i] and close[i] >= bb_upper[i] and volume[i] > vol_ma[i]
+        # Trend filter: price above/below KAMA
+        uptrend = close[i] > kama_aligned[i]
+        downtrend = close[i] < kama_aligned[i]
         
-        # Exit: return to middle band
-        long_exit = chop_range_aligned[i] and close[i] >= bb_middle[i]
-        short_exit = chop_range_aligned[i] and close[i] <= bb_middle[i]
+        # Momentum filter: positive/negative 12-period momentum
+        mom_pos = mom_12[i] > 0
+        mom_neg = mom_12[i] < 0
+        
+        # RSI filter: avoid extremes
+        rsi_ok = (rsi_aligned[i] > 30) & (rsi_aligned[i] < 70)
+        
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
+        
+        # Entry conditions
+        long_entry = uptrend and mom_pos and rsi_ok and vol_filter
+        short_entry = downtrend and mom_neg and rsi_ok and vol_filter
+        
+        # Exit conditions: trend reversal or RSI extreme
+        long_exit = not uptrend or rsi_aligned[i] >= 70
+        short_exit = not downtrend or rsi_aligned[i] <= 30
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -123,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_RSI_BB_MeanRev_Volume"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Momentum"
+timeframe = "12h"
 leverage = 1.0
