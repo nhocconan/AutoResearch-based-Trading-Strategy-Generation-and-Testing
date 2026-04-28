@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for additional context
+    # Get weekly data for HTF context
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -33,14 +33,18 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Daily range for pivot calculations
+    # Calculate daily range for pivot calculations
     daily_range = high_1d - low_1d
     
     # Daily Camarilla pivot levels (based on previous day)
+    camarilla_r1 = close_1d + daily_range * 1.1 / 12
+    camarilla_s1 = close_1d - daily_range * 1.1 / 12
     camarilla_r3 = close_1d + daily_range * 1.1 / 4
     camarilla_s3 = close_1d - daily_range * 1.1 / 4
     
-    # Align Daily Camarilla levels to 4h timeframe
+    # Align Daily Camarilla levels to 1d timeframe (no shift needed as we use previous day's data)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -62,7 +66,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -93,9 +98,9 @@ def generate_signals(prices):
         long_entry = (close[i] > r3_aligned[i]) and vol_filter and trend_up
         short_entry = (close[i] < s3_aligned[i]) and vol_filter and trend_down
         
-        # Exit conditions: price returns to opposite daily S3/R3 levels
-        long_exit = (close[i] < s3_aligned[i])
-        short_exit = (close[i] > r3_aligned[i])
+        # Exit conditions: price returns to opposite daily S1/R1 levels
+        long_exit = (close[i] < s1_aligned[i])
+        short_exit = (close[i] > r1_aligned[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -120,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyCamarilla_R3S3_WeeklyTrend_Volume_Session"
-timeframe = "4h"
+name = "1d_DailyCamarilla_R3S1_WeeklyTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
