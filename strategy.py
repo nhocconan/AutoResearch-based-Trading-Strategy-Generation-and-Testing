@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 4h primary timeframe for structure, 1d for trend direction.
-# Donchian channels provide clear breakout levels, filtered by 1d EMA34 trend and volume spikes.
-# Works in both bull and bear markets by following the 1d trend while using Donchian channels as structure.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 4h primary timeframe for balance of trade frequency and signal quality.
+# Camarilla pivots provide precise support/resistance levels from prior 1d OHLC.
+# Trend filtered by 1d EMA34 to avoid counter-trend trades.
+# Volume confirmation ensures breakouts have conviction.
+# Designed to work in both bull and bear markets by following 1d trend.
 # Target: 75-200 total trades over 4 years = 19-50/year for 4h. Size: 0.25.
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,9 +42,39 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Camarilla pivots (based on previous day's OHLC)
+    # Group by date to get daily OHLC
+    prices_df = prices.copy()
+    prices_df['date'] = prices_df['open_time'].dt.date
+    daily_ohlc = prices_df.groupby('date').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
+    
+    # Calculate Camarilla levels for each day
+    high_prev = daily_ohlc['high'].shift(1).values
+    low_prev = daily_ohlc['low'].shift(1).values
+    close_prev = daily_ohlc['close'].shift(1).values
+    
+    # Camarilla R3, S3 levels
+    R3 = close_prev + 1.1 * (high_prev - low_prev) / 4
+    S3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    
+    # Map daily levels to 4h bars
+    date_map = prices_df.set_index('open_time')['date']
+    camarilla_R3 = np.full(n, np.nan)
+    camarilla_S3 = np.full(n, np.nan)
+    
+    for idx, date_val in enumerate(date_map):
+        if pd.isna(date_val):
+            continue
+        date_idx = daily_ohlc[daily_ohlc['date'] == date_val].index
+        if len(date_idx) > 0 and date_idx[0] > 0:  # Ensure we have previous day
+            prev_idx = date_idx[0] - 1
+            camarilla_R3[idx] = R3[prev_idx]
+            camarilla_S3[idx] = S3[prev_idx]
     
     # 4h volume spike: >1.5x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +88,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(high_ma_20[i]) or
-            np.isnan(low_ma_20[i]) or
+            np.isnan(camarilla_R3[i]) or
+            np.isnan(camarilla_S3[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -71,9 +103,9 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > high_ma_20[i]
-        short_breakout = close[i] < low_ma_20[i]
+        # Camarilla breakout conditions
+        long_breakout = close[i] > camarilla_R3[i]
+        short_breakout = close[i] < camarilla_S3[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
@@ -81,9 +113,9 @@ def generate_signals(prices):
         long_entry = price_above_ema and long_breakout and vol_confirm
         short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: opposite Donchian level
-        long_exit = close[i] < low_ma_20[i]
-        short_exit = close[i] > high_ma_20[i]
+        # Exit conditions: opposite Camarilla level
+        long_exit = close[i] < camarilla_S3[i]
+        short_exit = close[i] > camarilla_R3[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
