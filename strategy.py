@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
-# Enter long when price breaks above 1d Camarilla R3 with volume spike and above 4h EMA50.
-# Enter short when price breaks below 1d Camarilla S3 with volume spike and below 4h EMA50.
+# Hypothesis: 4h strategy using 1d Williams %R (14) extreme readings with volume confirmation and 4h Supertrend trend filter.
+# Enter long when 1d Williams %R < -80 (oversold) with volume spike and price above 4h Supertrend.
+# Enter short when 1d Williams %R > -20 (overbought) with volume spike and price below 4h Supertrend.
 # Uses discrete position sizing (0.25) to balance return and drawdown. Target: 20-50 trades/year.
-# Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, EMA50 filters intermediate trend.
-# Works in bull (breakouts with trend) and bear (failed breaks reverse) markets.
+# Williams %R provides mean reversion signals from higher timeframe, volume confirms reversal strength, Supertrend filters intermediate trend.
+# Works in bull (bounces from oversold) and bear (rejections from overbought) markets.
 
-name = "4h_Camarilla_R3S3_4hEMA50_Trend_VolumeSpike_v1"
+name = "4h_WilliamsR14_4hSupertrend_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,51 +24,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 1d data for Williams %R (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivots (using previous bar's high, low, close)
+    # Calculate 1d Williams %R (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     n_1d = len(high_1d)
-    camarilla_r3 = np.full(n_1d, np.nan)
-    camarilla_s3 = np.full(n_1d, np.nan)
+    williams_r = np.full(n_1d, np.nan)
     
-    for i in range(1, n_1d):
-        # Use previous bar to avoid look-ahead
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        pivot = (phigh + plow + pclose) / 3.0
-        rng = phigh - plow
-        camarilla_r3[i] = pivot + rng * 1.1 / 4.0
-        camarilla_s3[i] = pivot - rng * 1.1 / 4.0
+    for i in range(13, n_1d):  # Start from index 13 for 14-period lookback
+        highest_high = np.max(high_1d[i-13:i+1])
+        lowest_low = np.min(low_1d[i-13:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50  # Neutral when range is zero
     
-    # Forward fill Camarilla levels
-    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
-    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
+    # Forward fill Williams %R
+    williams_r = pd.Series(williams_r).ffill().values
     
-    # Align 1d Camarilla to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1d Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Get 4h data for EMA50 trend filter
+    # Get 4h data for Supertrend trend filter
     df_4h = get_htf_data(prices, '4h')
     
-    if len(df_4h) < 50:
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
+    # Calculate 4h Supertrend (10, 3.0)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align EMA to 4h timeframe (already aligned since primary is 4h, but keep for consistency)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate ATR
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr_period = 10
+    atr = np.full(len(tr), np.nan)
+    for i in range(atr_period, len(tr)):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate Supertrend
+    upper_band = np.full(len(close_4h), np.nan)
+    lower_band = np.full(len(close_4h), np.nan)
+    supertrend = np.full(len(close_4h), np.nan)
+    uptrend = np.full(len(close_4h), True)
+    
+    multiplier = 3.0
+    
+    for i in range(1, len(close_4h)):
+        if np.isnan(atr[i]) or np.isnan(atr[i-1]):
+            upper_band[i] = upper_band[i-1]
+            lower_band[i] = lower_band[i-1]
+            supertrend[i] = supertrend[i-1]
+            uptrend[i] = uptrend[i-1]
+            continue
+        
+        upper_band[i] = (high_4h[i] + low_4h[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high_4h[i] + low_4h[i]) / 2 - multiplier * atr[i]
+        
+        if i == 1:
+            upper_band[i] = upper_band[i]
+            lower_band[i] = lower_band[i]
+        else:
+            if close_4h[i-1] > upper_band[i-1]:
+                upper_band[i] = upper_band[i]
+            else:
+                upper_band[i] = min(upper_band[i], upper_band[i-1])
+            
+            if close_4h[i-1] < lower_band[i-1]:
+                lower_band[i] = lower_band[i]
+            else:
+                lower_band[i] = max(lower_band[i], lower_band[i-1])
+        
+        if i == 1:
+            supertrend[i] = upper_band[i]
+            uptrend[i] = True
+        else:
+            if supertrend[i-1] == upper_band[i-1]:
+                if close_4h[i] <= upper_band[i]:
+                    supertrend[i] = upper_band[i]
+                    uptrend[i] = True
+                else:
+                    supertrend[i] = lower_band[i]
+                    uptrend[i] = False
+            else:
+                if close_4h[i] >= lower_band[i]:
+                    supertrend[i] = lower_band[i]
+                    uptrend[i] = True
+                else:
+                    supertrend[i] = upper_band[i]
+                    uptrend[i] = False
+    
+    # Forward fill Supertrend
+    supertrend = pd.Series(supertrend).ffill().values
+    
+    # Align Supertrend to 4h timeframe (already aligned since primary is 4h, but keep for consistency)
+    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
     
     # Calculate 4h volume spike: >2.0x 20-bar average volume (equivalent to ~1.33d)
     volume_series = pd.Series(volume)
@@ -82,28 +148,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 4h EMA50
-        above_ema = close[i] > ema_50_4h_aligned[i]
-        below_ema = close[i] < ema_50_4h_aligned[i]
+        # Trend filter: price relative to 4h Supertrend
+        above_supertrend = close[i] > supertrend_aligned[i]
+        below_supertrend = close[i] < supertrend_aligned[i]
         
-        # Camarilla breakout conditions with volume confirmation
-        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i]
-        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i]
+        # Williams %R extreme conditions with volume confirmation
+        long_signal = williams_r_aligned[i] < -80 and volume_spike[i]  # Oversold
+        short_signal = williams_r_aligned[i] > -20 and volume_spike[i]  # Overbought
         
-        # Exit conditions: opposite Camarilla level or trend reversal
-        long_exit = close[i] < camarilla_s3_aligned[i] or below_ema
-        short_exit = close[i] > camarilla_r3_aligned[i] or above_ema
+        # Exit conditions: opposite extreme or trend reversal
+        long_exit = williams_r_aligned[i] > -20 or below_supertrend  # Overbought or trend down
+        short_exit = williams_r_aligned[i] < -80 or above_supertrend  # Oversold or trend up
         
         # Handle entries and exits
-        if long_breakout and above_ema and position <= 0:
+        if long_signal and above_supertrend and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and below_ema and position >= 0:
+        elif short_signal and below_supertrend and position >= 0:
             signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
