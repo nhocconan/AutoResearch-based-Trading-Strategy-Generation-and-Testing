@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses proven Camarilla structure from DB top performers. Tight entries target 12-37 trades/year on 12h.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses proven Camarilla structure from DB top performers. Tight entries target 20-50 trades/year.
 # Long when price breaks above R3 with volume and price > 1d EMA34 (uptrend).
 # Short when price breaks below S3 with volume and price < 1d EMA34 (downtrend).
 # Volume spike (>2.0x 20-bar average) confirms breakout strength.
 # Position size 0.25 balances return and drawdown. Discrete levels minimize fee churn.
-# Works in both bull and bear via 1d EMA34 trend filter.
+# 1d EMA34 provides slower, more reliable trend filter than 12h EMA50 for BTC/ETH in both bull and bear.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla levels (based on previous bar's range)
+    # Calculate 4h Camarilla levels (based on previous bar's range)
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
     camarilla_r3 = close + (high - low) * 1.1 / 2
     camarilla_s3 = close - (high - low) * 1.1 / 2
@@ -46,14 +46,14 @@ def generate_signals(prices):
     camarilla_r3[0] = np.nan
     camarilla_s3[0] = np.nan
     
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure sufficient history for EMA34 and volume MA
+    start_idx = 50  # Ensure sufficient history for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
