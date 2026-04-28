@@ -13,36 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get daily data for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Get 4h data for ATR calculation (used for stop loss)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ATR(14) on 4h
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Calculate ATR(14) on daily
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,14 +49,14 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from weekly EMA
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         # Entry conditions: breakout of recent range with volume confirmation
         lookback = 10
@@ -84,12 +82,12 @@ def generate_signals(prices):
             # Trail stop: exit if price drops 2.5*ATR from highest high since entry
             lookback_stop = min(20, i+1)
             recent_high = np.nanmax(high[i-lookback_stop:i+1])
-            exit_condition = close[i] < recent_high - 2.5 * atr_4h_aligned[i]
+            exit_condition = close[i] < recent_high - 2.5 * atr_1d_aligned[i]
         elif position == -1:
             # Trail stop: exit if price rises 2.5*ATR from lowest low since entry
             lookback_stop = min(20, i+1)
             recent_low = np.nanmin(low[i-lookback_stop:i+1])
-            exit_condition = close[i] > recent_low + 2.5 * atr_4h_aligned[i]
+            exit_condition = close[i] > recent_low + 2.5 * atr_1d_aligned[i]
         else:
             exit_condition = False
         
@@ -114,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Breakout_Volume_Trend_ATRStop_v2"
-timeframe = "4h"
+name = "1d_1wEMA34_Breakout_Volume_ATRStop"
+timeframe = "1d"
 leverage = 1.0
