@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -29,8 +29,8 @@ def generate_signals(prices):
     tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate daily EMA(34) for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate previous day's close for Camarilla pivot calculation
     prev_close_1d = np.concatenate([[close_1d[0]], close_1d[:-1]])
@@ -43,16 +43,16 @@ def generate_signals(prices):
     S3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
     S4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
     
-    # Align daily indicators to 12h
+    # Align daily indicators to 4h
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Calculate 12-period moving average of volume for volume filter
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 20-period moving average of volume for volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -62,12 +62,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
             np.isnan(R4_aligned[i]) or 
             np.isnan(R3_aligned[i]) or
             np.isnan(S3_aligned[i]) or
@@ -81,9 +81,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA34
-        uptrend = close[i] > ema34_aligned[i]
-        downtrend = close[i] < ema34_aligned[i]
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 20-period average
         atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean()
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S4_BreakoutFade_VolumeTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S4_BreakoutFade_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
