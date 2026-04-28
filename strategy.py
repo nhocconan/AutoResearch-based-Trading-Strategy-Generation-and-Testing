@@ -44,10 +44,13 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 1d timeframe (since we are on 1d)
+    # Align HTF indicators to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Hour filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,6 +62,19 @@ def generate_signals(prices):
         if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
         # Trend filter: price above/below EMA34
@@ -73,20 +89,20 @@ def generate_signals(prices):
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions
+        # Entry conditions - tighter conditions to reduce trades
         long_entry = trend_up and rsi_bullish and vol_filter
         short_entry = trend_down and rsi_bearish and vol_filter
         
-        # Exit conditions: opposite conditions or volatility spike
+        # Exit conditions
         atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
         long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -97,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA34_RSI_Volume"
-timeframe = "1d"
+name = "4h_EMA34_RSI_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
