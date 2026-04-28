@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
-Hypothesis: Uses daily Camarilla pivot levels (R1/S1 for mean reversion, R4/S4 for breakout) on the daily timeframe.
-Trades in the direction of the weekly EMA50 trend with volume spike confirmation to filter false breakouts.
-Designed to work in both bull and bear markets by adapting to price action relative to daily pivots and weekly trend.
-Targets 7-25 trades per year to minimize fee decay while capturing meaningful market moves.
+6h_LongTermTrend_Pullback_With_VolumeConfirmation
+Hypothesis: Uses 6-hour price action with long-term trend filter from 1-day EMA200 and pullback entries.
+Looks for pullbacks to the 6-hour EMA21 during strong daily trends with volume confirmation.
+Designed to work in both bull and bear markets by following the dominant daily trend.
+Targets 12-37 trades per year to minimize fee decay while capturing meaningful trend continuation moves.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,92 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get 1-day data for long-term trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate 1-day EMA200 for long-term trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 6-hour EMA21 for pullback entries
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate Camarilla levels from previous daily bar
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_1d = df_1d['high'] - df_1d['low']
-    
-    # Camarilla levels
-    R4 = typical_price + (range_1d * 1.1 / 2)
-    R3 = typical_price + (range_1d * 1.1 / 4)
-    R1 = typical_price + (range_1d * 1.1 / 12)
-    S1 = typical_price - (range_1d * 1.1 / 12)
-    S3 = typical_price - (range_1d * 1.1 / 4)
-    S4 = typical_price - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to daily timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
-    
-    # Calculate volume spike (>1.8x 20-period MA for stricter filtering)
+    # Calculate volume confirmation (>1.5x 20-period MA)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_ma_20)
+    vol_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 200  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema_21[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Long-term trend direction from 1-day EMA200
+        trend_up = close[i] > ema_200_1d_aligned[i]
+        trend_down = close[i] < ema_200_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = vol_spike[i]
-        
-        # Price relative to Camarilla levels
-        price_above_R1 = close[i] > R1_aligned[i]
-        price_below_S1 = close[i] < S1_aligned[i]
-        price_above_R3 = close[i] > R3_aligned[i]
-        price_below_S3 = close[i] < S3_aligned[i]
-        price_above_R4 = close[i] > R4_aligned[i]
-        price_below_S4 = close[i] < S4_aligned[i]
+        # Price relative to 6-hour EMA21
+        price_above_ema21 = close[i] > ema_21[i]
+        price_below_ema21 = close[i] < ema_21[i]
         
         # Entry logic:
-        # Long: Mean reversion from S1/S3 OR breakout above R4 in uptrend
-        long_entry = vol_confirm and trend_up and (
-            (price_below_S1 and close[i] > S1_aligned[i-1]) or  # Rejection of S1
-            (price_below_S3 and close[i] > S3_aligned[i-1]) or  # Rejection of S3
-            (price_above_R4 and close[i-1] <= R4_aligned[i-1])   # Breakout above R4
-        )
+        # Long: Pullback to EMA21 in uptrend with volume confirmation
+        long_entry = trend_up and price_below_ema21 and vol_confirm[i] and (close[i] > close[i-1])
         
-        # Short: Mean reversion from R1/R3 OR breakdown below S4 in downtrend
-        short_entry = vol_confirm and trend_down and (
-            (price_above_R1 and close[i] < R1_aligned[i-1]) or  # Rejection of R1
-            (price_above_R3 and close[i] < R3_aligned[i-1]) or  # Rejection of R3
-            (price_below_S4 and close[i-1] >= S4_aligned[i-1])   # Breakdown below S4
-        )
+        # Short: Pullback to EMA21 in downtrend with volume confirmation
+        short_entry = trend_down and price_above_ema21 and vol_confirm[i] and (close[i] < close[i-1])
         
-        # Exit logic: Opposite level rejection or trend reversal
-        long_exit = (price_above_R3 and close[i] < R3_aligned[i-1]) or not trend_up
-        short_exit = (price_below_S1 and close[i] > S1_aligned[i-1]) or not trend_down
+        # Exit logic: Opposite EMA21 cross or trend reversal
+        long_exit = price_above_ema21 or not trend_up
+        short_exit = price_below_ema21 or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -131,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_LongTermTrend_Pullback_With_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
