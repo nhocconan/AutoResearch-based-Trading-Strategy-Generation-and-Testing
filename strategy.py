@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with volume spike and price > 1w EMA200.
-# Short when price breaks below Donchian lower band with volume spike and price < 1w EMA200.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+# Targets 1d timeframe with ~20-50 trades/year. Long when price breaks above Donchian upper band with volume and price > 1w EMA200.
+# Short when price breaks below Donchian lower band with volume and price < 1w EMA200.
 # Volume spike (>2.0x 20-bar average) confirms breakout strength.
-# Position size 0.25 to balance return and drawdown. Discrete levels minimize fee churn.
-# Trend filter uses weekly EMA200 to avoid whipsaws in sideways markets and capture major trends.
-# Targets ~20-50 trades/year on BTC/ETH/SOL.
+# Position size 0.25 for balance between return and drawdown control.
+# Discrete levels minimize fee churn. Works in both bull and bear via trend filter.
 
-name = "4h_Donchian20_1wEMA200_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,11 +35,11 @@ def generate_signals(prices):
     ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume spike: >2.0x 20-bar average volume
+    # Calculate 1d volume spike: >2.0x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma_20
     
