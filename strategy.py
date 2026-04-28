@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,33 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R (overbought/oversold)
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate Williams %R on daily timeframe: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily pivot points (P, S1, S2, S3, R1, R2, R3)
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Rolling highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    pivot_d = (high_d + low_d + close_d) / 3
+    r1_d = 2 * pivot_d - low_d
+    s1_d = 2 * pivot_d - high_d
+    r2_d = pivot_d + (high_d - low_d)
+    s2_d = pivot_d - (high_d - low_d)
+    r3_d = high_d + 2 * (pivot_d - low_d)
+    s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Align Williams %R to 6h timeframe (no extra delay needed as it's based on completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align to 4h timeframe
+    r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
+    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4h EMA20 for trend filter
+    close_4h_series = pd.Series(df_4h['close'].values)
+    ema20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,12 +58,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -75,23 +83,22 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA50
-        trend_up = close[i] > ema50_12h_aligned[i]
-        trend_down = close[i] < ema50_12h_aligned[i]
-        
-        # Williams %R levels: oversold < -80, overbought > -20
-        wr_oversold = williams_r_aligned[i] < -80
-        wr_overbought = williams_r_aligned[i] > -20
+        # Trend filter: price above/below 4h EMA20
+        trend_up = close[i] > ema20_4h_aligned[i]
+        trend_down = close[i] < ema20_4h_aligned[i]
         
         # Entry conditions: 
-        # Long: Williams %R oversold + uptrend + volume
-        # Short: Williams %R overbought + downtrend + volume
-        long_entry = wr_oversold and vol_filter and trend_up
-        short_entry = wr_overbought and vol_filter and trend_down
+        # Long: break above daily S3 with upward trend and volume
+        # Short: break below daily R3 with downward trend and volume
+        long_breakout = close[i] > s3_d_aligned[i]
+        short_breakout = close[i] < r3_d_aligned[i]
         
-        # Exit conditions: opposite extreme or trend reversal
-        long_exit = (williams_r_aligned[i] > -20) or (not trend_up)  # Exit when overbought or trend turns down
-        short_exit = (williams_r_aligned[i] < -80) or (not trend_down)  # Exit when oversold or trend turns up
+        long_entry = long_breakout and vol_filter and trend_up
+        short_entry = short_breakout and vol_filter and trend_down
+        
+        # Exit conditions: opposite S1/R1 level touch
+        long_exit = (close[i] < s1_d_aligned[i]) and position == 1
+        short_exit = (close[i] > r1_d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,10 +106,10 @@ def generate_signals(prices):
         elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif long_exit and position == 1:
+        elif long_exit:
             signals[i] = 0.0
             position = 0
-        elif short_exit and position == -1:
+        elif short_exit:
             signals[i] = 0.0
             position = 0
         else:
@@ -116,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_OversoldOverbought_12hTrend_Volume_Session"
-timeframe = "6h"
+name = "4h_DailyPivot_S3_R3_Breakout_4hTrend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
