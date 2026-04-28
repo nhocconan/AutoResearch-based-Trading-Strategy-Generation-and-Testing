@@ -1,31 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h KAMA with 1-day RSI regime filter and volume confirmation.
-# KAMA (Kaufman Adaptive Moving Average) adapts its smoothing based on market noise,
-# making it responsive in trends and smooth in ranges. Combined with daily RSI
-# (RSI > 60 for bullish regime, RSI < 40 for bearish regime) to filter trades
-# in the direction of the higher timeframe momentum. Volume confirmation ensures
-# breakouts have participation. Designed for 6h timeframe to target 50-150 total
-# trades over 4 years (12-37/year). Works in both bull and bear markets by
-# adapting to market conditions and filtering for clear momentum regimes.
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
+# Uses 4h for signal direction (breakout of 20-period high/low) and 1d for trend strength (ADX > 25).
+# 1h timeframe used only for entry timing precision. Volume filter ensures breakouts have participation.
+# Designed to work in both bull and bear markets by requiring strong trend (ADX) and avoiding false breakouts.
+# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def _kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).cumsum()
-    volatility = np.diff(volatility, prepend=volatility[0])
-    
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,32 +19,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for Donchian breakout signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate daily RSI (14-period)
+    # Calculate 4h Donchian channels (20-period high/low)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1h timeframe (wait for 4h bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Align RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # KAMA on 6h data
-    kama = _kama(close, er_length=10, fast_sc=2, slow_sc=30)
+    # Smoothed values
+    def _smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        res = np.full_like(arr, np.nan, dtype=float)
+        res[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            res[i] = (res[i-1] * (period-1) + arr[i]) / period
+        return res
     
-    # Volume filter: volume > 1.3x 20-period average
+    atr = _smma(tr, 14)
+    plus_di_smoothed = _smma(plus_dm, 14)
+    minus_di_smoothed = _smma(minus_dm, 14)
+    
+    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
+    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = _smma(dx, 14)
+    
+    # Align ADX to 1h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.3)
+    volume_filter = volume > (volume_ma * 1.5)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,33 +98,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: RSI > 60 = bullish, RSI < 40 = bearish
-        bullish_regime = rsi_1d_aligned[i] > 60
-        bearish_regime = rsi_1d_aligned[i] < 40
+        # Apply filters
+        strong_trend = adx_aligned[i] > 25
+        in_session = session_filter[i]
+        vol_ok = volume_filter[i]
         
-        # KAMA signals: price above KAMA = bullish, below = bearish
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = bullish_regime and price_above_kama and volume_filter[i]
-        short_entry = bearish_regime and price_below_kama and volume_filter[i]
+        # Entry conditions
+        long_entry = strong_trend and in_session and vol_ok and long_breakout
+        short_entry = strong_trend and in_session and vol_ok and short_breakout
         
-        # Exit conditions: when regime changes or price crosses KAMA
-        long_exit = (not bullish_regime) or (not price_above_kama)
-        short_exit = (not bearish_regime) or (not price_below_kama)
+        # Exit conditions: opposite breakout or trend weakening
+        long_exit = short_breakout or (not strong_trend)
+        short_exit = long_breakout or (not strong_trend)
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -108,14 +136,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_KAMA_1dRSI_RegimeFilter_Volume"
-timeframe = "6h"
+name = "1h_DonchianBreakout_4hChannel_1dADX_VolumeSession"
+timeframe = "1h"
 leverage = 1.0
