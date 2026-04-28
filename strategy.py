@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for pivot calculation (4h strategy)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
@@ -34,20 +34,18 @@ def generate_signals(prices):
     # Align to 4h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
     s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
-    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
-    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h EMA20 for trend filter
-    close_4h_series = pd.Series(df_4h['close'].values)
-    ema20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Weekly EMA34 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,12 +56,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
-            np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -83,9 +81,9 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 4h EMA20
-        trend_up = close[i] > ema20_4h_aligned[i]
-        trend_down = close[i] < ema20_4h_aligned[i]
+        # Trend filter: price above/below weekly EMA34
+        trend_up = close[i] > ema34_1w_aligned[i]
+        trend_down = close[i] < ema34_1w_aligned[i]
         
         # Entry conditions: 
         # Long: break above daily S3 with upward trend and volume
@@ -123,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_S3_R3_Breakout_4hTrend_Volume_Session"
+name = "4h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
