@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Uses 1-day Camarilla pivot levels (R1/S1 for mean reversion, R4/S4 for breakout) on the 12-hour timeframe.
-Trades in the direction of the 1-day EMA50 trend with volume spike confirmation to filter false breakouts.
-Designed to work in both bull and bear markets by adapting to price action relative to daily pivots and trend.
-Targets 12-37 trades per year to minimize fee drag while capturing meaningful market moves.
-"""
+# 4h_Stochastic_Momentum_Index_Signal_With_Volume_Confirmation
+# Hypothesis: SMI captures overbought/oversold momentum with less whipsaw than RSI. 
+# Uses SMI crosses at extreme levels (< -40 for long, > 40 for short) with volume confirmation and 
+# 1-day trend filter to align with higher timeframe momentum. Designed for 4h timeframe to 
+# balance trade frequency (~25-40 trades/year) and signal quality. Works in bull/bear markets 
+# by taking both long and short signals based on momentum extremes.
 
 import numpy as np
 import pandas as pd
@@ -21,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivots and trend filter
+    # Get 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -31,41 +29,34 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous 1-day bar
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_1d = df_1d['high'] - df_1d['low']
+    # Calculate Stochastic Momentum Index (SMI) with length=10, smooth_k=3, smooth_d=3
+    # SMI = (Close - Median of HL range) / (0.5 * Range of HL) * 100, then smoothed
+    hl_range = high - low
+    hh = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    ll = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    diff = close - (hh + ll) / 2.0  # Distance from midpoint of HL range
+    abs_diff = np.abs(diff)
+    hl_range_sum = pd.Series(hh - ll).rolling(window=10, min_periods=10).sum().values
     
-    # Camarilla levels
-    R4 = typical_price + (range_1d * 1.1 / 2)
-    R3 = typical_price + (range_1d * 1.1 / 4)
-    R1 = typical_price + (range_1d * 1.1 / 12)
-    S1 = typical_price - (range_1d * 1.1 / 12)
-    S3 = typical_price - (range_1d * 1.1 / 4)
-    S4 = typical_price - (range_1d * 1.1 / 2)
+    # Avoid division by zero
+    smi_raw = np.where(hl_range_sum != 0, (diff * 2) / hl_range_sum * 100, 0)
     
-    # Align Camarilla levels to 12h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    # Smooth with double smoothing (3-period SMA twice)
+    smi_k = pd.Series(smi_raw).rolling(window=3, min_periods=3).mean().values
+    smi_d = pd.Series(smi_k).rolling(window=3, min_periods=3).mean().values
     
-    # Calculate volume spike (>1.8x 20-period MA for stricter filtering)
+    # Calculate volume spike (>1.5x 20-period MA)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_ma_20)
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(smi_d[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -76,32 +67,19 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # Price relative to Camarilla levels
-        price_above_R1 = close[i] > R1_aligned[i]
-        price_below_S1 = close[i] < S1_aligned[i]
-        price_above_R3 = close[i] > R3_aligned[i]
-        price_below_S3 = close[i] < S3_aligned[i]
-        price_above_R4 = close[i] > R4_aligned[i]
-        price_below_S4 = close[i] < S4_aligned[i]
+        # SMI signals at extreme levels
+        smi_long_signal = smi_d[i] < -40 and smi_d[i-1] >= -40  # Cross above -40
+        smi_short_signal = smi_d[i] > 40 and smi_d[i-1] <= 40   # Cross below 40
         
         # Entry logic:
-        # Long: Mean reversion from S1/S3 OR breakout above R4 in uptrend
-        long_entry = vol_confirm and trend_up and (
-            (price_below_S1 and close[i] > S1_aligned[i-1]) or  # Rejection of S1
-            (price_below_S3 and close[i] > S3_aligned[i-1]) or  # Rejection of S3
-            (price_above_R4 and close[i-1] <= R4_aligned[i-1])   # Breakout above R4
-        )
+        # Long: SMI crosses above -40 (oversold recovery) with volume and uptrend
+        long_entry = vol_confirm and trend_up and smi_long_signal
+        # Short: SMI crosses below 40 (overbought rejection) with volume and downtrend
+        short_entry = vol_confirm and trend_down and smi_short_signal
         
-        # Short: Mean reversion from R1/R3 OR breakdown below S4 in downtrend
-        short_entry = vol_confirm and trend_down and (
-            (price_above_R1 and close[i] < R1_aligned[i-1]) or  # Rejection of R1
-            (price_above_R3 and close[i] < R3_aligned[i-1]) or  # Rejection of R3
-            (price_below_S4 and close[i-1] >= S4_aligned[i-1])   # Breakdown below S4
-        )
-        
-        # Exit logic: Opposite level rejection or trend reversal
-        long_exit = (price_above_R3 and close[i] < R3_aligned[i-1]) or not trend_up
-        short_exit = (price_below_S1 and close[i] > S1_aligned[i-1]) or not trend_down
+        # Exit logic: Opposite SMI extreme or trend reversal
+        long_exit = smi_d[i] > 20 or not trend_up  # Exit when SMI rises above 20 or trend down
+        short_exit = smi_d[i] < -20 or not trend_down  # Exit when SMI falls below -20 or trend up
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -126,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Breakout_DailyTrend"
-timeframe = "12h"
+name = "4h_Stochastic_Momentum_Index_Signal_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
