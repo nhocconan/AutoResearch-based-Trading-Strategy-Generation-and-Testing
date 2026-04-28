@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12h breakouts at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-Targets 12-37 trades/year by requiring breaks beyond first support/resistance levels (indicating strong momentum),
-alignment with daily trend, and volume surge. Works in bull/bear markets by trading with daily trend direction.
-Uses 12h primary timeframe to reduce trade frequency and fee drag, with 1d HTF for trend and levels.
+12h_Engulfing_Signal_1wTrend_Volume
+Hypothesis: 12-hour bullish/bearish engulfing candles with weekly trend filter and volume confirmation. Engulfing patterns signal strong momentum reversals, especially when aligned with the weekly trend and confirmed by volume spikes. Works in both bull and bear markets by trading with the weekly trend direction, reducing counter-trend whipsaws. Targets 15-30 trades/year by requiring pattern, trend alignment, and volume surge.
 """
 
 import numpy as np
@@ -17,37 +14,34 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla levels from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align all daily data to 12h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly EMA to 12h
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_surge = volume > (vol_ma_20 * 2.0)
+    
+    # Bullish engulfing: current candle body > previous candle body and closes above previous open
+    bullish_engulf = (close > open_) & (open_ < close) & (close > open_[1]) & (open_ < close[1]) & ((close - open_) > (open_[1] - close[1]))
+    # Bearish engulfing: current candle body > previous candle body and closes below previous open
+    bearish_engulf = (close < open_) & (open_ > close) & (close < open_[1]) & (open_ > close[1]) & ((open_ - close) > (close[1] - open_[1]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,25 +50,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_surge[i]) or 
+            np.isnan(bullish_engulf[i]) or np.isnan(bearish_engulf[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above Camarilla R1 + daily uptrend + volume surge
-        long_entry = (close[i] > camarilla_r1_aligned[i] and 
-                     trend_up[i] and 
-                     volume_surge[i])
+        # Long: bullish engulfing + weekly uptrend + volume surge
+        long_entry = bullish_engulf[i] and trend_up[i] and volume_surge[i]
+        # Short: bearish engulfing + weekly downtrend + volume surge
+        short_entry = bearish_engulf[i] and trend_down[i] and volume_surge[i]
         
-        # Short: price breaks below Camarilla S1 + daily downtrend + volume surge
-        short_entry = (close[i] < camarilla_s1_aligned[i] and 
-                      trend_down[i] and 
-                      volume_surge[i])
-        
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < camarilla_s1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > camarilla_r1_aligned[i] and volume_surge[i]
+        # Exit on opposite engulfing signal with volume surge
+        long_exit = bearish_engulf[i] and volume_surge[i]
+        short_exit = bullish_engulf[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -99,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "12h_Engulfing_Signal_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
