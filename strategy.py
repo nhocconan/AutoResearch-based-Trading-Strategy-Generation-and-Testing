@@ -13,25 +13,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
+    # Get daily data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period)
-    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily EMA(13) for trend filter
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align daily Donchian to daily timeframe (no extra delay needed)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    # Calculate Elder Ray components on daily
+    ema13 = ema13_1d
+    bull_power = high_1d - ema13
+    bear_power = low_1d - ema13
     
-    # Calculate daily EMA(200) for trend filter
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align daily indicators to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,13 +46,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or
-            np.isnan(ema200_aligned[i]) or
+        if (np.isnan(ema13_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -60,23 +62,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA200
-        uptrend = close[i] > ema200_aligned[i]
-        downtrend = close[i] < ema200_aligned[i]
+        # Trend filter: price above/below EMA13
+        uptrend = close[i] > ema13_aligned[i]
+        downtrend = close[i] < ema13_aligned[i]
         
         # Volume filter: current volume above average
         vol_filter = volume[i] > vol_ma[i]
         
-        # Breakout conditions: price breaks Donchian levels with volume and trend
-        long_breakout = close[i] > upper_aligned[i]
-        short_breakout = close[i] < lower_aligned[i]
+        # Elder Ray signals: bull power > 0 and bear power < 0 for strength
+        long_signal = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
+        short_signal = bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0
         
-        long_entry = long_breakout and uptrend and vol_filter
-        short_entry = short_breakout and downtrend and vol_filter
+        long_entry = long_signal and uptrend and vol_filter
+        short_entry = short_signal and downtrend and vol_filter
         
-        # Exit conditions: price returns to opposite Donchian level or trend reverses
-        long_exit = close[i] < lower_aligned[i] or not uptrend
-        short_exit = close[i] > upper_aligned[i] or not downtrend
+        # Exit when Elder Ray weakens or trend reverses
+        long_exit = (bull_power_aligned[i] <= 0 or bear_power_aligned[i] >= 0) or not uptrend
+        short_exit = (bull_power_aligned[i] >= 0 or bear_power_aligned[i] <= 0) or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -101,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_EMA200_Trend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
