@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot using last 5 days (approximation)
+    # Calculate weekly pivot using last 5 days
     high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max()
     low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min()
     close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last()
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dEMA200_Volume_v2"
 timeframe = "6h"
 leverage = 1.0
