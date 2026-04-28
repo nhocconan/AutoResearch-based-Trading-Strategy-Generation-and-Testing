@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_20_TenkanKijun_Cross_24hTrend
-Hypothesis: On 12h timeframe, use Donchian channel breakout (20-period) for entry, confirmed by Tenkan/Kijun cross (Ichimoku base/conversion line) and 24h EMA trend. Exit on opposite Donchian break. Designed for low trade frequency (~15-30/year) with trend alignment to work in both bull and bear markets. Uses 1d trend filter to avoid counter-trend trades.
+1d_HTF_Trend_Retracement_EMA
+Hypothesis: On daily timeframe, enter long when price retraces to EMA21 in weekly uptrend, short when price retraces to EMA21 in weekly downtrend. Use volume surge for confirmation. Exit when price crosses EMA50 in opposite direction. This strategy aims to capture trend continuation moves with low frequency by using higher timeframe trend and daily retracement entries, suitable for both bull and bear markets.
 """
 
 import numpy as np
@@ -16,71 +16,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    # Get weekly data for trend filter and EMAs
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA21 for trend filter
-    close_1d = df_1d['close'].values
-    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    close_weekly = df_weekly['close'].values
+    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian channel (20-period) on 12h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align weekly EMAs to daily timeframe
+    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    tenkan_period = 9
-    tenkan_high = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max().values
-    tenkan_low = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
-    tenkan = (tenkan_high + tenkan_low) / 2
+    # Weekly trend: bullish when price > EMA21, bearish when price < EMA21
+    weekly_uptrend = close_weekly > ema21_weekly
+    weekly_downtrend = close_weekly < ema21_weekly
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun_period = 26
-    kijun_high = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max().values
-    kijun_low = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min().values
-    kijun = (kijun_high + kijun_low) / 2
+    # Align weekly trend to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
+    
+    # Daily EMAs for entry and exit
+    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_daily = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, kijun_period, 21)
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(ema21_1d_aligned[i])):
+        if (np.isnan(ema21_weekly_aligned[i]) or np.isnan(ema50_weekly_aligned[i]) or
+            np.isnan(ema21_daily[i]) or np.isnan(ema50_daily[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_breakout = close[i] > highest_high[i-1]  # Break above Donchian high
-        short_breakout = close[i] < lowest_low[i-1]   # Break below Donchian low
+        # Entry conditions: price near daily EMA21 with weekly trend alignment and volume surge
+        near_ema21 = abs(close[i] - ema21_daily[i]) / ema21_daily[i] < 0.02  # Within 2% of EMA21
+        long_entry = near_ema21 and weekly_uptrend_aligned[i] > 0.5 and volume_surge[i] and close[i] > ema21_daily[i]
+        short_entry = near_ema21 and weekly_downtrend_aligned[i] > 0.5 and volume_surge[i] and close[i] < ema21_daily[i]
         
-        # Tenkan/Kijun cross for momentum confirmation
-        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Exit when price crosses EMA50 in opposite direction
+        long_exit = position == 1 and close[i] < ema50_daily[i]
+        short_exit = position == -1 and close[i] > ema50_daily[i]
         
-        # 1d trend filter: EMA21 slope
-        ema21_up = ema21_1d_aligned[i] > ema21_1d_aligned[i-1]
-        ema21_down = ema21_1d_aligned[i] < ema21_1d_aligned[i-1]
-        
-        if long_breakout and tk_cross_up and ema21_up and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_breakout and tk_cross_down and ema21_down and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif close[i] < lowest_low[i-1] and position == 1:  # Exit long on Donchian low break
-            signals[i] = -0.25
-            position = 0
-        elif close[i] > highest_high[i-1] and position == -1:  # Exit short on Donchian high break
-            signals[i] = 0.25
-            position = 0
+        elif long_exit and position == 1:
+            signals[i] = -0.25  # Reverse to short
+            position = -1
+        elif short_exit and position == -1:
+            signals[i] = 0.25   # Reverse to long
+            position = 1
         else:
             # Hold current position
             if position == 1:
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_TenkanKijun_Cross_24hTrend"
-timeframe = "12h"
+name = "1d_HTF_Trend_Retracement_EMA"
+timeframe = "1d"
 leverage = 1.0
