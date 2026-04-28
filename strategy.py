@@ -29,30 +29,35 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # 1d EMA(50) for trend
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
+    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
     # Align HTF indicators to 4h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate volume spike (1d volume ratio)
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume_1d, vol_ma, out=np.ones_like(volume_1d), where=vol_ma!=0)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -60,19 +65,17 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_aligned[i]
         trend_down = close[i] < ema_50_aligned[i]
         
-        # Volume confirmation: volume spike > 1.5x average
-        vol_spike = vol_ratio_aligned[i] > 1.5
+        # Momentum filter: RSI in favorable range
+        rsi_momentum_up = rsi_aligned[i] > 50
+        rsi_momentum_down = rsi_aligned[i] < 50
         
-        # Entry conditions with volume confirmation
-        long_entry = trend_up and vol_spike
-        short_entry = trend_down and vol_spike
+        # Entry conditions
+        long_entry = trend_up and rsi_momentum_up
+        short_entry = trend_down and rsi_momentum_down
         
-        # Exit conditions: opposite trend or volatility stop
-        atr_stop_long = close[i] < ema_50_aligned[i] - 2.0 * atr_14_aligned[i]
-        atr_stop_short = close[i] > ema_50_aligned[i] + 2.0 * atr_14_aligned[i]
-        
-        long_exit = not trend_up or atr_stop_long
-        short_exit = not trend_down or atr_stop_short
+        # Exit conditions: opposite trend or RSI reversal
+        long_exit = not trend_up or rsi_aligned[i] < 50
+        short_exit = not trend_down or rsi_aligned[i] > 50
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA50_VolumeSpike_ATRStop"
+name = "4h_EMA50_RSI_Trend_Momentum"
 timeframe = "4h"
 leverage = 1.0
