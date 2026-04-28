@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Enter long when price breaks above 4h Camarilla R3 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
-# Enter short when price breaks below 4h Camarilla S3 with 1d EMA34 downtrend and volume confirmation.
-# Exit when price retraces to the 4h Camarilla midpoint (R3/S3 average).
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation.
+# Enter long when price breaks above 4h Camarilla R4 with 1d EMA34 uptrend and volume > 1.5x 20-bar average.
+# Enter short when price breaks below 4h Camarilla S4 with 1d EMA34 downtrend and volume confirmation.
+# Exit when price retraces to the 4h Camarilla midpoint (R4/S4 average).
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
 # Target: 75-200 total trades over 4 years (19-50/year).
-# Camarilla levels provide precise intraday support/resistance. EMA34 on 1d ensures trend alignment.
-# Volume confirmation filters weak breakouts. This pattern has shown strong performance on ETH/USDT.
+# Camarilla R4/S4 levels provide stronger breakout confirmation than R3/S3, reducing false signals.
+# EMA34 on 1d ensures alignment with the primary trend while being responsive enough for 4h entries.
+# Volume confirmation filters weak breakouts. This pattern avoids overtrading by using stricter levels.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+name = "4h_Camarilla_R4S4_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,11 +39,11 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     
     # Camarilla levels for intraday trading
-    # R3 = Close + (High - Low) * 1.1/2
-    # S3 = Close - (High - Low) * 1.1/2
-    # Midpoint = (R3 + S3) / 2 = Close
-    camarilla_high = close_4h + (high_4h - low_4h) * 1.1 / 2.0
-    camarilla_low = close_4h - (high_4h - low_4h) * 1.1 / 2.0
+    # R4 = Close + (High - Low) * 1.1
+    # S4 = Close - (High - Low) * 1.1
+    # Midpoint = (R4 + S4) / 2 = Close
+    camarilla_high = close_4h + (high_4h - low_4h) * 1.1
+    camarilla_low = close_4h - (high_4h - low_4h) * 1.1
     camarilla_mid = close_4h  # Midpoint is the close price
     
     # Align Camarilla levels to 4h (shifted by one bar to avoid look-ahead)
@@ -63,10 +64,10 @@ def generate_signals(prices):
     # Align EMA to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,7 +85,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 1d EMA trend filter: price > EMA34 = uptrend, price < EMA34 = downtrend
+        # 1d EMA34 trend filter: price > EMA34 = uptrend, price < EMA34 = downtrend
         ema_trend_up = close[i] > ema_34_aligned[i]
         ema_trend_down = close[i] < ema_34_aligned[i]
         
@@ -92,11 +93,11 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long entry: price > Camarilla R3, price > EMA34 (uptrend), volume confirm
+            # Long entry: price > Camarilla R4, price > EMA34 (uptrend), volume confirm
             if price > camarilla_high_aligned[i] and ema_trend_up and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price < Camarilla S3, price < EMA34 (downtrend), volume confirm
+            # Short entry: price < Camarilla S4, price < EMA34 (downtrend), volume confirm
             elif price < camarilla_low_aligned[i] and ema_trend_down and vol_confirm:
                 signals[i] = -0.25
                 position = -1
