@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculations and trend filter
+    # Get daily data for pivot calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,17 +23,21 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily range for pivot calculations
+    # Calculate daily range for pivot calculations (use previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     daily_range = high_1d - low_1d
     
-    # Daily Camarilla pivot levels (based on previous day)
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    # Calculate Camarilla levels for TODAY based on YESTERDAY's data
+    # This prevents look-ahead bias
+    camarilla_r4 = np.roll(close_1d, 1) + np.roll(daily_range, 1) * 1.1 / 2
+    camarilla_s4 = np.roll(close_1d, 1) - np.roll(daily_range, 1) * 1.1 / 2
+    # First day has no yesterday data
+    camarilla_r4[0] = np.nan
+    camarilla_s4[0] = np.nan
     
-    # Align Daily Camarilla levels to 4h timeframe
+    # Align Daily Camarilla levels to daily timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
@@ -51,7 +55,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for sufficient warmup
+    start_idx = 200  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -113,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
-timeframe = "4h"
+name = "1d_DailyCamarilla_R4S4_WeeklyTrend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
