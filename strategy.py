@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-# Hypothesis: 4h Williams Alligator with 1d VWAP trend filter and volume confirmation.
-# Alligator (Jaw/Teeth/Lips) identifies trend direction and strength; VWAP confirms institutional participation.
-# Long when Lips > Teeth > Jaw above VWAP with volume expansion; Short when Lips < Teeth < Jaw below VWAP.
-# This trend-following system works in both bull and bear markets by capturing sustained moves with volatility filters.
-# Target: 20-40 trades/year to minimize fee drag.
+# [Experiment #103882] 12h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Confirmation
+# Hypothesis: Camarilla R3/S3 levels on 1d timeframe act as strong support/resistance. 
+# Breakouts with 1d EMA34 trend alignment and volume confirmation reduce false signals.
+# Works in bull markets (breakouts with trend) and bear (mean-reversion at extremes).
+# Target: 12-37 trades/year on 12h timeframe to avoid fee drag.
 
 import numpy as np
 import pandas as pd
@@ -19,76 +18,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP trend filter
+    # Get daily data for Camarilla pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:  # Need enough for EMA34
         return np.zeros(n)
     
-    # Calculate daily VWAP
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_num = (typical_price_1d * df_1d['volume']).cumsum()
-    vwap_den = df_1d['volume'].cumsum()
-    vwap_1d = (vwap_num / vwap_den).values
-    vwap_1d[vwap_den == 0] = np.nan  # Avoid division by zero
+    # Calculate daily Camarilla pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Standard Camarilla calculation
+    range_1d = high_1d - low_1d
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # First day uses its own close
     
-    # Williams Alligator on 4h data
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars
-    # Lips: 5-period SMMA, shifted 3 bars
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        sma = np.convolve(arr, np.ones(period)/period, mode='valid')
-        result[period-1:len(sma)+period-1] = sma
-        for i in range(len(sma)+period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Camarilla levels
+    r3 = close_prev + 1.1 * range_1d / 2
+    s3 = close_prev - 1.1 * range_1d / 2
+    r4 = close_prev + 1.1 * range_1d
+    s4 = close_prev - 1.1 * range_1d
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Shift the lines
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: volume > 1.5x 30-period average
-    volume_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    # Volume filter: volume > 1.8x 20-period average to avoid noise
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 40  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment
-        bullish_alignment = lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]
-        bearish_alignment = lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]
-        
-        # VWAP filter
-        above_vwap = close[i] > vwap_1d_aligned[i]
-        below_vwap = close[i] < vwap_1d_aligned[i]
+        # Trend filter
+        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_down = close[i] < ema34_1d_aligned[i]
         
         # Entry conditions
-        long_entry = bullish_alignment and above_vwap and volume_filter[i]
-        short_entry = bearish_alignment and below_vwap and volume_filter[i]
+        # Long: break above R3 with upward trend and volume
+        long_breakout = close[i] > r3_aligned[i]
+        long_entry = long_breakout and trend_up and volume_filter[i]
         
-        # Exit conditions: opposite Alligator alignment
-        long_exit = bearish_alignment and position == 1
-        short_exit = bullish_alignment and position == -1
+        # Short: break below S3 with downward trend and volume
+        short_breakout = close[i] < s3_aligned[i]
+        short_entry = short_breakout and trend_down and volume_filter[i]
+        
+        # Exit conditions: opposite S3/R3 levels (mean reversion)
+        long_exit = close[i] < s3_aligned[i] and position == 1
+        short_exit = close[i] > r3_aligned[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -114,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dVWAP_VolumeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
