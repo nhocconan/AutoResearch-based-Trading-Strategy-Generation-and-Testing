@@ -53,6 +53,10 @@ def generate_signals(prices):
     vol_ma_4h = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     volume_confirm = volume > vol_ma_4h * 1.5
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -64,6 +68,11 @@ def generate_signals(prices):
             np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(highest_high_4h_aligned[i]) or
             np.isnan(lowest_low_4h_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip outside session
+        if not session_filter[i]:
             signals[i] = 0.0
             continue
         
@@ -89,10 +98,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif exit_condition and position != 0:
             signals[i] = 0.0
@@ -100,14 +109,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian10_1dEMA34_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "1h_Donchian10_1dEMA34_Trend_VolumeConfirm_Session"
+timeframe = "1h"
 leverage = 1.0
