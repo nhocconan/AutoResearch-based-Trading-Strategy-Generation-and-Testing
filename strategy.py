@@ -1,15 +1,30 @@
-# 1h_Volume_Weighted_Momentum_4hTrend
-# Hypothesis: Use 4h trend direction (EMA50) as filter, enter on 1h volume-weighted momentum breakouts.
-# Volume-weighted RSI filters entries to avoid chop. Designed for 1h to target 60-150 trades over 4 years (15-37/year).
-# Works in bull/bear by requiring strong 4h trend and volume confirmation, reducing whipsaws.
+#!/usr/bin/env python3
+# Hypothesis: 6h Donchian breakout with weekly pivot bias and volume confirmation.
+# Uses weekly pivot points to establish long-term directional bias, then trades
+# breakouts of the 6-hour Donchian channel in the direction of the bias.
+# Volume confirmation ensures breakouts have institutional participation.
+# Designed to work in both bull and bear markets by using weekly pivot bias
+# as a trend filter that adapts to longer-term market structure.
+# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,81 +32,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot bias (long-term trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # 1h VWAP deviation (momentum)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = np.divide(vwap_num, vwap_den, out=np.zeros_like(vwap_num), where=vwap_den!=0)
-    price_vwap_ratio = close / vwap  # >1 = above VWAP (bullish momentum)
+    pivot_points = np.full(len(weekly_close), np.nan)
+    r3_points = np.full(len(weekly_close), np.nan)
+    s3_points = np.full(len(weekly_close), np.nan)
     
-    # 1h Volume-weighted RSI (avoid chop)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # Volume-weighted gains/losses
-    vol_gain = gain * volume
-    vol_loss = loss * volume
-    avg_vol_gain = pd.Series(vol_gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_vol_loss = pd.Series(vol_loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.divide(avg_vol_gain, avg_vol_loss, out=np.zeros_like(avg_vol_gain), where=avg_vol_loss!=0)
-    vol_rsi = 100 - (100 / (1 + rs))
+    for i in range(len(weekly_close)):
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(
+            weekly_high[i], weekly_low[i], weekly_close[i]
+        )
+        pivot_points[i] = pivot
+        r3_points[i] = r3
+        s3_points[i] = s3
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align weekly pivot data to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_points)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_points)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_points)
+    
+    # Determine weekly bias: price above pivot = bullish bias, below = bearish bias
+    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+    weekly_bias = np.where(weekly_close_aligned > pivot_aligned, 1,  # bullish
+                          np.where(weekly_close_aligned < pivot_aligned, -1, 0))  # bearish
+    
+    # Donchian channel on 6h data (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Volume filter: volume > 1.3x 20-period average
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup
+    start_idx = max(lookback - 1, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if any data unavailable
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(price_vwap_ratio[i]) or 
-            np.isnan(vol_rsi[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter: price above/below EMA50
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        # Get current weekly bias
+        bias = weekly_bias[i]
         
-        # Momentum conditions with volume confirmation
-        # Long: above VWAP, not overbought, in uptrend
-        long_entry = (uptrend_4h and 
-                     price_vwap_ratio[i] > 1.002 and  # 0.2% above VWAP
-                     vol_rsi[i] < 70 and              # Not overbought
-                     volume[i] > np.mean(volume[max(0,i-20):i]) * 1.5 and  # Volume spike
-                     in_session[i])
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
         
-        # Short: below VWAP, not oversold, in downtrend
-        short_entry = (downtrend_4h and 
-                      price_vwap_ratio[i] < 0.998 and  # 0.2% below VWAP
-                      vol_rsi[i] > 30 and              # Not oversold
-                      volume[i] > np.mean(volume[max(0,i-20):i]) * 1.5 and  # Volume spike
-                      in_session[i])
+        # Entry conditions with volume confirmation and bias filter
+        # Only take long breakouts in bullish bias, short breakouts in bearish bias
+        long_entry = breakout_up and bias == 1 and volume_filter[i]
+        short_entry = breakout_down and bias == -1 and volume_filter[i]
         
-        # Exit: opposite VWAP cross or trend change
-        long_exit = (not uptrend_4h) or (price_vwap_ratio[i] < 1.0) or (position == 1 and vol_rsi[i] > 70)
-        short_exit = (not downtrend_4h) or (price_vwap_ratio[i] > 1.0) or (position == -1 and vol_rsi[i] < 30)
+        # Exit conditions: opposite Donchian breakout or loss of bias
+        long_exit = (position == 1 and (breakout_down or bias == -1))
+        short_exit = (position == -1 and (breakout_up or bias == 1))
         
-        # Handle signals
+        # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -100,16 +121,16 @@ def generate_signals(prices):
             signals[i] = 0.0
             position = 0
         else:
-            # Hold position
+            # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_Volume_Weighted_Momentum_4hTrend"
-timeframe = "1h"
+name = "6h_Donchian_WeeklyPivotBias_Volume"
+timeframe = "6h"
 leverage = 1.0
