@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 breakout with volume confirmation and chop regime filter.
-# Enter long when price breaks above 1d Camarilla R3 with volume spike and chop < 61.8 (trending regime).
-# Enter short when price breaks below 1d Camarilla S3 with volume spike and chop < 61.8.
-# Uses discrete position sizing (0.25) to balance return and drawdown. Target: 12-37 trades/year.
-# Camarilla levels provide structure from higher timeframe, volume confirms breakout strength, chop filter avoids ranging markets.
-# Works in bull (breakouts with trend) and bear (failed breaks reverse via exits) markets.
+# Hypothesis: 4h strategy using 12h Supertrend for trend direction, 1d ATR-based volatility breakout for entry timing, and volume confirmation.
+# Enter long when price breaks above 1d ATR-based upper band with volume spike and 12h Supertrend uptrend.
+# Enter short when price breaks below 1d ATR-based lower band with volume spike and 12h Supertrend downtrend.
+# Uses discrete position sizing (0.25) to control risk and minimize fee churn. Target: 20-50 trades/year.
+# Supertrend provides HTF trend filter, ATR bands adapt to volatility, volume confirms breakout strength.
+# Works in bull (trend-following breaks) and bear (failed breaks reverse via trend filter) markets.
 
-name = "12h_Camarilla_R3S3_Breakout_Volume_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Supertrend12h_ATRBreakout1d_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,75 +24,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 12h data for Supertrend (HTF trend filter)
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h Supertrend (10, 3.0)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    n_12h = len(high_12h)
+    atr_period = 10
+    multiplier = 3.0
+    
+    # Calculate True Range and ATR
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr = np.full(n_12h, np.nan)
+    for i in range(atr_period, n_12h):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate Supertrend
+    hl2 = (high_12h + low_12h) / 2
+    upperband = hl2 + multiplier * atr
+    lowerband = hl2 - multiplier * atr
+    
+    supertrend = np.full(n_12h, np.nan)
+    direction = np.full(n_12h, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(atr_period, n_12h):
+        if i == atr_period:
+            supertrend[i] = upperband[i]
+            direction[i] = 1
+        else:
+            if supertrend[i-1] == upperband[i-1]:
+                if close_12h[i] <= upperband[i]:
+                    supertrend[i] = upperband[i]
+                else:
+                    supertrend[i] = lowerband[i]
+                    direction[i] = -1
+            else:
+                if close_12h[i] >= lowerband[i]:
+                    supertrend[i] = lowerband[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = upperband[i]
+                    direction[i] = -1
+    
+    # Align 12h Supertrend direction to 4h timeframe
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    
+    # Get 1d data for ATR-based volatility breakout
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivots (using previous bar's high, low, close)
+    # Calculate 1d ATR-based volatility breakout bands
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     n_1d = len(high_1d)
-    camarilla_r3 = np.full(n_1d, np.nan)
-    camarilla_s3 = np.full(n_1d, np.nan)
+    atr_period_1d = 14
+    multiplier_1d = 2.0
+    
+    # Calculate True Range and ATR for 1d
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    
+    atr_1d = np.full(n_1d, np.nan)
+    for i in range(atr_period_1d, n_1d):
+        if i == atr_period_1d:
+            atr_1d[i] = np.nanmean(tr_1d[i-atr_period_1d+1:i+1])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * (atr_period_1d - 1) + tr_1d[i]) / atr_period_1d
+    
+    # Calculate ATR-based breakout bands (using previous bar to avoid look-ahead)
+    upper_band = np.full(n_1d, np.nan)
+    lower_band = np.full(n_1d, np.nan)
     
     for i in range(1, n_1d):
-        # Use previous bar to avoid look-ahead
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        pivot = (phigh + plow + pclose) / 3.0
-        rng = phigh - plow
-        camarilla_r3[i] = pivot + rng * 1.1 / 4.0
-        camarilla_s3[i] = pivot - rng * 1.1 / 4.0
+        atr_val = atr_1d[i-1]
+        if np.isnan(atr_val):
+            continue
+        upper_band[i] = close_1d[i-1] + multiplier_1d * atr_val
+        lower_band[i] = close_1d[i-1] - multiplier_1d * atr_val
     
-    # Forward fill Camarilla levels
-    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
-    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
+    # Forward fill bands
+    upper_band = pd.Series(upper_band).ffill().values
+    lower_band = pd.Series(lower_band).ffill().values
     
-    # Align 1d indicators to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1d indicators to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 12h chop regime: EHLERS CHOPPINESS INDEX (14)
-    def choppiness_index(high, low, close, length=14):
-        atr_sum = np.zeros_like(close)
-        true_range = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            true_range[i] = tr
-            if i >= length:
-                atr_sum[i] = atr_sum[i-1] + tr - true_range[i-length+1]
-            else:
-                atr_sum[i] = atr_sum[i-1] + tr
-        atr = atr_sum / length
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < length:
-                max_high[i] = np.max(high[:i+1])
-                min_low[i] = np.min(low[:i+1])
-            else:
-                max_high[i] = np.max(high[i-length+1:i+1])
-                min_low[i] = np.min(low[i-length+1:i+1])
-        chop = np.zeros_like(close)
-        for i in range(length-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(length)
-            else:
-                chop[i] = 50.0
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
-    chop_trending = chop < 61.8  # Trending regime when chop < 61.8
-    
-    # Calculate 12h volume spike: >2.0x 20-bar average volume
+    # Calculate 4h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -101,18 +143,18 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(direction_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and chop filter
-        long_breakout = close[i] > camarilla_r3_aligned[i] and volume_spike[i] and chop_trending[i]
-        short_breakout = close[i] < camarilla_s3_aligned[i] and volume_spike[i] and chop_trending[i]
+        # Breakout conditions with volume confirmation and trend filter
+        long_breakout = close[i] > upper_band_aligned[i] and volume_spike[i] and direction_aligned[i] == 1
+        short_breakout = close[i] < lower_band_aligned[i] and volume_spike[i] and direction_aligned[i] == -1
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] < camarilla_s3_aligned[i]
-        short_exit = close[i] > camarilla_r3_aligned[i]
+        # Exit conditions: opposite band or trend change
+        long_exit = close[i] < lower_band_aligned[i] or direction_aligned[i] == -1
+        short_exit = close[i] > upper_band_aligned[i] or direction_aligned[i] == 1
         
         # Handle entries and exits
         if long_breakout and position <= 0:
