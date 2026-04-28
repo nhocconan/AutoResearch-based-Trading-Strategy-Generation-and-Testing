@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla H3/L3 mean reversion with 1d trend filter and volume confirmation.
-# Uses 6h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 12h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years).
 # 1d EMA34 provides primary trend filter: bull when price > EMA34, bear when price < EMA34.
-# Camarilla H3/L3 from 1d provide institutional pivot points for mean reversion in ranging markets.
-# Volume confirmation (>1.5x 24-bar average) ensures breakout validity at H3/L3 levels.
+# Camarilla H3/L3 from 1d provide institutional pivot points with proven edge.
+# Volume spike (>2.0x 24-bar average) confirms breakout strength.
 # Position size 0.25 for balance between return and drawdown control.
 # Discrete levels (0.0, ±0.25) minimize fee churn.
 
-name = "6h_Camarilla_H3L3_MeanReversion_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +29,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla pivots and EMA34 trend
+    # Get 1d data for Camarilla pivots (H3, L3) and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -41,20 +41,20 @@ def generate_signals(prices):
     # Calculate 1d Camarilla pivot levels (H3, L3)
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
-    h3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
-    l3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
+    h3_1d = close_1d + range_1d * 1.1 / 4.0  # H3 = Close + 1.1*(Range)/4
+    l3_1d = close_1d - range_1d * 1.1 / 4.0  # L3 = Close - 1.1*(Range)/4
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h volume confirmation: >1.5x 24-bar average volume
+    # Calculate 12h volume spike: >2.0x 24-bar average volume (accounting for session gaps)
     volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_24
+    volume_spike = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,19 +79,19 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Camarilla mean reversion conditions
-        long_setup = close[i] < l3_1d_aligned[i]  # Price below L3 -> long reversion
-        short_setup = close[i] > h3_1d_aligned[i]  # Price above H3 -> short reversion
+        # Camarilla breakout conditions
+        long_breakout = close[i] > h3_1d_aligned[i]
+        short_breakout = close[i] < l3_1d_aligned[i]
         
         # Volume confirmation
-        vol_confirm = volume_confirm[i]
+        vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and long_setup and vol_confirm
-        short_entry = price_below_ema and short_setup and vol_confirm
+        long_entry = price_above_ema and long_breakout and vol_confirm
+        short_entry = price_below_ema and short_breakout and vol_confirm
         
-        # Exit conditions: opposite Camarilla level (H3/L3 for reversion completion)
-        long_exit = close[i] > h3_1d_aligned[i]  # Exit long at H3
-        short_exit = close[i] < l3_1d_aligned[i]  # Exit short at L3
+        # Exit conditions: opposite Camarilla level (L3/H3 for reversion)
+        long_exit = close[i] < l3_1d_aligned[i]  # Exit long at L3
+        short_exit = close[i] > h3_1d_aligned[i]  # Exit short at H3
         
         # Handle entries and exits
         if long_entry and position <= 0:
