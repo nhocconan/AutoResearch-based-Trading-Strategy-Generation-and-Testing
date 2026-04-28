@@ -18,9 +18,9 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 12h data for trend filter (as per experiment guidance)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Daily high/low/close for pivot calculation
@@ -28,25 +28,25 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot points
+    # Calculate pivot points (Camarilla formula)
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_ = high_1d - low_1d
-    r3 = close_1d + range_ * 1.1 / 4
-    s3 = close_1d - range_ * 1.1 / 4
     r4 = close_1d + range_ * 1.1 / 2
     s4 = close_1d - range_ * 1.1 / 2
+    r3 = close_1d + range_ * 1.1 / 4
+    s3 = close_1d - range_ * 1.1 / 4
     
-    # Align pivot levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align pivot levels to 1h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # 12h trend filter: EMA25
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema25_12h = close_12h_series.ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema25_12h)
+    # Weekly trend filter: price above/below weekly EMA20
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,9 +61,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema25_12h_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -84,9 +84,9 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA25
-        trend_up = close[i] > ema25_12h_aligned[i]
-        trend_down = close[i] < ema25_12h_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
         # Long: price breaks above R4 with volume and trend up
@@ -99,10 +99,10 @@ def generate_signals(prices):
         short_exit = (close[i] > r3_aligned[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R4_S4_12hEMA25_Trend_Volume_Session"
-timeframe = "4h"
+name = "1h_Camarilla_R4_S4_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
