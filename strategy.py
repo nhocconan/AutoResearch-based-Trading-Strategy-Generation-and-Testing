@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Aroon_Trend_WeeklyPivot_Filter
-Hypothesis: Use Aroon oscillator (25-period) to detect strong trends on 6h, filtered by weekly pivot direction (bullish/bearish bias from weekly high/low). 
-Aroon > 50 indicates bullish momentum, Aroon < -50 bearish. Weekly pivot adds higher timeframe bias to avoid counter-trend trades.
-Works in bull markets by catching strong uptrends with bullish weekly bias, and in bear markets by catching strong downtrends with bearish weekly bias.
-Targets 15-30 trades/year to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout of Camarilla R1/S1 levels on 4h timeframe with 1d EMA34 trend filter and volume confirmation.
+Works in bull markets by capturing upward breakouts above R1 and in bear markets by capturing downward breakouts below S1.
+Volume surge confirms institutional participation. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,64 +12,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Aroon oscillator (25-period) on 6h data
-    period = 25
-    high_period = pd.Series(high).rolling(window=period, min_periods=period).apply(lambda x: x.argmax(), raw=True)
-    low_period = pd.Series(low).rolling(window=period, min_periods=period).apply(lambda x: x.argmin(), raw=True)
-    aroon_up = ((period - high_period) / period) * 100
-    aroon_down = ((period - low_period) / period) * 100
-    aroon_osc = aroon_up - aroon_down  # ranges from -100 to 100
-    
-    # Get weekly high/low for pivot bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate Camarilla levels on 4h data using previous day's OHLC
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 1:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Get previous day's OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Weekly bias: 1 if close > weekly midpoint (bullish), -1 if close < weekly midpoint (bearish)
-    weekly_mid = (weekly_high + weekly_low) / 2.0
-    weekly_bias = np.where(close[-1] > weekly_mid[-1], 1, -1)  # using latest weekly close for bias
-    # For historical alignment, we need to compute bias per week
-    # Simplify: use weekly close > weekly midpoint as bullish bias for that week
-    weekly_close = df_1w['close'].values
-    weekly_bias_raw = np.where(weekly_close > weekly_mid, 1, -1)
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_raw)
+    # Calculate Camarilla levels for each 4h bar using previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Aroon oscillator aligned to 6h (already on 6h, no alignment needed)
-    aroon_osc_aligned = aroon_osc  # same index as prices
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 40  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(aroon_osc_aligned[i]) or np.isnan(weekly_bias_aligned[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        aroon = aroon_osc_aligned[i]
-        bias = weekly_bias_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_r1_aligned[i]
+        breakout_down = close[i] < camarilla_s1_aligned[i]
+        
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
         # Entry conditions
-        # Long: strong bullish momentum (Aroon > 50) + bullish weekly bias
-        long_entry = aroon > 50 and bias == 1
-        # Short: strong bearish momentum (Aroon < -50) + bearish weekly bias
-        short_entry = aroon < -50 and bias == -1
+        # Long: upward breakout above R1 + uptrend + volume surge
+        long_entry = breakout_up and trend_up and volume_surge[i]
+        # Short: downward breakout below S1 + downtrend + volume surge
+        short_entry = breakout_down and trend_down and volume_surge[i]
         
-        # Exit conditions: momentum weakening or bias flip
-        long_exit = aroon < 0 or bias == -1
-        short_exit = aroon > 0 or bias == 1
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or not trend_up
+        short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -95,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Aroon_Trend_WeeklyPivot_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
