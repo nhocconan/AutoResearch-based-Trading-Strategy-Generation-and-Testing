@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend
+    # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,24 +22,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's close for Camarilla pivot calculation
-    prev_close_1d = np.concatenate([[close_1d[0]], close_1d[:-1]])
-    prev_high_1d = np.concatenate([[high_1d[0]], high_1d[:-1]])
-    prev_low_1d = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (R3/S3 for entry, R4/S4 for exit)
-    R3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
-    S3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 4
-    R4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
-    S4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align daily indicators to 1h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 20-period moving average of volume for volume filter
+    # Calculate 20-period moving average of volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Precompute session filter (08-20 UTC)
@@ -54,10 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or
-            np.isnan(R4_aligned[i]) or
-            np.isnan(S4_aligned[i]) or
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -67,41 +62,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
+        
+        # Volatility filter: only trade when ATR is above its 10-period average
+        atr_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean()
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
+        vol_filter = atr_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
+        
         # Volume filter: current volume above average
-        vol_filter = volume[i] > vol_ma[i]
+        vol_filter = vol_filter and volume[i] > vol_ma[i]
         
-        # Entry conditions: price touches R3/S3 with volume
-        long_entry = (close[i] <= R3_aligned[i] * 1.002) and (close[i] >= R3_aligned[i] * 0.998) and vol_filter
-        short_entry = (close[i] >= S3_aligned[i] * 0.998) and (close[i] <= S3_aligned[i] * 1.002) and vol_filter
+        # Entry conditions: trend + volatility + volume
+        long_entry = uptrend and vol_filter
+        short_entry = downtrend and vol_filter
         
-        # Exit conditions: price breaks R4/S4
-        long_exit = close[i] > R4_aligned[i]
-        short_exit = close[i] < S4_aligned[i]
+        # Exit conditions: trend reversal or volatility drop
+        long_exit = not uptrend or not vol_filter
+        short_exit = not downtrend or not vol_filter
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
-        # Exit conditions
-        elif position == 1 and long_exit:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif position == -1 and short_exit:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
-        # Hold position
         else:
+            # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R3S4_Touch_BreakoutExit"
-timeframe = "4h"
+name = "1h_EMA50_ATR14_Volume_Trend_Session"
+timeframe = "1h"
 leverage = 1.0
