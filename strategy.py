@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points and trend filter
+    # Get daily data for pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -29,19 +29,19 @@ def generate_signals(prices):
     r2 = pp + (high_1d - low_1d)
     s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 1d EMA34 for trend filter
+    # Daily EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d ATR14 for volatility filter (adaptive)
+    # Daily ATR14 for volatility filter (adaptive)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R2S2_Breakout_1dEMA34_VolumeFilter"
-timeframe = "12h"
+name = "4h_Pivot_R2S2_Breakout_1dEMA34_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
