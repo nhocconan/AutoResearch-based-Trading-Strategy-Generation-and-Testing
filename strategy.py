@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,15 +31,15 @@ def generate_signals(prices):
     r3_d = high_d + 2 * (pivot_d - low_d)
     s3_d = low_d - 2 * (high_d - pivot_d)
     
-    # Align to 1h timeframe
-    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    # Align to 12h timeframe
     r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
-    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
     # Get 4h data for trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 10:
         return np.zeros(n)
     
     # 4h EMA50 for trend filter
@@ -47,8 +47,8 @@ def generate_signals(prices):
     ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Volume filter: above average volume (24-period)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -56,11 +56,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 30  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(s3_d_aligned[i]) or np.isnan(r3_d_aligned[i]) or 
+        if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
             np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -99,10 +99,10 @@ def generate_signals(prices):
         short_exit = (close[i] > r1_d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif long_exit:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_DailyPivot_S3_R3_Breakout_4hEMA50_Volume_Session"
-timeframe = "1h"
+name = "12h_DailyPivot_S3_R3_Breakout_4hTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
