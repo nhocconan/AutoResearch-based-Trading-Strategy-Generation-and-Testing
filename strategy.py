@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ForceIndex_1dTrend_Filter
-Hypothesis: Elder Ray (bull/bear power) combined with Force Index on 6h timeframe, filtered by 1d EMA trend, captures institutional momentum in both bull and bear markets. The Elder Ray identifies power shifts while Force Index confirms with volume. Trend filter prevents counter-trend trades. Target: 20-40 trades/year per symbol to minimize fee decay.
+12h_TRIX_VolumeSpike_1dTrend
+Hypothesis: TRIX (12-period) on 12h timeframe captures momentum shifts with reduced lag compared to traditional MACD. Combined with volume spike confirmation and 1d EMA34 trend filter, this strategy aims to capture significant momentum moves while minimizing false signals. The 12h timeframe targets 12-37 trades/year to stay within optimal range, reducing fee drag. TRIX is effective in both bull and bear markets as it identifies accelerating momentum regardless of direction.
 """
 
 import numpy as np
@@ -20,58 +20,64 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate TRIX on 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 15:
+        return np.zeros(n)
     
-    # Force Index = (Close - Close_prev) * Volume
-    force_index = np.diff(close, prepend=close[0]) * volume
-    # Smooth Force Index with EMA(13)
-    force_index_smooth = pd.Series(force_index).ewm(span=13, adjust=False, min_periods=13).mean().values
+    close_12h = df_12h['close'].values
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
+    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = ema3 - np.roll(ema3, 1)
+    trix[0] = 0  # First value has no previous
+    trix_12h_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for all indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(force_index_smooth[i])):
+        if (np.isnan(trix_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # TRIX signals: positive = bullish momentum, negative = bearish momentum
+        trix_bullish = trix_12h_aligned[i] > 0
+        trix_bearish = trix_12h_aligned[i] < 0
         
-        # Elder Ray signals: Bull Power rising + Force Index positive = long
-        # Bear Power falling + Force Index negative = short
-        bull_rising = bull_power[i] > bull_power[i-1]
-        bear_falling = bear_power[i] < bear_power[i-1]
-        force_positive = force_index_smooth[i] > 0
-        force_negative = force_index_smooth[i] < 0
+        # Trend filter from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        long_signal = bull_rising and force_positive and uptrend
-        short_signal = bear_falling and force_negative and downtrend
+        # Entry conditions with volume confirmation and trend alignment
+        long_entry = trix_bullish and volume_spike[i] and uptrend
+        short_entry = trix_bearish and volume_spike[i] and downtrend
         
-        # Exit conditions: opposite signal or power divergence
-        long_exit = bear_falling and force_negative  # Bear power taking over
-        short_exit = bull_rising and force_positive  # Bull power taking over
+        # Exit when TRIX changes sign or trend fails
+        long_exit = (trix_12h_aligned[i] <= 0) or (not uptrend)
+        short_exit = (trix_12h_aligned[i] >= 0) or (not downtrend)
         
-        if long_signal and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -91,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ForceIndex_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_1dTrend"
+timeframe = "12h"
 leverage = 1.0
