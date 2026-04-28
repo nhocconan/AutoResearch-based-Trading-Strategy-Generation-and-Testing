@@ -1,10 +1,3 @@
-# 4h_HeikinAshi_Trend_HeikenAsi_Offset_Signal_v1
-# Hypothesis: Heikin-Ashi candles filter out market noise and reveal true trend direction.
-# Using HA close > HA open for uptrend and HA close < HA open for downtrend, combined with
-# volume confirmation and ADX trend strength filter. Works in both bull and bear markets
-# by following the dominant trend on 4H timeframe with strict entry conditions to limit trades.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,60 +13,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Heikin-Ashi candles
-    ha_close = (open_prices + high + low + close) / 4
-    ha_open = np.zeros_like(close)
-    ha_open[0] = (open_prices[0] + close[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    ha_high = np.maximum.reduce([high, ha_open, ha_close])
-    ha_low = np.minimum.reduce([low, ha_open, ha_close])
+    # Get weekly data for pivot calculation (weekly pivot from previous week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Calculate ADX for trend strength (using 14 periods)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
-        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Calculate weekly pivot (from previous week's OHLC)
+    pivot_weekly = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1_weekly = pivot_weekly + (range_1w * 0.382)  # R1 = Pivot + 0.382 * Range
+    s1_weekly = pivot_weekly - (range_1w * 0.382)  # S1 = Pivot - 0.382 * Range
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period]) if not np.any(np.isnan(data[:period])) else np.nan
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]) or np.isnan(data[i]):
-                result[i] = np.nan
-            else:
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    period_adx = 14
-    tr_smooth = wilders_smoothing(tr, period_adx)
-    plus_di_smooth = wilders_smoothing(plus_dm, period_adx)
-    minus_di_smooth = wilders_smoothing(minus_dm, period_adx)
+    # Align weekly indicators to daily timeframe
+    r1_weekly_aligned = align_htf_to_ltf(prices, df_1w, r1_weekly)
+    s1_weekly_aligned = align_htf_to_ltf(prices, df_1w, s1_weekly)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Avoid division by zero
-    dx = np.zeros(n)
-    mask = tr_smooth > 0
-    dx[mask] = 100 * np.abs(plus_di_smooth[mask] - minus_di_smooth[mask]) / tr_smooth[mask]
-    adx = wilders_smoothing(dx, period_adx)
-    
-    # Volume filter: 20-period average
+    # Calculate volume ratio (current vs 20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma20 + 1e-10)
     
-    # Heikin-Ashi trend signals
-    ha_uptrend = ha_close > ha_open
-    ha_downtrend = ha_close < ha_open
-    
-    # Combined signals
-    long_signal = ha_uptrend & (adx > 25) & (vol_ratio > 1.5)
-    short_signal = ha_downtrend & (adx > 25) & (vol_ratio > 1.5)
+    # Precompute session filter (08-20 UTC) - trade only during active hours
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,21 +52,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ha_open[i]) or np.isnan(ha_close[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_weekly_aligned[i]) or 
+            np.isnan(s1_weekly_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        if long_signal[i] and position <= 0:
+        # Session filter: only trade during active hours
+        if not session_mask[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
+        
+        # Volume filter: current volume above 1.5x average
+        vol_filter = vol_ratio[i] > 1.5
+        
+        # Breakout conditions: price breaks weekly R1/S1 with volume and trend
+        long_breakout = close[i] > r1_weekly_aligned[i]
+        short_breakout = close[i] < s1_weekly_aligned[i]
+        
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
+        
+        # Exit conditions: price returns to weekly pivot level or trend reverses
+        pivot_weekly_aligned = align_htf_to_ltf(prices, df_1w, pivot_weekly)
+        long_exit = close[i] < pivot_weekly_aligned[i] or not uptrend
+        short_exit = close[i] > pivot_weekly_aligned[i] or not downtrend
+        
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal[i] and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif not ha_uptrend[i] and position == 1:
+        elif long_exit and position == 1:
             signals[i] = 0.0
             position = 0
-        elif not ha_downtrend[i] and position == -1:
+        elif short_exit and position == -1:
             signals[i] = 0.0
             position = 0
         else:
@@ -111,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HeikinAshi_Trend_HeikenAsi_Offset_Signal_v1"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R1S1_Breakout_1wEMA50_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
