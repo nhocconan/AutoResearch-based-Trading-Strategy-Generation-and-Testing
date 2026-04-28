@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla H3/L3 breakout with 1w trend filter (price > 200 EMA) and volume confirmation.
-# Uses 1d primary timeframe for lower trade frequency (~10-25 trades/year) to minimize fee drag.
-# Camarilla H3/L3 levels provide dynamic support/resistance, filtered by 1w EMA200 trend and volume spikes.
-# Designed to work in both bull and bear markets by following the 1w trend while using Camarilla levels as entry signals.
-# Target: 30-100 total trades over 4 years (7-25/year). Size: 0.25.
+# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; we fade extremes in the direction of the 1d trend.
+# Long when %R < -80 (oversold) and price > 1d EMA50 (uptrend); short when %R > -20 (overbought) and price < 1d EMA50 (downtrend).
+# Volume confirmation requires current volume > 1.5x 20-bar average to avoid low-liquidity false signals.
+# Designed for range-bound and trending markets by combining mean reversion (%R extremes) with trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA200_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,51 +29,35 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA200 (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA200
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # 1d volume spike: >1.5x 20-bar average volume
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * volume_ma_20
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for EMA50 (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (H3, L3)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    H3 = close_1d + range_1d * 1.1 / 4
-    L3 = close_1d - range_1d * 1.1 / 4
+    # 6h Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Align Camarilla levels to 1d timeframe (no additional delay needed for same timeframe)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # 6h volume spike: >1.5x 20-bar average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # EMA200 needs 200 bars, volume MA needs 20, use 200 for safety
+    start_idx = 50  # EMA50 and Williams %R need 50 bars, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(H3_aligned[i]) or
-            np.isnan(L3_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(williams_r[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -82,29 +67,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w EMA200 direction
-        price_above_ema = close[i] > ema_200_1w_aligned[i]
-        price_below_ema = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > H3_aligned[i]
-        short_breakout = close[i] < L3_aligned[i]
+        # Williams %R conditions: fade extremes
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and long_breakout and vol_confirm
-        short_entry = price_below_ema and short_breakout and vol_confirm
+        long_entry = oversold and price_above_ema and vol_confirm
+        short_entry = overbought and price_below_ema and vol_confirm
         
-        # Calculate 1d Camarilla H4/L4 levels for exit
-        H4 = close_1d + range_1d * 1.1 / 2
-        L4 = close_1d - range_1d * 1.1 / 2
-        
-        H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-        L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-        
-        long_exit = close[i] < H4_aligned[i]
-        short_exit = close[i] > L4_aligned[i]
+        # Exit conditions: reverse signal or %R returns to neutral zone (-50)
+        long_exit = williams_r[i] > -50 or (position == 1 and not price_above_ema)
+        short_exit = williams_r[i] < -50 or (position == -1 and not price_below_ema)
         
         # Handle entries and exits
         if long_entry and position <= 0:
