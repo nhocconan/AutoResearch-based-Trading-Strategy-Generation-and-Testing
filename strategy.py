@@ -15,67 +15,73 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR(14) for volatility filter
-    tr1 = high_1d[1:] - low_1d[:-1]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Get 4h data for ATR calculation (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
+        return np.zeros(n)
     
-    # 12h Donchian(20) channel breakout (primary signal)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate ATR(14) on 4h
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_4h = np.concatenate([[np.nan], tr_4h])  # Align with original index
+    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50, 14, 20)
+    start_idx = max(100, 34, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA(50)
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1d EMA
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_1d_aligned[i] > 0
+        # Entry conditions: trend following with volatility filter
+        long_entry = uptrend and close[i] > high[i-1] and volume[i] > 1.2 * np.nanmean(volume[max(0,i-5):i]) if i >= 5 else False
+        short_entry = downtrend and close[i] < low[i-1] and volume[i] > 1.2 * np.nanmean(volume[max(0,i-5):i]) if i >= 5 else False
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > donch_high[i-1] and uptrend and vol_filter
-        breakout_short = close[i] < donch_low[i-1] and downtrend and vol_filter
-        
-        # Exit conditions: opposite Donchian band or trend reversal
+        # Exit conditions: ATR-based stop loss
         if position == 1:
-            exit_condition = close[i] < donch_low[i-1] or not uptrend
+            # Trail stop: exit if price drops 2*ATR from highest high since entry
+            # We'll use a simple trailing stop based on recent high
+            recent_high = np.nanmax(high[max(0,i-10):i+1]) if i >= 10 else high[i]
+            exit_condition = close[i] < recent_high - 2.0 * atr_4h_aligned[i]
         elif position == -1:
-            exit_condition = close[i] > donch_high[i-1] or not downtrend
+            # Trail stop: exit if price rises 2*ATR from lowest low since entry
+            recent_low = np.nanmin(low[max(0,i-10):i+1]) if i >= 10 else low[i]
+            exit_condition = close[i] > recent_low + 2.0 * atr_4h_aligned[i]
         else:
             exit_condition = False
         
         # Handle entries and exits
-        if breakout_long and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif breakout_short and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif exit_condition and position != 0:
@@ -92,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_ATR_VolumeFilter"
-timeframe = "12h"
+name = "4h_TrendBreakout_ATRStop_1dEMA34"
+timeframe = "4h"
 leverage = 1.0
