@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,16 +15,16 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(50) for trend filter (stable, avoids whipsaw)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(34) for trend filter (shorter period for better responsiveness)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d Camarilla pivot levels (H4/L4 for breakouts)
     pivot = (high_1d + low_1d + close_1d) / 3
@@ -32,32 +32,32 @@ def generate_signals(prices):
     H4 = close_1d + (range_hl * 1.1 / 2)
     L4 = close_1d - (range_hl * 1.1 / 2)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Volume confirmation: 12h volume > 20-period average
+    # Volume confirmation: current volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(H4_aligned[i]) or 
             np.isnan(L4_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA(50)
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1d EMA(34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current 12h volume above average
+        # Volume filter: current 4h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
         # Entry conditions: Camarilla H4/L4 breakout with volume and trend
@@ -67,7 +67,7 @@ def generate_signals(prices):
         long_entry = uptrend and long_breakout and volume_filter
         short_entry = downtrend and short_breakout and volume_filter
         
-        # Exit conditions: Mean reversion to opposite Camarilla level (H3/L3 for tighter exits)
+        # Exit conditions: Close below/above opposite Camarilla level (H3/L3 for tighter exits)
         H3 = close_1d + (range_hl * 1.1 / 4)
         L3 = close_1d - (range_hl * 1.1 / 4)
         H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_v2"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend_v4"
+timeframe = "4h"
 leverage = 1.0
