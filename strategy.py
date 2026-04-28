@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_VolumeSpike_RSI4060
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a strong trend filter in both bull and bear markets. Combined with volume spike (2x 20-bar average) and RSI in 40-60 range (avoiding extremes), this strategy captures trending moves while avoiding chop. Uses 1d trend filter for higher timeframe confirmation. Targets 20-30 trades/year via strict conditions.
+4h_Camarilla_R4_S4_Breakout_12hEMA50_VolumeSpike
+Hypothesis: Uses stronger Camarilla R4/S4 levels (1.5x range) with 12h EMA50 trend filter and volume spike (2x 24-bar avg) to capture high-probability breakouts. R4/S4 are more extreme, reducing false signals. Works in both bull and bear by following trend direction. Targets 20-30 trades/year via strict conditions.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,87 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate KAMA (20, 2, 30) on close
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
-    # Proper volatility calculation: sum of absolute changes over ER period
-    er_period = 10
-    change_arr = np.abs(np.diff(close, prepend=close[0]))
-    volatility_arr = np.convolve(change_arr, np.ones(er_period), 'same')  # sum of abs changes over er_period
-    volatility_arr[:er_period-1] = np.nan  # not enough data
-    er = np.where(volatility_arr != 0, change_arr / volatility_arr, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2  # fast SC=2/(2+1)=0.6645, slow SC=2/(30+1)=0.0645
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # RSI (14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels (R4/S4: 1.5x range)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_ = df_1d['high'] - df_1d['low']
+    R4 = typical_price + (range_ * 1.5 / 2)
+    S4 = typical_price - (range_ * 1.5 / 2)
     
-    # Volume confirmation: >2x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4.values)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4.values)
+    
+    # Volume confirmation: >2x 24-period MA (4 days of 4h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 and KAMA to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or
+            np.isnan(S4_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # KAMA direction: price above/below KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # RSI in neutral zone (40-60) to avoid extremes
-        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         # Volume confirmation (>2x average)
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (2.0 * vol_ma_24[i])
         
-        # Entry conditions
-        long_entry = uptrend & price_above_kama & rsi_neutral & vol_confirm
-        short_entry = downtrend & price_below_kama & rsi_neutral & vol_confirm
+        # Breakout conditions at R4/S4
+        long_breakout = close[i] > R4_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < S4_aligned[i] and vol_confirm and downtrend
         
-        # Exit conditions: opposite KAMA cross
-        long_exit = price_below_kama
-        short_exit = price_above_kama
+        # Exit conditions: return to midpoint of R4/S4
+        midpoint = (R4_aligned[i] + S4_aligned[i]) / 2
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
-        if long_entry and position <= 0:
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -118,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_VolumeSpike_RSI4060"
+name = "4h_Camarilla_R4_S4_Breakout_12hEMA50_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
