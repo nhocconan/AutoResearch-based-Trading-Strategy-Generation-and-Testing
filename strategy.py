@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar avg)
-# Uses tighter Camarilla levels (R1/S1) for earlier breakouts with 1d EMA34 trend filter and volume spike
-# Exits on opposite Camarilla level (S1/R1) touch or ATR stoploss (2.5x)
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses tighter Camarilla levels (R1/S1) for precise breakouts with 1d EMA34 trend filter and volume spike (>1.8x 20-bar avg)
+# Exits on opposite Camarilla level (R1/S1) touch or ATR stoploss (2.0x)
 # Target: 19-50 trades/year via tight conditions suitable for BTC/ETH in both bull and bear markets
 
 name = "4h_Camarilla_R1S1_1dEMA34_TrendFilter_VolumeSpike_v1"
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels (R1, S1) on 4h data using previous bar's OHLC
-    # Camarilla: R1 = close + 1.1*(high-low)/4, S1 = close - 1.1*(high-low)/4
+    # Camarilla: R1 = close + 1.1*(high-low)/6, S1 = close - 1.1*(high-low)/6
     # Using previous bar's values to avoid look-ahead
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -45,8 +45,8 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
+    r1 = prev_close + 1.1 * camarilla_range / 6
+    s1 = prev_close - 1.1 * camarilla_range / 6
     
     # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -85,13 +85,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long - exit on stoploss or price touches S1 (opposite level)
-            # ATR-based stoploss: 2.5 * ATR below entry
+            # ATR-based stoploss: 2.0 * ATR below entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price - 2.5 * atr_val
+            stop_loss = entry_price - 2.0 * atr_val
             # Exit on stoploss or price < S1 (opposite level touch)
             if price < stop_loss or price < s1[i]:
                 signals[i] = 0.0
@@ -99,13 +99,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short - exit on stoploss or price touches R1 (opposite level)
-            # ATR-based stoploss: 2.5 * ATR above entry
+            # ATR-based stoploss: 2.0 * ATR above entry
             tr1 = high[max(0, i-1):i+1] - low[max(0, i-1):i+1]
             tr2 = np.abs(high[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr3 = np.abs(low[max(0, i-1):i+1] - close[max(0, i-1):i])
             tr = np.maximum(np.maximum(tr1, tr2), tr3)
             atr_val = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
-            stop_loss = entry_price + 2.5 * atr_val
+            stop_loss = entry_price + 2.0 * atr_val
             # Exit on stoploss or price > R1 (opposite level touch)
             if price > stop_loss or price > r1[i]:
                 signals[i] = 0.0
