@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with volume confirmation and EMA50 trend filter.
-# Enter long when price breaks above 1w Camarilla R3 with volume > 2.0x 20-bar average and price > 1d EMA50 (uptrend).
-# Enter short when price breaks below 1w Camarilla S3 with volume > 2.0x 20-bar average and price < 1d EMA50 (downtrend).
-# Exit on opposite Camarilla level (R2/S2) to limit drawdown.
-# Uses discrete position sizing (0.25) to control risk. Target: 30-100 total trades over 4 years.
-# Camarilla provides mathematically derived support/resistance, volume confirms breakout strength,
-# 1d EMA50 filters counter-trend noise. Works in bull (breakouts with trend) and bear (failed breaks via exits) markets.
+# Hypothesis: 6h strategy using 1d Williams %R extremes with 6h Donchian(20) breakout confirmation and volume filter.
+# Enter long when price breaks above 6h Donchian(20) upper band, 1d Williams %R < -80 (oversold), and volume > 1.5x 20-bar average.
+# Enter short when price breaks below 6h Donchian(20) lower band, 1d Williams %R > -20 (overbought), and volume > 1.5x 20-bar average.
+# Exit on opposite Donchian band (lower for long exit, upper for short exit).
+# Uses discrete position sizing (0.25) to control risk. Target: 50-150 total trades over 4 years.
+# Williams %R identifies overextended conditions, Donchian breakout confirms directional momentum,
+# volume filter ensures breakout validity. Works in bull (breakouts from oversold) and bear (failed rallies from overbought) markets.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Donchian20_Breakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,51 +25,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla calculation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 30:
+    # Get 6h data for Donchian calculation (primary timeframe - compute directly)
+    if n < 40:  # Need at least 20*2 bars for Donchian
         return np.zeros(n)
     
-    # Calculate 1w Camarilla levels (using previous week's OHLC)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6)
-    #          S2 = C - ((H-L)*1.1/6), S1 = C - ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/2)
-    # where C = (H+L+Close)/3 (typical price)
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Calculate 6h Donchian(20) bands
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    typical_price = (h_1w + l_1w + c_1w) / 3.0
-    hl_range = h_1w - l_1w
-    
-    r3_1w = typical_price + (hl_range * 1.1 / 4.0)
-    s3_1w = typical_price - (hl_range * 1.1 / 4.0)
-    r2_1w = typical_price + (hl_range * 1.1 / 6.0)
-    s2_1w = typical_price - (hl_range * 1.1 / 6.0)
-    
-    # Align 1w Camarilla levels to 1d timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
-    # Get 1d data for EMA50 trend filter (HTF)
+    # Get 1d data for Williams %R (HTF)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 60:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d Williams %R(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 1d timeframe (same timeframe, no shift needed)
-    ema_50_1d_aligned = ema_50_1d  # Already aligned since same timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d volume confirmation: >2.0x 20-bar average volume
+    # Align 1d Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 6h volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,19 +68,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
-            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions with volume confirmation and trend filter
-        long_breakout = close[i] > r3_1w_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]
-        short_breakout = close[i] < s3_1w_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i]
+        # Williams %R conditions: oversold (< -80) for long, overbought (> -20) for short
+        williams_oversold = williams_r_aligned[i] < -80
+        williams_overbought = williams_r_aligned[i] > -20
         
-        # Exit conditions: opposite Camarilla level (R2/S2)
-        long_exit = close[i] < r2_1w_aligned[i]
-        short_exit = close[i] > s2_1w_aligned[i]
+        # Donchian breakout conditions with volume confirmation and Williams %R filter
+        long_breakout = close[i] > donchian_upper[i] and williams_oversold and volume_confirm[i]
+        short_breakout = close[i] < donchian_lower[i] and williams_overbought and volume_confirm[i]
+        
+        # Exit conditions: opposite Donchian band
+        long_exit = close[i] < donchian_lower[i]
+        short_exit = close[i] > donchian_upper[i]
         
         # Handle entries and exits
         if long_breakout and position <= 0:
