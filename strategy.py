@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d price action within weekly Bollinger Bands with trend filter and volume confirmation.
-# Uses weekly Bollinger Bands to identify overbought/oversold conditions relative to the weekly volatility envelope.
-# Enters long when price touches lower band in weekly uptrend with volume confirmation, short when price touches upper band in weekly downtrend.
-# Designed for 1d timeframe with ~30-100 total trades over 4 years to minimize fee decay.
+# Hypothesis: 6h Donchian channel breakout with 12h trend filter and volume confirmation.
+# Uses Donchian(20) to identify breakouts, filters by 12h EMA(50) trend direction,
+# and requires volume > 1.8x 20-period average to confirm. Designed for 6h timeframe
+# with 50-150 total trades over 4 years to minimize fee drag. Works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,55 +18,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    close_1w = df_1w['close'].values
-    bb_period = 20
-    bb_std = 2
-    sma_1w = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev_1w = pd.Series(close_1w).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band_1w = sma_1w + (bb_std_dev_1w * bb_std)
-    lower_band_1w = sma_1w - (bb_std_dev_1w * bb_std)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Weekly trend: price above/below weekly SMA(50)
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    weekly_uptrend = close_1w > sma_50_1w
-    weekly_downtrend = close_1w < sma_50_1w
+    # Donchian Channel (20)
+    donch_period = 20
+    upper_donch = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower_donch = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Align weekly indicators to daily
-    upper_band_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_band_1w)
-    lower_band_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_band_1w)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    
-    # Daily volume confirmation: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.8x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    volume_confirm = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 50, 20)  # Wait for weekly BB, trend, and volume
+    start_idx = max(donch_period, 50, 20)  # Wait for Donchian, EMA, and volume
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_1w_aligned[i]) or np.isnan(lower_band_1w_aligned[i]) or
-            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_donch[i]) or 
+            np.isnan(lower_donch[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: touch Bollinger Band in trend direction with volume
-        long_entry = (low[i] <= lower_band_1w_aligned[i]) and weekly_uptrend_aligned[i] and volume_confirm[i]
-        short_entry = (high[i] >= upper_band_1w_aligned[i]) and weekly_downtrend_aligned[i] and volume_confirm[i]
+        # Trend filter: price above/below 12h EMA(50)
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Exit conditions: opposite band touch or loss of trend
-        long_exit = (high[i] >= upper_band_1w_aligned[i]) or (weekly_uptrend_aligned[i] < 0.5)
-        short_exit = (low[i] <= lower_band_1w_aligned[i]) or (weekly_downtrend_aligned[i] < 0.5)
+        # Entry conditions: breakout from Donchian in trend direction with volume
+        long_breakout = close[i] > upper_donch[i]
+        short_breakout = close[i] < lower_donch[i]
+        
+        long_entry = long_breakout and uptrend and volume_confirm[i]
+        short_entry = short_breakout and downtrend and volume_confirm[i]
+        
+        # Exit conditions: opposite Donchian breakout or loss of trend
+        long_exit = (close[i] < lower_donch[i]) or (not uptrend)
+        short_exit = (close[i] > upper_donch[i]) or (not downtrend)
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -92,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyBollingerBand_Touch_Trend_Volume"
-timeframe = "1d"
+name = "6h_DonchianBreakout_12hEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
