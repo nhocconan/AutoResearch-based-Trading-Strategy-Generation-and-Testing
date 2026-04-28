@@ -35,28 +35,29 @@ def generate_signals(prices):
     H3 = close_1d + (range_hl * 1.1 / 4)
     L3 = close_1d - (range_hl * 1.1 / 4)
     
-    # Align pivot levels to 12h
+    # Align pivot levels to 4h
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Get 12h data for volume and volatility (use 4h as proxy since no 12h in get_htf_data)
-    # We'll use 4h data but align to 12h timeframe by sampling every 4th bar
+    # Get 4h data for volume and volatility
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 10:
         return np.zeros(n)
     
     volume_4h = df_4h['volume'].values
     close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     
     # Volume ratio (current 4h volume / 20-period average)
     vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
     
     # ATR(14) for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
     tr1 = np.abs(high_4h[1:] - low_4h[1:])
     tr2 = np.abs(high_4h[1:] - close_4h[:-1])
     tr3 = np.abs(low_4h[1:] - close_4h[:-1])
@@ -122,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
