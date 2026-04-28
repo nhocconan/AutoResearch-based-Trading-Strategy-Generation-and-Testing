@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 1-day ATR filter and volume confirmation.
-# Donchian(20) breakout provides clear entry/exit signals based on price channels.
-# ATR(14) filter ensures we only trade during sufficient volatility periods (ATR > 0.5 * ATR(50)).
-# Volume confirmation requires volume > 1.5x 20-period average to ensure participation.
+# Hypothesis: 4h Donchian breakout with 1-day ATR volatility filter and volume confirmation.
+# Donchian channels identify breakouts with clear support/resistance levels.
+# ATR filter ensures we only trade during sufficient volatility (avoid low-volatility whipsaws).
+# Volume confirmation ensures breakouts have institutional participation.
 # Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-# Works in both bull and bear markets by filtering for volatile breakouts.
+# Works in both bull and bear markets by filtering for volatility regimes.
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,9 +20,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR filter
+    # Get daily data for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:  # Need enough for ATR calculation
         return np.zeros(n)
     
     # Calculate daily ATR (14-period)
@@ -37,68 +37,55 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # ATR calculation using Wilder's smoothing
-    atr_14 = np.zeros_like(tr)
-    atr_14[0] = tr[0]
+    # ATR calculation using Wilder's smoothing (same as RSI)
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
     for i in range(1, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate ATR(50) for volatility regime filter
-    atr_50 = np.zeros_like(tr)
-    atr_50[:49] = np.nan
-    for i in range(49, len(tr)):
-        if i == 49:
-            atr_50[i] = np.mean(tr[0:50])
-        else:
-            atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
+    # ATR ratio: current ATR / 50-period average ATR (volatility regime filter)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma
+    atr_ratio[np.isnan(atr_ma) | (atr_ma == 0)] = 1.0  # Handle division by zero
     
-    # Align ATR indicators to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Donchian channels (20-period) on 4h data
-    highest_high = np.zeros_like(high)
-    lowest_low = np.zeros_like(low)
+    # Donchian channel on 4h data (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    for i in range(len(high)):
-        if i < 19:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
-        else:
-            highest_high[i] = np.max(high[i-19:i+1])
-            lowest_low[i] = np.min(low[i-19:i+1])
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 1.5)
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for sufficient warmup
+    start_idx = max(lookback, 50)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR(14) > 0.5 * ATR(50) ensures sufficient volatility
-        volatility_filter = atr_14_aligned[i] > 0.5 * atr_50_aligned[i]
+        # Volatility filter: ATR ratio > 0.8 (avoid low volatility chop)
+        vol_filter = atr_ratio_aligned[i] > 0.8
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_high[i]
-        short_breakout = close[i] < lowest_low[i]
+        # Breakout conditions
+        long_breakout = close[i] > highest_high[i-1]  # Break above prior 20-period high
+        short_breakout = close[i] < lowest_low[i-1]   # Break below prior 20-period low
         
-        # Entry conditions with volume and volatility confirmation
-        long_entry = long_breakout and volatility_filter and volume_filter[i]
-        short_entry = short_breakout and volatility_filter and volume_filter[i]
+        # Entry conditions with volume confirmation
+        long_entry = vol_filter and long_breakout and volume_filter[i]
+        short_entry = vol_filter and short_breakout and volume_filter[i]
         
-        # Exit conditions: opposite Donchian breakout or volatility collapse
-        long_exit = (not volatility_filter) or (close[i] < lowest_low[i])
-        short_exit = (not volatility_filter) or (close[i] > highest_high[i])
+        # Exit conditions: opposite breakout or volatility collapse
+        long_exit = (close[i] < lowest_low[i-1]) or (atr_ratio_aligned[i] < 0.6)
+        short_exit = (close[i] > highest_high[i-1]) or (atr_ratio_aligned[i] < 0.6)
         
         # Handle entries and exits
         if long_entry and position <= 0:
