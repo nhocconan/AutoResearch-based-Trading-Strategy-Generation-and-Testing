@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS
-Hypothesis: On 4h timeframe, buy when price breaks above Camarilla R3 level and sell when breaks below S3 level, with 12h EMA50 trend filter and volume confirmation. Camarilla levels provide institutional pivot points; breakouts capture momentum in trending markets. Volume surge filters false breakouts. Designed for moderate trade frequency (20-50/year) to balance opportunity and fee decay, working in both bull and bear markets via trend alignment.
+1h_AVWAP_Reversion_With_DailyTrend
+Hypothesis: On 1h timeframe, enter long when price deviates below 1-period Volume-Weighted Average Price (VWAP) with volume confirmation during uptrend days, and short when price deviates above VWAP with volume confirmation during downtrend days. Uses daily trend filter (price vs 100-period EMA) to avoid counter-trend trades. VWAP mean reversion works in both bull/bear markets as it captures short-term exhaustion moves. Designed for low trade frequency (<30/year) by requiring volume surge and trend alignment.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,99 +18,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (using prior day)
+    # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 100:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior daily bar
-    # Camarilla: R4 = close + (high-low)*1.1/2, R3 = close + (high-low)*1.1/4, etc.
-    # Using prior day's OHLC to avoid look-ahead
-    daily_close = df_daily['close'].values
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate daily 100 EMA for trend filter
+    close_daily = df_daily['close'].values
+    ema100_daily = pd.Series(close_daily).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Shift to get prior day's values (available at close of current day)
-    prior_daily_close = np.roll(daily_close, 1)
-    prior_daily_high = np.roll(daily_high, 1)
-    prior_daily_low = np.roll(daily_low, 1)
-    # First bar has no prior day
-    prior_daily_close[0] = daily_close[0]
-    prior_daily_high[0] = daily_high[0]
-    prior_daily_low[0] = daily_low[0]
+    # Align daily EMA100 to 1h timeframe
+    ema100_daily_aligned = align_htf_to_ltf(prices, df_daily, ema100_daily)
     
-    # Calculate Camarilla levels for prior day
-    daily_range = prior_daily_high - prior_daily_low
-    camarilla_r3 = prior_daily_close + daily_range * 1.1 / 4
-    camarilla_s3 = prior_daily_close - daily_range * 1.1 / 4
+    # Daily trend: bullish when price > EMA100, bearish when price < EMA100
+    daily_uptrend = close_daily > ema100_daily
+    daily_downtrend = close_daily < ema100_daily
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_daily, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    # Align daily trend to 1h timeframe
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_daily, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_daily, daily_downtrend.astype(float))
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 1-period VWAP (typical price weighted by volume)
+    typical_price = (high + low + close) / 3.0
+    vwap = typical_price  # For 1-period, VWAP = typical price
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Price deviation from VWAP
+    deviation = close - vwap
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Trend: bullish when price > EMA50, bearish when price < EMA50
-    bullish_trend = close > ema50_12h_4h
-    bearish_trend = close < ema50_12h_4h
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 to stabilize
+    start_idx = 100  # Wait for daily EMA100 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or
-            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or
+            np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla breakout with trend and volume
-        long_entry = close[i] > camarilla_r3_4h[i] and bullish_trend[i] and volume_surge[i]
-        short_entry = close[i] < camarilla_s3_4h[i] and bearish_trend[i] and volume_surge[i]
+        # Entry conditions with daily trend alignment and volume surge
+        long_entry = deviation[i] < 0 and daily_uptrend_aligned[i] > 0.5 and volume_surge[i]
+        short_entry = deviation[i] > 0 and daily_downtrend_aligned[i] > 0.5 and volume_surge[i]
         
-        # Exit on opposite Camarilla breakout with volume (to avoid whipsaw)
-        long_exit = close[i] < camarilla_s3_4h[i] and volume_surge[i]
-        short_exit = close[i] > camarilla_r3_4h[i] and volume_surge[i]
+        # Exit when price returns to VWAP (mean reversion complete)
+        long_exit = deviation[i] >= 0 and position == 1
+        short_exit = deviation[i] <= 0 and position == -1
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = 0.0
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.0
+            position = 0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_AVWAP_Reversion_With_DailyTrend"
+timeframe = "1h"
 leverage = 1.0
