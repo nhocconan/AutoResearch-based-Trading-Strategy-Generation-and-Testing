@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike
-# Camarilla pivot levels from daily timeframe provide high-probability reversal/continuation points.
-# Breakouts above R3 or below S3 indicate strong momentum. 1d EMA ensures alignment with longer-term trend.
-# Volume spike confirms conviction. Designed for 12h timeframe targeting 12-37 trades/year to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike
+# Camarilla pivot levels provide high-probability reversal/continuation points. Breakouts above R3 or below S3
+# indicate strong momentum. 1d EMA ensures alignment with long-term trend. Volume spike confirms conviction.
+# Designed for 4h timeframe targeting 20-50 trades/year to minimize fee drag while capturing strong moves.
 # Works in both bull and bear markets by following trend direction via EMA filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +23,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align 1d EMA to 12h (changes only when 1d bar closes)
+    # Align 1d EMA to 4h (changes only when 1d bar closes)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss
@@ -51,7 +51,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 12h (using prior day's levels)
+    # Align Camarilla levels to 4h (using prior day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
