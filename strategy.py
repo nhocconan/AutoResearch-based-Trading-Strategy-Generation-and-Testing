@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullPower_BearPower_1dTrend_Volume
-Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) captures institutional buying/selling pressure. Combined with 1-day EMA50 trend filter and volume spike (>1.5x average) to confirm institutional participation. Works in bull/bear by following higher timeframe trend. Targets 20-30 trades/year via strict Elder Ray divergence conditions.
+4h_RSI_Touch_200EMA_Trend
+Hypothesis: Uses RSI touching oversold/overbought levels while price is above/below 200 EMA on 4h chart, with volume confirmation. This mean-reversion strategy works in both bull and bear markets by capturing pullbacks in the direction of the higher timeframe trend. Targets 20-30 trades/year via strict RSI extreme conditions and trend alignment.
 """
 
 import numpy as np
@@ -13,78 +13,63 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and EMA13 for Elder Ray
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate 200 EMA on 4h for trend filter
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate EMA13 on 1d close for Elder Ray calculation
-    close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Elder Ray components on 1d data
-    # Bull Power = High - EMA13
-    bull_power = df_1d['high'].values - ema_13_1d
-    # Bear Power = Low - EMA13
-    bear_power = df_1d['low'].values - ema_13_1d
-    
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Volume confirmation: >1.5x 24-period MA (4 days of 6h bars)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: >1.5x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 200  # Wait for EMA200 and RSI to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_200[i]) or 
+            np.isnan(rsi_values[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 200 EMA
+        uptrend = close[i] > ema_200[i]
+        downtrend = close[i] < ema_200[i]
         
         # Volume confirmation (>1.5x average)
-        vol_confirm = volume[i] > (1.5 * vol_ma_24[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Elder Ray signals: Bull Power rising + Bear Power weakening for long
-        # Bear Power falling + Bull Power weakening for short
-        bull_rising = bull_power_aligned[i] > bull_power_aligned[i-1]
-        bear_falling = bear_power_aligned[i] < bear_power_aligned[i-1]
-        bull_falling = bull_power_aligned[i] < bull_power_aligned[i-1]
-        bear_rising = bear_power_aligned[i] > bear_power_aligned[i-1]
+        # RSI extreme conditions
+        rsi_oversold = rsi_values[i] < 30
+        rsi_overbought = rsi_values[i] > 70
         
-        # Long: Bull Power rising AND Bear Power falling (bulls gaining control)
-        long_signal = bull_rising and bear_falling and vol_confirm and uptrend
-        # Short: Bear Power rising AND Bull Power falling (bears gaining control)
-        short_signal = bear_rising and bull_falling and vol_confirm and downtrend
+        # Entry conditions
+        long_entry = rsi_oversold and vol_confirm and uptrend
+        short_entry = rsi_overbought and vol_confirm and downtrend
         
-        # Exit: when Elder Ray divergence fails or trend changes
-        long_exit = not (bull_rising and bear_falling) or not uptrend
-        short_exit = not (bear_rising and bull_falling) or not downtrend
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        long_exit = rsi_values[i] > 40
+        short_exit = rsi_values[i] < 60
         
-        if long_signal and position <= 0:
+        if long_entry and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_signal and position >= 0:
+        elif short_entry and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -104,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullPower_BearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_RSI_Touch_200EMA_Trend"
+timeframe = "4h"
 leverage = 1.0
