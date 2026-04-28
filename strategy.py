@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_Volume
-Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation. Targets 20-50 trades/year by requiring price to break beyond 20-period high/low, alignment with daily trend, and volume surge to avoid false breakouts. Works in both bull and bear markets by trading with the daily trend direction while using Donchian channels for breakout signals.
+1d_KAMA_Trend_RSI_Filter
+Hypothesis: Daily KAMA direction with RSI filter and volume confirmation. 
+KAMA adapts to market noise, reducing whipsaw in choppy markets. 
+Trades only when RSI confirms momentum (>55 for long, <45 for short) and volume surges.
+Works in both bull and bear markets by following adaptive trend while filtering false signals.
+Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -18,55 +22,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get weekly data for trend filter (optional but adds robustness)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Get daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    # Parameters: ER fast = 2, slow = 30
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly below
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Proper ER calculation
+    price_change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility_sum = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility_sum[i] = volatility_sum[i-1] + np.abs(close[i] - close[i-1])
+    # For first 10 periods, use expanding window
+    volatility_10 = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < 10:
+            volatility_10[i] = np.sum(np.abs(np.diff(close[:i+1]))) if i > 0 else 0
+        else:
+            volatility_10[i] = volatility_sum[i] - volatility_sum[i-10]
     
-    # Align higher timeframe data to 4h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ER = np.where(volatility_10 > 0, price_change / volatility_10, 0)
+    # Smooth ER
+    fast_SC = 2 / (2 + 1)   # EMA 2
+    slow_SC = 2 / (30 + 1)  # EMA 30
+    SC = (ER * (fast_SC - slow_SC) + slow_SC) ** 2
     
-    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + SC[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Alternative simpler approach using pandas for robustness
+    # Recalculate using pandas Series for clarity
+    close_series = pd.Series(close)
+    change = close_series.diff(10).abs()
+    volatility = close_series.diff().abs().rolling(10).sum()
+    ER = change / volatility
+    ER = ER.fillna(0)
+    fast_SC = 2 / (2 + 1)
+    slow_SC = 2 / (30 + 1)
+    SC = (ER * (fast_SC - slow_SC) + slow_SC) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + SC.iloc[i] * (close[i] - kama[i-1])
+    
+    # RSI calculation
+    delta = pd.Series(close).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.5)
+    
+    # Align higher timeframe data
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above 20-period high + daily uptrend + volume surge
-        long_entry = (close[i] > high_20[i] and 
-                     trend_up[i] and 
-                     volume_surge[i])
+        # Determine trend direction from weekly EMA
+        trend_up = close > ema_34_1w_aligned
+        trend_down = close < ema_34_1w_aligned
         
-        # Short: price breaks below 20-period low + daily downtrend + volume surge
-        short_entry = (close[i] < low_20[i] and 
-                      trend_down[i] and 
-                      volume_surge[i])
+        # Entry conditions
+        # Long: price > KAMA AND RSI > 55 (bullish momentum) AND volume surge AND weekly uptrend
+        long_entry = (close[i] > kama_aligned[i] and 
+                     rsi[i] > 55 and 
+                     volume_surge[i] and 
+                     trend_up[i])
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < low_20[i] and volume_surge[i]
-        short_exit = close[i] > high_20[i] and volume_surge[i]
+        # Short: price < KAMA AND RSI < 45 (bearish momentum) AND volume surge AND weekly downtrend
+        short_entry = (close[i] < kama_aligned[i] and 
+                      rsi[i] < 45 and 
+                      volume_surge[i] and 
+                      trend_down[i])
+        
+        # Exit when price crosses KAMA in opposite direction
+        long_exit = close[i] < kama_aligned[i] and position == 1
+        short_exit = close[i] > kama_aligned[i] and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -75,11 +136,11 @@ def generate_signals(prices):
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = -0.25  # Close long
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.25   # Close short
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -91,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
