@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_VolumeSpike_1dTrend
-Hypothesis: TRIX (12-period) on 12h timeframe captures momentum shifts with reduced lag compared to traditional MACD. Combined with volume spike confirmation and 1d EMA34 trend filter, this strategy aims to capture significant momentum moves while minimizing false signals. The 12h timeframe targets 12-37 trades/year to stay within optimal range, reducing fee drag. TRIX is effective in both bull and bear markets as it identifies accelerating momentum regardless of direction.
+12h_RSI34_1dEMA21_TopBottom_Reversal
+Hypothesis: RSI(34) on 12h identifies overbought/oversold conditions, while EMA(21) on 1d provides the primary trend filter. In bull markets, we buy oversold bounces above the rising 1d EMA21; in bear markets, we sell overbought rejections below the falling 1d EMA21. This mean-reversion-with-trend strategy avoids counter-trend trades and works in both regimes. Target: 20-30 trades/year per symbol to minimize fee drag while capturing meaningful reversals at key support/resistance levels.
 """
 
 import numpy as np
@@ -20,59 +20,51 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA21 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Calculate TRIX on 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 15:
-        return np.zeros(n)
+    # Calculate 12h RSI(34) for overbought/oversold signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    close_12h = df_12h['close'].values
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
-    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3 - np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
-    trix_12h_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for all indicators to stabilize
+    start_idx = 34  # Wait for RSI to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # TRIX signals: positive = bullish momentum, negative = bearish momentum
-        trix_bullish = trix_12h_aligned[i] > 0
-        trix_bearish = trix_12h_aligned[i] < 0
+        # RSI conditions
+        oversold = rsi[i] < 30
+        overbought = rsi[i] > 70
         
-        # Trend filter from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1d EMA21
+        uptrend = close[i] > ema_21_1d_aligned[i]
+        downtrend = close[i] < ema_21_1d_aligned[i]
         
-        # Entry conditions with volume confirmation and trend alignment
-        long_entry = trix_bullish and volume_spike[i] and uptrend
-        short_entry = trix_bearish and volume_spike[i] and downtrend
+        # Entry conditions: trade with the trend from extreme RSI levels
+        long_entry = oversold and uptrend
+        short_entry = overbought and downtrend
         
-        # Exit when TRIX changes sign or trend fails
-        long_exit = (trix_12h_aligned[i] <= 0) or (not uptrend)
-        short_exit = (trix_12h_aligned[i] >= 0) or (not downtrend)
+        # Exit conditions: RSI returns to neutral territory or trend changes
+        long_exit = (rsi[i] > 50) or (not uptrend)
+        short_exit = (rsi[i] < 50) or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -97,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TRIX_VolumeSpike_1dTrend"
+name = "12h_RSI34_1dEMA21_TopBottom_Reversal"
 timeframe = "12h"
 leverage = 1.0
