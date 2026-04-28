@@ -13,11 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and 6h data for entry timing
+    # Get 1d data for trend filter and volatility filter
     df_1d = get_htf_data(prices, '1d')
-    df_6h = get_htf_data(prices, '6h')
-    
-    if len(df_1d) < 34 or len(df_6h) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # 1d EMA(34) for trend filter
@@ -25,31 +23,37 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h RSI(14) for momentum filter
-    close_6h = df_6h['close'].values
-    delta = pd.Series(close_6h).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_6h = 100 - (100 / (1 + rs))
-    rsi_6h = rsi_6h.fillna(50).values
-    rsi_6h_aligned = align_htf_to_ltf(prices, df_6h, rsi_6h)
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume confirmation: current volume > 1.3x average volume (reduced to increase trades slightly)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma * 1.3
+    # Volume confirmation: current volume > 1.5x average volume (conservative to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > vol_ma * 1.5
+    
+    # 12-period high/low for breakout levels
+    high_12 = pd.Series(high).rolling(window=12, min_periods=12).max().values
+    low_12 = pd.Series(low).rolling(window=12, min_periods=12).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 20)
+    start_idx = max(34, 30, 12)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_6h_aligned[i])):
+            np.isnan(atr_14_aligned[i]) or
+            np.isnan(high_12[i]) or
+            np.isnan(low_12[i])):
             signals[i] = 0.0
             continue
         
@@ -57,19 +61,21 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Momentum filter from 6h RSI
-        rsi_momentum_up = rsi_6h_aligned[i] > 50
-        rsi_momentum_down = rsi_6h_aligned[i] < 50
+        # Volatility filter: ATR > 0.5 * price (avoid low volatility choppy periods)
+        vol_filter = atr_14_aligned[i] > 0.005 * close[i]
         
-        # Entry conditions: require 1d trend, 6h momentum, and volume confirmation
-        long_entry = uptrend and rsi_momentum_up and volume_confirm[i]
-        short_entry = downtrend and rsi_momentum_down and volume_confirm[i]
+        # Breakout conditions with volatility and volume confirmation
+        long_breakout = close[i] > high_12[i-1]  # Break above 12-period high
+        short_breakout = close[i] < low_12[i-1]  # Break below 12-period low
         
-        # Exit conditions: when trend or momentum reverses
+        long_entry = long_breakout and uptrend and vol_filter and volume_confirm[i]
+        short_entry = short_breakout and downtrend and vol_filter and volume_confirm[i]
+        
+        # Exit conditions: when trend reverses or volatility drops
         if position == 1:
-            exit_condition = not (uptrend and rsi_momentum_up)
+            exit_condition = not (uptrend and vol_filter)
         elif position == -1:
-            exit_condition = not (downtrend and rsi_momentum_down)
+            exit_condition = not (downtrend and vol_filter)
         else:
             exit_condition = False
         
@@ -94,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_Trend_RSI14_Momentum_VolumeConfirm"
-timeframe = "6h"
+name = "12h_EMA34_Trend_ATRVol_VolumeConfirm_Breakout"
+timeframe = "12h"
 leverage = 1.0
