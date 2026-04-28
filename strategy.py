@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Supertrend for trend direction and 1h Donchian breakout for entry timing.
-# Enter long when 4h Supertrend is bullish and price breaks above 1h Donchian upper band (20).
-# Enter short when 4h Supertrend is bearish and price breaks below 1h Donchian lower band (20).
-# Uses discrete position sizing (0.20) to minimize fee churn. Target: 15-35 trades/year.
-# Supertrend provides reliable trend filtering from higher timeframe, Donchian breakouts capture momentum.
-# Works in bull (trend continuation breaks) and bear (trend reversal breaks) markets.
+# Hypothesis: 6h strategy using weekly ATR-based volatility regime filter combined with daily Donchian breakout.
+# Long when: price breaks above daily Donchian upper (20) AND weekly ATR ratio (current/50-period) > 1.2 (high volatility regime)
+# Short when: price breaks below daily Donchian lower (20) AND weekly ATR ratio > 1.2
+# Uses discrete sizing (0.25) to limit fee drag. Target: 30-80 trades/year.
+# Weekly ATR filter ensures we only trade during expansion phases, avoiding low-volatility whipsaws.
+# Donchian provides clear breakout levels from higher timeframe. Works in bull (breakouts with trend) and bear (failed breaks reverse via exits).
 
-name = "1h_Supertrend4h_DonchianBreakout_20_v1"
-timeframe = "1h"
+name = "6h_WeeklyATR_VolRegime_DonchianBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,104 +24,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Supertrend (HTF)
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data for Donchian channels (MTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Supertrend (10, 3.0)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # True Range
-    tr = np.zeros(len(close_4h))
-    for i in range(1, len(close_4h)):
-        tr[i] = max(high_4h[i] - low_4h[i], 
-                    abs(high_4h[i] - close_4h[i-1]), 
-                    abs(low_4h[i] - close_4h[i-1]))
-    tr[0] = high_4h[0] - low_4h[0]
+    n_1d = len(high_1d)
+    donchian_high = np.full(n_1d, np.nan)
+    donchian_low = np.full(n_1d, np.nan)
     
-    # ATR(10)
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    for i in range(19, n_1d):  # min_periods=20
+        donchian_high[i] = np.max(high_1d[i-19:i+1])
+        donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_4h + low_4h) / 2 + 3.0 * atr
-    basic_lb = (high_4h + low_4h) / 2 - 3.0 * atr
+    # Forward fill Donchian levels
+    donchian_high = pd.Series(donchian_high).ffill().values
+    donchian_low = pd.Series(donchian_low).ffill().values
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros(len(close_4h))
-    final_lb = np.zeros(len(close_4h))
-    for i in range(len(close_4h)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if basic_ub[i] < final_ub[i-1] or close_4h[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close_4h[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
+    # Align 1d Donchian to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Supertrend
-    supertrend = np.zeros(len(close_4h))
-    for i in range(len(close_4h)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-        else:
-            if supertrend[i-1] == final_ub[i-1] and close_4h[i] <= final_ub[i]:
-                supertrend[i] = final_ub[i]
-            elif supertrend[i-1] == final_ub[i-1] and close_4h[i] > final_ub[i]:
-                supertrend[i] = final_lb[i]
-            elif supertrend[i-1] == final_lb[i-1] and close_4h[i] >= final_lb[i]:
-                supertrend[i] = final_lb[i]
-            elif supertrend[i-1] == final_lb[i-1] and close_4h[i] < final_lb[i]:
-                supertrend[i] = final_ub[i]
+    # Get weekly data for ATR regime filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Supertrend direction: 1 = bullish (price above supertrend), -1 = bearish (price below)
-    supertrend_dir = np.where(close_4h > supertrend, 1, -1)
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align 4h Supertrend direction to 1h timeframe
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, supertrend_dir.astype(float))
+    # Calculate weekly True Range and ATR(50)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h Donchian Channel (20)
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    n_1w = len(high_1w)
+    tr_1w = np.zeros(n_1w)
+    atr_1w = np.zeros(n_1w)
+    
+    for i in range(1, n_1w):
+        tr = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
+        tr_1w[i] = tr
+    
+    # Calculate ATR(50) with min_periods=50
+    for i in range(50, n_1w):
+        atr_1w[i] = np.mean(tr_1w[i-49:i+1])
+    
+    # Forward fill ATR
+    atr_1w = pd.Series(atr_1w).ffill().values
+    
+    # Calculate weekly ATR ratio: current ATR / 50-period ATR mean (using prior 50 weeks)
+    atr_ma_50 = np.full(n_1w, np.nan)
+    for i in range(100, n_1w):  # min_periods=100 for stability
+        atr_ma_50[i] = np.mean(atr_1w[i-99:i+1])
+    
+    atr_ratio = np.full(n_1w, np.nan)
+    for i in range(100, n_1w):
+        if atr_ma_50[i] > 0:
+            atr_ratio[i] = atr_1w[i] / atr_ma_50[i]
+    
+    # Forward fill ATR ratio
+    atr_ratio = pd.Series(atr_ratio).ffill().values
+    
+    # Align weekly ATR ratio to 6h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    
+    # Volume confirmation: 6h volume > 1.5x 24-period average (4 days)
+    volume_series = pd.Series(volume)
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 1.5 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = donchian_period  # Ensure sufficient history for Donchian
+    start_idx = 100  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_dir_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions with 4h Supertrend filter
-        long_breakout = (supertrend_dir_aligned[i] == 1 and 
-                         close[i] > highest_high[i])
-        short_breakout = (supertrend_dir_aligned[i] == -1 and 
-                          close[i] < lowest_low[i])
+        # High volatility regime: weekly ATR ratio > 1.2
+        high_vol_regime = atr_ratio_aligned[i] > 1.2
         
-        # Exit conditions: Donchian opposite band
-        long_exit = close[i] < lowest_low[i]
-        short_exit = close[i] > highest_high[i]
+        # Donchian breakout conditions with volume confirmation and volatility filter
+        long_breakout = close[i] > donchian_high_aligned[i] and volume_spike[i] and high_vol_regime
+        short_breakout = close[i] < donchian_low_aligned[i] and volume_spike[i] and high_vol_regime
+        
+        # Exit conditions: opposite Donchian level
+        long_exit = close[i] < donchian_low_aligned[i]
+        short_exit = close[i] > donchian_high_aligned[i]
         
         # Handle entries and exits
         if long_breakout and position <= 0:
-            signals[i] = 0.20
+            signals[i] = 0.25
             position = 1
         elif short_breakout and position >= 0:
-            signals[i] = -0.20
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -129,9 +133,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
