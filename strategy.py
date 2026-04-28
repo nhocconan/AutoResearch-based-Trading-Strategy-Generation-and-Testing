@@ -1,3 +1,4 @@
+# 103301
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -24,8 +25,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(50) for trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA(34) for trend
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # 1d RSI(14)
     delta = pd.Series(close_1d).diff()
@@ -45,47 +46,58 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Align HTF indicators to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Precompute 4h volatility filter
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > vol_ma
+    # Hour filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Trend filter: price above/below EMA34
+        trend_up = close[i] > ema_34_aligned[i]
+        trend_down = close[i] < ema_34_aligned[i]
         
         # Momentum filter: RSI in favorable range (not extreme)
-        rsi_bullish = 40 < rsi_aligned[i] < 60
-        rsi_bearish = 40 < rsi_aligned[i] < 60
+        rsi_bullish = rsi_aligned[i] > 50 and rsi_aligned[i] < 70
+        rsi_bearish = rsi_aligned[i] < 50 and rsi_aligned[i] > 30
         
         # Volume filter: above average volume
-        vol_ok = vol_filter[i]
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions
-        long_entry = trend_up and rsi_bullish and vol_ok
-        short_entry = trend_down and rsi_bearish and vol_ok
+        # Entry conditions - more restrictive to reduce trade frequency
+        long_entry = trend_up and rsi_bullish and vol_filter
+        short_entry = trend_down and rsi_bearish and vol_filter
         
         # Exit conditions: opposite conditions or volatility spike
-        atr_ma = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values
-        vol_spike = atr_14_aligned[i] > 1.5 * atr_ma[i]
-        
-        long_exit = not trend_up or not rsi_bullish or vol_spike
-        short_exit = not trend_down or not rsi_bearish or vol_spike
+        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
+        long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
+        short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -110,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA50_RSI_Volume_Filter"
+name = "4h_EMA34_RSI_Volume_Session_103301"
 timeframe = "4h"
 leverage = 1.0
