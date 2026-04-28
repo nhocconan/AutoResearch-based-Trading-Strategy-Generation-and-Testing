@@ -13,43 +13,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF context (Camarilla levels)
+    # Get daily data for HTF context (price channels)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily range for pivot calculations (use previous day)
+    # Daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    daily_range = high_1d - low_1d
     
-    # Calculate Camarilla levels from previous day
-    camarilla_r3 = close_1d + daily_range * 1.1 / 4
-    camarilla_s3 = close_1d - daily_range * 1.1 / 4
-    camarilla_r4 = close_1d + daily_range * 1.1 / 2
-    camarilla_s4 = close_1d - daily_range * 1.1 / 2
+    # Calculate Donchian upper/lower bands (previous day's 20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align to 6h timeframe (previous day's levels)
+    donchian_high = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Weekly trend filter: price above/below weekly SMA20
-    close_1w_series = pd.Series(df_1w['close'].values)
-    sma20_1w = close_1w_series.rolling(window=20, min_periods=20).mean().values
-    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    # Weekly trend filter: price above/below weekly EMA20
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Hour filter: 8-20 UTC (most active trading hours)
+    # Session filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -59,9 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(sma20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -81,19 +74,19 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below weekly SMA20
-        trend_up = close[i] > sma20_1w_aligned[i]
-        trend_down = close[i] < sma20_1w_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above daily R3 with volume and trend up
-        # Short: price breaks below daily S3 with volume and trend down
-        long_entry = (close[i] > r3_aligned[i]) and vol_filter and trend_up
-        short_entry = (close[i] < s3_aligned[i]) and vol_filter and trend_down
+        # Long: price breaks above daily Donchian high with volume and trend up
+        # Short: price breaks below daily Donchian low with volume and trend down
+        long_entry = (close[i] > donchian_high[i]) and vol_filter and trend_up
+        short_entry = (close[i] < donchian_low[i]) and vol_filter and trend_down
         
-        # Exit conditions: price returns to opposite S4/R4 levels (wider bands)
-        long_exit = (close[i] < s4_aligned[i])
-        short_exit = (close[i] > r4_aligned[i])
+        # Exit conditions: price returns to opposite Donchian level
+        long_exit = (close[i] < donchian_low[i])
+        short_exit = (close[i] > donchian_high[i])
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -118,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyCamarilla_R3S3_R4S4_WeeklyTrend_Volume_Session"
-timeframe = "4h"
+name = "6h_DailyDonchian_WeeklyEMA20_Trend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
