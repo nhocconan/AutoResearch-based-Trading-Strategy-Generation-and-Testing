@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 4h primary timeframe with 1d EMA34 as trend filter (more stable than 12h EMA50).
+# Uses 4h primary timeframe to capture medium-term trends with reduced trade frequency.
 # Donchian breakouts provide clear entry/exit signals, filtered by 1d EMA34 trend direction
 # and volume spikes to avoid false breakouts. Works in both bull and bear markets by
 # following the 1d trend while using Donchian channels as structure.
-# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year). Size: 0.25-0.30.
 
 name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
@@ -30,7 +30,7 @@ def generate_signals(prices):
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
