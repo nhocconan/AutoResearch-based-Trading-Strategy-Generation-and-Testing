@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_Chop
-Hypothesis: On daily timeframe, enter long when KAMA indicates uptrend, RSI is not overbought, and market is not choppy. Enter short when KAMA indicates downtrend, RSI is not oversold, and market is not choppy. Uses Choppiness Index as regime filter to avoid whipsaws in sideways markets. Designed for low trade frequency (~10-20/year) to minimize fee decay and work in both bull and bear markets.
+6h_LiquidityVoid_Trap_Reversal
+Hypothesis: Price often reverses after creating liquidity voids (fair value gaps) on 6h timeframe.
+In ranging markets, price revisits these voids before continuing. In trending markets,
+voids act as support/resistance. We enter when price returns to fill a void with
+confluence from 1d trend (price vs 50 EMA) and volume confirmation.
+Designed for low trade frequency (~15-25/year) to minimize fee decay in choppy markets.
 """
 
 import numpy as np
@@ -11,87 +14,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter and regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on weekly data
-    def calculate_kama(close_prices, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close_prices, n=length))
-        volatility = np.sum(np.abs(np.diff(close_prices)), axis=0)
-        er = np.zeros_like(close_prices)
-        er[length:] = change / np.where(volatility[length:] == 0, 1, volatility[length:])
-        
-        # Smoothing Constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # KAMA
-        kama = np.zeros_like(close_prices)
-        kama[0] = close_prices[0]
-        for i in range(1, len(close_prices)):
-            kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
-        return kama
+    # 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Choppiness Index on weekly data
-    def calculate_chop(high_prices, low_prices, close_prices, length=14):
-        atr = np.zeros_like(close_prices)
-        tr1 = high_prices[1:] - low_prices[1:]
-        tr2 = np.abs(high_prices[1:] - close_prices[:-1])
-        tr3 = np.abs(low_prices[1:] - close_prices[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # ATR calculation
-        atr[length:] = np.nansum(tr.reshape(-1, length), axis=1) / length
-        
-        # Chop calculation
-        max_high = np.zeros_like(close_prices)
-        min_low = np.zeros_like(close_prices)
-        for i in range(length, len(close_prices)):
-            max_high[i] = np.max(high_prices[i-length+1:i+1])
-            min_low[i] = np.min(low_prices[i-length+1:i+1])
-        
-        chop = np.full_like(close_prices, 50.0)
-        for i in range(length, len(close_prices)):
-            if np.sum(atr[i-length+1:i+1]) > 0:
-                chop[i] = 100 * np.log10(np.sum(atr[i-length+1:i+1]) / 
-                                          (max_high[i] - min_low[i])) / np.log10(length)
-        return chop
+    # Detect 6h fair value gaps (liquidity voids)
+    # Bullish FVG: gap between low[i-2] and high[i] where low[i-2] > high[i]
+    # Bearish FVG: gap between high[i-2] and low[i] where high[i-2] < low[i]
+    fvg_bull = np.zeros(n, dtype=bool)
+    fvg_bear = np.zeros(n, dtype=bool)
     
-    # Calculate indicators on weekly data
-    kama = calculate_kama(df_1w['close'].values, length=10, fast=2, slow=30)
-    chop = calculate_chop(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, length=14)
+    for i in range(2, n):
+        # Bullish FVG: two candles ago low > current candle high (gap up)
+        if low[i-2] > high[i]:
+            fvg_bull[i] = True
+        # Bearish FVG: two candles ago high < current candle low (gap down)
+        if high[i-2] < low[i]:
+            fvg_bear[i] = True
     
-    # Calculate RSI on daily data for entry timing
-    def calculate_rsi(close_prices, length=14):
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # Track active FVG zones (price hasn't filled them yet)
+    # For bullish FVG: active while price hasn't reached the gap low
+    # For bearish FVG: active while price hasn't reached the gap high
+    active_bull_fvg = np.zeros(n, dtype=bool)
+    active_bear_fvg = np.zeros(n, dtype=bool)
+    
+    # Track the gap boundaries
+    bull_fvg_low = np.full(n, np.nan)
+    bull_fvg_high = np.full(n, np.nan)
+    bear_fvg_low = np.full(n, np.nan)
+    bear_fvg_high = np.full(n, np.nan)
+    
+    for i in range(2, n):
+        if fvg_bull[i]:
+            bull_fvg_low[i] = high[i]      # Bottom of gap
+            bull_fvg_high[i] = low[i-2]    # Top of gap
+            active_bull_fvg[i] = True
+        elif i > 0:
+            bull_fvg_low[i] = bull_fvg_low[i-1]
+            bull_fvg_high[i] = bull_fvg_high[i-1]
+            active_bull_fvg[i] = active_bull_fvg[i-1]
+            # If price touches or goes below gap bottom, gap is filled
+            if low[i] <= bull_fvg_high[i]:
+                active_bull_fvg[i] = False
         
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        avg_gain[length:] = np.nanmean(gain.reshape(-1, length), axis=1)
-        avg_loss[length:] = np.nanmean(loss.reshape(-1, length), axis=1)
-        
-        rs = np.where(avg_loss[length:] == 0, 100, avg_gain[length:] / avg_loss[length:])
-        rsi = np.full_like(close_prices, 50.0)
-        rsi[length:] = 100 - (100 / (1 + rs))
-        return rsi
+        if fvg_bear[i]:
+            bear_fvg_low[i] = high[i-2]    # Bottom of gap
+            bear_fvg_high[i] = low[i]      # Top of gap
+            active_bear_fvg[i] = True
+        elif i > 0:
+            bear_fvg_low[i] = bear_fvg_low[i-1]
+            bear_fvg_high[i] = bear_fvg_high[i-1]
+            active_bear_fvg[i] = active_bear_fvg[i-1]
+            # If price touches or goes above gap top, gap is filled
+            if high[i] >= bear_fvg_low[i]:
+                active_bear_fvg[i] = False
     
-    rsi = calculate_rsi(close, length=14)
+    # Align 1d trend data to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    d1_uptrend = close > ema_50_aligned
+    d1_downtrend = close < ema_50_aligned
     
-    # Align all weekly data to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,42 +97,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_surge[i]) or
+            np.isnan(bull_fvg_low[i]) or np.isnan(bear_fvg_high[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition: price relative to KAMA
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
+        # Long setup: price fills bullish FVG (returns to gap) with trend and volume
+        long_setup = (active_bull_fvg[i] and 
+                     low[i] <= bull_fvg_high[i] and  # Price touched gap top
+                     high[i] >= bull_fvg_low[i] and  # Price entered gap
+                     d1_uptrend[i] and 
+                     volume_surge[i])
         
-        # RSI conditions: not overbought/oversold
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # Short setup: price fills bearish FVG (returns to gap) with trend and volume
+        short_setup = (active_bear_fvg[i] and
+                      high[i] >= bear_fvg_low[i] and   # Price touched gap bottom
+                      low[i] <= bear_fvg_high[i] and   # Price entered gap
+                      d1_downtrend[i] and
+                      volume_surge[i])
         
-        # Regime filter: not choppy (Choppiness Index < 61.8 = trending)
-        not_choppy = chop_aligned[i] < 61.8
+        # Exit when price moves through the gap (opposite side)
+        long_exit = active_bull_fvg[i] and high[i] > bull_fvg_high[i]
+        short_exit = active_bear_fvg[i] and low[i] < bear_fvg_low[i]
         
-        # Entry conditions
-        long_entry = price_above_kama and rsi_not_overbought and not_choppy
-        short_entry = price_below_kama and rsi_not_oversold and not_choppy
-        
-        # Exit conditions: opposite signal or choppy market
-        long_exit = price_below_kama or chop_aligned[i] >= 61.8
-        short_exit = price_above_kama or chop_aligned[i] >= 61.8
-        
-        if long_entry and position <= 0:
+        if long_setup and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_setup and position >= 0:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
-            signals[i] = -0.25  # Reverse to short
-            position = -1
+            signals[i] = -0.25  # Close long
+            position = 0
         elif short_exit and position == -1:
-            signals[i] = 0.25   # Reverse to long
-            position = 1
+            signals[i] = 0.25   # Close short
+            position = 0
         else:
             # Hold current position
             if position == 1:
@@ -147,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_Chop"
-timeframe = "1d"
+name = "6h_LiquidityVoid_Trap_Reversal"
+timeframe = "6h"
 leverage = 1.0
