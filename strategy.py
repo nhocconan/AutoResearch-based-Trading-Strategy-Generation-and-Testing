@@ -1,13 +1,9 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_Triple_RSI_Momentum_VolumeFilter
-Hypothesis: Uses three RSI periods (short, medium, long) to capture momentum shifts.
-RSI(6) < 30 and RSI(14) > RSI(50) signals bullish momentum; RSI(6) > 70 and RSI(14) < RSI(50) signals bearish momentum.
-Requires volume confirmation (current volume > 20-period average) to avoid false signals.
-Uses 1-day ADX > 25 as trend filter to ensure we trade in trending markets only.
-Designed for low trade frequency (<30/year) on 12h timeframe to minimize fee drag while capturing sustained moves.
-Works in both bull and bear markets by filtering for trend strength and momentum exhaustion.
+4h_PriceAction_RangeBreakout_12hTrend_1dVolatility
+Hypothesis: Combines 12h EMA trend filter with daily ATR-based volatility filter and 4h price action breakouts.
+Designed for low trade frequency (<25/year) to minimize fee burn while capturing strong directional moves 
+in both bull and bear markets by requiring alignment across multiple timeframes and volatility confirmation.
 """
 
 import numpy as np
@@ -16,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,142 +20,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate ADX on daily timeframe
+    # Get 1d data for ATR volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 14-period ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate 4-period ATR for breakout threshold
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr1_4h[0] = 0
+    tr2_4h[0] = 0
+    tr3_4h[0] = 0
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_4 = pd.Series(tr_4h).rolling(window=4, min_periods=4).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    atr = np.zeros_like(tr)
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
-    
-    # Initial smoothed values (simple average)
-    atr[tr_period] = np.mean(tr[1:tr_period+1])
-    dm_plus_smooth[tr_period] = np.mean(dm_plus[1:tr_period+1])
-    dm_minus_smooth[tr_period] = np.mean(dm_minus[1:tr_period+1])
-    
-    # Wilder smoothing
-    for i in range(tr_period + 1, len(tr)):
-        atr[i] = (atr[i-1] * (tr_period - 1) + tr[i]) / tr_period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period - 1) + dm_plus[i]) / tr_period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period - 1) + dm_minus[i]) / tr_period
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.zeros_like(dx)
-    adx[2*tr_period] = np.mean(dx[tr_period:2*tr_period])
-    for i in range(2*tr_period + 1, len(dx)):
-        adx[i] = (adx[i-1] * (tr_period - 1) + dx[i]) / tr_period
-    
-    # Align ADX to 12h timeframe (with 1-bar delay for daily close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate multiple RSI on 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    def calculate_rsi(prices, period):
-        rsi = np.zeros_like(prices)
-        if len(prices) < period + 1:
-            return rsi
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # First average gain/loss
-        avg_gain = np.mean(gain[:period])
-        avg_loss = np.mean(loss[:period])
-        
-        rsi[period] = 100 - (100 / (1 + (avg_gain / avg_loss if avg_loss != 0 else 0)))
-        
-        # Wilder smoothing
-        for i in range(period + 1, len(prices)):
-            avg_gain = (avg_gain * (period - 1) + gain[i-1]) / period
-            avg_loss = (avg_loss * (period - 1) + loss[i-1]) / period
-            rs = avg_gain / avg_loss if avg_loss != 0 else 0
-            rsi[i] = 100 - (100 / (1 + rs))
-        
-        return rsi
-    
-    rsi_6 = calculate_rsi(close_12h, 6)
-    rsi_14 = calculate_rsi(close_12h, 14)
-    rsi_50 = calculate_rsi(close_12h, 50)
-    
-    # Align RSI to main timeframe
-    rsi_6_aligned = align_htf_to_ltf(prices, df_12h, rsi_6)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_12h, rsi_14)
-    rsi_50_aligned = align_htf_to_ltf(prices, df_12h, rsi_50)
-    
-    # Volume confirmation: current volume > 20-period average
-    volume_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
-        volume_ma[i] = np.mean(volume[i-20:i])
-    volume_ma[:20] = volume_ma[20] if len(volume) > 20 else 0
-    volume_confirm = volume > volume_ma
+    # Calculate 20-period high/low for breakout levels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi_6_aligned[i]) or
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(rsi_50_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(atr_4[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price relative to 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # RSI momentum signals
-        rsi_6 = rsi_6_aligned[i]
-        rsi_14 = rsi_14_aligned[i]
-        rsi_50 = rsi_50_aligned[i]
+        # Volatility filter: current ATR > average ATR (avoid low volatility periods)
+        vol_filter = atr_4[i] > atr_14_aligned[i] * 0.5
         
-        # Bullish: short RSI oversold, medium RSI above long RSI (momentum building)
-        bullish_momentum = (rsi_6 < 30) and (rsi_14 > rsi_50)
+        # Breakout conditions: price breaks 20-period high/low with trend and volatility confirmation
+        long_breakout = close[i] > highest_20[i]
+        short_breakout = close[i] < lowest_20[i]
         
-        # Bearish: short RSI overbought, medium RSI below long RSI (momentum fading)
-        bearish_momentum = (rsi_6 > 70) and (rsi_14 < rsi_50)
+        long_entry = long_breakout and vol_filter and uptrend
+        short_entry = short_breakout and vol_filter and downtrend
         
-        # Entry conditions
-        long_entry = bullish_momentum and trending and volume_confirm[i]
-        short_entry = bearish_momentum and trending and volume_confirm[i]
-        
-        # Exit conditions: momentum exhaustion or trend weakening
-        long_exit = (rsi_6 > 50) or (adx_aligned[i] < 20)  # RSI recovery or trend weakening
-        short_exit = (rsi_6 < 50) or (adx_aligned[i] < 20)
+        # Exit conditions: price returns to midpoint of 20-period range or trend reverses
+        midpoint_20 = (highest_20[i] + lowest_20[i]) / 2
+        long_exit = close[i] < midpoint_20
+        short_exit = close[i] > midpoint_20
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -184,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Triple_RSI_Momentum_VolumeFilter"
-timeframe = "12h"
+name = "4h_PriceAction_RangeBreakout_12hTrend_1dVolatility"
+timeframe = "4h"
 leverage = 1.0
