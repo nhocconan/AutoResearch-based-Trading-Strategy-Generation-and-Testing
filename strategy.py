@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Volume_Spike_1dTrend_HTF
-Hypothesis: TRIX (triple smoothed EMA) captures momentum with reduced noise. 
-Long when TRIX crosses above zero with 1-day uptrend and volume spike.
-Short when TRIX crosses below zero with 1-day downtrend and volume spike.
-Volume spike (>2x 20-period average) confirms momentum. 
-Designed to work in both bull and bear markets by following the 1-day trend.
-Target: ~20-40 trades/year to minimize fee drag.
+4h_RSI_Extreme_Reversal
+Hypothesis: RSI extremes on 4h timeframe indicate exhaustion. In trending markets (above/below 200-day EMA), these reversals are reliable. RSI < 30 for long, RSI > 70 for short, with volume confirmation to avoid false signals. Works in both bull and bear markets by trading mean reversion within the trend.
 """
 
 import numpy as np
@@ -15,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,65 +18,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for trend filter and RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day EMA34 for trend filter
+    # Calculate 200-day EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate TRIX: triple EMA of ROC
-    # ROC = (close - close[n]) / close[n] * 100
-    roc = np.zeros_like(close)
-    roc[1:] = (close[1:] - close[:-1]) / close[:-1] * 100
+    # Calculate 14-period RSI on daily closes
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.values
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
     
-    # Triple EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3  # TRIX is the final smoothed EMA
-    
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Volume confirmation: >2x 20-period MA (stricter to reduce trades)
+    # Volume confirmation: >1.5x 20-period MA on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 200  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(trix[i]) or 
-            np.isnan(trix_signal[i]) or
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1-day EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 200-day EMA
+        uptrend = close[i] > ema_200_1d_aligned[i]
+        downtrend = close[i] < ema_200_1d_aligned[i]
         
-        # TRIX momentum signals
-        trix_cross_up = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
-        trix_cross_down = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
+        # RSI extreme conditions
+        rsi_oversold = rsi_14_aligned[i] < 30
+        rsi_overbought = rsi_14_aligned[i] > 70
         
-        # Volume confirmation (>2x average for stronger signal)
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        # Volume confirmation
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: TRIX cross in direction of trend with volume
-        long_entry = vol_confirm and uptrend and trix_cross_up
-        short_entry = vol_confirm and downtrend and trix_cross_down
+        # Entry logic: RSI extreme in direction of trend with volume
+        long_entry = vol_confirm and uptrend and rsi_oversold
+        short_entry = vol_confirm and downtrend and rsi_overbought
         
-        # Exit logic: opposite TRIX cross or trend change
-        long_exit = trix_cross_down or (not uptrend)
-        short_exit = trix_cross_up or (not downtrend)
+        # Exit logic: RSI returns to neutral or trend reverses
+        long_exit = (rsi_14_aligned[i] > 50) or (not uptrend)
+        short_exit = (rsi_14_aligned[i] < 50) or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -106,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_Volume_Spike_1dTrend_HTF"
+name = "4h_RSI_Extreme_Reversal"
 timeframe = "4h"
 leverage = 1.0
