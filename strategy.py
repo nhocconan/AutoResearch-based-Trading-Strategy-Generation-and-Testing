@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,21 +15,21 @@ def generate_signals(prices):
     
     # Get daily data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(14) for volatility
     tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(high_1d[1:], low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily SMA(50) for trend filter
+    # Calculate daily SMA(50) for trend
     sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
     # Align daily indicators to 4h
@@ -47,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
