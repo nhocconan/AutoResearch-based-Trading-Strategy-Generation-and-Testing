@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Enter long when price breaks above Donchian upper band, 1d EMA34 trending up, and volume > 1.8x 24-bar average.
-# Enter short when price breaks below Donchian lower band, 1d EMA34 trending down, and volume > 1.8x 24-bar average.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Enter long when price breaks above Donchian upper band, 1d EMA34 trending up, and volume > 1.8x 20-bar average.
+# Enter short when price breaks below Donchian lower band, 1d EMA34 trending down, and volume > 1.8x 20-bar average.
 # Exit when price reaches the opposite Donchian band or crosses the 1d EMA34.
 # Uses discrete position sizing (0.25) to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid excessive fee drag.
-# Donchian channels from 12h provide structure; EMA34 from 1d filters for daily trend alignment; volume confirms breakout strength.
-# This strategy focuses on BTC and ETH as primary targets, with SOL as secondary.
+# Target: 80-150 total trades over 4 years (20-38/year) to avoid excessive fee churn.
+# Donchian provides clear structure, EMA34 filters trend alignment, volume confirms breakout strength.
+# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,26 +37,26 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate Donchian bands (20-period) on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: >1.8x 24-bar average volume
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_24
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 24)  # Ensure sufficient history for indicators
+    start_idx = max(34, 20)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_24[i])):
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
