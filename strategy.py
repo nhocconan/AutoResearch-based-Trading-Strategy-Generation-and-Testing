@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,41 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (P, S1, S2, S3, R1, R2, R3)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    
-    pivot_w = (high_w + low_w + close_w) / 3
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    r3_w = high_w + 2 * (pivot_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
-    
-    # Align to 1d timeframe
-    r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
-    s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_1w, s2_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    
-    # Get daily data for trend filter
+    # Get daily data for pivot calculation (primary HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily pivot points (P, S1, S2, S3, R1, R2, R3)
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
+    
+    pivot_d = (high_d + low_d + close_d) / 3
+    r1_d = 2 * pivot_d - low_d
+    s1_d = 2 * pivot_d - high_d
+    r2_d = pivot_d + (high_d - low_d)
+    s2_d = pivot_d - (high_d - low_d)
+    r3_d = high_d + 2 * (pivot_d - low_d)
+    s3_d = low_d - 2 * (high_d - pivot_d)
+    
+    # Align to 12h timeframe
+    r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
+    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
+    
+    # Get weekly data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA20 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume filter: above average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,12 +58,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_w_aligned[i]) or np.isnan(s3_w_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -83,22 +83,22 @@ def generate_signals(prices):
         # Volume filter: above average volume
         vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema50_1d_aligned[i]
-        trend_down = close[i] < ema50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: break above weekly S3 with upward trend and volume
-        # Short: break below weekly R3 with downward trend and volume
-        long_breakout = close[i] > s3_w_aligned[i]
-        short_breakout = close[i] < r3_w_aligned[i]
+        # Long: break above daily S3 with upward trend and volume
+        # Short: break below daily R3 with downward trend and volume
+        long_breakout = close[i] > s3_d_aligned[i]
+        short_breakout = close[i] < r3_d_aligned[i]
         
         long_entry = long_breakout and vol_filter and trend_up
         short_entry = short_breakout and vol_filter and trend_down
         
         # Exit conditions: opposite S1/R1 level touch
-        long_exit = (close[i] < s1_w_aligned[i]) and position == 1
-        short_exit = (close[i] > r1_w_aligned[i]) and position == -1
+        long_exit = (close[i] < s1_d_aligned[i]) and position == 1
+        short_exit = (close[i] > r1_d_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_S3_R3_Breakout_DailyTrend_Volume_Session"
-timeframe = "1d"
+name = "12h_DailyPivot_S3_R3_Breakout_WeeklyTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
