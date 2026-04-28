@@ -44,12 +44,29 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to daily timeframe (we are already on 1d)
-    ema_50_aligned = ema_50  # Already aligned since we're on 1d timeframe
-    rsi_aligned = rsi
-    atr_14_aligned = atr_14
+    # Align HTF indicators to 4h timeframe (this strategy uses 4h primary)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Hour filter: 8-20 UTC (for 1d timeframe, we check the hour of the day's open)
+    # 4h Bollinger Bands for volatility regime
+    bb_period = 20
+    bb_std = 2.0
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_bb + bb_std * std_bb
+    lower_bb = sma_bb - bb_std * std_bb
+    bb_width = (upper_bb - lower_bb) / sma_bb
+    
+    # Bollinger Band width percentile for regime detection (20-period lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
+        lambda x: np.percentile(x, 50) if len(x) == 20 else np.nan, raw=True
+    ).values
+    
+    # Regime: low volatility (squeeze) when BB width below 50th percentile
+    low_vol_regime = bb_width < bb_width_percentile
+    
+    # Hour filter: 8-20 UTC (active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -60,7 +77,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+            np.isnan(atr_14_aligned[i]) or np.isnan(low_vol_regime[i])):
             signals[i] = 0.0
             continue
         
@@ -82,21 +99,18 @@ def generate_signals(prices):
         trend_down = close[i] < ema_50_aligned[i]
         
         # Momentum filter: RSI in moderate range (avoid extremes)
-        rsi_moderate = (rsi_aligned[i] > 40) and (rsi_aligned[i] < 60)
+        rsi_mid = 40 < rsi_aligned[i] < 60
         
-        # Volume filter: above average volume
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_filter = volume[i] > vol_ma[i]
+        # Volatility filter: low volatility regime (squeeze)
+        vol_filter = low_vol_regime[i]
         
-        # Entry conditions - more selective to reduce trades
-        long_entry = trend_up and rsi_moderate and vol_filter
-        short_entry = trend_down and rsi_moderate and vol_filter
+        # Entry conditions - selective to reduce trades
+        long_entry = trend_up and rsi_mid and vol_filter
+        short_entry = trend_down and rsi_mid and vol_filter
         
-        # Exit conditions: opposite conditions or volatility spike
-        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
-        atr_spike = atr_14_aligned[i] > 2.0 * atr_ma[i]
-        long_exit = not trend_up or not rsi_moderate or atr_spike
-        short_exit = not trend_down or not rsi_moderate or atr_spike
+        # Exit conditions: opposite trend or volatility expansion
+        long_exit = not trend_up or not rsi_mid or not vol_filter
+        short_exit = not trend_down or not rsi_mid or not vol_filter
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -121,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_RSI_Volume_Session"
-timeframe = "1d"
+name = "4h_EMA50_RSI_BB_Squeeze"
+timeframe = "4h"
 leverage = 1.0
