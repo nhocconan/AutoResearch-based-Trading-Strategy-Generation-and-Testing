@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d indicators
@@ -24,19 +24,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(50) for trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
-    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d ATR(14) for volatility
+    # 1d ATR(14) for volatility measurement
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -44,23 +32,20 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align HTF indicators to 4h timeframe
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Hour filter: 8-20 UTC (using precomputed hours for efficiency)
+    # Hour filter: 8-20 UTC (only trade during active hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 14  # Wait for ATR warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        # Skip if ATR data is not ready
+        if np.isnan(atr_14_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -77,38 +62,44 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Volatility contraction filter: look for low volatility periods
+        # ATR contraction: current ATR < 0.7 * 20-period average ATR
+        if i >= 34:  # Need 14 + 20 for ATR MA
+            atr_ma = np.nanmean(atr_14_aligned[i-20:i]) if not np.isnan(np.nanmean(atr_14_aligned[i-20:i])) else atr_14_aligned[i]
+            vol_contract = atr_14_aligned[i] < 0.7 * atr_ma
+        else:
+            vol_contract = False
         
-        # Momentum filter: RSI in moderate range (avoid extremes)
-        rsi_mid = (rsi_aligned[i] > 40) and (rsi_aligned[i] < 60)
+        # Price action: look for breakouts from recent range
+        # 20-period high/low for breakout detection
+        if i >= 20:
+            period_high = np.nanmax(high[i-20:i])
+            period_low = np.nanmin(low[i-20:i])
+            
+            # Breakout conditions with volume confirmation
+            vol_ma = np.nanmean(volume[i-5:i]) if i >= 5 else volume[i]
+            vol_surge = volume[i] > 1.5 * vol_ma
+            
+            # Long breakout: price breaks above recent range with volume
+            long_breakout = (close[i] > period_high) and vol_surge and vol_contract
+            
+            # Short breakout: price breaks below recent range with volume
+            short_breakout = (close[i] < period_low) and vol_surge and vol_contract
+        else:
+            long_breakout = False
+            short_breakout = False
         
-        # Volume filter: above average volume
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_filter = volume[i] > vol_ma[i]
+        # Exit conditions: volatility expansion or opposing breakout
+        vol_expand = atr_14_aligned[i] > 1.5 * atr_ma if i >= 34 else False
+        opposing_breakout = short_breakout if position == 1 else long_breakout if position == -1 else False
         
-        # Entry conditions - more selective to reduce trades
-        long_entry = trend_up and rsi_mid and vol_filter
-        short_entry = trend_down and rsi_mid and vol_filter
-        
-        # Exit conditions: opposite conditions or volatility spike
-        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
-        vol_spike = atr_14_aligned[i] > 2.0 * atr_ma[i]
-        
-        long_exit = (not trend_up) or (not rsi_mid) or vol_spike
-        short_exit = (not trend_down) or (not rsi_mid) or vol_spike
-        
-        if long_entry and position <= 0:
+        if long_breakout and position <= 0:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_breakout and position >= 0:
             signals[i] = -0.25
             position = -1
-        elif long_exit and position == 1:
-            signals[i] = 0.0
-            position = 0
-        elif short_exit and position == -1:
+        elif (vol_expand or opposing_breakout) and position != 0:
             signals[i] = 0.0
             position = 0
         else:
@@ -122,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_RSI_Volume_Session"
-timeframe = "12h"
+name = "4h_VolContraction_Breakout"
+timeframe = "4h"
 leverage = 1.0
