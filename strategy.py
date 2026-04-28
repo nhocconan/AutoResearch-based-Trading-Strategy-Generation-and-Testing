@@ -1,11 +1,4 @@
-# #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with daily EMA34 trend filter and volume confirmation.
-# R3/S3 levels represent stronger support/resistance than R1/S1, leading to fewer but higher-quality breakouts.
-# Daily EMA34 filters for trend alignment, reducing counter-trend trades.
-# Volume confirmation ensures breakouts have participation.
-# This combination should work in both bull and bear markets by filtering for momentum with trend alignment.
-# Target: 20-40 trades/year to avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,70 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough for EMA34
+    # Get weekly data for Donchian channel (long-term breakout)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Donchian channel (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Standard Camarilla calculation
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # First day uses its own close
+    # Align Donchian levels to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Camarilla levels
-    r3 = close_prev + 1.1 * range_1d / 2
-    s3 = close_prev - 1.1 * range_1d / 2
-    r4 = close_prev + 1.1 * range_1d
-    s4 = close_prev - 1.1 * range_1d
+    # Get daily data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: volume > 1.8x 20-period average to avoid noise
+    # Volume filter: volume > 1.8x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (volume_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup (weekly + daily)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
-        
         # Entry conditions
-        # Long: break above R3 with upward trend and volume
-        long_breakout = close[i] > r3_aligned[i]
-        long_entry = long_breakout and trend_up and volume_filter[i]
+        # Long: break above weekly 20-period high with volume
+        long_breakout = close[i] > high_20_aligned[i]
+        long_entry = long_breakout and volume_filter[i]
         
-        # Short: break below S3 with downward trend and volume
-        short_breakout = close[i] < s3_aligned[i]
-        short_entry = short_breakout and trend_down and volume_filter[i]
+        # Short: break below weekly 20-period low with volume
+        short_breakout = close[i] < low_20_aligned[i]
+        short_entry = short_breakout and volume_filter[i]
         
-        # Exit conditions: opposite S3/R3 levels (mean reversion)
-        long_exit = close[i] < s3_aligned[i] and position == 1
-        short_exit = close[i] > r3_aligned[i] and position == -1
+        # Exit conditions: opposite Donchian level (mean reversion)
+        long_exit = close[i] < low_20_aligned[i] and position == 1
+        short_exit = close[i] > high_20_aligned[i] and position == -1
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -109,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_Donchian20_Weekly_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
