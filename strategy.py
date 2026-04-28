@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Enter long when price breaks above Camarilla R3 level, 1d EMA34 trending up, and volume > 2.0x 20-bar average.
 # Enter short when price breaks below Camarilla S3 level, 1d EMA34 trending down, and volume > 2.0x 20-bar average.
 # Exit when price reaches opposite Camarilla level (R3/S3) or crosses the 1d EMA34.
-# Uses discrete position sizing (0.25) to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid excessive fee drag.
-# Camarilla levels provide precise support/resistance; EMA34 filters for 1d trend alignment;
+# Uses discrete position sizing (0.30) to balance return and fee drag.
+# Target: 100-180 total trades over 4 years (25-45/year) to avoid excessive fee churn.
+# Camarilla levels provide precise intraday support/resistance; EMA34 filters for 1d trend alignment;
 # Volume spike confirms institutional participation in breakouts.
-# Works in bull markets via trend-following breakouts and in bear markets via short opportunities.
+# This strategy focuses on BTC and ETH as primary targets, using tight entry conditions to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +47,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -59,7 +59,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure sufficient history for indicators
+    start_idx = max(50, 20)  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -90,10 +90,10 @@ def generate_signals(prices):
         
         # Handle entries and exits
         if breakout_up and ema_trend_up and vol_confirm and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.30
             position = 1
         elif breakout_down and ema_trend_down and vol_confirm and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.30
             position = -1
         elif position == 1 and exit_long:
             signals[i] = 0.0
@@ -104,9 +104,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
