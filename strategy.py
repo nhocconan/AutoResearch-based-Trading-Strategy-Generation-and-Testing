@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Uses wider Camarilla levels (R3/S3) to reduce false breakouts with strong weekly trend filter (EMA50) and volume spike (>2.0x 20-bar avg)
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
+# Uses wider Camarilla levels (R3/S3) for stronger breakouts with 12h EMA50 trend filter and volume spike (>2.0x 20-bar avg)
 # Exits on opposite Camarilla level (R3/S3) touch or ATR stoploss (2.0x)
-# Target: 15-25 trades/year via tight conditions suitable for BTC/ETH in both bull and bear markets
-# Timeframe: 1d (daily bars) to minimize fee drag and capture meaningful moves
+# Target: 12-37 trades/year via tight conditions suitable for BTC/ETH in both bull and bear markets
 
-name = "1d_Camarilla_R3S3_1wEMA50_TrendFilter_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_12hEMA50_TrendFilter_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,19 +22,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1w close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 12h close
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 1d timeframe (completed 1w candles only)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 12h EMA50 to 6h timeframe (completed 12h candles only)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels (R3, S3) on 1d data using previous bar's OHLC
+    # Calculate Camarilla levels (R3, S3) on 6h data using previous bar's OHLC
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
     # Using previous bar's values to avoid look-ahead
     prev_high = np.roll(high, 1)
@@ -63,22 +62,22 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        ema_trend = ema_50_1w_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R3 AND price > 1w EMA50 (uptrend) AND volume spike
+            # Long breakout: price breaks above R3 AND price > 12h EMA50 (uptrend) AND volume spike
             if price > r3[i] and price > ema_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S3 AND price < 1w EMA50 (downtrend) AND volume spike
+            # Short breakout: price breaks below S3 AND price < 12h EMA50 (downtrend) AND volume spike
             elif price < s3[i] and price < ema_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
