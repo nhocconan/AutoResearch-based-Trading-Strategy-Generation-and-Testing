@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses 6h primary timeframe for moderate trade frequency (~50-100/year expected).
-# Camarilla R3/S3 levels from 1d provide institutional pivot points with proven edge.
-# 1d EMA34 filters for trend alignment, reducing counter-trend trades in bear markets.
-# Volume spike (>2.0x 20-bar average) confirms breakout strength and filters low-momentum false breakouts.
-# Position size 0.25 for balanced risk/return. Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions on 6h chart.
+# 1d EMA50 provides trend filter to avoid counter-trend trades in strong trends.
+# Volume spike (>1.8x 20-bar average) confirms reversal strength.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 60-100 total trades over 4 years.
+# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeSpike_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -28,32 +28,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla pivots and EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1 / 2.0  # R3 = pivot + 1.1*(range)/2
-    s3_1d = pivot_1d - range_1d * 1.1 / 2.0  # S3 = pivot - 1.1*(range)/2
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 6h Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
     
-    # Align 1d indicators to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate 6h volume spike: >2.0x 20-bar average volume
+    # Calculate 6h volume spike: >1.8x 20-bar average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma_20
+    volume_spike = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,9 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(williams_r[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -74,29 +67,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA34 direction
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > r3_1d_aligned[i]
-        short_breakout = close[i] < s3_1d_aligned[i]
+        # Williams %R mean reversion signals
+        oversold = williams_r[i] < -80  # Oversold condition
+        overbought = williams_r[i] > -20  # Overbought condition
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        long_entry = price_above_ema and long_breakout and vol_confirm
-        short_entry = price_below_ema and short_breakout and vol_confirm
+        # Long entry: oversold + uptrend + volume spike
+        long_entry = oversold and price_above_ema and vol_confirm
+        # Short entry: overbought + downtrend + volume spike
+        short_entry = overbought and price_below_ema and vol_confirm
         
-        # Exit conditions: opposite Camarilla level (R2/S2 for faster exit)
-        # Calculate R2/S2 for exit
-        r2_1d = pivot_1d + range_1d * 1.1 / 4.0  # R2 = pivot + 1.1*(range)/4
-        s2_1d = pivot_1d - range_1d * 1.1 / 4.0  # S2 = pivot - 1.1*(range)/4
-        r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-        s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-        
-        long_exit = close[i] < s2_1d_aligned[i]  # Exit long at S2
-        short_exit = close[i] > r2_1d_aligned[i]  # Exit short at R2
+        # Exit conditions: opposite extreme or trend reversal
+        long_exit = williams_r[i] > -20 or close[i] < ema_50_1d_aligned[i]  # Exit long when overbought or trend breaks
+        short_exit = williams_r[i] < -80 or close[i] > ema_50_1d_aligned[i]  # Exit short when oversold or trend breaks
         
         # Handle entries and exits
         if long_entry and position <= 0:
