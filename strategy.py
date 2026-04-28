@@ -1,3 +1,6 @@
+# 4h_Donchian20_Breakout_1dTrend_Volume
+# Hypothesis: Donchian channel breakouts on 4h with 1d EMA50 trend filter and volume confirmation capture institutional moves. Works in bull/bear: breakouts capture momentum in trends, volume filter prevents fakeouts in ranges. Target: 20-40 trades/year on 4h timeframe to minimize fee drag. Uses 1d EMA50 aligned to 4h chart. No look-ahead bias.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,42 +16,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for indicators
+    # Get daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate daily RSI(14) for momentum
-    delta = pd.Series(close_1d).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily EMA(50) for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align daily EMA to 4h timeframe
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate price channels for breakout detection
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channel (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,11 +48,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or
-            np.isnan(ema50_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(high_ma[i]) or
+            np.isnan(low_ma[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -83,22 +64,19 @@ def generate_signals(prices):
         uptrend = close[i] > ema50_aligned[i]
         downtrend = close[i] < ema50_aligned[i]
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr_aligned[i] > np.nanpercentile(atr_aligned[:i+1], 20)
-        
         # Volume filter: current volume above average
-        vol_vol_filter = volume[i] > vol_ma[i]
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Breakout conditions: price breaks 20-period high/low with filters
-        long_breakout = close[i] > high_20[i-1]  # Break above previous high
-        short_breakout = close[i] < low_20[i-1]  # Break below previous low
+        # Breakout conditions: price breaks Donchian high/low with volume and trend
+        long_breakout = close[i] > high_ma[i]
+        short_breakout = close[i] < low_ma[i]
         
-        long_entry = long_breakout and uptrend and vol_filter and vol_vol_filter and (rsi_aligned[i] < 70)
-        short_entry = short_breakout and downtrend and vol_filter and vol_vol_filter and (rsi_aligned[i] > 30)
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = (close[i] < low_20[i-1]) or (not uptrend)
-        short_exit = (close[i] > high_20[i-1]) or (not downtrend)
+        # Exit conditions: price returns to opposite Donchian band or trend reverses
+        long_exit = close[i] < low_ma[i] or not uptrend
+        short_exit = close[i] > high_ma[i] or not downtrend
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -123,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_EMA_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
