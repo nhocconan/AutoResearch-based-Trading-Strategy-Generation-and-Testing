@@ -13,54 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6h Donchian channels (20-period)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # 12h Donchian channels (15-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 15:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    highest_high_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    lowest_low_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    highest_high_6h_aligned = align_htf_to_ltf(prices, df_6h, highest_high_6h)
-    lowest_low_6h_aligned = align_htf_to_ltf(prices, df_6h, lowest_low_6h)
+    highest_high_12h = pd.Series(high_12h).rolling(window=15, min_periods=15).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=15, min_periods=15).min().values
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
     
-    # Volume confirmation: current volume > 1.5x average volume (6h average)
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > vol_ma_6h * 1.5
+    # Volume confirmation: current volume > 1.3x average volume (12h average)
+    vol_ma_12h = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_confirm = volume > vol_ma_12h * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 20)
+    start_idx = max(50, 15, 15)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(highest_high_6h_aligned[i]) or
-            np.isnan(lowest_low_6h_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high_12h_aligned[i]) or
+            np.isnan(lowest_low_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter from 1d EMA
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > highest_high_6h_aligned[i]
-        breakout_down = close[i] < lowest_low_6h_aligned[i]
+        breakout_up = close[i] > highest_high_12h_aligned[i]
+        breakout_down = close[i] < lowest_low_12h_aligned[i]
         
         # Entry conditions: require trend + breakout + volume confirmation
         long_entry = uptrend and breakout_up and volume_confirm[i]
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Donchian15_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
