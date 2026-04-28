@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -43,16 +43,16 @@ def generate_signals(prices):
     rsi_1d = 100 - (100 / (1 + rs))
     rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h SMA(20) for trend filter
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h SMA(50) for trend filter
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -62,7 +62,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -70,7 +70,7 @@ def generate_signals(prices):
             np.isnan(rsi_aligned[i]) or 
             np.isnan(high_20[i]) or 
             np.isnan(low_20[i]) or 
-            np.isnan(sma_20[i])):
+            np.isnan(sma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -79,9 +79,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above SMA20 for long, below for short
-        uptrend = close[i] > sma_20[i]
-        downtrend = close[i] < sma_20[i]
+        # Trend filter: price above SMA50 for long, below for short
+        uptrend = close[i] > sma_50[i]
+        downtrend = close[i] < sma_50[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > high_20[i-1]  # Break above previous high
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_SMA20_RSI_Filter"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_SMA50_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
