@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R3/S3) breakout with volume confirmation and ADX trend filter.
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels (R3/S3) breakout with volume confirmation and ADX trend filter.
 # Enter long when price breaks above R3 with volume > 2.0x average and ADX > 25 (strong trend).
 # Enter short when price breaks below S3 with volume > 2.0x average and ADX > 25.
-# Exit when price returns to the 1d pivot level (PP) or opposite Camarilla level is touched.
+# Exit when price returns to the 1w pivot level (PP) or opposite Camarilla level is touched.
 # Camarilla levels provide institutional support/resistance; breakouts with volume confirm institutional participation.
 # ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
 # Works in bull markets (breakouts continue up) and bear markets (breakdowns continue down).
-# Uses discrete position sizing (0.25) to control risk. Target: 100-200 total trades over 4 years.
+# Uses discrete position sizing (0.25) to control risk. Target: 30-100 total trades over 4 years.
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX25_Volume2x_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wADX25_Volume2x_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +26,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (HTF)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for Camarilla pivot calculation (HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot Point (PP)
-    PP = (high_1d + low_1d + close_1d) / 3.0
+    PP = (high_1w + low_1w + close_1w) / 3.0
     # Range
-    range_1d = high_1d - low_1d
+    range_1w = high_1w - low_1w
     
     # Camarilla levels
-    R3 = PP + range_1d * 1.1 / 4.0
-    S3 = PP - range_1d * 1.1 / 4.0
-    R4 = PP + range_1d * 1.1 / 2.0
-    S4 = PP - range_1d * 1.1 / 2.0
+    R3 = PP + range_1w * 1.1 / 4.0
+    S3 = PP - range_1w * 1.1 / 4.0
+    R4 = PP + range_1w * 1.1 / 2.0
+    S4 = PP - range_1w * 1.1 / 2.0
     
-    # Align Camarilla levels to 4h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align Camarilla levels to 1d timeframe
+    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
     
-    # Calculate 4h ADX (14-period)
+    # Calculate 1d ADX (14-period)
     plus_dm = np.zeros_like(high)
     minus_dm = np.zeros_like(high)
     for i in range(1, n):
@@ -74,6 +74,8 @@ def generate_signals(prices):
     # Smoothed values (Wilder's smoothing)
     def wilders_smoothing(data, period):
         result = np.zeros_like(data)
+        if len(data) < period:
+            return result
         result[period-1] = np.nansum(data[:period])
         for i in range(period, len(data)):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
@@ -92,7 +94,7 @@ def generate_signals(prices):
     else:
         adx = np.full(n, np.nan)
     
-    # Calculate 4h volume confirmation: >2.0x 20-bar average volume
+    # Calculate 1d volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 2.0 * volume_ma_20
