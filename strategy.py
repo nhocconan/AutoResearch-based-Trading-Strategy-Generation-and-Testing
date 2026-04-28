@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-# 1d_1w_Camarilla_Pivot_With_WeeklyTrend_Volume
-# Hypothesis: Use weekly Camarilla pivot levels (R1/S1) on 1d timeframe with weekly trend filter and volume confirmation.
-# Captures reversions to weekly mean in ranging markets and breakouts in trending markets.
-# Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume surge confirms institutional participation. Targets 7-25 trades/year to minimize fee drag.
+# 12h_Camarilla_Pivot_With_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from 1-day timeframe provide key support/resistance levels.
+# Price breaking above/below R1/S1 levels with 1-day trend filter and volume surge indicates strong momentum.
+# Works in both bull and bear markets by capturing breakouts in the direction of higher timeframe trend.
+# Volume confirmation filters out false breakouts. Targets 15-25 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,61 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla pivot levels (R1/S1) on daily data
+    # Calculate 1-day Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Use weekly high, low, close from previous week
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().values  # 5 days = 1 week
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().values
-    weekly_close = df_1d['close'].rolling(window=5, min_periods=5).last().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    camarilla_r1 = weekly_close + (weekly_high - weekly_low) * 1.1 / 12
-    camarilla_s1 = weekly_close - (weekly_high - weekly_low) * 1.1 / 12
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Get weekly EMA50 for trend filter (using weekly close)
-    ema_50_weekly = pd.Series(weekly_close).ewm(span=10, adjust=False, min_periods=10).mean().values  # 10 weeks ~ 2 months
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
     
-    # Align higher timeframe data to daily
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_1d, ema_50_weekly)
+    # Get 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Align higher timeframe data to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient warmup
+    start_idx = 60  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_weekly_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Price relative to Camarilla levels
-        price_near_r1 = abs(close[i] - camarilla_r1_aligned[i]) / camarilla_r1_aligned[i] < 0.005  # Within 0.5%
-        price_near_s1 = abs(close[i] - camarilla_s1_aligned[i]) / camarilla_s1_aligned[i] < 0.005  # Within 0.5%
+        # Breakout conditions
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema_50_weekly_aligned[i]
-        trend_down = close[i] < ema_50_weekly_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: price near S1 support + uptrend + volume surge
-        long_entry = price_near_s1 and trend_up and volume_surge[i]
-        # Short: price near R1 resistance + downtrend + volume surge
-        short_entry = price_near_r1 and trend_down and volume_surge[i]
+        # Long: upward breakout above R1 + uptrend + volume surge
+        long_entry = breakout_up and trend_up and volume_surge[i]
+        # Short: downward breakout below S1 + downtrend + volume surge
+        short_entry = breakout_down and trend_down and volume_surge[i]
         
-        # Exit conditions: price moves away from level or trend reversal
-        long_exit = close[i] > camarilla_r1_aligned[i] or not trend_up
-        short_exit = close[i] < camarilla_s1_aligned[i] or not trend_down
+        # Exit conditions: opposite breakout or trend reversal
+        long_exit = breakout_down or not trend_up
+        short_exit = breakout_up or not trend_down
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -98,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_Pivot_With_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_With_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
