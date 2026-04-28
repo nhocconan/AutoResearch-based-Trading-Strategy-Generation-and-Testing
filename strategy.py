@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,17 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter (primary)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d ATR(14) for volatility filter
+    # Daily ATR(14) for volatility filter and stop loss
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -35,46 +39,50 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Get 1w data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    # 1w EMA(21) for long-term trend
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Daily RSI(14) for momentum filter
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_values = rsi_14.values
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 21)
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or
+            np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filters: both 1d and 1w must agree
-        uptrend = close[i] > ema_34_1d_aligned[i] and close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i] and close[i] < ema_21_1w_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-50):i+1]) * 0.8
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr_14_aligned[i] > np.mean(atr_14_aligned[max(0, i-30):i+1]) * 0.5
+        
+        # Momentum filter: avoid overextended conditions
+        mom_filter = (rsi_14_aligned[i] > 25) & (rsi_14_aligned[i] < 75)
         
         # Entry conditions
-        long_entry = uptrend and vol_filter
-        short_entry = downtrend and vol_filter
+        long_entry = uptrend and vol_filter and mom_filter
+        short_entry = downtrend and vol_filter and mom_filter
         
         # Exit conditions: ATR-based trailing stop
         if position == 1:
-            # Long position: exit if price drops 2*ATR from EMA(34)
-            long_exit = close[i] < (ema_34_1d_aligned[i] - 2.0 * atr_14_aligned[i])
+            # Long exit: price drops 2.5*ATR from weekly EMA (dynamic stop)
+            long_exit = close[i] < (ema_50_1w_aligned[i] - 2.5 * atr_14_aligned[i])
         elif position == -1:
-            # Short position: exit if price rises 2*ATR from EMA(34)
-            short_exit = close[i] > (ema_34_1d_aligned[i] + 2.0 * atr_14_aligned[i])
+            # Short exit: price rises 2.5*ATR from weekly EMA
+            short_exit = close[i] > (ema_50_1w_aligned[i] + 2.5 * atr_14_aligned[i])
         else:
             long_exit = False
             short_exit = False
@@ -103,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA34_EMA21_ATR"
-timeframe = "12h"
+name = "1d_WeeklyEMA50_ATR_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
