@@ -1,8 +1,7 @@
-# 102560
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_Volume_Trend_1d
-Hypothesis: Donchian(20) breakout with 1d EMA50 trend filter and volume spike (2x 48-bar avg) to capture high-probability breakouts on 4h timeframe. Works in both bull and bear by following 1d trend direction. Targets 75-200 total trades over 4 years.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses Camarilla R3/S3 levels from 1d with 1d EMA50 trend filter and volume spike (2x 48-bar avg) to capture high-probability breakouts on 4h timeframe. Designed for low trade frequency (19-50/year) to minimize fee drag while capturing strong directional moves. Works in both bull and bear by following 1d trend direction.
 """
 
 import numpy as np
@@ -19,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -29,9 +28,15 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily typical price and range for Camarilla pivots (R3/S3: 1.0x range)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_ = df_1d['high'] - df_1d['low']
+    R3 = typical_price + (range_ * 1.0 / 4)
+    S3 = typical_price - (range_ * 1.0 / 4)
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
     # Volume confirmation: >2x 48-period MA (8 days of 4h bars)
     vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
@@ -39,13 +44,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and Donchian to stabilize
+    start_idx = 50  # Wait for EMA50 to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+            np.isnan(R3_aligned[i]) or
+            np.isnan(S3_aligned[i]) or
             np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
@@ -57,12 +62,12 @@ def generate_signals(prices):
         # Volume confirmation (>2x average)
         vol_confirm = volume[i] > (2.0 * vol_ma_48[i])
         
-        # Breakout conditions at Donchian channels
-        long_breakout = close[i] > donchian_high[i] and vol_confirm and uptrend
-        short_breakout = close[i] < donchian_low[i] and vol_confirm and downtrend
+        # Breakout conditions at R3/S3
+        long_breakout = close[i] > R3_aligned[i] and vol_confirm and uptrend
+        short_breakout = close[i] < S3_aligned[i] and vol_confirm and downtrend
         
-        # Exit conditions: return to midpoint of Donchian channel
-        midpoint = (donchian_high[i] + donchian_low[i]) / 2
+        # Exit conditions: return to midpoint of R3/S3
+        midpoint = (R3_aligned[i] + S3_aligned[i]) / 2
         long_exit = close[i] < midpoint
         short_exit = close[i] > midpoint
         
@@ -89,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_Trend_1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
