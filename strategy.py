@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Focus on high-probability breakouts at daily Camarilla R1/S1 levels with 12h EMA50 trend filter and volume confirmation on 4h timeframe.
-Targets 20-50 trades/year by requiring multiple confluence factors (breakout, trend, volume) to reduce false signals and work in both bull and bear markets.
+4h_ThreeBarReversal_WithVolumeFilter
+Hypothesis: Three-bar reversal patterns (bullish/bearish engulfing of prior 2 bars) combined with volume surge and 4h EMA50 trend filter. Works in both bull and bear markets by capturing short-term reversals at momentum extremes. Targets 25-40 trades/year via strict pattern recognition.
 """
 
 import numpy as np
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,68 +18,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all higher timeframe data to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-    h12_uptrend = close > ema_50_12h_aligned
-    h12_downtrend = close < ema_50_12h_aligned
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 2.0)
+    volume_surge = volume > (vol_ma_20 * 1.5)
+    
+    # Three-bar reversal patterns
+    # Bullish: current bar closes above high of prior 2 bars
+    bullish_reversal = (close > np.maximum(high[-2], high[-3])) if len(close) >= 3 else False
+    bearish_reversal = (close < np.minimum(low[-2], low[-3])) if len(close) >= 3 else False
+    
+    # Vectorized pattern detection
+    bullish_pattern = np.zeros(n, dtype=bool)
+    bearish_pattern = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        bullish_pattern[i] = (close[i] > np.maximum(high[i-1], high[i-2]))
+        bearish_pattern[i] = (close[i] < np.minimum(low[i-1], low[i-2]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(ema_50[i]) or np.isnan(volume_surge[i]) or 
+            np.isnan(bullish_pattern[i]) or np.isnan(bearish_pattern[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        # Long: price breaks above R1 + 12h uptrend + volume surge
-        long_entry = (close[i] > R1_aligned[i] and 
-                     h12_uptrend[i] and 
+        # Entry conditions
+        # Long: bullish reversal + uptrend + volume surge
+        long_entry = (bullish_pattern[i] and 
+                     uptrend[i] and 
                      volume_surge[i])
         
-        # Short: price breaks below S1 + 12h downtrend + volume surge
-        short_entry = (close[i] < S1_aligned[i] and 
-                      h12_downtrend[i] and 
+        # Short: bearish reversal + downtrend + volume surge
+        short_entry = (bearish_pattern[i] and 
+                      downtrend[i] and 
                       volume_surge[i])
         
-        # Exit on opposite level break with volume surge
-        long_exit = close[i] < S1_aligned[i] and volume_surge[i]
-        short_exit = close[i] > R1_aligned[i] and volume_surge[i]
+        # Exit on opposite pattern
+        long_exit = bearish_pattern[i] and volume_surge[i]
+        short_exit = bullish_pattern[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -105,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+name = "4h_ThreeBarReversal_WithVolumeFilter"
 timeframe = "4h"
 leverage = 1.0
