@@ -1,3 +1,4 @@
+# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,9 +14,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and volatility
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA200 trend
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Get daily data for pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -27,30 +38,16 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Calculate daily range for volatility filter
-    daily_range = high_1d - low_1d
-    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
+    # Align weekly trend to daily
+    weekly_trend_raw = (close_1w > ema200_1w).astype(float)
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_raw)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA34 for trend
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_uptrend = close_1w > ema34_1w
-    weekly_downtrend = close_1w < ema34_1w
-    
-    # Align data to 4h
+    # Align daily pivot levels to daily (self-alignment for same timeframe)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    avg_range_aligned = align_htf_to_ltf(prices, df_1d, avg_daily_range)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
-    # Calculate 4h RSI for momentum
+    # Calculate daily RSI for momentum filter
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -66,16 +63,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(pivot_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(avg_range_aligned[i]) or 
-            np.isnan(rsi[i])):
+            np.isnan(rsi[i]) or
+            np.isnan(weekly_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,25 +82,29 @@ def generate_signals(prices):
             continue
         
         # Get current weekly trend
-        weekly_uptrend = weekly_uptrend_aligned[i] > 0.5
-        weekly_downtrend = weekly_downtrend_aligned[i] > 0.5
+        weekly_uptrend = weekly_trend_aligned[i] > 0.5
         
-        # Volatility filter: only trade when volatility is above average
-        volatility_filter = daily_range[i] > avg_range_aligned[i] * 0.8
-        
-        # Fade conditions at S1/R1 with RSI extremes
-        fade_s1 = close[i] <= s1_aligned[i] and rsi[i] < 30
+        # Fade at R1/S1 with RSI extremes
         fade_r1 = close[i] >= r1_aligned[i] and rsi[i] > 70
+        fade_s1 = close[i] <= s1_aligned[i] and rsi[i] < 30
         
-        # Long conditions: fade at S1 in uptrend or ranging market
+        # Long conditions
         long_condition = False
-        if weekly_uptrend or (not weekly_uptrend and not weekly_downtrend):
-            long_condition = fade_s1 and volatility_filter
+        if weekly_uptrend:
+            # In uptrend, look for pullbacks to S1
+            long_condition = fade_s1
+        else:
+            # In downtrend, look for bounces at R1 (counter-trend bounce)
+            long_condition = fade_r1
         
-        # Short conditions: fade at R1 in downtrend or ranging market
+        # Short conditions
         short_condition = False
-        if weekly_downtrend or (not weekly_uptrend and not weekly_downtrend):
-            short_condition = fade_r1 and volatility_filter
+        if weekly_uptrend:
+            # In uptrend, look for rejections at R1
+            short_condition = fade_r1
+        else:
+            # In downtrend, look for breakdowns from S1
+            short_condition = fade_s1
         
         if long_condition and position <= 0:
             signals[i] = 0.25
@@ -111,11 +112,11 @@ def generate_signals(prices):
         elif short_condition and position >= 0:
             signals[i] = -0.25
             position = -1
-        # Exit conditions: opposite signal or RSI neutral
-        elif position == 1 and (close[i] >= pivot_aligned[i] or rsi[i] > 50):
+        # Exit conditions: opposite signal or RSI mean reversion
+        elif position == 1 and (close[i] < pivot_aligned[i] or rsi[i] > 70):
             signals[i] = 0.0
             position = 0
-        elif position == -1 and (close[i] <= pivot_aligned[i] or rsi[i] < 50):
+        elif position == -1 and (close[i] > pivot_aligned[i] or rsi[i] < 30):
             signals[i] = 0.0
             position = 0
         # Hold position
@@ -129,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_Fade_S1R1_WeeklyTrend_VolFilter"
-timeframe = "4h"
+name = "1d_WeeklyEMA200_Trend_DailyPivot_Fade"
+timeframe = "1d"
 leverage = 1.0
