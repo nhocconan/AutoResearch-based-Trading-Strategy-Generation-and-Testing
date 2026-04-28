@@ -13,40 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Weekly Donchian and trend
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 6h
-    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
-    
-    # 1d EMA(50) for trend filter
+    # 1d EMA(50) for trend filter (stable, avoids whipsaw)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 6h volume > 20-period average
+    # Calculate 1d Camarilla pivot levels (H4/L4 for breakouts)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    H4 = close_1d + (range_hl * 1.1 / 2)
+    L4 = close_1d - (range_hl * 1.1 / 2)
+    
+    # Align pivot levels to 12h
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Volume confirmation: 12h volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(highest_20_aligned[i]) or 
-            np.isnan(lowest_20_aligned[i]) or
+            np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -55,19 +57,24 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: current 6h volume above average
+        # Volume filter: current 12h volume above average
         volume_filter = volume[i] > vol_ma_20[i]
         
-        # Entry conditions: Daily Donchian breakout with volume and trend
-        long_breakout = close[i] > highest_20_aligned[i]
-        short_breakout = close[i] < lowest_20_aligned[i]
+        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
+        long_breakout = close[i] > H4_aligned[i]
+        short_breakout = close[i] < L4_aligned[i]
         
         long_entry = uptrend and long_breakout and volume_filter
         short_entry = downtrend and short_breakout and volume_filter
         
-        # Exit conditions: Mean reversion to opposite Donchian level
-        long_exit = close[i] < lowest_20_aligned[i]
-        short_exit = close[i] > highest_20_aligned[i]
+        # Exit conditions: Mean reversion to opposite Camarilla level (H3/L3 for tighter exits)
+        H3 = close_1d + (range_hl * 1.1 / 4)
+        L3 = close_1d - (range_hl * 1.1 / 4)
+        H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+        L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+        
+        long_exit = close[i] < L3_aligned[i]
+        short_exit = close[i] > H3_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -90,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyDonchian20_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_v2"
+timeframe = "12h"
 leverage = 1.0
