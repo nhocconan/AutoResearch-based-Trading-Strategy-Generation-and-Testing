@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +13,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR-based volatility regime filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility regime
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align length
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align ATR to 6h
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1d Camarilla pivot levels (H4/L4 for breakouts)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    H4 = close_1d + (range_hl * 1.1 / 2)
+    L4 = close_1d - (range_hl * 1.1 / 2)
     
-    # Calculate 6h ATR(14) for dynamic position sizing
-    tr6_1 = high[1:] - low[1:]
-    tr6_2 = np.abs(high[1:] - close[:-1])
-    tr6_3 = np.abs(low[1:] - close[:-1])
-    tr6 = np.maximum(np.maximum(tr6_1, tr6_2), tr6_3)
-    tr6 = np.concatenate([[np.nan], tr6])
-    atr_14_6h = pd.Series(tr6).rolling(window=14, min_periods=14).mean().values
+    # Align pivot levels to 12h
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Get weekly data for Donchian channel
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly Donchian(20)
-    highest_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align weekly Donchian to 6h
-    highest_20_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_20_1w)
-    lowest_20_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_20_1w)
+    # Volume confirmation: current volume > 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 14)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(highest_20_1w_aligned[i]) or 
-            np.isnan(lowest_20_1w_aligned[i]) or
-            np.isnan(atr_14_6h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when 1d ATR is above its 50-period median
-        # This avoids choppy markets and focuses on volatile periods
-        if i >= 50:
-            atr_slice = atr_14_1d_aligned[max(0, i-49):i+1]
-            atr_median = np.nanmedian(atr_slice)
-            volatile_regime = not np.isnan(atr_median) and atr_14_1d_aligned[i] > atr_median
-        else:
-            volatile_regime = False
+        # Trend filter from 1d EMA(34)
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Dynamic position size based on 6h ATR (inverse volatility)
-        # Size = 0.30 * (median ATR / current ATR) capped at 0.30
-        if i >= 50:
-            atr6_slice = atr_14_6h[max(0, i-49):i+1]
-            atr6_median = np.nanmedian(atr6_slice)
-            if not np.isnan(atr6_median) and atr_14_6h[i] > 0:
-                vol_scalar = min(atr6_median / atr_14_6h[i], 1.0)
-                base_size = 0.30 * vol_scalar
-            else:
-                base_size = 0.15
-        else:
-            base_size = 0.15
+        # Volume filter: current 12h volume above average
+        volume_filter = volume[i] > vol_ma_20[i]
         
-        # Entry conditions: Weekly Donchian breakout in volatile regime
-        long_breakout = close[i] > highest_20_1w_aligned[i]
-        short_breakout = close[i] < lowest_20_1w_aligned[i]
+        # Entry conditions: Camarilla H4/L4 breakout with volume and trend
+        long_breakout = close[i] > H4_aligned[i]
+        short_breakout = close[i] < L4_aligned[i]
         
-        long_entry = long_breakout and volatile_regime
-        short_entry = short_breakout and volatile_regime
+        long_entry = uptrend and long_breakout and volume_filter
+        short_entry = downtrend and short_breakout and volume_filter
         
-        # Exit conditions: Close crosses back below/above the opposite Donchian level
-        long_exit = close[i] < lowest_20_1w_aligned[i]
-        short_exit = close[i] > highest_20_1w_aligned[i]
+        # Exit conditions: Close below/above opposite Camarilla level (H3/L3 for exits)
+        H3 = close_1d + (range_hl * 1.1 / 4)
+        L3 = close_1d - (range_hl * 1.1 / 4)
+        H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+        L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+        
+        long_exit = close[i] < L3_aligned[i]
+        short_exit = close[i] > H3_aligned[i]
         
         # Handle entries and exits
         if long_entry and position <= 0:
-            signals[i] = base_size
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -base_size
+            signals[i] = -0.25
             position = -1
         elif (position == 1 and long_exit) or (position == -1 and short_exit):
             signals[i] = 0.0
@@ -117,14 +89,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = base_size
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -base_size
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklyDonchian20_VolatileRegime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_Breakout_VolumeTrend_v6"
+timeframe = "12h"
 leverage = 1.0
