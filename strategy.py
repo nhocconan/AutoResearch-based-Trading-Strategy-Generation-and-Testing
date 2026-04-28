@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS
-Hypothesis: On 4h timeframe, use Camarilla R3/S3 levels from 1d timeframe for breakout entries, filtered by 12h EMA trend and volume confirmation. Camarilla levels provide key support/resistance, trend filter avoids counter-trend trades, and volume confirms institutional participation. Designed for 20-40 trades/year to minimize fee drag and work in both bull/bear markets via trend alignment.
+1d_RSI_MeanRev_with_WeeklyTrend_Filter
+Hypothesis: On daily timeframe, use weekly trend (via 8/21 EMA crossover) to filter RSI mean-reversion entries. 
+Long when weekly uptrend + RSI < 30 + price below Bollinger lower band. 
+Short when weekly downtrend + RSI > 70 + price above Bollinger upper band. 
+Weekly trend filter avoids counter-trend trades; RSI extremes + Bollinger bands capture mean-reversion in both bull/bear markets. 
+Designed for low trade frequency (<25/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,65 +22,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 21:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    prev_close = np.roll(df_daily['close'].values, 1)
-    prev_high = np.roll(df_daily['high'].values, 1)
-    prev_low = np.roll(df_daily['low'].values, 1)
-    # First day has no previous, use current values
-    prev_close[0] = df_daily['close'].values[0]
-    prev_high[0] = df_daily['high'].values[0]
-    prev_low[0] = df_daily['low'].values[0]
+    # Calculate weekly 8 and 21 EMA for trend filter
+    close_weekly = df_weekly['close'].values
+    ema8_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    camarilla_R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Align weekly EMAs to daily timeframe
+    ema8_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema8_weekly)
+    ema21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema21_weekly)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_S3)
+    # Weekly trend: bullish when EMA8 > EMA21
+    weekly_uptrend = ema8_weekly_aligned > ema21_weekly_aligned
+    weekly_downtrend = ema8_weekly_aligned < ema21_weekly_aligned
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
-        return np.zeros(n)
+    # Daily RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 12h EMA21 for trend filter
-    close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    
-    # Trend: bullish when price > EMA21, bearish when price < EMA21
-    bullish_trend = close > ema21_12h_aligned
-    bearish_trend = close < ema21_12h_aligned
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    # Daily Bollinger Bands (20-period, 2 std)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    lower_band = ma20 - (2 * std20)
+    upper_band = ma20 + (2 * std20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Wait for EMA21 to stabilize
+    start_idx = 21  # Wait for weekly EMA21 and daily indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or
-            np.isnan(ema21_12h_aligned[i]) or np.isnan(volume_surge[i])):
+        if (np.isnan(ema8_weekly_aligned[i]) or np.isnan(ema21_weekly_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(lower_band[i]) or np.isnan(upper_band[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions with trend alignment and volume surge
-        long_entry = close[i] > camarilla_R3_aligned[i] and bullish_trend[i] and volume_surge[i]
-        short_entry = close[i] < camarilla_S3_aligned[i] and bearish_trend[i] and volume_surge[i]
+        # Entry conditions: weekly trend alignment + RSI extreme + Bollinger band touch
+        long_entry = weekly_uptrend[i] and (rsi[i] < 30) and (close[i] <= lower_band[i])
+        short_entry = weekly_downtrend[i] and (rsi[i] > 70) and (close[i] >= upper_band[i])
         
-        # Exit on opposite Camarilla level with volume surge
-        long_exit = close[i] < camarilla_S3_aligned[i] and volume_surge[i]
-        short_exit = close[i] > camarilla_R3_aligned[i] and volume_surge[i]
+        # Exit when RSI returns to neutral zone (40-60)
+        long_exit = rsi[i] > 40
+        short_exit = rsi[i] < 60
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -101,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1d_RSI_MeanRev_with_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
