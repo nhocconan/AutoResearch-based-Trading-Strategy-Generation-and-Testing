@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses tighter Camarilla levels (R1/S1) for earlier trend capture, 1d EMA>price for primary trend filter, and volume spike (>1.8x 24-bar avg) for momentum
-# Exits on opposite Camarilla level (R1/S1) touch or ATR-based stoploss (1.5x)
-# Designed for 12h timeframe to capture medium-term trends with controlled trade frequency (target: 12-37 trades/year)
-# Uses discrete position sizing (0.25) to minimize fee churn
+# Hypothesis: 4h Camarilla R1/S1 breakout with 4h EMA21 trend filter and volume confirmation
+# Uses tighter Camarilla levels (R1/S1) for earlier entry with stronger trend filter (4h EMA21) and volume spike (>1.8x 20-bar avg)
+# Exits on opposite Camarilla level (R1/S1) touch or ATR stoploss (1.5x)
+# Target: 30-60 trades/year via balanced conditions suitable for BTC/ETH in both bull and bear markets
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_4hEMA21_TrendFilter_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +22,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need sufficient data for EMA calculation
+    # Get 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 1d close
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA(21) on 4h close
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (completed 1d candles only)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 4h EMA21 to 4h timeframe (completed 4h candles only)
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Calculate Camarilla levels (R1, S1) on 12h data using previous bar's OHLC
+    # Calculate Camarilla levels (R1, S1) on 4h data using previous bar's OHLC
     # Camarilla: R1 = close + 1.1*(high-low)/6, S1 = close - 1.1*(high-low)/6
     # Using previous bar's values to avoid look-ahead
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan  # First bar has no previous
+    prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
@@ -49,36 +48,36 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range / 6
     s1 = prev_close - 1.1 * camarilla_range / 6
     
-    # Volume confirmation: >1.8x 24-bar average volume (24*12h = 12 days)
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 1.8 * volume_ma_24
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 34  # Need sufficient history for EMA and volume MA
+    start_idx = 21  # Need sufficient history for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_24[i])):
+            np.isnan(ema_21_4h_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_confirm = volume_spike[i]
         price = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_21_4h_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price breaks above R1 AND price > 1d EMA34 (uptrend) AND volume spike
+            # Long breakout: price breaks above R1 AND price > 4h EMA21 (uptrend) AND volume spike
             if price > r1[i] and price > ema_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short breakout: price breaks below S1 AND price < 1d EMA34 (downtrend) AND volume spike
+            # Short breakout: price breaks below S1 AND price < 4h EMA21 (downtrend) AND volume spike
             elif price < s1[i] and price < ema_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
