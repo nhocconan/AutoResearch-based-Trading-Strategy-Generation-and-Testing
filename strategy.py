@@ -1,14 +1,3 @@
-# 12h_PivotPoint_Reversal_With_Trend_and_Volume
-# Hypothesis: Price tends to reverse at key support/resistance (pivot levels) when aligned with higher timeframe trend and volume confirmation.
-# This strategy works in both bull and bear markets by taking reversals at institutional pivot points, using 1-day pivot levels calculated from prior day's OHLC.
-# Trend filter ensures we trade in direction of higher timeframe momentum, reducing false signals.
-# Volume confirmation adds conviction to reversals.
-# Timeframe: 12h (low frequency to minimize fee drag, target 50-150 trades over 4 years)
-# Pivot levels: Calculated from prior 1-day OHLC (standard floor trader pivots)
-# Entry: Long when price crosses above S1 with bullish trend and volume spike; Short when price crosses below R1 with bearish trend and volume spike
-# Exit: Opposite pivot level touch or trend reversal
-# Position sizing: 0.25 (discrete to minimize churn)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -16,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,53 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once for pivot calculation and trend context
+    # Get 1d data once for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points from prior day's OHLC
-    # Standard formula: P = (H + L + C)/3, R1 = 2*P - L, S1 = 2*P - H
+    # Calculate 1d indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate pivot, R1, S1 for each day
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # 1d ATR(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 12h timeframe (use prior day's levels for current day)
-    # Shift by 1 to use previous day's pivot levels (avoid look-ahead)
-    pivot_shifted = np.roll(pivot, 1)
-    r1_shifted = np.roll(r1, 1)
-    s1_shifted = np.roll(s1, 1)
-    # First day has no prior day, set to NaN
-    pivot_shifted[0] = np.nan
-    r1_shifted[0] = np.nan
-    s1_shifted[0] = np.nan
-    
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_shifted)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_shifted)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_shifted)
-    
-    # 1-day EMA(50) for trend filter
+    # 1d EMA(50) for trend
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean().values
+    avg_loss = loss.rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align HTF indicators to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 4h Donchian(20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -78,13 +73,24 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_aligned[i]
         trend_down = close[i] < ema_50_aligned[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = (close[i] > s1_aligned[i]) and trend_up and volume_spike[i]
-        short_entry = (close[i] < r1_aligned[i]) and trend_down and volume_spike[i]
+        # Momentum filter: RSI in favorable range
+        rsi_momentum_up = rsi_aligned[i] > 50
+        rsi_momentum_down = rsi_aligned[i] < 50
         
-        # Exit conditions: touch opposite pivot level or trend reversal
-        long_exit = (close[i] < pivot_aligned[i]) or not trend_up
-        short_exit = (close[i] > pivot_aligned[i]) or not trend_down
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
+        
+        # Volume filter
+        volume_ok = volume[i] > vol_ma[i]
+        
+        # Entry conditions
+        long_entry = trend_up and rsi_momentum_up and breakout_up and volume_ok
+        short_entry = trend_down and rsi_momentum_down and breakout_down and volume_ok
+        
+        # Exit conditions: opposite trend or RSI reversal
+        long_exit = not trend_up or rsi_aligned[i] < 50
+        short_exit = not trend_down or rsi_aligned[i] > 50
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -109,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PivotPoint_Reversal_With_Trend_and_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
