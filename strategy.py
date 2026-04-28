@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,54 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 6h Donchian channels (18-period) - tighter for fewer trades
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 18:
+    # 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    highest_high_6h = pd.Series(high_6h).rolling(window=18, min_periods=18).max().values
-    lowest_low_6h = pd.Series(low_6h).rolling(window=18, min_periods=18).min().values
-    highest_high_6h_aligned = align_htf_to_ltf(prices, df_6h, highest_high_6h)
-    lowest_low_6h_aligned = align_htf_to_ltf(prices, df_6h, lowest_low_6h)
+    highest_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
     
-    # Volume confirmation: current volume > 1.8x average volume (6h average)
-    vol_ma_6h = pd.Series(volume).rolling(window=18, min_periods=18).mean().values
-    volume_confirm = volume > vol_ma_6h * 1.8
+    # Volume confirmation: current volume > 1.5x average volume (12h average)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma_12h * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 18, 18)
+    start_idx = max(50, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(highest_high_6h_aligned[i]) or
-            np.isnan(lowest_low_6h_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(highest_high_12h_aligned[i]) or
+            np.isnan(lowest_low_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > highest_high_6h_aligned[i]
-        breakout_down = close[i] < lowest_low_6h_aligned[i]
+        breakout_up = close[i] > highest_high_12h_aligned[i]
+        breakout_down = close[i] < lowest_low_12h_aligned[i]
         
         # Entry conditions: require trend + breakout + volume confirmation
         long_entry = uptrend and breakout_up and volume_confirm[i]
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian18_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
