@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Donchian channel breakouts with 1d ADX trend filter and volume confirmation.
-# Enter long when price breaks above weekly Donchian(20) upper band with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Enter short when price breaks below weekly Donchian(20) lower band with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Exit when price returns to weekly Donchian midpoint.
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakouts with volume confirmation and 1w EMA34 trend filter.
+# Enter long when price breaks above 1d Camarilla R3 level with volume > 2.0x 50-bar average and close > 1w EMA34.
+# Enter short when price breaks below 1d Camarilla S3 level with volume > 2.0x average and close < 1w EMA34.
+# Exit when price returns to the 1d Camarilla midpoint (P).
 # Uses discrete position sizing (0.25) to control risk and minimize fee churn.
-# Weekly Donchian provides stable structure, 1d ADX filters for trending markets only, volume confirms breakout strength.
-# Designed to work in both bull (breakouts with trend) and bear (breakdowns with trend) markets by requiring ADX > 25.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Works in bull markets (breakouts continue up with trend) and bear markets (breakdowns continue down with trend).
+# Uses 1d Camarilla for structure (more stable than lower TF) and 1w EMA34 for trend filter (reduces whipsaws).
 
-name = "6h_WeeklyDonchian20_1dADX25_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,72 +26,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel calculation (MTF structure)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Donchian(20) channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Donchian upper: max(high, lookback=20)
-    roll_max = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Donchian lower: min(low, lookback=20)
-    roll_min = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    # Donchian midpoint: (upper + lower) / 2
-    donchian_mid = (roll_max + roll_min) / 2.0
-    
-    # Align weekly Donchian levels to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, roll_max)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, roll_min)
-    mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    
-    # Get daily data for ADX trend filter (MTF trend)
+    # Get 1d data for Camarilla pivot calculation (MTF structure)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
+    # Calculate 1d Camarilla levels (using previous bar's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # True range for Camarilla calculation
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - close_1d)
     tr3 = np.abs(low_1d - close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
+    # Camarilla levels (based on previous bar's close and range)
+    camarilla_pivot = close_1d  # Pivot is previous close
+    camarilla_range = high_1d - low_1d
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # R3 and S3 levels (standard breakout levels)
+    r3 = camarilla_pivot + camarilla_range * 1.1 / 4
+    s3 = camarilla_pivot - camarilla_range * 1.1 / 4
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(np.concatenate([[0.0], plus_dm])).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(np.concatenate([[0.0], minus_dm])).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
+    # Get 1w data for EMA34 trend filter (MTF trend)
+    df_1w = get_htf_data(prices, '1w')
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 1w EMA34
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Calculate volume confirmation: >2.0x 50-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_ma_50 = volume_series.rolling(window=50, min_periods=50).mean().values
+    volume_confirm = volume > 2.0 * volume_ma_50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,28 +79,29 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(mid_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma_50[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1d ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25.0
+        # Trend filter: 1w EMA34 bias
+        bullish_bias = close[i] > ema_34_1w_aligned[i]
+        bearish_bias = close[i] < ema_34_1w_aligned[i]
         
-        # Weekly Donchian breakout conditions
-        long_breakout = close[i] > upper_aligned[i]
-        short_breakout = close[i] < lower_aligned[i]
+        # Camarilla breakout conditions
+        long_breakout = close[i] > r3_aligned[i]
+        short_breakout = close[i] < s3_aligned[i]
         
-        # Exit condition: return to weekly Donchian midpoint
-        long_exit = close[i] < mid_aligned[i]
-        short_exit = close[i] > mid_aligned[i]
+        # Exit condition: return to pivot
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and trending
-        short_entry = short_breakout and vol_confirm and trending
+        long_entry = long_breakout and vol_confirm and bullish_bias
+        short_entry = short_breakout and vol_confirm and bearish_bias
         
         # Handle entries and exits
         if long_entry and position <= 0:
