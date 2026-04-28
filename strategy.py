@@ -26,7 +26,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(df_1d['close'].values)
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -83,10 +83,10 @@ def generate_signals(prices):
         short_exit = (close[i] > high_20_aligned[i]) and position == -1
         
         if long_entry and position <= 0:
-            signals[i] = 0.30
+            signals[i] = 0.25
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.30
+            signals[i] = -0.25
             position = -1
         elif long_exit:
             signals[i] = 0.0
@@ -97,14 +97,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DonchianBreakout_DailyTrend_Volume_Session"
-timeframe = "4h"
+name = "12h_DonchianBreakout_DailyTrend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
