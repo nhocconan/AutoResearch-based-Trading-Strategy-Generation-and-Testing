@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX25 regime filter
-# Long when price breaks above Donchian(20) high AND volume > 1.5x 20-bar avg AND 1d ADX > 25
-# Short when price breaks below Donchian(20) low AND volume > 1.5x 20-bar avg AND 1d ADX > 25
-# Exit when price touches opposite Donchian band or ADX < 20 (range)
-# Target: 20-50 trades/year via tight entry conditions and regime filter
+# Hypothesis: 4h Williams Alligator with 1d ADX25 regime filter and volume confirmation
+# Williams Alligator: Jaw (EMA13, 8-bar shift), Teeth (EMA8, 5-bar shift), Lips (EMA5, 3-bar shift)
+# Long when Lips > Teeth > Jaw AND ADX > 25 (trending) AND volume > 1.5x 20-bar avg
+# Short when Jaw > Teeth > Lips AND ADX > 25 AND volume > 1.5x 20-bar avg
+# Exits when Alligator alignment breaks or volume drops
+# Target: 19-50 trades/year via regime filter reducing whipsaw in ranging markets
 # Works in both bull and bear markets by only trading when ADX confirms trending conditions
 
-name = "4h_Donchian20_Volume_1dADX25_Regime_v1"
+name = "4h_WilliamsAlligator_1dADX25_Regime_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -60,16 +61,23 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Prepend zeros for alignment (since we lost bars in calculations)
-    adx = np.concatenate([np.full(27, np.nan), adx])  # 14 (TR) + 14 (DM smoothing) + 14 (ADX smoothing) - 1
+    # Prepend zeros for alignment (lost 27 bars: 1 for TR, 14 for TR smoothing, 12 for ADX smoothing)
+    adx = np.concatenate([np.full(27, np.nan), adx])
     
     # Align 1d ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Donchian channels on 4h data
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Williams Alligator on 4h data
+    close_s = pd.Series(close)
+    # Jaw: EMA(13) shifted by 8 bars
+    jaw = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full(len(jaw), np.nan)
+    # Teeth: EMA(8) shifted by 5 bars
+    teeth = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full(len(teeth), np.nan)
+    # Lips: EMA(5) shifted by 3 bars
+    lips = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full(len(lips), np.nan)
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -79,42 +87,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # Need sufficient history for all indicators
+    start_idx = max(40, 20)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
         adx_val = adx_aligned[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above Donchian high AND volume confirmation AND ADX > 25 (trending)
-            if curr_high > upper_band and vol_conf and adx_val > 25:
+            # Long when Lips > Teeth > Jaw AND ADX > 25 (trending) AND volume confirmation
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and adx_val > 25 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian low AND volume confirmation AND ADX > 25 (trending)
-            elif curr_low < lower_band and vol_conf and adx_val > 25:
+            # Short when Jaw > Teeth > Lips AND ADX > 25 (trending) AND volume confirmation
+            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and adx_val > 25 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price touches lower band or ADX < 20 (range)
-            if curr_low <= lower_band or adx_val < 20:
+        elif position == 1:  # Long - exit when Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) or ADX < 20 or no volume
+            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price touches upper band or ADX < 20 (range)
-            if curr_high >= upper_band or adx_val < 20:
+        elif position == -1:  # Short - exit when Alligator alignment breaks (Jaw <= Teeth or Teeth <= Lips) or ADX < 20 or no volume
+            if jaw[i] <= teeth[i] or teeth[i] <= lips[i] or adx_val < 20 or not vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
