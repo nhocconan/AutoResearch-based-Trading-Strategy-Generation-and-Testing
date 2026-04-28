@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Enter long when price breaks above Camarilla R3 level with 1d EMA34 uptrend and volume > 2x 20-bar average.
 # Enter short when price breaks below Camarilla S3 level with 1d EMA34 downtrend and volume > 2x 20-bar average.
 # Exit when price retraces to the Camarilla H3/L3 levels respectively.
 # Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels provide support/resistance structure; 1d EMA34 ensures higher timeframe alignment;
+# Target: 75-200 total trades over 4 years (19-50/year).
+# Camarilla levels provide intraday support/resistance structure; 1d EMA34 ensures higher timeframe alignment;
 # volume spike filters weak breakouts. Works in both bull (strong breakouts) and bear (strong breakdowns).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,27 +29,23 @@ def generate_signals(prices):
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34
     close_1d = df_1d['close'].values
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 12h
+    # Align EMA34 to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate Camarilla levels (based on previous day's range)
-    # For 12h timeframe, we use daily Camarilla levels
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     # Previous day's high, low, close
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Align to 12h
+    # Align to 4h
     prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
