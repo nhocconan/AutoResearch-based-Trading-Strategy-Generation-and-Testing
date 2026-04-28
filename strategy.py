@@ -44,7 +44,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First value
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 1h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
@@ -89,20 +89,20 @@ def generate_signals(prices):
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         vol_filter = volume[i] > vol_ma[i]
         
-        # Entry conditions - tighter conditions to reduce trades
+        # Entry conditions
         long_entry = trend_up and rsi_bullish and vol_filter
         short_entry = trend_down and rsi_bearish and vol_filter
         
-        # Exit conditions
+        # Exit conditions: opposite conditions or volatility spike
         atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().values
         long_exit = not trend_up or not rsi_bullish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         short_exit = not trend_down or not rsi_bearish or (atr_14_aligned[i] > 2.0 * atr_ma[i])
         
         if long_entry and position <= 0:
-            signals[i] = 0.25
+            signals[i] = 0.20
             position = 1
         elif short_entry and position >= 0:
-            signals[i] = -0.25
+            signals[i] = -0.20
             position = -1
         elif long_exit and position == 1:
             signals[i] = 0.0
@@ -113,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_EMA34_RSI_Volume_Session"
-timeframe = "4h"
+name = "1h_EMA34_RSI_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
