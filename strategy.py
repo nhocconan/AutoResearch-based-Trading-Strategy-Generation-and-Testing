@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h momentum breakout using 1-day Donchian channels with volume and volatility confirmation.
-# Donchian breakouts capture strong trends, while 1-day timeframe filters out noise.
-# Volume surge (2x average) confirms institutional participation.
-# Volatility filter (ATR ratio > 1.2) avoids whipsaws in low-volatility ranging markets.
-# Works in bull markets via breakout continuation and bear markets via breakdowns.
-# Target: 50-150 total trades over 4 years (12-37/year) with selective entries.
+# Hypothesis: 4h RSI mean reversion with Bollinger Bands and volume confirmation in ranging markets.
+# In ranging markets (low volatility), price tends to revert to the mean when hitting Bollinger Bands.
+# RSI < 30 indicates oversold (long signal), RSI > 70 indicates overbought (short signal).
+# Bollinger Band width < 0.05 identifies low volatility ranging conditions.
+# Volume confirmation ensures reversals have participation.
+# Works in both bull and bear markets by focusing on range-bound conditions.
 
 import numpy as np
 import pandas as pd
@@ -20,74 +20,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ATR
+    # Get daily data for Bollinger Bands and volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Upper band: highest high over 20 days
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over 20 days
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Daily ATR (14-period) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
+    bb_period = 20
+    bb_std = 2
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Middle band (SMA)
+    bb_middle = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    # Standard deviation
+    bb_std_dev = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    # Upper and lower bands
+    bb_upper = bb_middle + (bb_std_dev * bb_std)
+    bb_lower = bb_middle - (bb_std_dev * bb_std)
     
-    # ATR calculation
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Band width (normalized)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    bb_width = np.where(bb_middle != 0, bb_width, 0)
     
-    # ATR ratio: current ATR / 50-period average ATR (volatility regime filter)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
+    # Bollinger Band width < 0.05 indicates low volatility ranging market
+    ranging_filter = bb_width < 0.05
     
-    # Align indicators to 6h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Align ranging filter to 4h timeframe
+    ranging_filter_aligned = align_htf_to_ltf(prices, df_1d, ranging_filter)
     
-    # Volume filter: volume > 2.0 x 20-period average on 6s timeframe
+    # Calculate RSI (14-period) on 4h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Smoothed average gain/loss
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # RS and RSI
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: volume > 1.3x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (volume_ma * 2.0)
+    volume_filter = volume > (volume_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for sufficient warmup
+    start_idx = max(34, 20)  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ranging_filter_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_ratio_aligned[i] > 1.2
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Breakout conditions
-        long_breakout = close[i] > upper_20_aligned[i]
-        short_breakout = close[i] < lower_20_aligned[i]
+        # Entry conditions with volume confirmation
+        long_entry = rsi_oversold and ranging_filter_aligned[i] and volume_filter[i]
+        short_entry = rsi_overbought and ranging_filter_aligned[i] and volume_filter[i]
         
-        # Entry conditions with volume and volatility confirmation
-        long_entry = long_breakout and volume_filter[i] and vol_filter
-        short_entry = short_breakout and volume_filter[i] and vol_filter
-        
-        # Exit conditions: opposite breakout or volatility collapse
-        long_exit = (short_breakout) or (atr_ratio_aligned[i] < 0.8)
-        short_exit = (long_breakout) or (atr_ratio_aligned[i] < 0.8)
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        long_exit = rsi[i] >= 40
+        short_exit = rsi[i] <= 60
         
         # Handle entries and exits
         if long_entry and position <= 0:
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DonchianBreakout_1dVolumeVolatilityFilter"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_BBands_RangeFilter_Volume"
+timeframe = "4h"
 leverage = 1.0
