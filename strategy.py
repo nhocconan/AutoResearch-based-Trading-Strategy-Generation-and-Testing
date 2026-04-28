@@ -30,7 +30,7 @@ def generate_signals(prices):
     r2_1d = pivot_1d + (high_1d - low_1d)
     s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily pivot levels to 12h timeframe
+    # Align daily pivot levels to 1d timeframe (already aligned, but for consistency)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
@@ -39,13 +39,28 @@ def generate_signals(prices):
     vol_spike_1d = vol_1d > (1.5 * vol_ma_20_1d)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 1d ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily ATR for volatility filter
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = 0
+    tr3_1d[0] = 0
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,14 +72,18 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(r2_aligned[i]) or
             np.isnan(s2_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(vol_spike_aligned[i])):
+            np.isnan(vol_spike_aligned[i]) or
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Session filter: only trade during active hours
         if not session_mask[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Volatility filter: avoid extremely low volatility periods
+        if atr_1d_aligned[i] < 0.5 * np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]):
             signals[i] = 0.0
             continue
         
@@ -114,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_R2S2_Breakout_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_DailyPivot_R2S2_Breakout_VolumeSpike_v2"
+timeframe = "1d"
 leverage = 1.0
