@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and EMA
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Weekly EMA50 for trend filter
+    close_1w_series = pd.Series(df_1w['close'].values)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly EMA50 to daily timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Get daily data for Donchian channels and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -22,56 +34,48 @@ def generate_signals(prices):
     high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align to daily timeframe (no additional alignment needed as we're already on 1d)
+    high_20_aligned = high_20
+    low_20_aligned = low_20
     
-    # Align to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Daily volume filter: above average volume (20-period)
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = vol_ma  # Already aligned to daily
     
-    # Volume filter: above average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get minute-level data for entry timing (using 15m for better precision)
+    df_15m = get_htf_data(prices, '15m')
+    if len(df_15m) < 20:
+        return np.zeros(n)
     
-    # Hour filter: 8-20 UTC (most active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # 15-minute volume spike detection
+    vol_15m = pd.Series(df_15m['volume'].values)
+    vol_ma_15m = vol_15m.rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_15m > (vol_ma_15m * 1.5)  # 50% above average
+    vol_spike_aligned = align_htf_to_ltf(prices, df_15m, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Trend filter: price above/below weekly EMA50
+        trend_up = close[i] > ema50_1w_aligned[i]
+        trend_down = close[i] < ema50_1w_aligned[i]
         
-        if not in_session:
-            # Outside session: flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume filter: above average volume
-        vol_filter = volume[i] > vol_ma[i]
-        
-        # Trend filter: price above/below daily EMA34
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
+        # Volume filter: average volume + volume spike
+        vol_filter = (volume[i] > vol_ma_aligned[i]) and vol_spike_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout above daily Donchian high in uptrend
-        # Short: breakdown below daily Donchian low in downtrend
+        # Long: breakout above daily Donchian high in uptrend with volume spike
+        # Short: breakdown below daily Donchian low in downtrend with volume spike
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
@@ -105,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_DailyTrend_Volume_Session"
-timeframe = "4h"
+name = "1d_WeeklyEMA50_Trend_DailyDonchian_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
