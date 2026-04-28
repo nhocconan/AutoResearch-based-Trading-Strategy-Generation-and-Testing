@@ -15,14 +15,14 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter (shorter period for better responsiveness)
+    # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
