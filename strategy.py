@@ -1,12 +1,35 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h 20-period Donchian channel breakout with 1-week volume confirmation and 1-day ADX trend filter.
-# In trending markets (ADX>25), breakouts of price channels tend to continue. Volume confirms participation.
-# Works in both bull and bear markets by filtering for strong trends via ADX and requiring volume.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 1d KAMA (Kaufman Adaptive Moving Average) direction + RSI(14) + weekly volatility regime filter.
+# KAMA adapts to market noise - follows price closely in trending markets, stays flat in ranging markets.
+# In trending markets (weekly ATR > 20-period average), we take KAMA direction signals.
+# In ranging markets (weekly ATR <= 20-period average), we mean-revert at RSI extremes.
+# This dual-regime approach works in both bull and bear markets by adapting to volatility conditions.
+# Weekly volatility filter prevents whipsaws in low-volatility environments.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def _kama(close, er_length=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    
+    er = np.zeros_like(close)
+    for i in range(len(close)):
+        if volatility[i] > 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,109 +41,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for volume confirmation
+    # Get weekly data for volatility regime filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need enough for volume average
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Get daily data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
-        return np.zeros(n)
+    # Weekly ATR for volatility regime
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly average volume (20-period)
-    weekly_volume = df_1w['volume'].values
-    volume_ma = pd.Series(weekly_volume).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma)
-    
-    # Calculate daily ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align weekly volatility regime to daily
+    vol_regime = atr_1w > atr_ma_1w  # True = trending, False = ranging
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
     
-    # Smoothed values
-    def _smma(array, period):
-        """Smoothed Moving Average (SMMA)"""
-        if len(array) < period:
-            return np.full_like(array, np.nan, dtype=float)
-        result = np.full_like(array, np.nan, dtype=float)
-        # First value is simple moving average
-        result[period-1] = np.mean(array[:period])
-        # Subsequent values: SMMA = (prev_smma * (period-1) + current_close) / period
-        for i in range(period, len(array)):
-            result[i] = (result[i-1] * (period-1) + array[i]) / period
-        return result
+    # Daily KAMA
+    kama = _kama(close, er_length=10, fast_sc=2, slow_sc=30)
+    kama_dir = np.where(close > kama, 1, -1)  # 1 = above KAMA (bullish), -1 = below KAMA (bearish)
     
-    atr = _smma(tr, 14)
-    plus_di_smoothed = _smma(plus_dm, 14)
-    minus_di_smoothed = _smma(minus_dm, 14)
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # DI values
-    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
-    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = _smma(dx, 14)
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 12h Donchian channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for sufficient warmup
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        kama_direction = kama_dir[i]
+        rsi_value = rsi[i]
+        is_trending = vol_regime_aligned[i] > 0.5  # Weekly volatility regime
         
-        # Volume confirmation: current volume > 1.5x weekly average volume
-        volume_confirm = volume[i] > (volume_ma_aligned[i] * 1.5)
-        
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_high[i-1]  # Break above previous period's high
-        short_breakout = close[i] < lowest_low[i-1]   # Break below previous period's low
-        
-        # Entry conditions
-        long_entry = strong_trend and long_breakout and volume_confirm
-        short_entry = strong_trend and short_breakout and volume_confirm
-        
-        # Exit conditions: when trend weakens or opposite breakout occurs
-        long_exit = (not strong_trend) or (position == 1 and short_breakout)
-        short_exit = (not strong_trend) or (position == -1 and long_breakout)
+        if is_trending:
+            # Trending regime: follow KAMA direction
+            long_entry = kama_direction == 1 and position <= 0
+            short_entry = kama_direction == -1 and position >= 0
+            # Exit when KAMA direction changes
+            long_exit = kama_direction == -1 and position == 1
+            short_exit = kama_direction == 1 and position == -1
+        else:
+            # Ranging regime: mean reversion at RSI extremes
+            long_entry = rsi_value < 30 and position <= 0  # Oversold
+            short_entry = rsi_value > 70 and position >= 0  # Overbought
+            # Exit when RSI returns to neutral zone
+            long_exit = rsi_value > 50 and position == 1
+            short_exit = rsi_value < 50 and position == -1
         
         # Handle entries and exits
-        if long_entry and position <= 0:
+        if long_entry:
             signals[i] = 0.25
             position = 1
-        elif short_entry and position >= 0:
+        elif short_entry:
             signals[i] = -0.25
             position = -1
         elif long_exit and position == 1:
@@ -140,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1wVolume_1dADX_Trend"
-timeframe = "12h"
+name = "1d_KAMA_RSI_VolatilityRegime"
+timeframe = "1d"
 leverage = 1.0
