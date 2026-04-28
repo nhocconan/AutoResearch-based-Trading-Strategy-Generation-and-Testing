@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
-Hypothesis: Breakouts of daily Camarilla R1/S1 levels on 12h chart with 1-day EMA trend filter and volume spike confirmation.
-Targets 15-25 trades/year by requiring volume > 2x 20-period average and clear trend alignment.
-Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
+1d_KAMA_Trend_With_RSI_Divergence
+Hypothesis: KAMA adapts to market efficiency, filtering noise in ranging markets while capturing trends. Combined with RSI divergence and volume confirmation, it works in both bull and bear markets by avoiding false signals during low-efficiency periods. Targets 15-25 trades/year by requiring KAMA trend alignment, RSI divergence, and volume > 1.5x 20-period average.
 """
 
 import numpy as np
@@ -12,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,66 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly KAMA for trend filter
+    close_1w = df_1w['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1w, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA calculation
+    kama_1w = np.full_like(close_1w, np.nan)
+    kama_1w[9] = close_1w[9]  # Start after 10 periods
+    for i in range(10, len(close_1w)):
+        if np.isnan(kama_1w[i-1]):
+            kama_1w[i] = close_1w[i]
+        else:
+            kama_1w[i] = kama_1w[i-1] + sc[i] * (close_1w[i] - kama_1w[i-1])
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily RSI for divergence
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Camarilla formulas:
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: >2x 20-period MA
+    # Volume confirmation: >1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(kama_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below weekly KAMA
+        uptrend = close[i] > kama_1w_aligned[i]
+        downtrend = close[i] < kama_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_r1 = close[i] > camarilla_r1_aligned[i]
-        breakdown_s1 = close[i] < camarilla_s1_aligned[i]
+        # RSI divergence (simplified: look for RSI extremums)
+        rsi_high = rsi[i] == np.max(rsi[max(0, i-5):i+1]) and rsi[i] > 70
+        rsi_low = rsi[i] == np.min(rsi[max(0, i-5):i+1]) and rsi[i] < 30
         
         # Volume confirmation
-        vol_confirm = volume[i] > (2.0 * vol_ma_20[i])
+        vol_confirm = volume[i] > (1.5 * vol_ma_20[i])
         
-        # Entry logic: breakout in direction of trend with volume
-        long_entry = vol_confirm and uptrend and breakout_r1
-        short_entry = vol_confirm and downtrend and breakdown_s1
+        # Entry logic: trend alignment with RSI extreme and volume
+        long_entry = vol_confirm and uptrend and rsi_low
+        short_entry = vol_confirm and downtrend and rsi_high
         
-        # Exit logic: opposite breakout or trend change
-        long_exit = breakdown_s1 or (not uptrend)
-        short_exit = breakout_r1 or (not downtrend)
+        # Exit logic: opposite RSI extreme or trend change
+        long_exit = rsi_high or (not uptrend)
+        short_exit = rsi_low or (not downtrend)
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -104,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "1d_KAMA_Trend_With_RSI_Divergence"
+timeframe = "1d"
 leverage = 1.0
