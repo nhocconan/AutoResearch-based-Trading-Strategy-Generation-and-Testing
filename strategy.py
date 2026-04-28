@@ -1,3 +1,10 @@
+#2025-06-14: 4h RSI Mean Reversion with Volume Confirmation and Trend Filter
+#Hypothesis: RSI mean reversion works in both bull and bear markets when filtered by trend and volume.
+#In bull markets, buy oversold dips in uptrends; in bear markets, sell overbought rallies in downtrends.
+#Volume confirms conviction; RSI avoids chasing extremes.
+#Timeframe: 4h balances trade frequency (~20-50/year) and signal quality.
+#Uses 1d trend filter (EMA50) for multi-timeframe alignment.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,41 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for volume confirmation and regime
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Donchian channels (20 periods)
-    high_12h_series = pd.Series(df_12h['high'].values)
-    low_12h_series = pd.Series(df_12h['low'].values)
-    donchian_upper = high_12h_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_12h_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Daily EMA50 for trend filter
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Donchian channels to 6h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    # RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h EMA50 for trend filter
-    close_12h_series = pd.Series(df_12h['close'].values)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # 1d volume spike detection (volume > 1.5x 20-period average)
-    volume_1d_series = pd.Series(df_1d['volume'].values)
-    vol_ma_20 = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d_series > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.values)
-    
-    # 6h volume filter: above average volume
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Hour filter: 8-20 UTC (most active trading hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -55,13 +48,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Wait for sufficient warmup
+    start_idx = 50  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(vol_ma_6h[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -78,23 +70,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filters: 6h volume above average AND 12h volume spike
-        vol_filter_6h = volume[i] > vol_ma_6h[i]
-        vol_filter_12h = vol_spike_aligned[i] == 1
+        # Volume filter: above average volume
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Trend filter: price above/below 12h EMA50
-        trend_up = close[i] > ema50_12h_aligned[i]
-        trend_down = close[i] < ema50_12h_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        trend_up = close[i] > ema50_1d_aligned[i]
+        trend_down = close[i] < ema50_1d_aligned[i]
         
         # Entry conditions: 
-        # Long: price breaks above Donchian upper in uptrend with volume confirmation
-        # Short: price breaks below Donchian lower in downtrend with volume confirmation
-        long_entry = (close[i] > donchian_upper_aligned[i]) and vol_filter_6h and vol_filter_12h and trend_up
-        short_entry = (close[i] < donchian_lower_aligned[i]) and vol_filter_6h and vol_filter_12h and trend_down
+        # Long: RSI < 30 (oversold) in uptrend + volume
+        # Short: RSI > 70 (overbought) in downtrend + volume
+        long_entry = (rsi[i] < 30) and vol_filter and trend_up
+        short_entry = (rsi[i] > 70) and vol_filter and trend_down
         
-        # Exit conditions: price returns to Donchian middle
-        long_exit = (close[i] < donchian_middle_aligned[i]) and position == 1
-        short_exit = (close[i] > donchian_middle_aligned[i]) and position == -1
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        long_exit = (rsi[i] >= 40) and position == 1
+        short_exit = (rsi[i] <= 60) and position == -1
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -119,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DonchianBreakout_12hTrend_VolumeSpike_Session"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
