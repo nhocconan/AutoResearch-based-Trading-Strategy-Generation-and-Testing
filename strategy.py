@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,30 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once for HTF context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data once for HTF context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate weekly indicators
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Weekly ATR(10)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # 1d EMA(50) for trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA(20) for trend
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1d RSI(14)
-    delta = pd.Series(close_1d).diff()
+    # Weekly RSI(14) for momentum
+    delta = pd.Series(close_1w).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     avg_gain = gain.rolling(window=14, min_periods=14).mean().values
@@ -44,38 +44,46 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Align HTF indicators to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to daily timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    atr_10_aligned = align_htf_to_ltf(prices, df_1w, atr_10)
+    
+    # Daily Donchian channel breakout (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for sufficient warmup
+    start_idx = 100  # Wait for sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_10_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema_20_aligned[i]
+        trend_down = close[i] < ema_20_aligned[i]
         
         # Momentum filter: RSI in favorable range
         rsi_momentum_up = rsi_aligned[i] > 50
         rsi_momentum_down = rsi_aligned[i] < 50
         
+        # Breakout filters
+        breakout_up = close[i] > high_20[i-1]  # Break above previous 20-day high
+        breakout_down = close[i] < low_20[i-1]  # Break below previous 20-day low
+        
         # Entry conditions
-        long_entry = trend_up and rsi_momentum_up
-        short_entry = trend_down and rsi_momentum_down
+        long_entry = trend_up and rsi_momentum_up and breakout_up
+        short_entry = trend_down and rsi_momentum_down and breakout_down
         
         # Exit conditions: opposite trend or RSI reversal
-        long_exit = not trend_up or rsi_aligned[i] < 50
-        short_exit = not trend_down or rsi_aligned[i] > 50
+        long_exit = not trend_up or rsi_aligned[i] < 50 or close[i] < low_20[i]
+        short_exit = not trend_down or rsi_aligned[i] > 50 or close[i] > high_20[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -100,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_RSI_Trend_Momentum"
-timeframe = "4h"
+name = "1d_WeeklyEMA20_RSI_Breakout"
+timeframe = "1d"
 leverage = 1.0
