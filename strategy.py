@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Extreme_Trend_Filter_Volume
-Hypothesis: Uses RSI(14) extremes (<20 for long, >80 for short) with 4h EMA50 trend filter and volume spike confirmation.
-Designed to capture oversold/overbought reversals in both bull and bear markets by combining mean reversion with trend alignment.
-Volume spike filters false signals. Targets 20-50 trades per year to minimize fee drag while capturing high-probability reversals.
+1d_4hTrend_WeeklyVolumeBreakout
+Hypothesis: Uses 4h EMA20 trend and 1w volume spike to filter breakouts on daily timeframe.
+Enters long when price breaks above 4h EMA20 with weekly volume spike, short when breaks below.
+Designed to capture trend momentum while filtering false signals in both bull and bear markets.
+Targets 15-25 trades per year to minimize fee decay.
 """
 
 import numpy as np
@@ -20,30 +21,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
+    # Get 4h data for EMA20 trend
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
+    # Calculate 4h EMA20
     close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate RSI(14) on 4h closes
-    delta = pd.Series(close_4h).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi_values)
+    # Get 1w data for volume spike
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Volume spike (>1.5x 20-period MA)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma_20)
+    # Calculate 1w volume 20-period MA
+    vol_1w = df_1w['volume'].values
+    vol_ma_20_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    
+    # Volume spike: current 1d volume > 2.0x 1w volume MA
+    vol_spike = volume > (2.0 * vol_ma_20_1w_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,38 +51,27 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 4h EMA50
-        trend_up = close[i] > ema_50_4h_aligned[i]
-        trend_down = close[i] < ema_50_4h_aligned[i]
+        # Trend direction from 4h EMA20
+        price_above_ema = close[i] > ema_20_4h_aligned[i]
+        price_below_ema = close[i] < ema_20_4h_aligned[i]
         
         # Volume confirmation
         vol_confirm = vol_spike[i]
         
-        # RSI extremes
-        rsi_oversold = rsi_aligned[i] < 20
-        rsi_overbought = rsi_aligned[i] > 80
-        
         # Entry logic:
-        # Long: Oversold in uptrend OR overbought reversal in downtrend (contrarian)
-        long_entry = vol_confirm and (
-            (rsi_oversold and trend_up) or  # Oversold bounce in uptrend
-            (rsi_overbought and not trend_up)  # Overbought reversal in downtrend/sideways
-        )
+        # Long: price above EMA20 with volume spike
+        long_entry = price_above_ema and vol_confirm
+        # Short: price below EMA20 with volume spike
+        short_entry = price_below_ema and vol_confirm
         
-        # Short: Overbought in downtrend OR oversold reversal in uptrend (contrarian)
-        short_entry = vol_confirm and (
-            (rsi_overbought and trend_down) or  # Overbought rejection in downtrend
-            (rsi_oversold and not trend_down)   # Oversold reversal in uptrend/sideways
-        )
-        
-        # Exit logic: RSI returns to neutral zone (40-60) or trend reversal
-        long_exit = (rsi_aligned[i] > 40 and not trend_up) or (rsi_aligned[i] > 60)
-        short_exit = (rsi_aligned[i] < 60 and not trend_down) or (rsi_aligned[i] < 40)
+        # Exit logic: price crosses back through EMA20
+        long_exit = price_below_ema
+        short_exit = price_above_ema
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Extreme_Trend_Filter_Volume"
-timeframe = "4h"
+name = "1d_4hTrend_WeeklyVolumeBreakout"
+timeframe = "1d"
 leverage = 1.0
