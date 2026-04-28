@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI_40_60_MeanReversion_1dTrend_Volume
-Hypothesis: On 4h timeframe, take mean reversion trades when RSI(14) reaches extreme levels (40 for long, 60 for short) only when aligned with daily trend (price vs EMA50) and confirmed by volume surge. This combines mean reversion in ranging markets with trend filter to avoid counter-trend trades in strong trends, working in both bull and bear markets by adapting to regime.
+12h_Donchian20_WeeklyTrend_VolumeS
+Hypothesis: 12-hour breakouts at 20-period Donchian channels with weekly trend filter and volume confirmation. Targets 15-35 trades/year by requiring strong breakouts, weekly trend alignment, and volume surge to reduce false signals and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,28 +18,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 20-period Donchian channels from previous 12h bar
+    donchian_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all higher timeframe data to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Trend filter: price > EMA34 = bullish, < EMA34 = bearish
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (vol_ma_20 * 1.5)
+    volume_surge = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,29 +55,25 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_surge[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price > EMA50 = bullish, < EMA50 = bearish
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
-        
         # Entry conditions with trend alignment and volume surge
-        # Long: RSI < 40 (oversold) + daily uptrend + volume surge
-        long_entry = (rsi_values[i] < 40 and 
-                     trend_up and 
+        # Long: price breaks above Donchian high + weekly uptrend + volume surge
+        long_entry = (close[i] > donchian_high_aligned[i] and 
+                     trend_up[i] and 
                      volume_surge[i])
         
-        # Short: RSI > 60 (overbought) + daily downtrend + volume surge
-        short_entry = (rsi_values[i] > 60 and 
-                      trend_down and 
+        # Short: price breaks below Donchian low + weekly downtrend + volume surge
+        short_entry = (close[i] < donchian_low_aligned[i] and 
+                      trend_down[i] and 
                       volume_surge[i])
         
-        # Exit when RSI returns to neutral zone (40-60) with volume surge
-        long_exit = (rsi_values[i] > 50 and volume_surge[i])
-        short_exit = (rsi_values[i] < 50 and volume_surge[i])
+        # Exit on opposite level break with volume surge
+        long_exit = close[i] < donchian_low_aligned[i] and volume_surge[i]
+        short_exit = close[i] > donchian_high_aligned[i] and volume_surge[i]
         
         if long_entry and position <= 0:
             signals[i] = 0.25
@@ -95,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_40_60_MeanReversion_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_WeeklyTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
