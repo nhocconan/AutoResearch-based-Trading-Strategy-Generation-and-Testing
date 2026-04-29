@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Uses 6h primary timeframe to reduce trade frequency vs 4h while maintaining good signal quality
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Long when price breaks above R3 with volume spike AND 1d EMA34 uptrend
 # Short when price breaks below S3 with volume spike AND 1d EMA34 downtrend
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Discrete position sizing (0.25) to reduce churn
+# Uses 12h primary timeframe to reduce trade frequency and fee drag while capturing multi-day moves
+# Daily EMA34 provides stable trend filter; volume confirmation avoids false breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while allowing meaningful sample
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (range_1d * 1.1 / 2)
     camarilla_s3 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
