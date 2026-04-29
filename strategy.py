@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla levels provide precise daily support/resistance; breakouts capture momentum
-# 1d EMA34 ensures alignment with longer-term trend; volume >2.0x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
-# Works in both bull and bear: trend filter avoids counter-trend trades, volume confirms strength
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla levels from daily provide robust S/R; breakouts with volume >2x mean confirm participation
+# 1d EMA34 ensures alignment with daily trend; discrete sizing (0.25) minimizes fee churn
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,11 +43,7 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Precompute daily data for Camarilla levels (using previous day's data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
+    # Precompute daily data for Camarilla levels
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
@@ -60,7 +55,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 12h bars for daily levels
+    start_idx = max(96, 30, 14, 34)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
