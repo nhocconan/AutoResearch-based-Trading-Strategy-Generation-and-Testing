@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation (>1.5x 20-period average)
-# Camarilla pivot levels (R3/S3) act as strong support/resistance; breakouts capture institutional moves.
-# 1w EMA34 ensures alignment with weekly trend to avoid counter-trend whipsaws in bear markets like 2022.
-# Volume confirmation filters for participation; discrete sizing (0.25) minimizes fee churn.
-# Works in bull markets (breakouts with trend) and bear markets (mean reversion off extremes with trend filter).
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2x 20-period average)
+# Camarilla R3/S3 levels act as strong intraday support/resistance; breakouts capture momentum with institutional participation.
+# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws in both bull/bear markets.
+# Volume spike filter (>2x average) confirms significant market interest, reducing false breakouts.
+# Discrete position sizing (0.25) minimizes fee churn while maintaining meaningful exposure.
+# Target: 75-150 total trades over 4 years (19-37/year) on 6h timeframe.
 
-name = "1d_Camarilla_R3S3_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +25,56 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d OHLC for Camarilla pivot levels (using prior day's data)
-    # Shift by 1 to avoid look-ahead: use previous day's OHLC for today's levels
-    prev_high = pd.Series(high).shift(1).values
-    prev_low = pd.Series(low).shift(1).values
-    prev_close = pd.Series(close).shift(1).values
+    # Calculate daily pivot points from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Camarilla pivot levels: R3, S3 based on prior day's range
-    # R3 = close + 1.1*(high-low)*1.1/4 = close + 1.1*(high-low)*0.275
-    # S3 = close - 1.1*(high-low)*1.1/4 = close - 1.1*(high-low)*0.275
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
+    # Camarilla levels: R3 = close + range * 1.1/4, S3 = close - range * 1.1/4
+    camarilla_r3_1d = close_1d + range_1d * 1.1 / 4
+    camarilla_s3_1d = close_1d - range_1d * 1.1 / 4
     
-    # Calculate 20-period average volume for confirmation (on 1d timeframe)
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # Calculate 20-period average volume for spike confirmation (on 6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20) + 1  # 1w EMA34 warmup + shift for prior day OHLC + volume MA warmup
+    start_idx = max(34, 20)  # 1d EMA34, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_1w = ema_34_1w_aligned[i]
-        curr_r3 = camarilla_r3[i]
-        curr_s3 = camarilla_s3[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = curr_volume > 1.5 * curr_vol_ma
+        # Volume spike confirmation: current volume > 2x 20-period average
+        vol_spike = curr_volume > 2.0 * curr_vol_ma
         
         # Camarilla breakout conditions
         breakout_long = curr_high > curr_r3   # price breaks above R3
@@ -79,34 +82,38 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price retouches mid-point between R3 and S3 OR trend turns bearish
-            mid_point = (curr_r3 + curr_s3) / 2
-            if curr_close < mid_point or curr_close < curr_ema_1w:
+            # Exit: price retracement to pivot level OR trend turns bearish
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, 
+                                           (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3)
+            if (not np.isnan(pivot_aligned[i]) and 
+                (curr_close < pivot_aligned[i] or curr_close < curr_ema_1d)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price retouches mid-point between R3 and S3 OR trend turns bullish
-            mid_point = (curr_r3 + curr_s3) / 2
-            if curr_close > mid_point or curr_close > curr_ema_1w:
+            # Exit: price retracement to pivot level OR trend turns bullish
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, 
+                                           (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3)
+            if (not np.isnan(pivot_aligned[i]) and 
+                (curr_close > pivot_aligned[i] or curr_close > curr_ema_1d)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: bullish breakout above R3 AND above 1w EMA34 AND volume confirmation
+            # Long entry: bullish breakout above R3 AND above 1d EMA34 AND volume spike
             if (breakout_long and 
-                curr_close > curr_ema_1w and 
-                vol_confirm):
+                curr_close > curr_ema_1d and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish breakout below S3 AND below 1w EMA34 AND volume confirmation
+            # Short entry: bearish breakout below S3 AND below 1d EMA34 AND volume spike
             elif (breakout_short and 
-                  curr_close < curr_ema_1w and 
-                  vol_confirm):
+                  curr_close < curr_ema_1d and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
             else:
