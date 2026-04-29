@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 Breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above R1, 1d EMA34 up-trend, volume > 1.8x average
-# Short when price breaks below S3, 1d EMA34 down-trend, volume > 1.8x average
-# Exit when price reverts to Camarilla Pivot Point
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
+# Long when price breaks above 20-period high, 1d EMA34 up-trend, volume > 1.5x average
+# Short when price breaks below 20-period low, 1d EMA34 down-trend, volume > 1.5x average
+# Exit when price reverts to 20-period midpoint (mean reversion)
 # Uses discrete position sizing (0.25) to balance capture and risk.
-# Target: 80-180 total trades over 4 years (20-45/year) to avoid fee drag.
-# Uses 1d for signal direction and levels, 4h only for execution timing.
+# Target: 100-180 total trades over 4 years (25-45/year) to avoid fee drag.
+# Uses 1d for signal direction/trend, 4h only for entry timing and breakout levels.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Volume_v1"
+name = "4h_Donchian20_1dEMA34_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,9 +30,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
+    # Get 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Align 4h indicators to 4h timeframe (no additional delay needed for Donchian)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -40,33 +57,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate previous day's OHLC for Camarilla levels
-    prev_high = df_1d['high'].shift(1).values  # Previous day's high
-    prev_low = df_1d['low'].shift(1).values    # Previous day's low
-    prev_close = df_1d['close'].shift(1).values # Previous day's close
-    
-    # Calculate Camarilla levels
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    r1 = camarilla_pivot + (range_val * 1.1 / 12)
-    s1 = camarilla_pivot - (range_val * 1.1 / 12)
-    r3 = camarilla_pivot + (range_val * 1.1 / 4)
-    s3 = camarilla_pivot - (range_val * 1.1 / 4)
-    
-    # Align 1d levels to 4h timeframe
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Volume MA and 1d EMA34 warmup
+    start_idx = max(20, 34)  # Donchian and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -75,49 +72,49 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
+        curr_donchian_high = donchian_high_aligned[i]
+        curr_donchian_low = donchian_low_aligned[i]
+        curr_donchian_mid = donchian_mid_aligned[i]
         curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_pivot = camarilla_pivot_aligned[i]
-        curr_r1 = r1_aligned[i]
-        curr_s1 = s1_aligned[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price below Camarilla Pivot
-            if curr_close < curr_pivot:
+            # Exit: price below Donchian midpoint (mean reversion)
+            if curr_close < curr_donchian_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above Camarilla Pivot
-            if curr_close > curr_pivot:
+            # Exit: price above Donchian midpoint (mean reversion)
+            if curr_close > curr_donchian_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
             
-            # Long when price breaks above R1, 1d EMA34 up-trend, volume confirmed
-            if curr_close > curr_r1 and curr_close > curr_ema34_1d and vol_confirmed:
+            # Long when price breaks above Donchian high, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_donchian_high and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
-            elif curr_close < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
+            # Short when price breaks below Donchian low, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_donchian_low and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
