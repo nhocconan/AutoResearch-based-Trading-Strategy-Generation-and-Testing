@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA50 trend filter and volume spike confirmation
-# Elder Ray measures bull/bear strength relative to EMA13; Bull Power = High - EMA13, Bear Power = Low - EMA13
-# In bull markets (price > 1d EMA50), we look for Bull Power expansion with volume confirmation for longs
-# In bear markets (price < 1d EMA50), we look for Bear Power expansion with volume confirmation for shorts
-# Uses strict volume confirmation (>2.0x 20-period average) to reduce false signals
-# Designed for ~12-37 trades/year on 6h timeframe to minimize fee drag while capturing momentum
-# Works in both bull and bear via 1d EMA50 trend filter - only trades in direction of higher timeframe momentum
+# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d EMA34 trend filter and volume spike confirmation
+# Alligator uses SMAs: Jaw=13, Teeth=8, Lips=5. In trending markets, lines are ordered and separated.
+# In bull trend (price > 1d EMA34): Lips > Teeth > Jaw -> long when Lips crosses above Teeth with volume
+# In bear trend (price < 1d EMA34): Jaw > Teeth > Lips -> short when Jaw crosses below Teeth with volume
+# Volume confirmation (>1.8x 20-period average) reduces false signals. Target ~12-37 trades/year on 12h.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +24,21 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Get 1d data for EMA50 trend filter (HTF = 1d)
+    # Get 1d data for EMA34 trend filter (HTF = 1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
+    # Calculate Williams Alligator SMAs (on 12h data)
     close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    jaw = close_s.rolling(window=13, min_periods=13).mean().values  # Jaw (13)
+    teeth = close_s.rolling(window=8, min_periods=8).mean().values    # Teeth (8)
+    lips = close_s.rolling(window=5, min_periods=5).mean().values     # Lips (5)
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -63,9 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -74,46 +69,46 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_1d = ema_50_1d_aligned[i]
-        curr_ema13 = ema_13[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or Bull Power turns negative (loss of bullish momentum)
-            if curr_close < entry_price - 1.5 * curr_atr or curr_bull_power <= 0:
+            # Exit: stoploss hit or Alligator lines converge (trend weakening)
+            if curr_close < entry_price - 2.0 * curr_atr or (curr_lips <= curr_teeth):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or Bear Power turns positive (loss of bearish momentum)
-            if curr_close > entry_price + 1.5 * curr_atr or curr_bear_power >= 0:
+            # Exit: stoploss hit or Alligator lines converge (trend weakening)
+            if curr_close > entry_price + 2.0 * curr_atr or (curr_jaw >= curr_teeth):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average
-            vol_confirm = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirm = curr_volume > 1.8 * curr_vol_ma
             
-            # Long entry when price > 1d EMA50 (bullish regime) AND Bull Power expanding with volume confirmation
-            if curr_close > curr_ema50_1d and curr_bull_power > 0 and vol_confirm:
-                # Additional confirmation: Bull Power should be increasing (momentum building)
-                if i > start_idx and curr_bull_power > bull_power[i-1]:
+            # Bull trend: price > 1d EMA34, look for Lips crossing above Teeth
+            if curr_close > curr_ema34_1d and curr_lips > curr_teeth and vol_confirm:
+                # Additional confirmation: Lips was below or equal to Teeth previous bar (crossing up)
+                if i > start_idx and curr_lips <= curr_teeth + 1e-9 and lips[i-1] <= teeth[i-1]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
-            # Short entry when price < 1d EMA50 (bearish regime) AND Bear Power expanding with volume confirmation
-            elif curr_close < curr_ema50_1d and curr_bear_power < 0 and vol_confirm:
-                # Additional confirmation: Bear Power should be decreasing (momentum building)
-                if i > start_idx and curr_bear_power < bear_power[i-1]:
+            # Bear trend: price < 1d EMA34, look for Jaw crossing below Teeth
+            elif curr_close < curr_ema34_1d and curr_jaw < curr_teeth and vol_confirm:
+                # Additional confirmation: Jaw was above or equal to Teeth previous bar (crossing down)
+                if i > start_idx and curr_jaw >= curr_teeth - 1e-9 and jaw[i-1] >= teeth[i-1]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
