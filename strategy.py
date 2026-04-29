@@ -3,20 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation
-# Williams Alligator consists of three smoothed moving averages (Jaw, Teeth, Lips)
-# Jaw (13-period SMMA, 8-bar shift) = Blue line
-# Teeth (8-period SMMA, 5-bar shift) = Red line  
-# Lips (5-period SMMA, 3-bar shift) = Green line
-# In bullish alignment: Lips > Teeth > Jaw (green > red > blue)
-# In bearish alignment: Jaw > Teeth > Lips (blue > red > green)
-# Uses 1w EMA50 for higher timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (>1.8x 20-period average) reduces false signals
-# Designed for ~7-25 trades/year on 1d timeframe to minimize fee drag while capturing strong trends
-# Works in both bull and bear via 1w EMA50 trend filter - only trades in direction of higher timeframe momentum
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout levels derived from prior day's range
+# In bull markets (price > 1d EMA34), we look for breaks above R3 with volume confirmation for longs
+# In bear markets (price < 1d EMA34), we look for breaks below S3 with volume confirmation for shorts
+# Uses volume > 2.0x 24-period average for confirmation to reduce false signals
+# Designed for ~12-37 trades/year on 12h timeframe to minimize fee drag while capturing momentum
+# Works in both bull and bear via 1d EMA34 trend filter - only trades in direction of higher timeframe momentum
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,27 +26,30 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Get 1w data for EMA50 trend filter (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter and Camarilla pivots (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator components (SMMA = smoothed moving average)
-    # SMMA is similar to EMA but with different smoothing factor
-    # We'll use EMA as approximation for SMMA with same period
-    close_s = pd.Series(close)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw: 13-period SMMA, 8-bar shift -> approximate with EMA(13) shifted 8
-    jaw = close_s.ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMMA, 5-bar shift -> approximate with EMA(8) shifted 5
-    teeth = close_s.ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMMA, 3-bar shift -> approximate with EMA(5) shifted 3
-    lips = close_s.ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
+    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
+    # R3 = close + 1.1*(high-low)/2
+    # S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -59,20 +58,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 24-period average volume for confirmation
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = 20  # volume MA warmup and Alligator shifts
+    start_idx = 24  # volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -81,46 +80,49 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
-        curr_jaw = jaw[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_atr = atr[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_vol_ma = vol_ma_24[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or Alligator loses bullish alignment (Lips <= Teeth or Teeth <= Jaw)
-            if curr_close < entry_price - 2.0 * curr_atr or curr_lips <= curr_teeth or curr_teeth <= curr_jaw:
+            # Exit: stoploss hit or price drops below R3 (failed breakout)
+            if curr_close < entry_price - 1.5 * curr_atr or curr_close < curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or Alligator loses bearish alignment (Jaw <= Teeth or Teeth <= Lips)
-            if curr_close > entry_price + 2.0 * curr_atr or curr_jaw <= curr_teeth or curr_teeth <= curr_lips:
+            # Exit: stoploss hit or price rises above S3 (failed breakout)
+            if curr_close > entry_price + 1.5 * curr_atr or curr_close > curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirm = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 24-period average
+            vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long entry when price > 1w EMA50 (bullish regime) AND bullish Alligator alignment with volume confirmation
-            if curr_close > curr_ema50_1w and curr_lips > curr_teeth and curr_teeth > curr_jaw and vol_confirm:
-                signals[i] = 0.25
-                position = 1
-                entry_price = curr_close
-                atr_at_entry = curr_atr
-            # Short entry when price < 1w EMA50 (bearish regime) AND bearish Alligator alignment with volume confirmation
-            elif curr_close < curr_ema50_1w and curr_jaw > curr_teeth and curr_teeth > curr_lips and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-                entry_price = curr_close
-                atr_at_entry = curr_atr
+            # Long entry when price > 1d EMA34 (bullish regime) AND breaks above R3 with volume confirmation
+            if curr_close > curr_ema34_1d and curr_close > curr_r3 and vol_confirm:
+                # Additional confirmation: close near high of bar (strong bullish close)
+                if curr_close > (curr_high + curr_low) / 2:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
+            # Short entry when price < 1d EMA34 (bearish regime) AND breaks below S3 with volume confirmation
+            elif curr_close < curr_ema34_1d and curr_close < curr_s3 and vol_confirm:
+                # Additional confirmation: close near low of bar (strong bearish close)
+                if curr_close < (curr_high + curr_low) / 2:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
             else:
                 signals[i] = 0.0
     
