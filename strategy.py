@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and 1d volatility regime filter
-# RSI(2) < 10 for long, > 90 for short captures extreme short-term reversals
-# 4h EMA50 trend filter ensures we trade with higher timeframe momentum
-# 1d ATR ratio (ATR5/ATR20) < 0.8 identifies low volatility regimes where mean reversion works best
-# Session filter (08-20 UTC) reduces noise during off-hours
-# Target: 80-120 total trades over 4 years (20-30/year) on 1h timeframe
+# Hypothesis: 6h Weekly Donchian Breakout with 1d Volume Spike Filter
+# Uses weekly Donchian channels (20-period) for major trend structure and breakout signals
+# Filters with 1d volume spikes (>2.0x 20-period average) to avoid false breakouts
+# Weekly timeframe provides strong trend context suitable for both bull and bear markets
+# Volume confirmation reduces whipsaws and focuses on institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
 
-name = "1h_RSI2_MeanRev_4hEMA50_1dATRRegime"
-timeframe = "1h"
+name = "6h_WeeklyDonchian_Breakout_1dVolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,101 +25,77 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 1 or len(df_1d) < 1:
+    if len(df_1w) < 1 or len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Weekly Donchian Channels (20-period)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    donchian_upper = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR5 and ATR20 for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align weekly Donchian levels to 6h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    atr_5 = pd.Series(tr).rolling(window=5, min_periods=5).mean().values
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_5 / atr_20  # Ratio of short-term to long-term volatility
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Calculate RSI(2) on 1h timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain_ma = pd.Series(gain).ewm(span=2, adjust=False, min_periods=2).mean().values
-    loss_ma = pd.Series(loss).ewm(span=2, adjust=False, min_periods=2).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi_2 = 100 - (100 / (1 + rs))
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1d volume spike filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2)  # 4h EMA50 warmup, RSI(2) warmup
+    start_idx = max(20, 20)  # weekly Donchian warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_2[i]) or 
-            np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        curr_rsi = rsi_2[i]
-        curr_ema_4h = ema_50_4h_aligned[i]
-        curr_atr_ratio = atr_ratio_aligned[i]
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_vol_ma_1d = vol_ma_20_1d_aligned[i]
+        curr_donchian_upper = donchian_upper_aligned[i]
+        curr_donchian_lower = donchian_lower_aligned[i]
         
-        # Volatility regime filter: only trade in low volatility (mean reversion favorable)
-        vol_regime = curr_atr_ratio < 0.8
+        # Volume confirmation: current 6h volume > 2.0x 1d average volume (strict threshold)
+        vol_confirm = curr_volume > 2.0 * curr_vol_ma_1d
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: RSI(2) > 50 (mean reversion complete) OR price breaks below 4h EMA50
-            if curr_rsi > 50 or curr_close < curr_ema_4h:
+            # Exit: price closes below weekly Donchian lower OR volume confirmation fails
+            if curr_close < curr_donchian_lower or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI(2) < 50 (mean reversion complete) OR price breaks above 4h EMA50
-            if curr_rsi < 50 or curr_close > curr_ema_4h:
+            # Exit: price closes above weekly Donchian upper OR volume confirmation fails
+            if curr_close > curr_donchian_upper or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: RSI(2) < 10 (extreme oversold) + price above 4h EMA50 + low volatility regime
-            if (curr_rsi < 10 and 
-                curr_close > curr_ema_4h and 
-                vol_regime):
-                signals[i] = 0.20
+            # Long entry: price breaks above weekly Donchian upper + volume confirmation
+            if (curr_high > curr_donchian_upper and 
+                vol_confirm):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: RSI(2) > 90 (extreme overbought) + price below 4h EMA50 + low volatility regime
-            elif (curr_rsi > 90 and 
-                  curr_close < curr_ema_4h and 
-                  vol_regime):
-                signals[i] = -0.20
+            # Short entry: price breaks below weekly Donchian lower + volume confirmation
+            elif (curr_low < curr_donchian_lower and 
+                  vol_confirm):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
