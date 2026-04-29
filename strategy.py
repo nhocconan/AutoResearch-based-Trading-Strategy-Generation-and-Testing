@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses Camarilla pivot levels from 1d HTF for precise entry/exit zones
-# 1d EMA34 provides strong trend filter to avoid counter-trend trades in ranging markets
+# 1d EMA34 provides strong trend filter to avoid counter-trend trades
 # Volume > 2.0x average confirms institutional participation and reduces false breakouts
 # Discrete position sizing (0.25) with Camarilla H3/L3 exit for quick profit taking
-# Designed for ~20-50 trades/year to minimize fee drag while capturing strong moves
+# Designed for ~12-25 trades/year to minimize fee drag while capturing strong moves
 # Works in bull/bear via trend filter - only trades in direction of 1d EMA34
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -48,16 +48,16 @@ def generate_signals(prices):
     h3_1d = close_1d + range_1d * 1.1 / 6.0
     l3_1d = close_1d - range_1d * 1.1 / 6.0
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d Camarilla levels and EMA34 to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Get 1d data for EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-period average volume for confirmation
