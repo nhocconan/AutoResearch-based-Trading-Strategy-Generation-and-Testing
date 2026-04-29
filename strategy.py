@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
 # Uses Camarilla pivot levels from 1d: breakout at R3/S3 with continuation (not fade)
 # Volume confirmation (>2.0x 24-period average) ensures institutional participation
 # Trend filter uses 1d EMA34 to avoid counter-trend trades in both bull and bear markets
-# Tight entry conditions target ~12-37 trades/year per symbol to minimize fee drag
-# Designed for 12h timeframe to capture swings with controlled frequency
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Designed for 4h timeframe to capture swings with controlled frequency
 # BTC/ETH focus: requires EMA alignment and volume confirmation to avoid SOL-only bias
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Stoploss: price closes above entry + 2.0 * ATR_at_entry
@@ -110,7 +110,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
             # Volume confirmation: current volume > 2.0x 24-period average
@@ -119,14 +119,14 @@ def generate_signals(prices):
             # Long entry: price breaks above R3 in uptrend (price > EMA34_1d)
             if vol_confirm and curr_close > curr_ema34_1d:
                 if curr_high > curr_r3:  # Break above R3
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
             # Short entry: price breaks below S3 in downtrend (price < EMA34_1d)
             elif vol_confirm and curr_close < curr_ema34_1d:
                 if curr_low < curr_s3:  # Break below S3
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
