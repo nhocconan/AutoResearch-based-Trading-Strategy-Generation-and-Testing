@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
-# Uses 1d timeframe for lower trade frequency (target: 30-100 trades over 4 years)
-# Camarilla R3/S3 levels provide strong support/resistance for breakouts
-# 1w EMA34 ensures alignment with weekly trend to avoid counter-trend trades
-# Volume confirmation > 1.5x average filters weak breakouts
-# Discrete position sizing (0.25) reduces fee churn
-# Designed to work in both bull and bear markets by following weekly trend
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla R3/S3 levels from daily pivot for institutional breakout signals
+# 1d EMA34 ensures alignment with higher timeframe trend (bull/bear agnostic)
+# Volume > 1.5x 20-period average confirms breakout strength
+# Discrete position sizing (0.25) and mean reversion exit at daily pivot point
+# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year)
+# Works in both bull and bear markets via trend filter + mean reversion logic
 
-name = "1d_Camarilla_R3S3_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,20 +26,19 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla pivot levels (using previous day's OHLC)
+    # Get 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
     high_1d = df_1d['high'].values
@@ -62,10 +61,10 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Align 1d indicators to 1d timeframe (no alignment needed as both are 1d)
-    pp_aligned = pp_shifted
-    r3_aligned = r3_shifted
-    s3_aligned = s3_shifted
+    # Align 1d indicators to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,12 +72,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Volume and 1w EMA34 warmup
+    start_idx = max(20, 34)  # Volume and 1d EMA34 warmup
     
     for i in range(start_idx, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any required data is NaN
         if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -89,7 +93,7 @@ def generate_signals(prices):
         curr_pp = pp_aligned[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
-        curr_ema34_1w = ema_34_1w_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
@@ -113,12 +117,12 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x 20-period average
             vol_confirmed = curr_volume > 1.5 * curr_vol_ma
             
-            # Long when price breaks above R3, 1w EMA34 up-trend, volume confirmed
-            if curr_high > curr_r3 and curr_close > curr_ema34_1w and vol_confirmed:
+            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, 1w EMA34 down-trend, volume confirmed
-            elif curr_low < curr_s3 and curr_close < curr_ema34_1w and vol_confirmed:
+            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
