@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume spike confirmation
-# Long when: price breaks above Donchian(20) high AND 12h EMA50 rising AND volume > 1.5x 20-period avg volume
-# Short when: price breaks below Donchian(20) low AND 12h EMA50 falling AND volume > 1.5x 20-period avg volume
-# Uses discrete sizing (0.25) to minimize fee churn. Donchian provides structure, EMA50 trend filter avoids counter-trend trades,
-# volume spike confirms institutional interest. Works in bull/bear via trend filter + breakout logic.
-# Timeframe: 4h (primary), HTF: 12h for EMA50 trend.
+# Hypothesis: 1h Volume-Weighted RSI with 4h Trend Filter and Session Hours
+# Long when: 4h EMA50 uptrend AND 1h VW-RSI < 30 (oversold) during 08-20 UTC
+# Short when: 4h EMA50 downtrend AND 1h VW-RSI > 70 (overbought) during 08-20 UTC
+# Uses volume-weighted RSI for better mean reversion signals, 4h EMA for trend filter,
+# session filter to reduce noise, and discrete sizing (0.20) to minimize fee churn.
+# Works in bull/bear via trend filter + mean reversion at extremes.
+# Timeframe: 1h (primary), HTF: 4h for trend.
 
-name = "4h_Donchian20_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_VolWeightedRSI_4hEMA50_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,80 +25,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 12h EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session hours (08-20 UTC) - prices.index is DatetimeIndex
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load HTF data ONCE before loop for 4h EMA50 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Donchian(20) on 4h data
-    period = 20
-    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # Calculate 1h Volume-Weighted RSI (14-period)
+    # Typical price = (H+L+C)/3
+    typical_price = (high + low + close) / 3.0
+    # Volume-weighted typical price
+    vwtp = typical_price * volume
     
-    # Calculate volume spike: volume > 1.5x 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate changes
+    delta = pd.Series(typical_price).diff().values
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    # Volume-weighted gains and losses
+    vt_gain = gain * volume
+    vt_loss = loss * volume
+    
+    # Smoothed volume-weighted RSI
+    avg_vt_gain = pd.Series(vt_gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_vt_loss = pd.Series(vt_loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_vt_loss != 0, avg_vt_gain / avg_vt_loss, 0)
+    vw_rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period, 50)  # warmup for Donchian and EMA
+    start_idx = 50  # warmup for EMA50 and RSI
     
     for i in range(start_idx, n):
-        # Skip if HTF EMA data not available
-        if np.isnan(ema_50_12h_aligned[i]):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
-        curr_ema_50_12h_prev = ema_50_12h_aligned[i-1] if i > 0 else curr_ema_50_12h
-        curr_volume_spike = volume_spike[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
+        curr_vw_rsi = vw_rsi[i]
         
         # Handle exits
         if position == 1:  # Long position
             # Exit conditions:
-            # 1. Price falls below Donchian(20) low
-            # 2. 12h EMA50 starts falling (trend change)
-            if (curr_low < curr_donchian_low or
-                curr_ema_50_12h < curr_ema_50_12h_prev):
+            # 1. 4h EMA50 turns down (trend change)
+            # 2. VW-RSI > 50 (mean reversion exit)
+            if (curr_close < curr_ema_50_4h or curr_vw_rsi > 50):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit conditions:
-            # 1. Price rises above Donchian(20) high
-            # 2. 12h EMA50 starts rising (trend change)
-            if (curr_high > curr_donchian_high or
-                curr_ema_50_12h > curr_ema_50_12h_prev):
+            # 1. 4h EMA50 turns up (trend change)
+            # 2. VW-RSI < 50 (mean reversion exit)
+            if (curr_close > curr_ema_50_4h or curr_vw_rsi < 50):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high AND 12h EMA50 rising AND volume spike
-            if (curr_high > curr_donchian_high and
-                curr_ema_50_12h > curr_ema_50_12h_prev and
-                curr_volume_spike):
-                signals[i] = 0.25
+            # Long entry: 4h UPTREND AND VW-RSI oversold (<30)
+            if (curr_close > curr_ema_50_4h) and (curr_vw_rsi < 30):
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below Donchian low AND 12h EMA50 falling AND volume spike
-            elif (curr_low < curr_donchian_low and
-                  curr_ema_50_12h < curr_ema_50_12h_prev and
-                  curr_volume_spike):
-                signals[i] = -0.25
+            # Short entry: 4h DOWNTREND AND VW-RSI overbought (>70)
+            elif (curr_close < curr_ema_50_4h) and (curr_vw_rsi > 70):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
