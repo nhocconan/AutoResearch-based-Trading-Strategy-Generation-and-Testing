@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA(34) trend filter + volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume > 2.0x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 4h (primary), HTF: 1d for EMA(34) trend filter.
-# Added ATR-based trailing stop (2.5x) to reduce overtrading and manage risk.
+# Hypothesis: 6h Ichimoku Cloud + TK Cross with 1d Weekly Pivot Direction Filter
+# Long when: price > Kumo (cloud), Tenkan > Kijun (TK cross bullish), AND price > 1d weekly pivot R1
+# Short when: price < Kumo (cloud), Tenkan < Kijun (TK cross bearish), AND price < 1d weekly pivot S1
+# Uses Ichimoku for trend/momentum, weekly pivots for institutional levels, discrete sizing (0.25) to minimize fee churn.
+# Works in bull/bear via cloud filter (trend) + pivot levels (mean reversion at extremes).
+# Timeframe: 6h (primary), HTF: 1d for weekly pivot calculation.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_1dWeeklyPivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,110 +19,134 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Load HTF data ONCE before loop
+    # Load HTF data ONCE before loop for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d weekly pivot points (using prior week's high/low/close)
+    # We need to resample 1d to weekly - but since we can't resample, we approximate:
+    # Use rolling 5-day window for weekly high/low/close (standard 5 trading days)
+    if len(df_1d) >= 5:
+        # Weekly high = max of last 5 daily highs
+        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
+        # Weekly low = min of last 5 daily lows
+        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
+        # Weekly close = last daily close in the 5-day window
+        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).values
+        
+        # Calculate weekly pivot points: P = (H+L+C)/3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # R1 = 2*P - L
+        weekly_r1 = 2 * weekly_pivot - weekly_low
+        # S1 = 2*P - H
+        weekly_s1 = 2 * weekly_pivot - weekly_high
+        
+        # Align to 6h timeframe
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+        weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    else:
+        # Not enough data for weekly calculation
+        weekly_pivot_aligned = np.full(n, np.nan)
+        weekly_r1_aligned = np.full(n, np.nan)
+        weekly_s1_aligned = np.full(n, np.nan)
     
-    # Calculate ATR for volatility filter (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
-    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2.0)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2.0)
+    
+    # Current Kumo (cloud) boundaries: we need Senkou A and B from 26 periods ago
+    # So current cloud is senkou_a[ i-26 ] and senkou_b[ i-26 ]
+    senkou_a_lagged = np.roll(senkou_a, 26)
+    senkou_b_lagged = np.roll(senkou_b, 26)
+    # First 26 values are invalid due to lag
+    senkou_a_lagged[:26] = np.nan
+    senkou_b_lagged[:26] = np.nan
+    
+    # Kumo top = max(senkou_a, senkou_b), Kumo bottom = min(senkou_a, senkou_b)
+    kumo_top = np.where(senkou_a_lagged > senkou_b_lagged, senkou_a_lagged, senkou_b_lagged)
+    kumo_bottom = np.where(senkou_a_lagged < senkou_b_lagged, senkou_a_lagged, senkou_b_lagged)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0  # for long positions
-    lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(100, 34)  # warmup for indicators
+    start_idx = max(52, 26)  # warmup for Ichimoku (need 52 for Senkou B)
     
     for i in range(start_idx, n):
+        # Skip if weekly pivot data not available
+        if np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]):
+            signals[i] = 0.0
+            continue
+            
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_1d = ema_34_1d_aligned[i]
-        curr_atr = atr[i]
-        
-        # Calculate Donchian channels (20-period)
-        if i >= 20:
-            donch_high = np.max(high[i-20:i])
-            donch_low = np.min(low[i-20:i])
-        else:
-            donch_high = curr_high
-            donch_low = curr_low
-        
-        # Volume confirmation: current volume > 2.0x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-        else:
-            vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        curr_tenkan = tenkan[i]
+        curr_kijun = kijun[i]
+        curr_kumo_top = kumo_top[i]
+        curr_kumo_bottom = kumo_bottom[i]
+        curr_weekly_r1 = weekly_r1_aligned[i]
+        curr_weekly_s1 = weekly_s1_aligned[i]
         
         # Handle exits
         if position == 1:  # Long position
-            # Update highest price since entry
-            if curr_close > highest_since_entry:
-                highest_since_entry = curr_close
-            
             # Exit conditions:
-            # 1. Price breaks below Donchian(20) low
-            # 2. Price < 1d EMA(34) (trend filter fails)
-            # 3. Trailing stop: price drops 2.5*ATR from highest since entry
-            if (curr_close < donch_low or
-                curr_close < curr_ema_1d or
-                curr_close < highest_since_entry - 2.5 * curr_atr):
+            # 1. Price falls below Kumo (cloud)
+            # 2. Tenkan crosses below Kijun (TK cross bearish)
+            # 3. Price falls below weekly S1 (mean reversion)
+            if (curr_close < curr_kumo_bottom or
+                curr_tenkan < curr_kijun or
+                curr_close < curr_weekly_s1):
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
             # Exit conditions:
-            # 1. Price breaks above Donchian(20) high
-            # 2. Price > 1d EMA(34) (trend filter fails)
-            # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
-            if (curr_close > donch_high or
-                curr_close > curr_ema_1d or
-                curr_close > lowest_since_entry + 2.5 * curr_atr):
+            # 1. Price rises above Kumo (cloud)
+            # 2. Tenkan crosses above Kijun (TK cross bullish)
+            # 3. Price rises above weekly R1 (mean reversion)
+            if (curr_close > curr_kumo_top or
+                curr_tenkan > curr_kijun or
+                curr_close > curr_weekly_r1):
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume spike
-            if (curr_close > donch_high and 
-                curr_close > curr_ema_1d and 
-                vol_spike):
+            # Bullish Ichimoku: price > Kumo AND Tenkan > Kijun
+            bullish_ichimoku = (curr_close > curr_kumo_top) and (curr_tenkan > curr_kijun)
+            # Bearish Ichimoku: price < Kumo AND Tenkan < Kijun
+            bearish_ichimoku = (curr_close < curr_kumo_bottom) and (curr_tenkan < curr_kijun)
+            
+            # Long entry: bullish Ichimoku AND price > weekly R1 (break above resistance)
+            if bullish_ichimoku and (curr_close > curr_weekly_r1):
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_close
-            # Short entry: price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume spike
-            elif (curr_close < donch_low and 
-                  curr_close < curr_ema_1d and 
-                  vol_spike):
+            # Short entry: bearish Ichimoku AND price < weekly S1 (break below support)
+            elif bearish_ichimoku and (curr_close < curr_weekly_s1):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
