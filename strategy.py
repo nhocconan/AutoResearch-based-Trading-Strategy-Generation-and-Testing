@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above R4 AND close > 1d EMA34 AND volume > 1.8x 20-bar avg
-# Short when price breaks below S4 AND close < 1d EMA34 AND volume > 1.8x 20-bar avg
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > 1w EMA34 AND volume > 1.8x 20-bar avg
+# Short when price breaks below S3 AND close < 1w EMA34 AND volume > 1.8x 20-bar avg
 # Exit when price retouches the central pivot (P) level
 # Uses discrete position sizing (0.25) to reduce fee drag while maintaining profitability.
-# Target: 80-150 total trades over 4 years (20-38/year) on 4h.
-# R4/S4 levels provide stronger breakout confirmation than R3/S3, reducing false signals.
-# 1d EMA34 filters counter-trend moves more effectively than shorter EMAs.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# R3/S3 levels provide strong breakout confirmation with moderate frequency.
+# 1w EMA34 filters counter-trend moves effectively in both bull and bear markets.
 # Volume confirmation ensures institutional participation, reducing whipsaws.
 # Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume).
 
-name = "4h_Camarilla_R4S4_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,35 +28,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA34 trend filter and Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from previous day's OHLC
+    # Calculate Camarilla levels from previous week's OHLC
     # Camarilla: P = (H + L + C) / 3
-    # R4 = C + (H - L) * 1.1
-    # S4 = C - (H - L) * 1.1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # R3 = C + (H - L) * 1.1/4
+    # S3 = C - (H - L) * 1.1/4
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot point
-    p = (high_1d + low_1d + close_1d) / 3.0
-    # R4 and S4 levels
-    r4 = close_1d + (high_1d - low_1d) * 1.1
-    s4 = close_1d - (high_1d - low_1d) * 1.1
+    p = (high_1w + low_1w + close_1w) / 3.0
+    # R3 and S3 levels
+    r3 = close_1w + (high_1w - low_1w) * 1.1 / 4
+    s3 = close_1w - (high_1w - low_1w) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    p_aligned = align_htf_to_ltf(prices, df_1d, p)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 12h timeframe (using previous week's levels)
+    p_aligned = align_htf_to_ltf(prices, df_1w, p)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -70,17 +70,17 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(p_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(p_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        ema_34 = ema_34_1d_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
         curr_p = p_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_close = close[i]
         
         # Handle exits and position management
@@ -101,12 +101,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R4 AND close > 1d EMA34 AND volume confirmation
-            if curr_close > curr_r4 and close[i] > ema_34 and vol_conf:
+            # Long when price breaks above R3 AND close > 1w EMA34 AND volume confirmation
+            if curr_close > curr_r3 and close[i] > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S4 AND close < 1d EMA34 AND volume confirmation
-            elif curr_close < curr_s4 and close[i] < ema_34 and vol_conf:
+            # Short when price breaks below S3 AND close < 1w EMA34 AND volume confirmation
+            elif curr_close < curr_s3 and close[i] < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
