@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Uses weekly EMA50 for strong trend filter to reduce whipsaw in ranging markets
-# Camarilla R3/S3 from previous weekly range act as breakout levels
-# Volume spike confirms breakout validity with 2.0x 20-period average
-# ATR-based stoploss (2x ATR) manages risk
-# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Works in bull markets via trend-following breaks and in bear markets via avoidance of counter-trend trades
+# Hypothesis: 4h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trends via smoothed median prices
+# In bull markets: price above alligator lines with upward alignment = long
+# In bear markets: price below alligator lines with downward alignment = short
+# Volume confirmation filters weak breakouts
+# 1d EMA50 ensures we only trade with the higher timeframe trend
+# Designed for moderate trade frequency (target: 100-200 total over 4 years) to balance edge and fees
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Williams_Alligator_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,99 +26,87 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR for stoploss (using 14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
-    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Williams Alligator: three smoothed median price lines
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
+    
+    # Jaw: 13-period SMMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
+    
+    # Teeth: 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
+    
+    # Lips: 5-period SMMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
+    
+    # Handle NaN values from shifting
+    jaw = np.where(np.isnan(jaw), median_price, jaw)
+    teeth = np.where(np.isnan(teeth), median_price, teeth)
+    lips = np.where(np.isnan(lips), median_price, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA
+    start_idx = 20  # warmup for Alligator lines
     
     for i in range(start_idx, n):
-        # Need at least 1 previous bar to calculate Camarilla levels
-        if i < 1:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Camarilla levels from previous bar's weekly range
-        # Use weekly high/low from 1w data
-        idx_1w = i // (24 * 7)  # approximate weekly bar index (7 12h bars per week)
-        if idx_1w < 1 or idx_1w >= len(df_1w):
-            signals[i] = 0.0
-            continue
-            
-        # Get previous completed weekly bar for Camarilla calculation
-        weekly_high = df_1w['high'].values[idx_1w-1]
-        weekly_low = df_1w['low'].values[idx_1w-1]
-        weekly_close = df_1w['close'].values[idx_1w-1]
-        weekly_range = weekly_high - weekly_low
-        
-        if weekly_range <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla levels from weekly range
-        R3 = weekly_close + weekly_range * 1.1 / 4
-        S3 = weekly_close - weekly_range * 1.1 / 4
-        
         curr_close = close[i]
-        curr_ema_1w = ema_50_1w_aligned[i]
-        curr_atr = atr[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_confirmed = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # Handle exits and stoploss
+        # Alligator alignment conditions
+        # Bullish alignment: Lips > Teeth > Jaw (green)
+        bullish_aligned = curr_lips > curr_teeth and curr_teeth > curr_jaw
+        # Bearish alignment: Lips < Teeth < Jaw (red)
+        bearish_aligned = curr_lips < curr_teeth and curr_teeth < curr_jaw
+        
+        # Handle exits
         if position == 1:  # Long position
-            # Stoploss: 2 * ATR below entry
-            stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: price below S3 OR price below 1w EMA50 OR stoploss hit
-            if curr_close < S3 or curr_close < curr_ema_1w or curr_close < stop_price:
+            # Exit: loss of bullish alignment OR price below 1d EMA50
+            if not bullish_aligned or curr_close < curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Stoploss: 2 * ATR above entry
-            stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: price above R3 OR price above 1w EMA50 OR stoploss hit
-            if curr_close > R3 or curr_close > curr_ema_1w or curr_close > stop_price:
+            # Exit: loss of bearish alignment OR price above 1d EMA50
+            if not bearish_aligned or curr_close > curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > 1w EMA50 AND volume spike
-            if curr_close > R3 and curr_close > curr_ema_1w and vol_spike:
+            # Long entry: bullish alignment AND price > 1d EMA50 AND volume confirmation
+            if bullish_aligned and curr_close > curr_ema_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-            # Short entry: price breaks below S3 AND price < 1w EMA50 AND volume spike
-            elif curr_close < S3 and curr_close < curr_ema_1w and vol_spike:
+            # Short entry: bearish alignment AND price < 1d EMA50 AND volume confirmation
+            elif bearish_aligned and curr_close < curr_ema_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
             else:
                 signals[i] = 0.0
     
