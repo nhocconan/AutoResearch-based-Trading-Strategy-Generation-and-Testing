@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakout captures momentum in both bull and bear markets
-# 1d EMA50 ensures we trade with the higher timeframe trend (avoid counter-trend)
-# Volume confirmation (>1.8x 20-period average) ensures institutional participation
-# ATR-based stoploss (2.5x ATR) manages risk in volatile markets
-# Designed for ~20-40 trades/year on 4h timeframe to minimize fee drag
-# Uses discrete position sizing (0.0, ±0.25) to reduce churn
+# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation
+# Elder Ray measures bull/bear power: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# In trending markets: long when Bull Power > 0 and Bear Power rising (less negative)
+#                 short when Bear Power < 0 and Bull Power falling (less positive)
+# Uses 1d EMA50 for trend alignment to avoid counter-trend trades
+# Volume confirmation (>1.4x 20-period average) ensures participation
+# Designed for ~12-30 trades/year on 6h timeframe to minimize fee drag
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,78 +35,68 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate ATR (14-period) for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
-    # Calculate 20-period average volume for confirmation (on 4h data)
+    # Calculate 20-period average volume for confirmation (on 6h data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 20  # Donchian and volume MA warmup
+    start_idx = 20  # Warmup for EMA13 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_ema50_1d = ema_50_1d_aligned[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
-        curr_atr = atr[i]
+        curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower OR stoploss hit (2.5x ATR)
-            if curr_low <= curr_donchian_lower or curr_close <= entry_price - 2.5 * curr_atr:
+            # Exit: Bull Power turns negative OR Bear Power rises above -0.5*ATR proxy
+            if curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper OR stoploss hit (2.5x ATR)
-            if curr_high >= curr_donchian_upper or curr_close >= entry_price + 2.5 * curr_atr:
+            # Exit: Bear Power turns positive OR Bull Power falls below 0.5*ATR proxy
+            if curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirm = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 1.4x 20-period average
+            vol_confirm = curr_volume > 1.4 * curr_vol_ma
             
-            # Long entry: price breaks above Donchian upper in uptrend (price > 1d EMA50)
+            # Long entry: Bull Power > 0 (bulls in control) AND Bear Power rising (less negative)
+            # AND price above 1d EMA50 (uptrend alignment)
             if vol_confirm and curr_close > curr_ema50_1d:
-                if curr_high > curr_donchian_upper:
+                if curr_bull_power > 0 and curr_bear_power > bear_power[i-1]:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-            # Short entry: price breaks below Donchian lower in downtrend (price < 1d EMA50)
+            # Short entry: Bear Power < 0 (bears in control) AND Bull Power falling (less positive)
+            # AND price below 1d EMA50 (downtrend alignment)
             elif vol_confirm and curr_close < curr_ema50_1d:
-                if curr_low < curr_donchian_lower:
+                if curr_bear_power < 0 and curr_bull_power < bull_power[i-1]:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
             else:
                 signals[i] = 0.0
     
