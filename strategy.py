@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
-# Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
-# Exit when price crosses opposite Camarilla level (S3 for longs, R3 for shorts)
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R1 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when price breaks below S1 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit when price crosses opposite Camarilla level (S1 for longs, R1 for shorts)
 # Uses discrete position sizing (0.25) to minimize fee churn while capturing moves.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
-# Camarilla R3/S3 are strong intraday levels with good breakout reliability.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Camarilla R1/S1 are strong intraday levels with good breakout reliability.
 # 1d EMA34 filters counter-trend moves, volume spike ensures institutional participation.
 # Works in bull markets (trend continuation via breakouts) and bear markets (mean reversion within trend via exits).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 12h timeframe
+    # Align EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 1d data for Camarilla pivot levels (using prior bar's OHLC)
@@ -53,18 +53,18 @@ def generate_signals(prices):
     prior_low[0] = np.nan
     prior_close[0] = np.nan
     
-    # Align prior bar OHLC to 12h timeframe
+    # Align prior bar OHLC to 4h timeframe
     prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
     prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
     prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close)
     
-    # Calculate Camarilla levels for each 12h bar based on prior bar's OHLC
-    # Camarilla R3 = Close + (High - Low) * 1.1/4
-    # Camarilla S3 = Close - (High - Low) * 1.1/4
-    # We use R3/S3 for entries/exits as they are strong intraday levels
+    # Calculate Camarilla levels for each 4h bar based on prior bar's OHLC
+    # Camarilla R1 = Close + (High - Low) * 1.1/12
+    # Camarilla S1 = Close - (High - Low) * 1.1/12
+    # We use R1/S1 for entries/exits as they are strong intraday levels
     range_hl = prior_high_aligned - prior_low_aligned
-    r3 = prior_close_aligned + range_hl * 1.1 / 4
-    s3 = prior_close_aligned - range_hl * 1.1 / 4
+    r1 = prior_close_aligned + range_hl * 1.1 / 12
+    s1 = prior_close_aligned - range_hl * 1.1 / 12
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -78,7 +78,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -88,33 +88,33 @@ def generate_signals(prices):
         ema_34 = ema_34_1d_aligned[i]
         
         # Camarilla levels
-        r3_level = r3[i]
-        s3_level = s3[i]
+        r1_level = r1[i]
+        s1_level = s1[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price crosses below S3 (mean reversion to median)
-            if curr_close < s3_level:
+            # Exit: price crosses below S1 (mean reversion to median)
+            if curr_close < s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (mean reversion to median)
-            if curr_close > r3_level:
+            # Exit: price crosses above R1 (mean reversion to median)
+            if curr_close > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R3 AND price > 1d EMA34 AND volume confirmation
-            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
+            # Long when price breaks above R1 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r1_level and curr_close > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3 AND price < 1d EMA34 AND volume confirmation
-            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
+            # Short when price breaks below S1 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s1_level and curr_close < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
