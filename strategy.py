@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume spike and 1d trend filter
-# Long when price breaks above R3 level with 4h volume > 2x 20-period average and 1d close > 1d EMA50
-# Short when price breaks below S3 level with 4h volume > 2x 20-period average and 1d close < 1d EMA50
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades, 4h volume for confirmation
-# Camarilla levels provide precise intraday support/resistance
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag on 1h timeframe
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA13) in bullish regime (price > 1d EMA34) with volume spike
+# Short when Bear Power < 0 (close < EMA13) AND Bull Power < 0 (close < EMA13) in bearish regime (price < 1d EMA34) with volume spike
+# Uses 1d EMA34 for trend filter to avoid counter-trend whipsaws
+# Volume confirmation ensures moves have institutional participation
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 
-name = "1h_Camarilla_R3S3_4hVolumeSpike_1dTrend_Filter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,105 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (precompute hour array)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h volume MA(20)
-    vol_4h = df_4h['volume'].values
-    vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    
-    # Load 1d data ONCE for trend filter
+    # Load HTF data ONCE before loop for daily calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
+    # Calculate 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily EMA34 to 6h timeframe (completed 1d bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Elder Ray components: EMA13 for reference
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = Close - EMA13
+    bull_power = close - ema13
+    # Bear Power = Close - EMA13 (same calculation, interpreted differently)
+    bear_power = close - ema13
+    
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for EMA and indicators
+    start_idx = max(40, 20)  # warmup for EMA34 and EMA13
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(vol_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(ema13[i]):
             signals[i] = 0.0
             continue
             
-        # Calculate Camarilla levels for today using previous day's OHLC
-        # Need to get previous day's OHLC - we'll approximate using rolling window
-        # For 1h timeframe, we need to look back 24 hours for previous day
-        if i < 24:
-            continue
-            
-        # Get previous day's OHLC (24 hours ago to 1 hour ago)
-        prev_high = np.max(high[i-24:i])
-        prev_low = np.min(low[i-24:i])
-        prev_close = close[i-1]
+        curr_close = close[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_ema34 = ema34_aligned[i]
+        curr_volume_confirm = volume_confirm[i]
         
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla R3 and S3 levels
-        r3 = prev_close + (range_val * 1.1 / 4)
-        s3 = prev_close - (range_val * 1.1 / 4)
-        
-        # Volume confirmation: 4h volume > 2x 20-period average
-        volume_confirm = volume[i] > (2.0 * vol_4h_aligned[i])
-        
-        # Trend filter: 1d close > EMA50 for long, < EMA50 for short
-        trend_long = close[i] > ema_50_1d_aligned[i]
-        trend_short = close[i] < ema_50_1d_aligned[i]
+        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
+        is_bullish_regime = curr_close > curr_ema34
+        is_bearish_regime = curr_close < curr_ema34
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 with volume confirmation and uptrend
-            if close[i] > r3 and volume_confirm and trend_long:
-                signals[i] = 0.20
-                position = 1
-            # Short: price breaks below S3 with volume confirmation and downtrend
-            elif close[i] < s3 and volume_confirm and trend_short:
-                signals[i] = -0.20
-                position = -1
+            # Only trade with volume confirmation
+            if curr_volume_confirm:
+                # Bullish entry: Bull Power > 0 AND Bear Power < 0 in bullish regime
+                # (close > EMA13 AND close < EMA13 is impossible, so we use:
+                # Bull Power > 0 means close > EMA13)
+                if is_bullish_regime and curr_bull_power > 0:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish entry: Bull Power < 0 AND Bear Power < 0 in bearish regime
+                # (close < EMA13 means both powers negative)
+                elif is_bearish_regime and curr_bull_power < 0:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when price returns to Camarilla H3 level (profit target) or breaks below L3 (stop)
-            # Calculate H3 and L3 for exit
-            h3 = prev_close + (range_val * 1.1 / 2)
-            l3 = prev_close - (range_val * 1.1 / 2)
-            
-            if close[i] <= h3 or close[i] < l3:
+            # Exit when: Bull Power turns negative (close < EMA13) OR regime changes to bearish
+            if curr_bull_power <= 0 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when price returns to Camarilla L3 level (profit target) or breaks above H3 (stop)
-            h3 = prev_close + (range_val * 1.1 / 2)
-            l3 = prev_close - (range_val * 1.1 / 2)
-            
-            if close[i] >= l3 or close[i] > h3:
+            # Exit when: Bull Power turns positive (close > EMA13) OR regime changes to bullish
+            if curr_bull_power >= 0 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
