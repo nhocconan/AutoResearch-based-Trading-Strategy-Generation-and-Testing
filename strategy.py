@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above recent Williams bullish fractal AND price > 12h EMA50 AND volume > 1.5x 20-period average
-# Short when price breaks below recent Williams bearish fractal AND price < 12h EMA50 AND volume > 1.5x 20-period average
+# Hypothesis: 4h TRIX + volume spike + choppiness regime filter
+# Long when TRIX crosses above zero AND chop > 61.8 (ranging) AND volume > 1.5x 20-period average
+# Short when TRIX crosses below zero AND chop > 61.8 (ranging) AND volume > 1.5x 20-period average
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 50-150 total trades over 4 years on 6h timeframe (~12-37/year)
-# Williams fractals require 2-bar confirmation delay for proper alignment
-# Works in bull markets via long breakouts with 12h uptrend
-# Works in bear markets via short breakdowns with 12h downtrend
+# Target: 25-35 trades/year on 4h timeframe (~100-140 total over 4 years)
+# TRIX is effective in ranging markets (chop > 61.8) which suits 2025 bear/range conditions
+# Volume confirmation reduces false signals
+# Works in both bull and bear via mean reversion in ranging regimes
 
-name = "6h_Williams_Fractal_Breakout_12hEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_TRIX_ZeroCross_ChopRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,14 +28,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter (used as regime filter: price > EMA34 = bull, < EMA34 = bear)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -45,52 +45,55 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Williams Fractals on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate TRIX (15,9,9) - triple exponential moving average
+    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = np.where(ema3[:-1] != 0, (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100, 0)
+    trix = np.concatenate([[0], trix])  # align length
     
-    # Williams Fractals: 5-bar pattern
-    # Bullish fractal: low[n-2] < low[n-1] and low[n] < low[n-1] and low[n+1] < low[n-1] and low[n+2] < low[n-1]
-    # Bearish fractal: high[n-2] > high[n-1] and high[n] > high[n-1] and high[n+1] > high[n-1] and high[n+2] > high[n-1]
-    n_12h = len(high_12h)
-    bullish_fractal = np.full(n_12h, np.nan)
-    bearish_fractal = np.full(n_12h, np.nan)
+    # Calculate TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    for i in range(2, n_12h - 2):
-        # Bullish fractal: lowest low in the middle
-        if (low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i+1] and 
-            low_12h[i-1] < low_12h[i-2] and low_12h[i+1] < low_12h[i+2]):
-            bullish_fractal[i] = low_12h[i]
-        # Bearish fractal: highest high in the middle
-        if (high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i+1] and 
-            high_12h[i-1] > high_12h[i-2] and high_12h[i+1] > high_12h[i+2]):
-            bearish_fractal[i] = high_12h[i]
+    # Calculate TRIX histogram (TRIX - signal)
+    trix_hist = trix - trix_signal
     
-    # Align Williams Fractals to 6h timeframe with 2-bar confirmation delay
-    # Williams fractals need 2 extra 12h bars after the center bar for confirmation
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
+    # Calculate Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(ATR(1)) / (nperiod * log(nperiod))) / log10(nperiod)
+    # Simplified: CHOP = 100 * log10(sum(TR(1)) / (ATR(14) * 14)) / log10(14)
+    atr_1 = tr  # true range
+    sum_tr_14 = np.zeros(n)
+    for i in range(14, n):
+        sum_tr_14[i] = np.sum(atr_1[i-13:i+1])
+    sum_tr_14[:14] = np.nan
+    
+    atr_14 = atr  # already calculated
+    chop = np.zeros(n)
+    for i in range(14, n):
+        if atr_14[i] > 0 and sum_tr_14[i] > 0:
+            chop[i] = 100 * np.log10(sum_tr_14[i] / (atr_14[i] * 14)) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral
+    chop[:14] = 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(100, 60, 60)  # warmup for EMA and ATR
+    start_idx = max(100, 34, 14)  # warmup
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_12h = ema_50_12h_aligned[i]
         curr_atr = atr[i]
-        curr_bullish = bullish_fractal_aligned[i]
-        curr_bearish = bearish_fractal_aligned[i]
-        
-        # Skip if fractal levels are not available
-        if np.isnan(curr_bullish) or np.isnan(curr_bearish):
-            signals[i] = 0.0
-            continue
+        curr_trix = trix[i]
+        curr_trix_signal = trix_signal[i]
+        curr_trix_hist = trix_hist[i]
+        curr_chop = chop[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
         
         # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
@@ -105,8 +108,8 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             # Trailing stop: 2.0 * ATR below highest high
             stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop
-            if curr_close < stop_price:
+            # Exit conditions: price below trailing stop OR TRIX crosses below zero
+            if curr_close < stop_price or curr_trix_hist < 0:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -118,8 +121,8 @@ def generate_signals(prices):
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             # Trailing stop: 2.0 * ATR above lowest low
             stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop
-            if curr_close > stop_price:
+            # Exit conditions: price above trailing stop OR TRIX crosses above zero
+            if curr_close > stop_price or curr_trix_hist > 0:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -127,13 +130,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above recent Williams bullish fractal AND price > 12h EMA50 AND volume spike
-            if curr_close > curr_bullish and curr_close > curr_ema_12h and vol_spike:
+            # Long entry: TRIX crosses above zero AND chop > 61.8 (ranging) AND volume spike
+            # In ranging markets, we expect mean reversion - long when TRIX turns up from negative
+            if curr_trix_hist > 0 and curr_trix_hist <= 0.1 and curr_chop > 61.8 and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: price breaks below recent Williams bearish fractal AND price < 12h EMA50 AND volume spike
-            elif curr_close < curr_bearish and curr_close < curr_ema_12h and vol_spike:
+            # Short entry: TRIX crosses below zero AND chop > 61.8 (ranging) AND volume spike
+            # In ranging markets, we expect mean reversion - short when TRIX turns down from positive
+            elif curr_trix_hist < 0 and curr_trix_hist >= -0.1 and curr_chop > 61.8 and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
