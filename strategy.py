@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme Reversal + 12h EMA50 Trend Filter + Volume Spike
-# Long when Williams %R(14) < -80 (oversold) AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short when Williams %R(14) > -20 (overbought) AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when Williams %R returns to -50 level (mean reversion)
-# Williams %R identifies exhaustion points, 12h EMA50 filters counter-trend moves,
-# volume confirmation ensures reversal strength. Works in ranging markets with clear reversals.
-# Target: 12-37 trades/year on 6h timeframe.
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR stoploss
+# Long when price breaks above Donchian upper (20-bar high) AND volume > 1.5x 20-bar avg
+# Short when price breaks below Donchian lower (20-bar low) AND volume > 1.5x 20-bar avg
+# Exit on opposite Donchian breakout or ATR(14) trailing stop (2.0x ATR)
+# Uses discrete position sizing (0.30) to balance return and drawdown.
+# Donchian channels provide clear trend structure, volume confirmation filters weak breakouts,
+# ATR stoploss manages risk in volatile markets. This pattern has worked on SOLUSDT and can extend to BTC/ETH with proper filtering.
 
-name = "6h_WilliamsRExtreme_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeConfirm_ATRTrail_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,78 +25,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R calculation and EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Williams %R(14) on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
-    # Replace division by zero with -50 (neutral)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
+    
+    # ATR(14) for trailing stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_high = 0.0
+    lowest_low = 0.0
     
-    start_idx = max(20, 50)  # volume MA and Williams %R/EMA50 warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_williams_r = williams_r_aligned[i]
-        curr_ema50 = ema_50_12h_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_close = close[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_atr = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R returns to -50 level (mean reversion)
-            if curr_williams_r >= -50:
+            # Update highest high for trailing stop
+            highest_high = max(highest_high, curr_high)
+            # Exit conditions: opposite Donchian breakout OR ATR trailing stop
+            if curr_close < curr_donchian_low or curr_close < (highest_high - 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                highest_high = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to -50 level (mean reversion)
-            if curr_williams_r <= -50:
+            # Update lowest low for trailing stop
+            lowest_low = min(lowest_low, curr_low)
+            # Exit conditions: opposite Donchian breakout OR ATR trailing stop
+            if curr_close > curr_donchian_high or curr_close > (lowest_low + 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                lowest_low = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when Williams %R < -80 (oversold) AND price > 12h EMA50 AND volume confirmation
-            if curr_williams_r < -80 and curr_close > curr_ema50 and vol_conf:
-                signals[i] = 0.25
+            # Long when price breaks above Donchian upper AND volume confirmation
+            if curr_close > curr_donchian_high and vol_conf:
+                signals[i] = 0.30
                 position = 1
-            # Short when Williams %R > -20 (overbought) AND price < 12h EMA50 AND volume confirmation
-            elif curr_williams_r > -20 and curr_close < curr_ema50 and vol_conf:
-                signals[i] = -0.25
+                entry_price = curr_close
+                highest_high = curr_high
+            # Short when price breaks below Donchian lower AND volume confirmation
+            elif curr_close < curr_donchian_low and vol_conf:
+                signals[i] = -0.30
                 position = -1
+                entry_price = curr_close
+                lowest_low = curr_low
             else:
                 signals[i] = 0.0
     
