@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price > Donchian(20) high AND 1d EMA34 uptrend AND volume spike
-# Short when price < Donchian(20) low AND 1d EMA34 downtrend AND volume spike
-# Exit on opposite Donchian(10) break or regime change
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-# Works in bull/bear by following 1d trend - avoids whipsaw in sideways markets
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR stoploss
+# Long when price breaks above Donchian upper band AND price > 1d EMA34 AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower band AND price < 1d EMA34 AND volume > 1.5x 20-period average
+# Exit when price touches Donchian middle band (10-period average of high/low) or ATR-based stoploss
+# Works in both bull/bear by following 1d trend. Target: 75-200 total trades over 4 years (19-50/year).
 
 name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
@@ -35,66 +34,72 @@ def generate_signals(prices):
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Donchian Channel (20) on 4h data
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    period_dc = 20
+    highest_high = pd.Series(high).rolling(window=period_dc, min_periods=period_dc).max().values
+    lowest_low = pd.Series(low).rolling(window=period_dc, min_periods=period_dc).min().values
+    upper_band = highest_high
+    lower_band = lowest_low
+    middle_band = (highest_high + lowest_low) / 2  # Donchian middle (10-period avg of high/low)
     
-    # Donchian Channel (10) for exit
-    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # ATR(14) for stoploss
+    period_atr = 14
+    tr1 = pd.Series(high).rolling(window=2).max().values - pd.Series(low).rolling(window=2).min().values
+    tr2 = abs(pd.Series(high).rolling(window=2).max().values - pd.Series(close).shift(1).values)
+    tr3 = abs(pd.Series(low).rolling(window=2).min().values - pd.Series(close).shift(1).values)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=period_atr, min_periods=period_atr).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(20, 34, 20)  # warmup for Donchian(20), EMA34, volume MA
+    start_idx = max(period_dc, 34, period_atr, 20)  # warmup
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_upper = upper_band[i]
+        curr_lower = lower_band[i]
+        curr_middle = middle_band[i]
+        curr_ema34 = ema34_aligned[i]
+        curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
-        
-        # Donchian levels
-        upper_20 = highest_high_20[i]
-        lower_20 = lowest_low_20[i]
-        upper_10 = highest_high_10[i]
-        lower_10 = lowest_low_10[i]
-        
-        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
-        is_bullish_regime = curr_close > ema34_aligned[i]
-        is_bearish_regime = curr_close < ema34_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: price > Donchian(20) high AND bullish regime
-                if curr_close > upper_20 and is_bullish_regime:
+                # Bullish entry: price breaks above upper band AND price > 1d EMA34
+                if curr_close > curr_upper and curr_close > curr_ema34:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price < Donchian(20) low AND bearish regime
-                elif curr_close < lower_20 and is_bearish_regime:
+                    entry_price = curr_close
+                # Bearish entry: price breaks below lower band AND price < 1d EMA34
+                elif curr_close < curr_lower and curr_close < curr_ema34:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price < Donchian(10) low OR regime changes to bearish
-            if (curr_close < lower_10) or (not is_bullish_regime):
+            # Exit when: price touches middle band OR ATR stoploss hit OR price < 1d EMA34
+            if (curr_low <= curr_middle) or (curr_close <= entry_price - 2.0 * curr_atr) or (curr_close < curr_ema34):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price > Donchian(10) high OR regime changes to bullish
-            if (curr_close > upper_10) or (not is_bearish_regime):
+            # Exit when: price touches middle band OR ATR stoploss hit OR price > 1d EMA34
+            if (curr_high >= curr_middle) or (curr_close >= entry_price + 2.0 * curr_atr) or (curr_close > curr_ema34):
                 signals[i] = 0.0
                 position = 0
             else:
