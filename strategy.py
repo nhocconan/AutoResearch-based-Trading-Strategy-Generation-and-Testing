@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA50 trend filter and volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trending vs ranging markets
-# In trending markets (JAW > TEETH > LIPS for uptrend, reverse for downtrend), we trade breakouts
+# Hypothesis: 12h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries
 # 1d EMA50 provides strong HTF trend filter to avoid counter-trend trades
-# Volume confirmation (1.5x 20-period average) ensures institutional participation
-# Designed for low trade frequency (target: 12-37 trades/year) on 6h timeframe to minimize fee drag
-# Works in bull markets via long signals when Alligator aligned up + price > TEETH + HTF uptrend
-# Works in bear markets via short signals when Alligator aligned down + price < TEETH + HTF downtrend
-# Alligator's smoothed moving averages reduce whipsaw in choppy markets
+# Volume spike (1.8x 20-period average) confirms participation at extreme levels
+# Fixed profit target at 2.0x ATR and stoploss at 1.5x ATR for asymmetric risk/reward
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag on 12h timeframe
+# Works in bull markets via mean reversion longs during pullbacks in uptrend
+# Works in bear markets via mean reversion shorts during bounces in downtrend
+# Williams %R is effective in ranging markets which dominate BTC/ETH price action
 
-name = "6h_Williams_Alligator_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +29,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
@@ -37,25 +37,15 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator: Smoothed Moving Average (SMA-like but with different smoothing)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # SMMA formula: SMMA_t = (SMMA_{t-1} * (period-1) + close_t) / period
-    def smma(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        result = np.full_like(data, np.nan)
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Calculate ATR for stoploss (using 14-period)
+    # Calculate ATR for stops and targets (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -66,74 +56,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
-    start_idx = 50  # warmup for Alligator and EMA
+    start_idx = 50  # warmup for EMA and Williams %R
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_jaw = jaw[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
         curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume spike confirmation: current volume > 1.8x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_confirmed = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # Alligator alignment conditions
-        # Bullish alignment: JAW > TEETH > LIPS (alligator mouth opening up)
-        # Bearish alignment: JAW < TEETH < LIPS (alligator mouth opening down)
-        bullish_aligned = curr_jaw > curr_teeth and curr_teeth > curr_lips
-        bearish_aligned = curr_jaw < curr_teeth and curr_teeth < curr_lips
-        
-        # Handle exits and stoploss
+        # Handle exits and position management
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            # Trailing stop: 2.0 * ATR below highest high
-            stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR Alligator loses bullish alignment
-            if curr_close < stop_price or not bullish_aligned:
+            # Exit conditions: Williams %R > -20 (overbought) OR price hits 2.0* ATR target
+            if curr_williams_r > -20 or curr_close >= entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
-            # Trailing stop: 2.0 * ATR above lowest low
-            stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR Alligator loses bearish alignment
-            if curr_close > stop_price or not bearish_aligned:
+            # Exit conditions: Williams %R < -80 (oversold) OR price hits 2.0* ATR target
+            if curr_williams_r < -80 or curr_close <= entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-                lowest_low_since_entry = 0.0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Bullish Alligator alignment AND price > TEETH AND price > 1d EMA50 AND volume confirmed
-            if bullish_aligned and curr_close > curr_teeth and curr_close > curr_ema_1d and vol_confirmed:
+            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
+            if curr_williams_r < -80 and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                highest_high_since_entry = curr_high
-            # Short entry: Bearish Alligator alignment AND price < TEETH AND price < 1d EMA50 AND volume confirmed
-            elif bearish_aligned and curr_close < curr_teeth and curr_close < curr_ema_1d and vol_confirmed:
+            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
+            elif curr_williams_r > -20 and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                lowest_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
