@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX regime filter and volume confirmation
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
 # Long when price breaks above Donchian upper channel in bullish regime (ADX>25) with volume spike
 # Short when price breaks below Donchian lower channel in bearish regime (ADX>25) with volume spike
-# Uses 1w ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
+# Uses 1d ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
 # Volume confirmation ensures breakouts have institutional participation
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 12h timeframe
 
-name = "1d_Donchian20_1wADX25_VolumeSpike_Regime_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dADX25_VolumeSpike_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for weekly calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load HTF data ONCE before loop for daily calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w ADX(14) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # first value NaN
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -58,22 +58,22 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1]/period) + data[i]
         return result
     
-    atr_1w = wilders_smooth(tr, 14)
+    atr_1d = wilders_smooth(tr, 14)
     dm_plus_smooth = wilders_smooth(dm_plus, 14)
     dm_minus_smooth = wilders_smooth(dm_minus, 14)
     
     # DI+ and DI-
-    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
-    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
     
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1w = wilders_smooth(dx, 14)
+    adx_1d = wilders_smooth(dx, 14)
     
-    # Align weekly ADX to 1d timeframe (completed 1w bar only)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align daily ADX to 12h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Donchian(20) channels on 1d
+    # Donchian(20) channels on 12h
     donchian_window = 20
     upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
