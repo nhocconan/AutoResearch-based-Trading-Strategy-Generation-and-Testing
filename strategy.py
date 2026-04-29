@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 Breakout + 4h EMA50 Trend + Volume Spike
-# Long when price breaks above Camarilla R3 level AND price > 4h EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below Camarilla S3 level AND price < 4h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when price reverts to Camarilla Pivot level (mean reversion)
-# Uses discrete position sizing (0.20) to reduce fee drag. Target: 15-37 trades/year on 1h timeframe.
-# Camarilla levels provide precise support/resistance, 4h EMA50 filters counter-trend moves,
-# volume confirmation ensures breakout strength. Designed to work in both bull and bear markets
-# via trend filter and mean-reversion exits. Session filter (08-20 UTC) reduces noise.
+# Hypothesis: 6h Elder Ray + 12h EMA50 Trend + Volume Spike
+# Long when Bull Power > 0 AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
+# Short when Bear Power < 0 AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
+# Exit when power reverses sign (Bull Power <= 0 for long, Bear Power >= 0 for short)
+# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 6h timeframe.
+# Elder Ray measures bull/bear power via EMA13, 12h EMA50 filters trend direction,
+# volume confirmation ensures breakout strength. Works in bull/bear via trend filter.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_12hEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,50 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 4h data
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA(50) on 12h data
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    prev_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_close = df_1d['close'].shift(1).values # Previous day close
-    
-    # Handle first bar where shift creates NaN
-    if len(prev_high) > 0:
-        prev_high[0] = df_1d['high'].iloc[0]
-        prev_low[0] = df_1d['low'].iloc[0]
-        prev_close[0] = df_1d['close'].iloc[0]
-    
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_range = prev_high - prev_low
-    camarilla_R3 = prev_close + camarilla_range * 1.1 / 4.0
-    camarilla_S3 = prev_close - camarilla_range * 1.1 / 4.0
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Calculate Elder Ray on 6h data using EMA13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -78,48 +50,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA and EMA50 warmup
+    start_idx = max(20, 13)  # volume MA and EMA13 warmup
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
-            np.isnan(camarilla_S3_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_ema50 = ema_50_4h_aligned[i]
-        curr_R3 = camarilla_R3_aligned[i]
-        curr_S3 = camarilla_S3_aligned[i]
-        curr_pivot = camarilla_pivot_aligned[i]
+        curr_ema50 = ema_50_12h_aligned[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
         curr_close = close[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price reverts to Camarilla Pivot level (mean reversion)
-            if curr_close <= curr_pivot:
+            # Exit: Bull Power <= 0 (bulls losing control)
+            if curr_bull <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reverts to Camarilla Pivot level (mean reversion)
-            if curr_close >= curr_pivot:
+            # Exit: Bear Power >= 0 (bears losing control)
+            if curr_bear >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume confirmation
-            if curr_close > curr_R3 and curr_close > curr_ema50 and vol_conf:
-                signals[i] = 0.20
+            # Long when Bull Power > 0 AND price > 12h EMA50 AND volume confirmation
+            if curr_bull > 0 and curr_close > curr_ema50 and vol_conf:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume confirmation
-            elif curr_close < curr_S3 and curr_close < curr_ema50 and vol_conf:
-                signals[i] = -0.20
+            # Short when Bear Power < 0 AND price < 12h EMA50 AND volume confirmation
+            elif curr_bear < 0 and curr_close < curr_ema50 and vol_conf:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
