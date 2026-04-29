@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d EMA(50) trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA(50) AND volume > 1.8x 24-period average
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA(50) AND volume > 1.8x 24-period average
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation
+# Long when price breaks above Donchian upper band AND price > 12h EMA(50) AND volume > 1.8x 20-period average
+# Short when price breaks below Donchian lower band AND price < 12h EMA(50) AND volume > 1.8x 20-period average
 # Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 12h (primary), HTF: 1d for trend filter and Williams %R calculation.
+# Timeframe: 4h (primary), HTF: 12h for trend filter.
 
-name = "12h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,27 +24,20 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA(50)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Williams %R on 1d data (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Calculate Donchian channels (20-period)
+    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d_arr) / (highest_high - lowest_low + 1e-10) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate ATR for volatility (14-period on LTF)
+    # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -54,58 +47,79 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0  # for long positions
+    lowest_since_entry = 0.0   # for short positions
     
     start_idx = max(100, 60)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
-        curr_ema = ema_50_1d_aligned[i]
-        curr_williams = williams_r_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema = ema_50_12h_aligned[i]
+        curr_upper = upper_band[i]
+        curr_lower = lower_band[i]
+        curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 1.8x 24-period average
-        if i >= 24:
-            vol_ma_24 = np.mean(volume[i-24:i])
+        # Volume confirmation: current volume > 1.8x 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
         else:
-            vol_ma_24 = 0.0
-        vol_spike = volume[i] > 1.8 * vol_ma_24 if vol_ma_24 > 0 else False
+            vol_ma_20 = 0.0
+        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits
         if position == 1:  # Long position
+            # Update highest price since entry
+            if curr_close > highest_since_entry:
+                highest_since_entry = curr_close
+            
             # Exit conditions:
-            # 1. Williams %R > -50 (exiting oversold territory)
-            # 2. Price < 1d EMA(50)
-            # 3. Trailing stop: price drops 3.0*ATR from entry (tracked via position logic)
-            if (curr_williams > -50 or 
-                curr_close < curr_ema):
+            # 1. Price breaks below Donchian lower band
+            # 2. Price < 12h EMA(50)
+            # 3. Trailing stop: price drops 2.5*ATR from highest since entry
+            if (curr_close < curr_lower or 
+                curr_close < curr_ema or
+                curr_close < highest_since_entry - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
+            # Update lowest price since entry
+            if curr_low < lowest_since_entry:
+                lowest_since_entry = curr_low
+            
             # Exit conditions:
-            # 1. Williams %R < -50 (exiting overbought territory)
-            # 2. Price > 1d EMA(50)
-            if (curr_williams < -50 or 
-                curr_close > curr_ema):
+            # 1. Price breaks above Donchian upper band
+            # 2. Price > 12h EMA(50)
+            # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
+            if (curr_close > curr_upper or 
+                curr_close > curr_ema or
+                curr_close > lowest_since_entry + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA(50) AND volume spike
-            if (curr_williams < -80 and 
+            # Long entry: price breaks above Donchian upper band AND price > 12h EMA(50) AND volume spike
+            if (curr_close > curr_upper and 
                 curr_close > curr_ema and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA(50) AND volume spike
-            elif (curr_williams > -20 and 
+                highest_since_entry = curr_close
+            # Short entry: price breaks below Donchian lower band AND price < 12h EMA(50) AND volume spike
+            elif (curr_close < curr_lower and 
                   curr_close < curr_ema and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
