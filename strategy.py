@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike
-# Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume > 1.5x 20-bar avg
-# Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume > 1.5x 20-bar avg
-# Exit when price retests Camarilla pivot (central level)
-# Uses discrete position sizing (0.20) to reduce fee drag and improve test generalization.
-# Target: 15-35 trades/year on 1h timeframe (60-140 total over 4 years) to avoid overtrading.
-# Uses 4h trend filter for signal direction and 1h for entry timing, plus session filter (08-20 UTC)
-# to reduce noise trades. Works in bull markets by capturing breakouts and in bear markets 
-# by shorting breakdowns with trend alignment preventing counter-trend trades.
+# Hypothesis: 6h Elder Ray Index with 1d ADX regime filter
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong trend)
+# Short when Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (strong trend)
+# Exit when power values cross zero (momentum shift) or ADX < 20 (weak trend)
+# Uses 1d EMA13 for power calculation and 1d ADX(14) for regime filter
+# Works in bull markets by capturing strong uptrends and in bear markets by capturing strong downtrends
+# ADX filter prevents whipsaws in ranging markets, focusing on high-probability trending moves
+# Target: 12-25 trades/year on 6h timeframe (48-100 total over 4 years) to minimize fee drag
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1dADX_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +25,113 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA13 and ADX calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA13 for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4h data for Camarilla levels (based on previous 4h bar)
-    prev_high_4h = df_4h['high'].values
-    prev_low_4h = df_4h['low'].values
-    prev_close_4h = df_4h['close'].values
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power_1d = high_1d - ema_13_1d
+    bear_power_1d = ema_13_1d - low_1d
     
-    camarilla_range = prev_high_4h - prev_low_4h
-    camarilla_pivot = (prev_high_4h + prev_low_4h + prev_close_4h) / 3.0
-    camarilla_r3 = prev_close_4h + camarilla_range * 1.1 / 4.0  # R3 level
-    camarilla_s3 = prev_close_4h - camarilla_range * 1.1 / 4.0  # S3 level
+    # Calculate 1d ADX(14) for regime filter
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Align Camarilla levels and pivot to 1h timeframe (they represent levels from previous 4h bar)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Volume confirmation: >1.5x 20-bar average volume (stricter to reduce trades)
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+                else:
+                    result[i] = np.nan
+        return result
     
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour  # open_time is already datetime64[ms], index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
+    atr_1d = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d > 0, dm_plus_smooth / atr_1d * 100, 0)
+    di_minus = np.where(atr_1d > 0, dm_minus_smooth / atr_1d * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = wilder_smooth(dx, 14)
+    
+    # Align all indicators to 6h timeframe
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA and EMA50 warmup
+    start_idx = max(13, 14*2)  # EMA13 and ADX warmup (need ~28 bars for ADX)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_1d_aligned[i]) or 
+            np.isnan(bear_power_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
-        vol_conf = volume_confirm[i]
-        curr_ema50_4h = ema_50_4h_aligned[i]
-        curr_pivot = camarilla_pivot_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        curr_bull = bull_power_1d_aligned[i]
+        curr_bear = bear_power_1d_aligned[i]
+        curr_adx = adx_1d_aligned[i]
         curr_close = close[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price retests Camarilla pivot
-            if curr_close <= curr_pivot:
+            # Exit: Bull Power <= 0 (momentum weakening) OR ADX < 20 (weak trend)
+            if curr_bull <= 0 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price retests Camarilla pivot
-            if curr_close >= curr_pivot:
+            # Exit: Bear Power <= 0 (momentum weakening) OR ADX < 20 (weak trend)
+            if curr_bear <= 0 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume confirmation
-            if curr_close > curr_r3 and curr_close > curr_ema50_4h and vol_conf:
-                signals[i] = 0.20
+            # Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong uptrend)
+            if curr_bull > 0 and curr_bear < 0 and curr_adx > 25:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume confirmation
-            elif curr_close < curr_s3 and curr_close < curr_ema50_4h and vol_conf:
-                signals[i] = -0.20
+            # Short when Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (strong downtrend)
+            elif curr_bear > 0 and curr_bull < 0 and curr_adx > 25:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
