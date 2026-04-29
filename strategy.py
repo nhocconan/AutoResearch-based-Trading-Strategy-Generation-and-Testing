@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
-# Donchian breakouts capture strong momentum moves; 12h EMA50 ensures alignment with medium-term trend
-# Volume confirmation (>2.0x 20-period average) filters false breakouts
-# Works in bull/bear via 12h EMA50 trend filter - only trades in direction of 12h momentum
-# Designed for ~20-50 trades/year to minimize fee drag while participating in established trends
-# ATR-based stoploss (1.5x) manages risk
+# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume spike confirmation
+# Camarilla H3/L3 levels act as strong support/resistance on 1h timeframe; breakouts with volume and 4h EMA50 trend alignment capture momentum moves
+# Designed for ~15-37 trades/year to minimize fee drag while participating in established trends
+# Works in bull/bear via 4h EMA50 trend filter - only trades in direction of 4h momentum
+# Uses strict volume confirmation (>2.0x 20-period average) to reduce false breakouts and overtrading
+# Exits on 1.5x ATR stoploss or when price retests the broken level (H3/L3)
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA50_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +23,17 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values  # needed for Camarilla calculation
     
-    # Get 12h data for EMA50 trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for EMA50 trend filter (HTF = 4h)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate Donchian channels (20-period) for breakout signals
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper_channel = high_roll.values
-    lower_channel = low_roll.values
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -55,56 +50,68 @@ def generate_signals(prices):
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = 20  # Donchian and volume MA warmup
+    start_idx = 20  # volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_open = open_price[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
+        curr_ema50_4h = ema_50_4h_aligned[i]
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_upper = upper_channel[i]
-        curr_lower = lower_channel[i]
+        
+        # Calculate Camarilla levels for this 1h bar using previous bar's OHLC
+        if i == 0:
+            signals[i] = 0.0
+            continue
+        prev_close = close[i-1]
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_open = open_price[i-1]
+        
+        # Camarilla levels (based on previous bar's range)
+        # H3/L3 are the key levels for breakout trading
+        H3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+        L3 = prev_close - (prev_high - prev_low) * 1.1 / 4
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price breaks below lower channel (failed breakout)
-            if curr_close < entry_price - 1.5 * curr_atr or curr_close < curr_lower:
+            # Exit: stoploss hit or price breaks below L3 (failed breakout)
+            if curr_close < entry_price - 1.5 * curr_atr or curr_close < L3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price breaks above upper channel (failed breakout)
-            if curr_close > entry_price + 1.5 * curr_atr or curr_close > curr_upper:
+            # Exit: stoploss hit or price breaks above H3 (failed breakout)
+            if curr_close > entry_price + 1.5 * curr_atr or curr_close > H3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new breakout entries
             # Volume confirmation: current volume > 2.0x 20-period average
             vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long breakout when price closes above upper channel with 12h EMA50 uptrend and volume confirmation
-            if curr_close > curr_upper and curr_close > curr_ema50_12h and vol_confirm:
-                signals[i] = 0.25
+            # Long breakout when price closes above H3 with 4h EMA50 uptrend and volume confirmation
+            if curr_close > H3 and curr_close > curr_ema50_4h and vol_confirm:
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
                 atr_at_entry = curr_atr
-            # Short breakout when price closes below lower channel with 12h EMA50 downtrend and volume confirmation
-            elif curr_close < curr_lower and curr_close < curr_ema50_12h and vol_confirm:
-                signals[i] = -0.25
+            # Short breakout when price closes below L3 with 4h EMA50 downtrend and volume confirmation
+            elif curr_close < L3 and curr_close < curr_ema50_4h and vol_confirm:
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
                 atr_at_entry = curr_atr
