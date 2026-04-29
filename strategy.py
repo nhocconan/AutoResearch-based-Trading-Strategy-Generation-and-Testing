@@ -3,18 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h EMA50 trend filter and volume confirmation
-# Long: price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short: price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit: price crosses 12h EMA50 OR ATR stoploss (2.5 * ATR) OR opposite Donchian breakout
-# Donchian provides clear structure for breakouts in both trending and ranging markets
-# 12h EMA50 filters for higher timeframe trend alignment, reducing counter-trend trades
-# Volume spike confirms institutional participation and reduces false breakouts
-# Discrete position sizing: 0.28 for long/short to balance return and drawdown
-# Target: 80-150 total trades over 4 years (20-38/year) on 4h timeframe
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1w EMA50 trend filter and volume confirmation
+# Elder Ray: Bull Power = High - EMA13(Close), Bear Power = Low - EMA13(Close)
+# Trend filter: 1w EMA50 (primary trend direction)
+# Entry conditions:
+#   Long: Bull Power > 0 AND Bear Power < 0 AND price > 1w EMA50 AND volume > 1.5x 20-bar avg
+#   Short: Bull Power < 0 AND Bear Power > 0 AND price < 1w EMA50 AND volume > 1.5x 20-bar avg
+# Exit: Elder Ray divergence (Bull Power < 0 for long OR Bear Power > 0 for short) OR price crosses 1w EMA50
+# Williams Alligator identifies trend presence and direction with less whipsaw than single MAs
+# 1w EMA50 provides stronger trend filter than shorter HTF, reducing false signals in chop
+# Volume spike confirms breakout strength and institutional participation
+# Discrete position sizing: 0.25 for long/short to minimize fee churn while maintaining adequate exposure
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
 
-name = "4h_Donchian_Breakout_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1wEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,89 +31,71 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR for stoploss (using 14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
-    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (using close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(50, 13, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_12h = ema_50_12h_aligned[i]
-        curr_atr = atr[i]
+        curr_ema_1w = ema_50_1w_aligned[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
+        # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # Handle exits and stoploss
+        # Handle exits
         if position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry
-            stop_price = entry_price - 2.5 * curr_atr
-            # Exit conditions: price below 12h EMA50 OR stoploss hit OR price breaks below Donchian low
-            if curr_close < curr_ema_12h or curr_close < stop_price or curr_low < donchian_low[i]:
+            # Exit conditions: Elder Ray divergence (Bull Power < 0) OR price below 1w EMA50
+            if curr_bull < 0 or curr_close < curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry
-            stop_price = entry_price + 2.5 * curr_atr
-            # Exit conditions: price above 12h EMA50 OR stoploss hit OR price breaks above Donchian high
-            if curr_close > curr_ema_12h or curr_close > stop_price or curr_high > donchian_high[i]:
+            # Exit conditions: Elder Ray divergence (Bear Power > 0) OR price above 1w EMA50
+            if curr_bear > 0 or curr_close > curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high AND price > 12h EMA50 AND volume spike
-            if curr_high > donchian_high[i] and curr_close > curr_ema_12h and vol_spike:
-                signals[i] = 0.28
+            # Long entry: Bull Power > 0 AND Bear Power < 0 AND price > 1w EMA50 AND volume spike
+            if (curr_bull > 0 and curr_bear < 0 and 
+                curr_close > curr_ema_1w and
+                vol_spike):
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: price breaks below Donchian low AND price < 12h EMA50 AND volume spike
-            elif curr_low < donchian_low[i] and curr_close < curr_ema_12h and vol_spike:
-                signals[i] = -0.28
+            # Short entry: Bull Power < 0 AND Bear Power > 0 AND price < 1w EMA50 AND volume spike
+            elif (curr_bull < 0 and curr_bear > 0 and 
+                  curr_close < curr_ema_1w and
+                  vol_spike):
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
