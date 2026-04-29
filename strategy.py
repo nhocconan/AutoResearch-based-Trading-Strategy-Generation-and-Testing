@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for ~25-50 trades/year on 4h timeframe to minimize fee drag while capturing high-probability moves.
 # Works in both bull and bear markets via 1d trend filter - only trades breakouts in trend direction.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
