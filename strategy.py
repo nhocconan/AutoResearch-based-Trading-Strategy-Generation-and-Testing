@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR stoploss
-# Long when price breaks above Donchian upper (20-bar high) AND volume > 1.5x 20-bar avg
-# Short when price breaks below Donchian lower (20-bar low) AND volume > 1.5x 20-bar avg
-# Exit on opposite Donchian breakout or ATR(14) trailing stop (2.0x ATR)
-# Uses discrete position sizing (0.30) to balance return and drawdown.
-# Donchian channels provide clear trend structure, volume confirmation filters weak breakouts,
-# ATR stoploss manages risk in volatile markets. This pattern has worked on SOLUSDT and can extend to BTC/ETH with proper filtering.
+# Hypothesis: 12h Volume Spike + 1d EMA50 Trend + 1w RSI Regime Filter
+# Long when: volume > 3.0x 20-bar avg AND price > 1d EMA50 AND 1w RSI < 70 (not overbought)
+# Short when: volume > 3.0x 20-bar avg AND price < 1d EMA50 AND 1w RSI > 30 (not oversold)
+# Exit: price crosses 1d EMA50 (trend reversal)
+# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-30 trades/year on 12h timeframe.
+# Volume spike confirms institutional interest, 1d EMA50 filters trend direction,
+# 1w RSI regime prevents extreme counter-trend entries. Works in both bull/bear markets.
 
-name = "4h_Donchian20_VolumeConfirm_ATRTrail_v1"
-timeframe = "4h"
+name = "12h_VolumeSpike_1dEMA50_1wRSI_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,90 +20,84 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Calculate EMA(50) on 1d data
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get 1w data for RSI regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate RSI(14) on 1w data
+    close_1w = df_1w['close'].values
+    delta = pd.Series(close_1w).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi_14_1w = 100 - (100 / (1 + rs))
+    rsi_14_1w = rsi_14_1w.fillna(50).values  # Fill NaN with neutral 50
+    # Align RSI to 12h timeframe
+    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
+    
+    # Volume confirmation: >3.0x 20-bar average volume (stricter to reduce trades)
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
-    
-    # ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_confirm = volume > 3.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_high = 0.0
-    lowest_low = 0.0
     
-    start_idx = 20  # Donchian and volume MA warmup
+    start_idx = max(20, 50)  # volume MA and EMA50 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_14_1w_aligned[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_ema50 = ema_50_1d_aligned[i]
+        curr_rsi = rsi_14_1w_aligned[i]
         curr_close = close[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_atr = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Update highest high for trailing stop
-            highest_high = max(highest_high, curr_high)
-            # Exit conditions: opposite Donchian breakout OR ATR trailing stop
-            if curr_close < curr_donchian_low or curr_close < (highest_high - 2.0 * curr_atr):
+            # Exit: price crosses below 1d EMA50 (trend reversal)
+            if curr_close < curr_ema50:
                 signals[i] = 0.0
                 position = 0
-                highest_high = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low for trailing stop
-            lowest_low = min(lowest_low, curr_low)
-            # Exit conditions: opposite Donchian breakout OR ATR trailing stop
-            if curr_close > curr_donchian_high or curr_close > (lowest_low + 2.0 * curr_atr):
+            # Exit: price crosses above 1d EMA50 (trend reversal)
+            if curr_close > curr_ema50:
                 signals[i] = 0.0
                 position = 0
-                lowest_low = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above Donchian upper AND volume confirmation
-            if curr_close > curr_donchian_high and vol_conf:
-                signals[i] = 0.30
+            # Long when volume spike AND price > 1d EMA50 AND 1w RSI < 70 (not overbought)
+            if vol_conf and curr_close > curr_ema50 and curr_rsi < 70:
+                signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_high = curr_high
-            # Short when price breaks below Donchian lower AND volume confirmation
-            elif curr_close < curr_donchian_low and vol_conf:
-                signals[i] = -0.30
+            # Short when volume spike AND price < 1d EMA50 AND 1w RSI > 30 (not oversold)
+            elif vol_conf and curr_close < curr_ema50 and curr_rsi > 30:
+                signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                lowest_low = curr_low
             else:
                 signals[i] = 0.0
     
