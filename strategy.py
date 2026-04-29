@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 20-period high AND price > 1d EMA34 AND volume > 1.5x 20-period average
-# Short when price breaks below 20-period low AND price < 1d EMA34 AND volume > 1.5x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in both bull/bear by following 1d trend direction.
+# Hypothesis: 4h Donchian breakout + 1d trend filter + volume spike
+# Long when price breaks above Donchian(20) high AND 1d EMA50 uptrend AND volume > 2x MA20
+# Short when price breaks below Donchian(20) low AND 1d EMA50 downtrend AND volume > 2x MA20
+# Exit when price crosses Donchian midpoint OR trend reverses
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 50-150 total trades over 4 years.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +25,75 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop for 1d calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20) on 12h data
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel (20) on 4h data
+    period_dc = 20
+    highest_high = pd.Series(high).rolling(window=period_dc, min_periods=period_dc).max().values
+    lowest_low = pd.Series(low).rolling(window=period_dc, min_periods=period_dc).min().values
+    dc_upper = highest_high
+    dc_lower = lowest_low
+    dc_middle = (dc_upper + dc_lower) / 2
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # warmup for Donchian and EMA34
+    start_idx = max(period_dc, 50, 20)  # warmup for Donchian, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]):
+        if np.isnan(ema50_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_dc_upper = dc_upper[i]
+        curr_dc_lower = dc_lower[i]
+        curr_dc_middle = dc_middle[i]
+        curr_ema50 = ema50_aligned[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema34 = ema34_aligned[i]
-        curr_highest_high = highest_high_20[i]
-        curr_lowest_low = lowest_low_20[i]
         
-        # Breakout conditions
-        breakout_up = curr_close > curr_highest_high
-        breakout_down = curr_close < curr_lowest_low
+        # Trend regime: bullish if price > 1d EMA50, bearish if price < 1d EMA50
+        is_bullish_regime = curr_close > curr_ema50
+        is_bearish_regime = curr_close < curr_ema50
         
-        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
-        is_bullish_regime = curr_close > curr_ema34
-        is_bearish_regime = curr_close < curr_ema34
+        # Donchian breakout conditions
+        breakout_up = curr_close > curr_dc_upper
+        breakout_down = curr_close < curr_dc_lower
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: breakout above 20-period high AND bullish regime
+                # Bullish entry: break above upper band AND bullish regime
                 if breakout_up and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: breakout below 20-period low AND bearish regime
+                # Bearish entry: break below lower band AND bearish regime
                 elif breakout_down and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price breaks below 20-period low OR regime changes to bearish
-            if curr_close < curr_lowest_low or not is_bullish_regime:
+            # Exit when: price < middle OR regime changes to bearish
+            if (curr_close < curr_dc_middle) or (not is_bullish_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price breaks above 20-period high OR regime changes to bullish
-            if curr_close > curr_highest_high or not is_bearish_regime:
+            # Exit when: price > middle OR regime changes to bullish
+            if (curr_close > curr_dc_middle) or (not is_bearish_regime):
                 signals[i] = 0.0
                 position = 0
             else:
