@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above R3, 1d EMA34 up-trend, volume > 1.5x average
-# Short when price breaks below S3, 1d EMA34 down-trend, volume > 1.5x average
-# Exit when price reverts to daily pivot (mean reversion)
-# Uses discrete position sizing (0.25) to balance capture and risk.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag while ensuring sufficient trades.
-# Uses 1d for signal direction/trend, 6h only for entry timing and breakout levels.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3, 1d EMA34 up-trend, volume > 2.0x average
+# Short when price breaks below S3, 1d EMA34 down-trend, volume > 2.0x average
+# Exit when price reverts to Camarilla midpoint (mean reversion)
+# Uses discrete position sizing (0.25) and tight volume filter to limit trades to ~150-250 over 4 years.
+# Uses 1d for signal direction/trend, 4h only for entry timing and breakout levels.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,61 +29,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data for Camarilla pivot calculation (using prior day's OHLC)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
+    # Get 4h data for Camarilla levels (based on previous day)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC from 6h data for prior day's pivot
-    # We'll use the prior completed day's OHLC to calculate today's Camarilla levels
-    df_6h_copy = df_6h.copy()
-    df_6h_copy['date'] = pd.to_datetime(df_6h_copy.index).date
-    daily_ohlc = df_6h_copy.groupby('date').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).reset_index()
+    # Calculate 4h Camarilla levels using previous day's OHLC
+    # Shift by 1 to use completed day only (no look-ahead)
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
+    prev_close = df_4h['close'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    if len(daily_ohlc) < 2:
-        return np.zeros(n)
+    # Camarilla levels
+    camarilla_h5 = prev_close + prev_range * 1.1/2  # R3
+    camarilla_h4 = prev_close + prev_range * 1.1/4  # R2
+    camarilla_h3 = prev_close + prev_range * 1.1/6  # R1
+    camarilla_l3 = prev_close - prev_range * 1.1/6  # S1
+    camarilla_l4 = prev_close - prev_range * 1.1/4  # S2
+    camarilla_l5 = prev_close - prev_range * 1.1/2  # S3
+    camarilla_mid = prev_close  # Pivot point
     
-    # Calculate Camarilla levels for each day using prior day's OHLC
-    camarilla_r3 = np.full(len(daily_ohlc), np.nan)
-    camarilla_s3 = np.full(len(daily_ohlc), np.nan)
-    daily_pivot = np.full(len(daily_ohlc), np.nan)
-    
-    for i in range(1, len(daily_ohlc)):
-        # Prior day's OHLC
-        phigh = daily_ohlc.iloc[i-1]['high']
-        plow = daily_ohlc.iloc[i-1]['low']
-        pclose = daily_ohlc.iloc[i-1]['close']
-        
-        # Camarilla calculations
-        range_val = phigh - plow
-        daily_pivot[i] = (phigh + plow + pclose) / 3
-        camarilla_r3[i] = daily_pivot[i] + range_val * 1.1 / 4
-        camarilla_s3[i] = daily_pivot[i] - range_val * 1.1 / 4
-    
-    # Forward fill to get today's levels based on prior day's data
-    camarilla_r3 = pd.Series(camarilla_r3).ffill().values
-    camarilla_s3 = pd.Series(camarilla_s3).ffill().values
-    daily_pivot = pd.Series(daily_pivot).ffill().values
-    
-    # Create mapping from 6h bar to daily index
-    df_6h_copy['date_only'] = pd.to_datetime(df_6h_copy.index).date
-    date_to_idx = {date: idx for idx, date in enumerate(daily_ohlc['date'])}
-    daily_idx_for_6h = df_6h_copy['date_only'].map(date_to_idx).values
-    
-    # Get Camarilla levels for each 6h bar
-    camarilla_r3_6h = camarilla_r3[daily_idx_for_6h]
-    camarilla_s3_6h = camarilla_s3[daily_idx_for_6h]
-    daily_pivot_6h = daily_pivot[daily_idx_for_6h]
-    
-    # Align 6h indicators to 6h timeframe (no additional delay needed as they're based on prior day)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_r3_6h)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_s3_6h)
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_6h, daily_pivot_6h)
+    # Align 4h indicators to 4h timeframe (no additional delay needed for Camarilla)
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h5)
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l5)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_4h, camarilla_mid)
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -102,7 +71,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Volume MA and 1d EMA34 warmup
+    start_idx = max(20, 34)  # Volume and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -111,8 +80,8 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(daily_pivot_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(camarilla_h5_aligned[i]) or np.isnan(camarilla_l5_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -121,39 +90,39 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_pivot = daily_pivot_aligned[i]
+        curr_h5 = camarilla_h5_aligned[i]
+        curr_l5 = camarilla_l5_aligned[i]
+        curr_mid = camarilla_mid_aligned[i]
         curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price below daily pivot (mean reversion)
-            if curr_close < curr_pivot:
+            # Exit: price below Camarilla midpoint (mean reversion)
+            if curr_close < curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above daily pivot (mean reversion)
-            if curr_close > curr_pivot:
+            # Exit: price above Camarilla midpoint (mean reversion)
+            if curr_close > curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average (tight filter)
+            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
             
-            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
-            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
+            # Long when price breaks above R3 (H5), 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_h5 and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
-            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
+            # Short when price breaks below S3 (L5), 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_l5 and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
