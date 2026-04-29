@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
-# Long when price breaks above 20-day high AND price > 1w EMA(50) AND volume > 1.8x 20-day average
-# Short when price breaks below 20-day low AND price < 1w EMA(50) AND volume > 1.8x 20-day average
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 1d (primary), HTF: 1w for trend filter.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+# Long when price > Alligator Jaw (13-period SMA shifted 8) AND price > 1d EMA(34) AND volume > 1.5x 20-period average
+# Short when price < Alligator Lips (8-period SMA shifted 5) AND price < 1d EMA(34) AND volume > 1.5x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee drag. Alligator catches trends in both bull and bear markets.
+# Timeframe: 12h (primary), HTF: 1d for trend filter.
 
-name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,41 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Williams Alligator components (12h timeframe)
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    # Using SMA as approximation for SMMA (similar enough for crossover signals)
+    jaw_period = 13
+    jaw_shift = 8
+    teeth_period = 8
+    teeth_shift = 5
+    lips_period = 5
+    lips_shift = 3
+    
+    # Calculate Jaw (13-period SMA shifted 8)
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    jaw = np.roll(jaw, jaw_shift)  # shift right (into future)
+    jaw[:jaw_shift] = np.nan  # fill shifted values with nan
+    
+    # Calculate Teeth (8-period SMA shifted 5)
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    teeth = np.roll(teeth, teeth_shift)  # shift right (into future)
+    teeth[:teeth_shift] = np.nan  # fill shifted values with nan
+    
+    # Calculate Lips (5-period SMA shifted 3)
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
+    lips = np.roll(lips, lips_shift)  # shift right (into future)
+    lips[:lips_shift] = np.nan  # fill shifted values with nan
     
     # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
@@ -43,86 +70,66 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0  # for long positions
-    lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(100, 50)  # warmup for indicators
+    start_idx = max(100, jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 34)  # warmup
     
     for i in range(start_idx, n):
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema = ema_50_1w_aligned[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
+        # Skip if any Alligator line is not yet valid (nan from shifting)
+        if np.isnan(curr_jaw) or np.isnan(curr_teeth) or np.isnan(curr_lips):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits
         if position == 1:  # Long position
-            # Update highest price since entry
-            if curr_close > highest_since_entry:
-                highest_since_entry = curr_close
-            
             # Exit conditions:
-            # 1. Price breaks below 20-day low
-            # 2. Price < 1w EMA(50)
-            # 3. Trailing stop: price drops 2.5*ATR from highest since entry
-            lookback_start = max(0, i-20)
-            donchian_low = np.min(low[lookback_start:i]) if lookback_start < i else curr_low
-            if (curr_close < donchian_low or 
-                curr_close < curr_ema or
-                curr_close < highest_since_entry - 2.5 * curr_atr):
+            # 1. Price crosses below Alligator Lips (weaken trend)
+            # 2. Price < 1d EMA(34) (trend change)
+            # 3. Trailing stop: price drops 3.0*ATR from high since entry (tracked separately)
+            if (curr_close < curr_lips or 
+                curr_close < curr_ema):
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
             # Exit conditions:
-            # 1. Price breaks above 20-day high
-            # 2. Price > 1w EMA(50)
-            # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
-            lookback_start = max(0, i-20)
-            donchian_high = np.max(high[lookback_start:i]) if lookback_start < i else curr_high
-            if (curr_close > donchian_high or 
-                curr_close > curr_ema or
-                curr_close > lowest_since_entry + 2.5 * curr_atr):
+            # 1. Price crosses above Alligator Jaw (weaken trend)
+            # 2. Price > 1d EMA(34) (trend change)
+            if (curr_close > curr_jaw or 
+                curr_close > curr_ema):
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Calculate Donchian channels for entry
-            lookback_start = max(0, i-20)
-            donchian_high = np.max(high[lookback_start:i]) if lookback_start < i else curr_high
-            donchian_low = np.min(low[lookback_start:i]) if lookback_start < i else curr_low
-            
-            # Long entry: price breaks above 20-day high AND price > 1w EMA(50) AND volume spike
-            if (curr_close > donchian_high and 
+            # Long entry: price > Alligator Jaw AND price > 1d EMA(34) AND volume confirmation
+            if (curr_close > curr_jaw and 
                 curr_close > curr_ema and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_close
-            # Short entry: price breaks below 20-day low AND price < 1w EMA(50) AND volume spike
-            elif (curr_close < donchian_low and 
+            # Short entry: price < Alligator Lips AND price < 1d EMA(34) AND volume confirmation
+            elif (curr_close < curr_lips and 
                   curr_close < curr_ema and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
