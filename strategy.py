@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
-# Donchian breakouts capture sustained moves, especially when aligned with higher timeframe trend
-# 1d EMA50 filters for higher timeframe direction to avoid counter-trend trades
-# Volume spike confirms breakout validity with institutional participation
-# ATR-based stoploss manages risk during adverse moves
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
-# Works in both bull and bear markets by only taking trend-aligned breakouts
+# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Camarilla pivot levels (R1, S1) from weekly range act as strong support/resistance - breaks often lead to sustained moves
+# 1w EMA50 provides higher timeframe trend filter to avoid counter-trend trades
+# Volume spike confirms breakout validity
+# ATR-based stoploss manages risk
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
+# Works in bull markets via trend-following breaks and in bear markets via mean-reversion at extremes
 
-name = "4h_Donchian_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,14 +26,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -50,19 +50,34 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA
     
     for i in range(start_idx, n):
-        # Need at least 20 previous bars for Donchian channels
-        if i < 20:
+        # Need at least 1 previous bar to calculate Camarilla levels
+        if i < 1:
             signals[i] = 0.0
             continue
             
-        # Calculate Donchian channels from previous 20 bars (excluding current)
-        lookback_high = np.max(high[i-20:i])
-        lookback_low = np.min(low[i-20:i])
+        # Calculate Camarilla levels from previous bar's weekly range
+        # Use weekly high/low from HTF data aligned to current bar
+        idx_1w = (i // (7 * 24 * 4))  # approximate weekly bar index
+        if idx_1w < 1 or idx_1w >= len(df_1w):
+            signals[i] = 0.0
+            continue
+            
+        # Get previous completed weekly bar for Camarilla calculation
+        weekly_high = df_1w['high'].values[idx_1w-1]
+        weekly_low = df_1w['low'].values[idx_1w-1]
+        weekly_close = df_1w['close'].values[idx_1w-1]
+        weekly_range = weekly_high - weekly_low
+        
+        if weekly_range <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Camarilla levels from weekly range
+        R1 = weekly_close + weekly_range * 1.1 / 12
+        S1 = weekly_close - weekly_range * 1.1 / 12
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_ema_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
         
         # Volume spike confirmation: current volume > 2.0x 20-period average
@@ -76,8 +91,8 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: price below Donchian low OR price below 1d EMA50 OR stoploss hit
-            if curr_close < lookback_low or curr_close < curr_ema_1d or curr_close < stop_price:
+            # Exit conditions: price below S1 OR price below 1w EMA50 OR stoploss hit
+            if curr_close < S1 or curr_close < curr_ema_1w or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,21 +101,21 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: price above Donchian high OR price above 1d EMA50 OR stoploss hit
-            if curr_close > lookback_high or curr_close > curr_ema_1d or curr_close > stop_price:
+            # Exit conditions: price above R1 OR price above 1w EMA50 OR stoploss hit
+            if curr_close > R1 or curr_close > curr_ema_1w or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high AND price > 1d EMA50 AND volume spike
-            if curr_high > lookback_high and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: price breaks above R1 AND price > 1w EMA50 AND volume spike
+            if curr_close > R1 and curr_close > curr_ema_1w and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: price breaks below Donchian low AND price < 1d EMA50 AND volume spike
-            elif curr_low < lookback_low and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: price breaks below S1 AND price < 1w EMA50 AND volume spike
+            elif curr_close < S1 and curr_close < curr_ema_1w and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
