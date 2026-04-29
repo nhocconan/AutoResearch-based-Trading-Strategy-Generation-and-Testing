@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
-# Long when price breaks above 6h Donchian upper(20) AND price > 1d EMA(34) AND volume > 2.0x 20-period average
-# Short when price breaks below 6h Donchian lower(20) AND price < 1d EMA(34) AND volume > 2.0x 20-period average
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper(20) AND price > 1d EMA(34) AND volume > 2.0x 20-period average
+# Short when price breaks below 12h Donchian lower(20) AND price < 1d EMA(34) AND volume > 2.0x 20-period average
 # Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
 # Added ATR-based trailing stop for risk management to reduce drawdown.
-# Timeframe: 6h (primary), HTF: 1d for trend filter.
+# Timeframe: 12h (primary), HTF: 1d for trend filter.
 
-name = "6h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,20 +34,20 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Load primary 6h data for Donchian channels
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Load primary 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Donchian upper = max(high, 20), lower = min(low, 20)
-    high_roll_max = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    high_roll_max = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    donchian_upper = align_htf_to_ltf(prices, df_6h, high_roll_max)
-    donchian_lower = align_htf_to_ltf(prices, df_6h, low_roll_min)
+    donchian_upper = align_htf_to_ltf(prices, df_12h, high_roll_max)
+    donchian_lower = align_htf_to_ltf(prices, df_12h, low_roll_min)
     
     # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
