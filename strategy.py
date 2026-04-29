@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA34 trend filter
-# Uses proven Donchian breakout structure with volume spike confirmation (>2.0x 20-period MA)
-# 1d EMA34 filter ensures trades only in direction of higher timeframe trend
+# Uses proven Donchian breakout structure with volume spike (>2.0x 20-period MA) for confirmation
+# 1d EMA34 trend filter ensures trades align with higher timeframe direction
 # Works in bull/bear: volume confirms breakout validity, 1d EMA34 filters counter-trend noise
-# Target: 75-150 total trades over 4 years (19-37/year) for 4h timeframe
-# Novelty: Applying proven Donchian+Volume+Trend framework to 4h with 1d HTF filter
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Novelty: Applying proven Donchian+Volume+Trend framework to 4h timeframe with 1d HTF filter
 
 name = "4h_Donchian20_VolumeSpike_1dEMA34_Trend_v1"
 timeframe = "4h"
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
+    # Donchian channels: 20-period high/low
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -62,19 +62,19 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: price breaks above upper Donchian with volume and above 1d EMA34
+                # Bullish entry: price breaks above 20-period high with volume and above 1d EMA34
                 if curr_high > curr_high_20 and curr_close > curr_ema_34:
                     signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below lower Donchian with volume and below 1d EMA34
+                # Bearish entry: price breaks below 20-period low with volume and below 1d EMA34
                 elif curr_low < curr_low_20 and curr_close < curr_ema_34:
                     signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price breaks below lower Donchian (reversal signal)
+            # Exit when price breaks below 20-period low (reversal signal)
             if curr_low < curr_low_20:
                 signals[i] = 0.0
                 position = 0
@@ -82,7 +82,7 @@ def generate_signals(prices):
                 signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian (reversal signal)
+            # Exit when price breaks above 20-period high (reversal signal)
             if curr_high > curr_high_20:
                 signals[i] = 0.0
                 position = 0
