@@ -3,21 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation
-# Enter long when BB width < 20th percentile (squeeze) AND price breaks above upper band AND 1d ADX > 25 AND volume > 1.5x average
-# Enter short when BB width < 20th percentile (squeeze) AND price breaks below lower band AND 1d ADX > 25 AND volume > 1.5x average
-# Exit when price returns to middle band (mean reversion) or BB width expands above 50th percentile (squeeze end)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 6h.
-# Bollinger squeeze captures low volatility breakouts that often trend well. 1d ADX filter ensures we only trade in trending regimes on higher timeframe, reducing false breakouts in ranging markets.
-# Volume confirmation adds conviction to breakouts.
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R measures overbought/oversold levels (%R = (Highest High - Close) / (Highest High - Lowest Low) * -100)
+# Long when %R < -80 (oversold) AND close > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when %R > -20 (overbought) AND close < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit when %R crosses above -50 for longs or below -50 for shorts (mean reversion completion)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
+# Williams %R is effective in ranging markets and captures reversals from extremes.
+# 1d EMA34 filter ensures alignment with higher timeframe trend for better win rate.
+# Volume confirmation ensures signals have conviction, reducing false breakouts.
 
-name = "6h_BBSqueeze_1dADX_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,119 +27,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for ADX
+    if len(df_1d) < 34:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(34) on 1d close
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Calculate Williams %R(14) on 12h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Smoothed TR, DM+ (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr_smooth = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= 27:  # Need 14 for DX + 14 for ADX smoothing
-        adx[26] = np.nanmean(dx[14:27])  # First ADX is average of first 14 DX
-        for i in range(27, len(dx)):
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Bollinger Bands (20, 2) on 6h data
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Percentile of BB width (lookback 50 periods for regime)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(50, len(bb_width)):
-        bb_width_percentile[i] = (np.sum(bb_width[i-50:i] <= bb_width[i]) / 50) * 100
-    
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need sufficient history for BB percentile and bands
+    start_idx = max(14, 20, 34)  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        adx_val = adx_1d_aligned[i]
-        width_percentile = bb_width_percentile[i]
+        ema_trend = ema_34_1d_aligned[i]
+        wr = williams_r[i]
         curr_close = close[i]
-        bb_mid = bb_middle[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when BB squeeze (width < 20th percentile) AND price breaks above upper band AND 1d ADX > 25 AND volume confirmation
-            if (width_percentile < 20 and curr_close > bb_up and adx_val > 25 and vol_conf):
+            # Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume confirmation
+            if wr < -80 and curr_close > ema_trend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when BB squeeze (width < 20th percentile) AND price breaks below lower band AND 1d ADX > 25 AND volume confirmation
-            elif (width_percentile < 20 and curr_close < bb_low and adx_val > 25 and vol_conf):
+            # Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume confirmation
+            elif wr > -20 and curr_close < ema_trend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price returns to middle band OR squeeze ends (width > 50th percentile)
-            if curr_close <= bb_mid or width_percentile > 50:
+        elif position == 1:  # Long - exit when Williams %R crosses above -50
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price returns to middle band OR squeeze ends (width > 50th percentile)
-            if curr_close >= bb_mid or width_percentile > 50:
+        elif position == -1:  # Short - exit when Williams %R crosses below -50
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
