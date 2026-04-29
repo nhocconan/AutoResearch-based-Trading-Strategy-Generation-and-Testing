@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above R3 AND price > 1w EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below S3 AND price < 1w EMA50 AND volume > 2.0x 20-bar avg
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
 # Exit when price crosses Camarilla H4/L4 levels (mean reversion to median)
-# Uses discrete position sizing (0.25) to balance return and fee drag.
-# Target: 12-37 trades/year on 12h (50-150 total over 4 years).
-# Camarilla levels provide high-probability reversal points; 1w EMA50 filters counter-trend moves.
+# Uses discrete position sizing (0.30) to balance return and fee drag.
+# Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+# Camarilla levels provide high-probability reversal points; 1d EMA34 filters counter-trend moves.
 # Volume spike ensures institutional participation, reducing false breakouts.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +26,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA(50) on 1w data
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 1d data for Camarilla levels (prior day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate Camarilla levels from previous day's OHLC
+    # Need to align daily OHLC to 4h bars
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 1:
         return np.zeros(n)
     
     # Extract daily OHLC values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    daily_high = df_1d_ohlc['high'].values
+    daily_low = df_1d_ohlc['low'].values
+    daily_close = df_1d_ohlc['close'].values
     
-    # Align daily OHLC to 12h timeframe (each value represents the prior day's close)
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Align daily OHLC to 4h timeframe (each value represents the prior day's close)
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_close)
     
-    # Calculate Camarilla levels for each 12h bar based on prior day's OHLC
+    # Calculate Camarilla levels for each 4h bar based on prior day's OHLC
     # Camarilla R3/S3 and H4/L4 levels
     daily_range = daily_high_aligned - daily_low_aligned
     camarilla_h4 = daily_close_aligned + daily_range * 1.1 / 2
@@ -68,11 +69,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # EMA50 and volume MA warmup
+    start_idx = max(34, 20)  # EMA34 and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
             np.isnan(camarilla_s3[i]) or np.isnan(camarilla_h4[i]) or 
             np.isnan(camarilla_l4[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
@@ -80,7 +81,7 @@ def generate_signals(prices):
         
         vol_conf = volume_confirm[i]
         curr_close = close[i]
-        ema_50 = ema_50_1w_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
         
         # Camarilla levels
         r3 = camarilla_r3[i]
@@ -95,7 +96,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price crosses above L4 (mean reversion to median)
@@ -103,16 +104,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R3 AND price > 1w EMA50 AND volume confirmation
-            if curr_close > r3 and curr_close > ema_50 and vol_conf:
-                signals[i] = 0.25
+            # Long when price breaks above R3 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r3 and curr_close > ema_34 and vol_conf:
+                signals[i] = 0.30
                 position = 1
-            # Short when price breaks below S3 AND price < 1w EMA50 AND volume confirmation
-            elif curr_close < s3 and curr_close < ema_50 and vol_conf:
-                signals[i] = -0.25
+            # Short when price breaks below S3 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s3 and curr_close < ema_34 and vol_conf:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
