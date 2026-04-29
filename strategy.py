@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA34 trend filter + volume spike confirmation
-# Williams %R measures overbought/oversold: (Highest High - Close)/(Highest High - Lowest Low) * -100
-# Long: Williams %R < -80 (oversold) in bullish regime (price > 1d EMA34) with volume confirmation
-# Short: Williams %R > -20 (overbought) in bearish regime (price < 1d EMA34) with volume confirmation
-# Volume confirmation: current volume > 1.8x 20-period average
-# Uses ATR-based stops (2.0x ATR) and discrete position sizing (0.25) to minimize fee churn
-# Designed for ~12-37 trades/year on 6h timeframe with strict entry conditions
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# Donchian channels provide clear breakout levels; ADX > 25 filters for trending markets
+# Volume confirmation (>1.5x 20-period average) reduces false breakouts
+# Only trade breakouts in direction of 1d ADX trend (ADX > 25 and +DI > -DI for longs, vice versa for shorts)
+# Designed for ~12-37 trades/year on 12h timeframe to minimize fee drag while capturing strong trends
+# Works in both bull and bear via 1d ADX trend filter - only trades when higher timeframe shows strong trend
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike_v2"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,27 +24,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter (HTF = 1d)
+    # Get 1d data for ADX trend filter (HTF = 1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d ADX components for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R (14-period) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate ATR (14-period) for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
+    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    
+    # Smoothed values
+    tr_14 = tr_1d.ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = dm_plus.ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = dm_minus.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus.values)
+    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus.values)
+    
+    # Calculate Donchian channels (20-period) on 12h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,14 +72,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_at_entry = 0.0
     
-    start_idx = 20  # volume MA warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or 
+            np.isnan(di_minus_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -68,44 +87,47 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema34_1d = ema_34_1d_aligned[i]
-        curr_williams_r = williams_r[i]
-        curr_atr = atr[i]
+        curr_adx = adx_aligned[i]
+        curr_di_plus = di_plus_aligned[i]
+        curr_di_minus = di_minus_aligned[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or Williams %R > -50 (exiting oversold territory)
-            if curr_close < entry_price - 2.0 * curr_atr or curr_williams_r > -50:
+            # Exit: price breaks below Donchian low OR ADX weakens (< 20)
+            if curr_close < curr_lowest_20 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or Williams %R < -50 (exiting overbought territory)
-            if curr_close > entry_price + 2.0 * curr_atr or curr_williams_r < -50:
+            # Exit: price breaks above Donchian high OR ADX weakens (< 20)
+            if curr_close > curr_highest_20 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirm = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = curr_volume > 1.5 * curr_vol_ma
             
-            # Long entry when price > 1d EMA34 (bullish regime) AND Williams %R < -80 (oversold) with volume confirmation
-            if curr_close > curr_ema34_1d and curr_williams_r < -80 and vol_confirm:
+            # Strong trend filter: ADX > 25
+            strong_trend = curr_adx > 25
+            
+            # Long entry: price breaks above Donchian high AND +DI > -DI (bullish trend) AND volume confirmation
+            if curr_close > curr_highest_20 and curr_di_plus > curr_di_minus and strong_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-            # Short entry when price < 1d EMA34 (bearish regime) AND Williams %R > -20 (overbought) with volume confirmation
-            elif curr_close < curr_ema34_1d and curr_williams_r > -20 and vol_confirm:
+            # Short entry: price breaks below Donchian low AND -DI > +DI (bearish trend) AND volume confirmation
+            elif curr_close < curr_lowest_20 and curr_di_minus > curr_di_plus and strong_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
             else:
                 signals[i] = 0.0
     
