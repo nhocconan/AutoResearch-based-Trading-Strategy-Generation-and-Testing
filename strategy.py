@@ -3,128 +3,109 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA + RSI(14) + choppiness regime filter (CHOP > 61.8) for mean reversion
-# In choppy markets (CHOP > 61.8), price tends to revert to KAMA (adaptive trend)
-# Long when RSI < 30 and price < KAMA(10, ER=2,30) in chop
-# Short when RSI > 70 and price > KAMA(10, ER=2,30) in chop
-# Uses 1w EMA50 as higher timeframe trend filter: only take longs when price > 1w EMA50,
-# only shorts when price < 1w EMA50 to avoid fighting major trends
-# Designed for ~7-25 trades/year on 1d timeframe with strict entry conditions
-# Works in both bull and bear via 1w EMA50 trend filter and chop regime confirmation
+# Hypothesis: 6h Williams %R + 1d EMA34 trend filter + volume spike confirmation
+# Williams %R measures overbought/oversold: (Highest High - Close)/(Highest High - Lowest Low) * -100
+# Long: Williams %R < -80 (oversold) in bullish regime (price > 1d EMA34) with volume confirmation
+# Short: Williams %R > -20 (overbought) in bearish regime (price < 1d EMA34) with volume confirmation
+# Volume confirmation: current volume > 1.8x 20-period average
+# Uses ATR-based stops (2.0x ATR) and discrete position sizing (0.25) to minimize fee churn
+# Designed for ~12-37 trades/year on 6h timeframe with strict entry conditions
 
-name = "1d_KAMA_RSI_ChopRegime_1wEMA50_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA34_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA34 trend filter (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate KAMA (adaptive moving average) on 1d
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    close_s = pd.Series(close)
-    change = abs(close_s - close_s.shift(10))
-    volatility = abs(close_s.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # Calculate Williams %R (14-period) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    
-    # Calculate Choppiness Index (CHOP) - measures trend vs range
-    # CHOP > 61.8 = ranging/choppy market (good for mean reversion)
-    # CHOP < 38.2 = trending market (avoid mean reversion)
-    atr_period = 14
+    # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = tr.rolling(window=atr_period, min_periods=atr_period).sum()
-    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max()
-    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(atr_period)
-    chop = chop.fillna(50).values  # neutral when undefined
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 20  # volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_kama = kama[i]
-        curr_rsi = rsi[i]
-        curr_chop = chop[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_williams_r = williams_r[i]
+        curr_atr = atr[i]
+        curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) or chop < 38.2 (trending market)
-            if curr_rsi > 50 or curr_chop < 38.2:
+            # Exit: stoploss hit or Williams %R > -50 (exiting oversold territory)
+            if curr_close < entry_price - 2.0 * curr_atr or curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) or chop < 38.2 (trending market)
-            if curr_rsi < 50 or curr_chop < 38.2:
+            # Exit: stoploss hit or Williams %R < -50 (exiting overbought territory)
+            if curr_close > entry_price + 2.0 * curr_atr or curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Only trade in choppy/ranging markets (CHOP > 61.8)
-            if curr_chop > 61.8:
-                # Regime filter: only trade with higher timeframe trend
-                # Longs only when price > 1w EMA50 (bullish higher TF)
-                # Shorts only when price < 1w EMA50 (bearish higher TF)
-                if curr_close > curr_ema50_1w:
-                    # Long setup: oversold RSI + price below KAMA (mean reversion long)
-                    if curr_rsi < 30 and curr_close < curr_kama:
-                        signals[i] = 0.25
-                        position = 1
-                elif curr_close < curr_ema50_1w:
-                    # Short setup: overbought RSI + price above KAMA (mean reversion short)
-                    if curr_rsi > 70 and curr_close > curr_kama:
-                        signals[i] = -0.25
-                        position = -1
-                # If price == EMA50_1w, stay flat (no trade)
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirm = curr_volume > 1.8 * curr_vol_ma
+            
+            # Long entry when price > 1d EMA34 (bullish regime) AND Williams %R < -80 (oversold) with volume confirmation
+            if curr_close > curr_ema34_1d and curr_williams_r < -80 and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                atr_at_entry = curr_atr
+            # Short entry when price < 1d EMA34 (bearish regime) AND Williams %R > -20 (overbought) with volume confirmation
+            elif curr_close < curr_ema34_1d and curr_williams_r > -20 and vol_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                atr_at_entry = curr_atr
             else:
                 signals[i] = 0.0
     
