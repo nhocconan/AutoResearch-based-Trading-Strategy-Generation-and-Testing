@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R momentum with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion within trend
-# Long when Williams %R crosses above -80 (oversold) AND price > 1d EMA34 (bullish regime)
-# Short when Williams %R crosses below -20 (overbought) AND price < 1d EMA34 (bearish regime)
+# Hypothesis: 6h Williams %R momentum with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions (-20 to -80 range)
+# Long when Williams %R crosses above -80 from below AND price > 1d EMA34 (bullish regime)
+# Short when Williams %R crosses below -20 from above AND price < 1d EMA34 (bearish regime)
 # Volume confirmation ensures momentum strength
-# Works in both bull and bear markets by following 1d trend while capturing 4h mean reversion
+# Works in both bull and bear markets by following 1d trend while capturing 6h mean reversion
 # Target: 75-150 total trades over 4 years (19-37/year) to minimize fee drag
 
-name = "4h_WilliamsR_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,16 +34,17 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 6h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Williams %R (14-period)
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100.0
-    # Handle division by zero (when high == low)
-    williams_r[highest_high == lowest_low] = -50.0
+    williams_r = np.zeros_like(close)
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    williams_r = np.where(hl_range != 0, ((highest_high - close) / hl_range) * -100.0, -50.0)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34, 20, 14)  # warmup for EMA34, volume MA, and Williams %R
+    start_idx = max(50, 34, 20, 14)  # warmup for EMA34, Williams %R, and volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
@@ -65,6 +66,9 @@ def generate_signals(prices):
         curr_ema34 = ema34_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
+        # Previous Williams %R for crossover detection
+        prev_williams_r = williams_r[i-1] if i > 0 else -50.0
+        
         # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
         is_bullish_regime = curr_close > curr_ema34
         is_bearish_regime = curr_close < curr_ema34
@@ -72,26 +76,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: Williams %R crosses above -80 (oversold) AND bullish regime
-                if curr_williams_r > -80 and williams_r[i-1] <= -80 and is_bullish_regime:
+                # Bullish entry: Williams %R crosses above -80 from below AND bullish regime
+                if prev_williams_r <= -80.0 and curr_williams_r > -80.0 and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Williams %R crosses below -20 (overbought) AND bearish regime
-                elif curr_williams_r < -20 and williams_r[i-1] >= -20 and is_bearish_regime:
+                # Bearish entry: Williams %R crosses below -20 from above AND bearish regime
+                elif prev_williams_r >= -20.0 and curr_williams_r < -20.0 and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: Williams %R crosses below -50 (momentum loss) OR regime changes to bearish
-            if curr_williams_r < -50 and williams_r[i-1] >= -50 or not is_bullish_regime:
+            # Exit when: Williams %R rises above -20 (overbought) OR regime changes to bearish
+            if curr_williams_r >= -20.0 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: Williams %R crosses above -50 (momentum loss) OR regime changes to bullish
-            if curr_williams_r > -50 and williams_r[i-1] <= -50 or not is_bearish_regime:
+            # Exit when: Williams %R falls below -80 (oversold) OR regime changes to bullish
+            if curr_williams_r <= -80.0 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
