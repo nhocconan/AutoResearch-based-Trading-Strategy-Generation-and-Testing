@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses Donchian channel (20-period high/low) from daily candles for institutional breakout levels
-# 1w EMA50 provides strong HTF trend filter to align with primary trend direction
-# Volume spike (2.0x 20-period average) confirms breakout validity with institutional participation
-# ATR-based trailing stop (2.0x ATR) manages risk while allowing trends to develop
-# Designed for low trade frequency (target: 7-25 trades/year) to minimize fee drag on 1d timeframe
-# Works in bull markets via long signals when price breaks above Donchian high with HTF uptrend
-# Works in bear markets via short signals when price breaks below Donchian low with HTF downtrend
-# Donchian channels work well in both trending and ranging markets by providing clear breakout thresholds
+# Hypothesis: 6h Williams Alligator (13,8,5 SMAs) with 12h EMA50 trend filter and volume confirmation
+# Williams Alligator identifies trend formation when jaws (13), teeth (8), lips (5) are aligned and diverging
+# Long when lips > teeth > jaws AND price > 12h EMA50 AND volume > 1.5x 20-period average
+# Short when lips < teeth < jaws AND price < 12h EMA50 AND volume > 1.5x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
+# Target: 12-37 trades/year on 6h timeframe to avoid fee drag while capturing Alligator trend signals
+# Works in bull markets via long signals when Alligator aligns upward with HTF uptrend
+# Works in bear markets via short signals when Alligator aligns downward with HTF downtrend
+# Alligator's smoothed SMAs reduce whipsaw in ranging markets while catching strong trends
 
-name = "1d_Donchian_Breakout_1wEMA50_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Williams_Alligator_12hEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,20 +28,22 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian channels (20-period)
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator SMAs (13,8,5) - using close prices
+    # Jaws: 13-period SMA
+    jaws = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    # Teeth: 8-period SMA
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    # Lips: 5-period SMA
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -56,32 +58,33 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA and Donchian
+    start_idx = 50  # warmup for EMA and Alligator
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_1w = ema_50_1w_aligned[i]
+        curr_ema_12h = ema_50_12h_aligned[i]
         curr_atr = atr[i]
-        curr_upper = upper[i]
-        curr_lower = lower[i]
+        curr_lips = lips[i]
+        curr_teeth = teeth[i]
+        curr_jaws = jaws[i]
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
+        # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            # Trailing stop: 2.0 * ATR below highest high
-            stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR price breaks below Donchian lower (failed breakout)
-            if curr_close < stop_price or curr_close < curr_lower:
+            # Trailing stop: 2.5 * ATR below highest high
+            stop_price = highest_high_since_entry - 2.5 * curr_atr
+            # Exit conditions: price below trailing stop OR Alligator alignment breaks down
+            if curr_close < stop_price or not (curr_lips > curr_teeth > curr_jaws):
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -91,10 +94,10 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
-            # Trailing stop: 2.0 * ATR above lowest low
-            stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR price breaks above Donchian upper (failed breakout)
-            if curr_close > stop_price or curr_close > curr_upper:
+            # Trailing stop: 2.5 * ATR above lowest low
+            stop_price = lowest_low_since_entry + 2.5 * curr_atr
+            # Exit conditions: price above trailing stop OR Alligator alignment breaks down
+            if curr_close > stop_price or not (curr_lips < curr_teeth < curr_jaws):
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -102,13 +105,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian upper AND price > 1w EMA50 AND volume spike
-            if curr_close > curr_upper and curr_close > curr_ema_1w and vol_spike:
+            # Long entry: Lips > Teeth > Jaws AND price > 12h EMA50 AND volume spike
+            if curr_lips > curr_teeth > curr_jaws and curr_close > curr_ema_12h and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: Price breaks below Donchian lower AND price < 1w EMA50 AND volume spike
-            elif curr_close < curr_lower and curr_close < curr_ema_1w and vol_spike:
+            # Short entry: Lips < Teeth < Jaws AND price < 12h EMA50 AND volume spike
+            elif curr_lips < curr_teeth < curr_jaws and curr_close < curr_ema_12h and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
