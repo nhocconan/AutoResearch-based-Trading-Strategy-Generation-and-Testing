@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA34 trend filter + volume confirmation
-# Long when price breaks above Donchian(20) upper band AND price > 1w EMA34 AND volume > 2.0x 20-bar avg
-# Short when price breaks below Donchian(20) lower band AND price < 1w EMA34 AND volume > 2.0x 20-bar avg
-# Exit when price crosses opposite Donchian band (e.g., long exits when price < lower band)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
-# Donchian channels provide structural breakouts in both trending and ranging markets.
-# 1w EMA34 ensures we trade with higher timeframe trend, reducing counter-trend whipsaws.
-# Volume confirmation filters low-conviction moves. Works on BTC/ETH as primary targets.
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike
+# Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit on opposite Camarilla level touch (long exit at S3, short exit at R3)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
+# Camarilla levels provide institutional support/resistance. EMA34 filters counter-trend moves.
+# Volume spike confirms institutional participation. Works in both bull and bear markets.
 
-name = "12h_Donchian20_1wEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,20 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA(34) on 1w data
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 12h timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) calculation on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Use previous day's typical price for Camarilla calculation
+    prev_typical = pd.Series(typical_price).shift(1).values
+    # Calculate range
+    daily_range = high - low
+    prev_range = pd.Series(daily_range).shift(1).values
+    
+    # Camarilla levels
+    R3 = prev_typical + (prev_range * 1.1 / 4)
+    S3 = prev_typical - (prev_range * 1.1 / 4)
+    R4 = prev_typical + (prev_range * 1.1 / 2)
+    S4 = prev_typical - (prev_range * 1.1 / 2)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -53,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -62,30 +72,32 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        upper_band = highest_high[i]
-        lower_band = lowest_low[i]
-        ema_34 = ema_34_1w_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
+        r3_level = R3[i]
+        s3_level = S3[i]
+        r4_level = R4[i]
+        s4_level = S4[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above upper band AND price > 1w EMA34 AND volume confirmation
-            if curr_close > upper_band and curr_close > ema_34 and vol_conf:
+            # Long when close > R3 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below lower band AND price < 1w EMA34 AND volume confirmation
-            elif curr_close < lower_band and curr_close < ema_34 and vol_conf:
+            # Short when close < S3 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price crosses below lower band
-            if curr_close < lower_band:
+        elif position == 1:  # Long - exit when close < S3 (opposite level)
+            if curr_close < s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price crosses above upper band
-            if curr_close > upper_band:
+        elif position == -1:  # Short - exit when close > R3 (opposite level)
+            if curr_close > r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
