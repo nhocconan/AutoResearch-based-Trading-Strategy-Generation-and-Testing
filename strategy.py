@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 1d EMA34 with volume spike
-# Short when price breaks below Donchian(20) low AND price < 1d EMA34 with volume spike
-# Exit on opposite Donchian breakout or trend reversal
-# Uses 1d EMA34 for trend filter to avoid counter-trend whipsaws
-# Volume confirmation ensures moves have institutional participation
-# Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above Camarilla R3 AND price > 1d EMA34 with volume > 2x average
+# Short when price breaks below Camarilla S3 AND price < 1d EMA34 with volume > 2x average
+# Exit on opposite Camarilla break or trend reversal
+# Uses proven Camarilla structure from top performers with tight entry conditions
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,23 +36,32 @@ def generate_signals(prices):
     # Align daily EMA34 to 4h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla levels from previous 1d bar
+    # Need previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Camarilla R3, S3 levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 20-period average (stricter than before)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, lookback)  # warmup for EMA34 and Donchian
+    start_idx = max(40, 20)  # warmup for EMA34 and Camarilla
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]):
             signals[i] = 0.0
             continue
             
@@ -61,6 +69,8 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema34 = ema34_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
@@ -70,26 +80,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: price breaks above Donchian high AND bullish regime
-                if curr_high > highest_high[i-1] and is_bullish_regime:
+                # Bullish entry: price breaks above Camarilla R3 AND bullish regime
+                if curr_high > curr_r3 and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian low AND bearish regime
-                elif curr_low < lowest_low[i-1] and is_bearish_regime:
+                # Bearish entry: price breaks below Camarilla S3 AND bearish regime
+                elif curr_low < curr_s3 and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price breaks below Donchian low OR regime changes to bearish
-            if curr_low < lowest_low[i-1] or not is_bullish_regime:
+            # Exit when: price breaks below Camarilla S3 OR regime changes to bearish
+            if curr_low < curr_s3 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price breaks above Donchian high OR regime changes to bullish
-            if curr_high > highest_high[i-1] or not is_bearish_regime:
+            # Exit when: price breaks above Camarilla R3 OR regime changes to bullish
+            if curr_high > curr_r3 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
