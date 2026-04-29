@@ -3,62 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA34 trend filter and volume confirmation
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend absence (all lines intertwined) vs presence (lines separated, ordered).
-# In trending markets (Alligator "awake"), we trade breakouts of the Alligator's "mouth" (Lips) in direction of 1w EMA34 trend.
-# Volume confirmation ensures breakout legitimacy. Designed for low frequency (~10-25 trades/year) to minimize fee drag.
-# Works in bull/bear via 1w EMA34 trend filter - only trades in direction of weekly momentum.
+# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation
+# Uses Ichimoku cloud (senkou span A/B) from 6h timeframe for dynamic support/resistance
+# Entry: price breaks above/below cloud with TK cross confirmation and 1d EMA50 trend alignment
+# Exit: price re-enters cloud or TK cross reverses
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in bull/bear via 1d EMA50 trend filter - only trades in direction of daily momentum
+# Ichimoku provides adaptive trend/filter that performs well in ranging and trending markets
 
-name = "1d_WilliamsAlligator_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:  # need enough data for Ichimoku calculations
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator on 1d timeframe (using close prices)
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.empty_like(arr, dtype=float)
-        result[:] = np.nan
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (Prev_SMMA * (period-1) + Close) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    # Shift as per Alligator definition: Jaw+8, Teeth+5, Lips+3
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind (not used for signals)
+    
+    # Align Ichimoku components (they are already calculated on 6h timeframe)
+    # Senkou spans need to be shifted forward by 26 periods for cloud plotting
+    # But for signal generation, we use current cloud values (already shifted in calculation)
+    # Actually, senkou_a/b as calculated above are the values to be plotted 26 periods ahead
+    # So current cloud is senkou_a/b from 26 periods ago
+    senkou_a_lagged = np.roll(senkou_a, 26)
+    senkou_b_lagged = np.roll(senkou_b, 26)
+    # Set first 26 values to NaN since we don't have cloud data yet
+    senkou_a_lagged[:26] = np.nan
+    senkou_b_lagged[:26] = np.nan
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -75,62 +85,73 @@ def generate_signals(prices):
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = 21  # lips needs 5 + 3 shift = 8, but we need enough for SMMA warmup
+    start_idx = max(52, 26) + 26  # need senkou b period + cloud shift
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(senkou_a_lagged[i]) or 
+            np.isnan(senkou_b_lagged[i]) or np.isnan(tenkan[i]) or 
+            np.isnan(kijun[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_open = open_price[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        curr_jaw = jaw_shifted[i]
-        curr_teeth = teeth_shifted[i]
-        curr_lips = lips_shifted[i]
-        curr_ema34_1w = ema_34_1w_aligned[i]
+        curr_tenkan = tenkan[i]
+        curr_kijun = kijun[i]
+        curr_senkou_a = senkou_a_lagged[i]
+        curr_senkou_b = senkou_b_lagged[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
+        # Cloud boundaries (top and bottom of cloud)
+        cloud_top = max(curr_senkou_a, curr_senkou_b)
+        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
+        
+        # TK cross (Tenkan crossing Kijun)
+        tk_cross_bullish = curr_tenkan > curr_kijun
+        tk_cross_bearish = curr_tenkan < curr_kijun
+        
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price breaks below Teeth (trend weakening)
-            if curr_close < entry_price - 2.5 * atr_at_entry or curr_close < curr_teeth:
+            # Exit: stoploss hit or price re-enters cloud or TK cross turns bearish
+            if (curr_close < entry_price - 2.0 * atr_at_entry or 
+                curr_close < cloud_top or 
+                not tk_cross_bullish):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price breaks above Teeth (trend weakening)
-            if curr_close > entry_price + 2.5 * atr_at_entry or curr_close > curr_teeth:
+            # Exit: stoploss hit or price re-enters cloud or TK cross turns bullish
+            if (curr_close > entry_price + 2.0 * atr_at_entry or 
+                curr_close > cloud_bottom or 
+                not tk_cross_bearish):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new breakout entries
-            # Alligator is "awake" when lines are separated and ordered
-            # Uptrend: Lips > Teeth > Jaw
-            # Downtrend: Lips < Teeth < Jaw
-            alligator_awake_up = curr_lips > curr_teeth and curr_teeth > curr_jaw
-            alligator_awake_down = curr_lips < curr_teeth and curr_teeth < curr_jaw
-            
             # Volume confirmation: current volume > 1.5x 20-period average
             vol_confirm = curr_volume > 1.5 * curr_vol_ma
             
-            # Long entry: price breaks above Lips with uptrend Alligator, weekly uptrend, and volume
-            if curr_close > curr_lips and alligator_awake_up and curr_close > curr_ema34_1w and vol_confirm:
+            # Long breakout when price breaks above cloud with bullish TK cross and 1d EMA50 uptrend
+            if (curr_close > cloud_top and 
+                tk_cross_bullish and 
+                curr_close > curr_ema50_1d and 
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 atr_at_entry = curr_atr
-            # Short entry: price breaks below Lips with downtrend Alligator, weekly downtrend, and volume
-            elif curr_close < curr_lips and alligator_awake_down and curr_close < curr_ema34_1w and vol_confirm:
+            # Short breakout when price breaks below cloud with bearish TK cross and 1d EMA50 downtrend
+            elif (curr_close < cloud_bottom and 
+                  tk_cross_bearish and 
+                  curr_close < curr_ema50_1d and 
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
