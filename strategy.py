@@ -7,9 +7,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Camarilla R3/S3 levels act as strong support/resistance; breakouts with volume and daily trend alignment capture momentum moves
 # Designed for ~20-50 trades/year to minimize fee drag while participating in established trends
 # Works in bull/bear via 1d EMA34 trend filter - only trades in direction of daily momentum
-# Uses strict volume confirmation (>2.0x 20-period average) to reduce false breakouts and overtrading
+# Uses strict volume confirmation (>2.5x 20-period average) to reduce false breakouts and overtrading
+# Focus on BTC/ETH as primary targets with SOL as secondary
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -100,8 +101,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new breakout entries
-            # Volume confirmation: current volume > 2.0x 20-period average
-            vol_confirm = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 2.5x 20-period average (stricter to reduce trade frequency)
+            vol_confirm = curr_volume > 2.5 * curr_vol_ma
             
             # Long breakout when price closes above R3 with 1d EMA34 uptrend and volume confirmation
             if curr_close > R3 and curr_close > curr_ema34_1d and vol_confirm:
