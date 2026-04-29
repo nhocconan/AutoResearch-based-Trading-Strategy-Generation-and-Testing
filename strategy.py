@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume spike confirmation
-# Long when Williams %R < -80 (oversold), price > 1d EMA34 (uptrend), volume > 2.0x average
-# Short when Williams %R > -20 (overbought), price < 1d EMA34 (downtrend), volume > 2.0x average
-# Exit when Williams %R crosses -50 (mean reversion)
-# Uses discrete position sizing (0.25) and volume confirmation to target 12-37 trades/year on 6h.
-# Designed to work in both bull and bear markets by fading extremes in the direction of the 1d trend.
+# Hypothesis: 12h Williams %R mean reversion with 1d EMA34 trend filter and volume spike
+# Long when Williams %R(14) < -80 (oversold), price > 1d EMA34 (uptrend), volume > 1.5x average
+# Short when Williams %R(14) > -20 (overbought), price < 1d EMA34 (downtrend), volume > 1.5x average
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Designed for 12h timeframe to target 12-37 trades/year, works in both bull and bear markets
+# by fading extremes in the direction of the higher timeframe trend.
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,20 +29,20 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data for Williams %R (14-period)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Calculate 6h Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_6h['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_6h['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Replace division by zero with -50 (neutral)
+    # Calculate 12h Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_12h['close'].values) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 6h Williams %R to 6h timeframe (no additional delay needed)
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    # Align 12h Williams %R to 12h timeframe (no additional delay needed)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -78,6 +78,7 @@ def generate_signals(prices):
         curr_williams_r = williams_r_aligned[i]
         curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
+        curr_volume = volume[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
@@ -97,8 +98,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average
-            vol_confirmed = volume[i] > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
             
             # Long when Williams %R < -80 (oversold), price > 1d EMA34 (uptrend), volume confirmed
             if curr_williams_r < -80 and curr_close > curr_ema34_1d and vol_confirmed:
