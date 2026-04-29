@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike
-# Long when price breaks above Camarilla R3 AND price > 1d EMA(34) AND volume > 2.0x 20-period average
-# Short when price breaks below Camarilla S3 AND price < 1d EMA(34) AND volume > 2.0x 20-period average
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 AND price > 1d EMA(50) AND volume > 2.0x 20-period average
+# Short when price breaks below Camarilla S3 AND price < 1d EMA(50) AND volume > 2.0x 20-period average
 # Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 4h (primary), HTF: 1d for trend filter and Camarilla levels.
+# Timeframe: 6h (primary), HTF: 1d for trend filter and Camarilla levels.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,13 +25,13 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34)
+    # Calculate 1d EMA(50)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla pivot levels from 1d data
     high_1d = df_1d['high'].values
@@ -58,13 +58,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for long positions
     lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(100, 50)  # warmup for indicators
+    start_idx = max(100, 60)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_34_1d_aligned[i]
+        curr_ema = ema_50_1d_aligned[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         curr_atr = atr[i]
@@ -84,7 +84,7 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price breaks below Camarilla S3
-            # 2. Price < 1d EMA(34)
+            # 2. Price < 1d EMA(50)
             # 3. Trailing stop: price drops 2.5*ATR from highest since entry
             if (curr_close < curr_s3 or 
                 curr_close < curr_ema or
@@ -102,7 +102,7 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price breaks above Camarilla R3
-            # 2. Price > 1d EMA(34)
+            # 2. Price > 1d EMA(50)
             # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
             if (curr_close > curr_r3 or 
                 curr_close > curr_ema or
@@ -114,14 +114,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R3 AND price > 1d EMA(34) AND volume spike
+            # Long entry: price breaks above Camarilla R3 AND price > 1d EMA(50) AND volume spike
             if (curr_close > curr_r3 and 
                 curr_close > curr_ema and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short entry: price breaks below Camarilla S3 AND price < 1d EMA(34) AND volume spike
+            # Short entry: price breaks below Camarilla S3 AND price < 1d EMA(50) AND volume spike
             elif (curr_close < curr_s3 and 
                   curr_close < curr_ema and 
                   vol_spike):
