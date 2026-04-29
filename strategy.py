@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves
-# 1d EMA50 filter ensures trading with the higher timeframe trend
-# Volume confirmation avoids false breakouts
-# Works in both bull and bear markets by following 1d trend while capturing 12h momentum shifts
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Williams %R momentum with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion within trend
+# Long when Williams %R crosses above -80 (oversold) AND price > 1d EMA34 (bullish regime)
+# Short when Williams %R crosses below -20 (overbought) AND price < 1d EMA34 (bearish regime)
+# Volume confirmation ensures momentum strength
+# Works in both bull and bear markets by following 1d trend while capturing 4h mean reversion
+# Target: 75-150 total trades over 4 years (19-37/year) to minimize fee drag
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,70 +30,68 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA50 to 12h timeframe (completed 1d bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian Channel (20-period)
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100.0
+    # Handle division by zero (when high == low)
+    williams_r[highest_high == lowest_low] = -50.0
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for EMA50 and Donchian
+    start_idx = max(50, 34, 20, 14)  # warmup for EMA34, volume MA, and Williams %R
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_aligned[i]):
+        if np.isnan(ema34_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_upper = upper[i]
-        curr_lower = lower[i]
-        curr_ema50 = ema50_aligned[i]
+        curr_williams_r = williams_r[i]
+        curr_ema34 = ema34_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Trend regime: bullish if price > 1d EMA50, bearish if price < 1d EMA50
-        is_bullish_regime = curr_close > curr_ema50
-        is_bearish_regime = curr_close < curr_ema50
+        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
+        is_bullish_regime = curr_close > curr_ema34
+        is_bearish_regime = curr_close < curr_ema34
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: price breaks above upper band AND bullish regime
-                if curr_close > curr_upper and is_bullish_regime:
+                # Bullish entry: Williams %R crosses above -80 (oversold) AND bullish regime
+                if curr_williams_r > -80 and williams_r[i-1] <= -80 and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below lower band AND bearish regime
-                elif curr_close < curr_lower and is_bearish_regime:
+                # Bearish entry: Williams %R crosses below -20 (overbought) AND bearish regime
+                elif curr_williams_r < -20 and williams_r[i-1] >= -20 and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price breaks below lower band OR regime changes to bearish
-            if curr_close < curr_lower or not is_bullish_regime:
+            # Exit when: Williams %R crosses below -50 (momentum loss) OR regime changes to bearish
+            if curr_williams_r < -50 and williams_r[i-1] >= -50 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price breaks above upper band OR regime changes to bullish
-            if curr_close > curr_upper or not is_bearish_regime:
+            # Exit when: Williams %R crosses above -50 (momentum loss) OR regime changes to bullish
+            if curr_williams_r > -50 and williams_r[i-1] <= -50 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
