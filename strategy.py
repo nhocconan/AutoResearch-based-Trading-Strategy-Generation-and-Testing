@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses 6h primary timeframe with 1d HTF for trend and pivot calculation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses 12h primary timeframe with 1d HTF for trend and pivot calculation
 # Camarilla R3/S3 breakouts indicate strong momentum when aligned with 1d trend
 # Volume confirmation filters false breakouts
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull and bear markets by following 1d trend while capturing 6h momentum
+# Works in both bull and bear markets by following 1d trend while capturing 12h momentum
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 12h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels from prior 1d (using 1d data)
@@ -49,11 +49,11 @@ def generate_signals(prices):
     r3_level = close_1d + camarilla_range
     s3_level = close_1d - camarilla_range
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume confirmation: volume > 2.0x 20-period average (20*6h = ~5 days)
+    # Volume confirmation: volume > 2.0x 20-period average (20*12h = ~10 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
     
