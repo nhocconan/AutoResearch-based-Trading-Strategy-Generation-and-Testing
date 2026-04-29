@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 12h EMA50 trend filter and volume confirmation
-# Uses tighter Camarilla levels (R4/S4) for fewer, higher-quality breakouts
-# Volume confirmation > 2.0x average to filter weak breakouts
-# 12h EMA50 trend filter ensures alignment with higher timeframe momentum
-# Discrete position sizing (0.25) and mean reversion exit at pivot point
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Uses tighter Camarilla levels (R3/S3) for fewer, higher-quality breakouts
+# Volume confirmation > 1.8x average to filter weak breakouts
+# 4h EMA50 trend filter ensures alignment with higher timeframe momentum
+# Session filter (08-20 UTC) reduces noise trades
+# Discrete position sizing (0.20) and mean reversion exit at pivot point
 # Designed to reduce trade frequency while maintaining edge in both bull and bear markets
+# Target: 15-37 trades/year (60-150 over 4 years) to avoid fee drag
 
-name = "4h_Camarilla_R4S4_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike_Session_v3"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,13 +27,13 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Precompute session filter (08-20 UTC)
+    # Precompute session filter (08-20 UTC) - using DatetimeIndex for safety
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
     # Get 1d data for Camarilla pivot levels (using previous day's OHLC)
@@ -39,10 +41,10 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
     high_1d = df_1d['high'].values
@@ -52,23 +54,23 @@ def generate_signals(prices):
     # Camarilla calculations based on previous day
     # Pivot point = (H + L + C) / 3
     pp = (high_1d + low_1d + close_1d) / 3.0
-    # R4 = C + (H - L) * 1.1 / 2
-    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    # S4 = C - (H - L) * 1.1 / 2
-    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    # R3 = C + (H - L) * 1.1 / 4
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    # S3 = C - (H - L) * 1.1 / 4
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
     # Use previous day's values (shift by 1) to avoid look-ahead
     pp_shifted = np.roll(pp, 1)
-    r4_shifted = np.roll(r4, 1)
-    s4_shifted = np.roll(s4, 1)
+    r3_shifted = np.roll(r3, 1)
+    s3_shifted = np.roll(s3, 1)
     pp_shifted[0] = np.nan
-    r4_shifted[0] = np.nan
-    s4_shifted[0] = np.nan
+    r3_shifted[0] = np.nan
+    s3_shifted[0] = np.nan
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 1h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_shifted)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_shifted)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,7 +78,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Volume and 12h EMA50 warmup
+    start_idx = max(20, 50)  # Volume and 4h EMA50 warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -85,8 +87,8 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -95,9 +97,9 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         curr_pp = pp_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_ema50_4h = ema_50_4h_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
@@ -107,7 +109,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit: price above pivot point (mean reversion to pivot)
@@ -115,19 +117,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average (stricter)
-            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.8x 20-period average (balanced)
+            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
             
-            # Long when price breaks above R4, 12h EMA50 up-trend, volume confirmed
-            if curr_high > curr_r4 and curr_close > curr_ema50_12h and vol_confirmed:
-                signals[i] = 0.25
+            # Long when price breaks above R3, 4h EMA50 up-trend, volume confirmed
+            if curr_high > curr_r3 and curr_close > curr_ema50_4h and vol_confirmed:
+                signals[i] = 0.20
                 position = 1
-            # Short when price breaks below S4, 12h EMA50 down-trend, volume confirmed
-            elif curr_low < curr_s4 and curr_close < curr_ema50_12h and vol_confirmed:
-                signals[i] = -0.25
+            # Short when price breaks below S3, 4h EMA50 down-trend, volume confirmed
+            elif curr_low < curr_s3 and curr_close < curr_ema50_4h and vol_confirmed:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
