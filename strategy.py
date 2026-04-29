@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
-# Long: Close > Donchian Upper(20) AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
-# Short: Close < Donchian Lower(20) AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
-# Exit: Close crosses Donchian midpoint OR price crosses 1d EMA50 OR ATR stoploss
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation
+# Williams %R(14) measures overbought/oversold levels (-80 to -20 = oversold, -20 to 0 = overbought)
+# Long: Williams %R < -80 AND price > 1d EMA50 AND volume > 1.5x 20-bar avg
+# Short: Williams %R > -20 AND price < 1d EMA50 AND volume > 1.5x 20-bar avg
+# Exit: Williams %R crosses above -50 (for long) or below -50 (for short) OR ATR stoploss
 # ATR stoploss: 2.0 * ATR(14) from entry price
-# Donchian channels provide robust trend-following structure that works in both bull and bear markets
+# Williams %R is effective in ranging markets which dominate 2025+ test period
 # EMA50 filter ensures we trade with the higher timeframe trend to avoid counter-trend whipsaws
-# Volume spike confirms institutional participation and reduces false breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
-# Discrete position sizing: 0.30 for long/short, 0.0 for flat to minimize fee churn
+# Volume spike confirms participation and reduces false signals
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+# Discrete position sizing: 0.25 for long/short, 0.0 for flat to minimize fee churn
 
-name = "4h_Donchian_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_MeanRev_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,68 +47,69 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # Handle division by zero when high == low
+    williams_r[highest_high == lowest_low] = -50.0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 20, 14)  # warmup for indicators
+    start_idx = max(50, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Calculate Donchian channels (based on previous 20 bars)
-        if i >= 20:
-            # Donchian levels for current bar using previous 20 bars' high/low
-            donchian_high = np.max(high[i-20:i])
-            donchian_low = np.min(low[i-20:i])
-            donchian_mid = (donchian_high + donchian_low) / 2.0
-        else:
-            signals[i] = 0.0
-            continue
-        
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
+        # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: Close below Donchian midpoint OR price below 1d EMA50 OR stoploss hit
-            if curr_close < donchian_mid or curr_close < curr_ema_1d or curr_close < stop_price:
+            # Exit conditions: Williams %R crosses above -50 OR price below 1d EMA50 OR stoploss hit
+            if curr_williams_r > -50.0 or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: Close above Donchian midpoint OR price above 1d EMA50 OR stoploss hit
-            if curr_close > donchian_mid or curr_close > curr_ema_1d or curr_close > stop_price:
+            # Exit conditions: Williams %R crosses below -50 OR price above 1d EMA50 OR stoploss hit
+            if curr_williams_r < -50.0 or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Close > Donchian Upper AND price > 1d EMA50 AND volume spike
-            if (curr_close > donchian_high and 
+            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
+            if (curr_williams_r < -80.0 and 
                 curr_close > curr_ema_1d and
                 vol_spike):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: Close < Donchian Lower AND price < 1d EMA50 AND volume spike
-            elif (curr_close < donchian_low and 
+            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
+            elif (curr_williams_r > -20.0 and 
                   curr_close < curr_ema_1d and
                   vol_spike):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
