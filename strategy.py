@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Uses Williams Alligator (jaw/teeth/lips) to identify trendless markets and avoid false breakouts
-# 1d EMA34 provides strong HTF trend filter to align with primary trend direction
-# Volume spike (2.0x 20-period average) confirms breakout validity with institutional participation
-# ATR-based trailing stop (2.5x ATR) manages risk while allowing trends to develop
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag
-# Works in bull markets via long signals when lips > teeth > jaw and price > 1d EMA34
-# Works in bear markets via short signals when lips < teeth < jaw and price < 1d EMA34
-# Williams Alligator excels in ranging markets by staying flat, reducing whipsaw losses
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d EMA50 trend filter and volume confirmation
+# Bollinger Band squeeze (low volatility contraction) precedes explosive breakouts
+# 1d EMA50 provides strong HTF trend filter to align with primary trend direction
+# Volume spike (2.0x 20-period average) confirms breakout validity
+# ATR-based trailing stop (2.0x ATR) manages risk while allowing trends to develop
+# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag
+# Works in bull markets via long signals when BB squeeze breaks upward and price > 1d EMA50
+# Works in bear markets via short signals when BB squeeze breaks downward and price < 1d EMA50
+# Bollinger Band squeeze is a proven volatility-based edge that works across market regimes
 
-name = "4h_Williams_Alligator_1dEMA34_VolumeConfirm_v1"
+name = "4h_BollingerSqueeze_EMA50_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,27 +32,33 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator (jaw=13, teeth=8, lips=5) with SMMA
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_bb + (bb_std * std_bb)
+    lower_band = sma_bb - (bb_std * std_bb)
+    bb_width = (upper_band - lower_band) / sma_bb  # Normalized band width
     
-    jaw = smma(close, 13)  # Blue line (13-period)
-    teeth = smma(close, 8)  # Red line (8-period)
-    lips = smma(close, 5)   # Green line (5-period)
+    # Bollinger Band squeeze: band width below 20-period percentile (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_width_std = pd.Series(bb_width).rolling(window=20, min_periods=20).std().values
+    squeeze_threshold = bb_width_ma - (1.5 * bb_width_std)  # 1.5 std below mean width
+    bb_squeeze = bb_width < squeeze_threshold
+    
+    # Breakout detection: price breaks above upper band OR below lower band
+    breakout_up = close > upper_band
+    breakout_down = close < lower_band
+    
+    # Volume spike confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -68,39 +74,28 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = 34  # warmup for Alligator and EMA
+    start_idx = 50  # warmup for EMA50 and BB
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_lips = lips[i]
-        curr_teeth = teeth[i]
-        curr_jaw = jaw[i]
-        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
-        
-        # Volume spike confirmation: current volume > 2.0x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-        else:
-            vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
-        
-        # Alligator signals: 
-        # Bullish: lips > teeth > jaw (alligator waking up to eat)
-        # Bearish: lips < teeth < jaw (alligator sleeping)
-        bullish_alligator = curr_lips > curr_teeth and curr_teeth > curr_jaw
-        bearish_alligator = curr_lips < curr_teeth and curr_teeth < curr_jaw
+        curr_bb_squeeze = bb_squeeze[i]
+        curr_breakout_up = breakout_up[i]
+        curr_breakout_down = breakout_down[i]
+        curr_vol_spike = vol_spike[i]
         
         # Handle exits and stoploss
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            # Trailing stop: 2.5 * ATR below highest high
-            stop_price = highest_high_since_entry - 2.5 * curr_atr
-            # Exit conditions: price below trailing stop OR Alligator turns bearish
-            if curr_close < stop_price or not bullish_alligator:
+            # Trailing stop: 2.0 * ATR below highest high
+            stop_price = highest_high_since_entry - 2.0 * curr_atr
+            # Exit conditions: price below trailing stop OR breakout fails (price < middle band)
+            middle_band = sma_bb[i]
+            if curr_close < stop_price or curr_close < middle_band:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -110,10 +105,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
-            # Trailing stop: 2.5 * ATR above lowest low
-            stop_price = lowest_low_since_entry + 2.5 * curr_atr
-            # Exit conditions: price above trailing stop OR Alligator turns bullish
-            if curr_close > stop_price or not bearish_alligator:
+            # Trailing stop: 2.0 * ATR above lowest low
+            stop_price = lowest_low_since_entry + 2.0 * curr_atr
+            # Exit conditions: price above trailing stop OR breakout fails (price > middle band)
+            middle_band = sma_bb[i]
+            if curr_close > stop_price or curr_close > middle_band:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -121,14 +117,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Bullish Alligator AND price > 1d EMA34 AND volume spike
-            if bullish_alligator and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: BB squeeze breakout upward AND price > 1d EMA50 AND volume spike
+            if curr_bb_squeeze and curr_breakout_up and curr_close > curr_ema_1d and curr_vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_high_since_entry = curr_high
-            # Short entry: Bearish Alligator AND price < 1d EMA34 AND volume spike
-            elif bearish_alligator and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: BB squeeze breakout downward AND price < 1d EMA50 AND volume spike
+            elif curr_bb_squeeze and curr_breakout_down and curr_close < curr_ema_1d and curr_vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
