@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
 # Uses Camarilla pivot levels from 1d: breakout at R3/S3 with continuation (not fade)
 # Volume confirmation (>2.0x 24-period average) ensures institutional participation
 # Trend filter uses 1d EMA34 to avoid counter-trend trades in both bull and bear markets
-# Tight entry conditions target ~12-37 trades/year per symbol to minimize fee drag
-# Designed for 12h timeframe to capture swings with controlled frequency
+# Tight entry conditions target ~19-50 trades/year per symbol to minimize fee drag
+# Designed for 4h timeframe to capture swings with controlled frequency
 # BTC/ETH focus: requires EMA alignment and volume confirmation to avoid SOL-only bias
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
