@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based trailing stop
-# Donchian breakouts capture momentum bursts after consolidation
-# Daily EMA34 ensures we trade breakouts in alignment with higher timeframe trend
-# Volume confirmation validates breakout strength
-# ATR trailing stop manages risk and allows profits to run
-# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by daily EMA)
-# Target: 20-50 trades/year (80-200 total over 4 years)
+# Hypothesis: 6h Weekly Camarilla R3/S3 Breakout with Daily Volume Spike
+# Weekly Camarilla levels provide significant support/resistance that price respects
+# Breakouts above R3 or below S3 with volume confirmation indicate strong momentum
+# Daily volume spike (>2x 20-period average) validates institutional participation
+# Works in bull/bear markets as breakouts capture volatility expansion
+# Target: 12-25 trades/year (48-100 total over 4 years)
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "6h_WeeklyCamarilla_R3S3_Breakout_DailyVolSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,89 +24,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for daily calculations
+    # Load HTF data ONCE before loop for weekly and daily calculations
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1w) < 10 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly Camarilla levels (based on previous week OHLC)
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR(14) for 4h data for volatility and stoploss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    weekly_range = high_1w - low_1w
+    camarilla_r3 = close_1w + 1.1 * weekly_range * 1.1 / 4
+    camarilla_s3 = close_1w - 1.1 * weekly_range * 1.1 / 4
     
-    # Calculate Donchian Channel(20) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly Camarilla levels to 6h timeframe (wait for weekly bar close)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Calculate daily volume spike: volume > 2x 20-period average
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > (2.0 * vol_ma_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0  # Track entry price for ATR-based stop
-    highest_since_entry = 0.0  # For long trailing stop
-    lowest_since_entry = 0.0   # For short trailing stop
     
-    start_idx = max(40, 34, 20, 20, 14)  # warmup for all indicators
+    start_idx = max(30, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if HTF data not available or ATR not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if HTF data not available
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_spike_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume_confirm = volume_confirm[i]
-        curr_ema34_1d = ema34_1d_aligned[i]
-        curr_atr = atr[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_vol_spike = vol_spike_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Bullish breakout: price breaks above 20-period high in bullish daily regime
-            if curr_close > highest_high[i] and curr_volume_confirm and curr_close > curr_ema34_1d:
-                signals[i] = 0.30
+            # Bullish breakout: price breaks above weekly R3 with volume spike
+            if curr_close > curr_r3 and curr_vol_spike:
+                signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_close
-            # Bearish breakout: price breaks below 20-period low in bearish daily regime
-            elif curr_close < lowest_low[i] and curr_volume_confirm and curr_close < curr_ema34_1d:
-                signals[i] = -0.30
+            # Bearish breakout: price breaks below weekly S3 with volume spike
+            elif curr_close < curr_s3 and curr_vol_spike:
+                signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_close
         
-        elif position == 1:  # Long position
-            # Update highest price since entry for trailing stop
-            if curr_high > highest_since_entry:
-                highest_since_entry = curr_high
-            
-            # ATR-based trailing stop: exit if price drops 2.5*ATR from highest since entry
-            if curr_close < (highest_since_entry - 2.5 * curr_atr):
+        elif position == 1:  # Long position - exit when price returns to weekly midline
+            # Exit when price crosses below weekly R3 (breakout failed) or reaches midpoint
+            weekly_mid = (r3_aligned[i] + s3_aligned[i]) / 2
+            if curr_close < weekly_mid:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
-        elif position == -1:  # Short position
-            # Update lowest price since entry for trailing stop
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
-            # ATR-based trailing stop: exit if price rises 2.5*ATR from lowest since entry
-            if curr_close > (lowest_since_entry + 2.5 * curr_atr):
+        elif position == -1:  # Short position - exit when price returns to weekly midline
+            # Exit when price crosses above weekly S3 (breakout failed) or reaches midpoint
+            weekly_mid = (r3_aligned[i] + s3_aligned[i]) / 2
+            if curr_close > weekly_mid:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
