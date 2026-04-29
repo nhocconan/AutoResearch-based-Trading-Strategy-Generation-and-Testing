@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Donchian breakouts capture strong momentum moves; 1d EMA34 ensures alignment with daily trend
-# Volume spike >2.0x confirms participation; discrete sizing (0.25) minimizes fee churn
-# Works in bull/bear via trend filter (only trade long above EMA34, short below EMA34)
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Volume spike >2.0x confirms participation; discrete sizing (0.30) minimizes fee churn
+# Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via trend filter.
 
-name = "12h_Donchian20_VolumeSpike_1dEMA34_Trend_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_1dEMA34_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -72,11 +71,11 @@ def generate_signals(prices):
             if curr_volume_confirm:
                 # Bullish entry: price breaks above Donchian upper + above 1d EMA34
                 if curr_high > highest_20[i] and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                 # Bearish entry: price breaks below Donchian lower + below 1d EMA34
                 elif curr_low < lowest_20[i] and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:  # Long position
@@ -85,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Exit: price breaks above Donchian upper
@@ -93,6 +92,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
