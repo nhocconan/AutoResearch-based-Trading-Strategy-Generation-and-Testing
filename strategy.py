@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation
-# Long when price breaks above 12h Camarilla R3 AND price > 1d EMA(34) AND volume > 2.0x 20-period average
-# Short when price breaks below 12h Camarilla S3 AND price < 1d EMA(34) AND volume > 2.0x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Based on proven pattern: Camarilla breakouts with volume and trend filters show strong test performance.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation
+# Long when price breaks above 4h Camarilla R3 AND price > 1d EMA(34) AND volume > 2.0x 20-period average
+# Short when price breaks below 4h Camarilla S3 AND price < 1d EMA(34) AND volume > 2.0x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee drag. Based on proven Camarilla breakout pattern
+# with volume and HTF trend filters showing strong test performance on ETH/SOL in DB.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,27 +33,30 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate pivot point and ranges
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_hl = high_12h - low_12h
+    # Calculate Camarilla levels for 4h: R3, S3
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    # Using typical formula: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    # Simplified: R3 = close + 1.1*(high-low)*0.275, S3 = close - 1.1*(high-low)*0.275
+    # Actually standard: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    # Where 1.1/4 = 0.275
+    rng_4h = high_4h - low_4h
+    camarilla_r3_4h = close_4h + 0.275 * rng_4h
+    camarilla_s3_4h = close_4h - 0.275 * rng_4h
     
-    # Camarilla levels
-    camarilla_r3 = pivot + (range_hl * 1.1 / 4)
-    camarilla_s3 = pivot - (range_hl * 1.1 / 4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3_4h)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3_4h)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    
-    # Calculate ATR for volatility filter (14-period)
+    # Calculate ATR for volatility (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
