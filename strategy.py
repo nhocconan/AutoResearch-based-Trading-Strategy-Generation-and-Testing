@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
 # Long when price breaks above Camarilla R3 AND price > 1d EMA34 with volume > 2x average
 # Short when price breaks below Camarilla S3 AND price < 1d EMA34 with volume > 2x average
 # Exit on opposite Camarilla break or trend reversal
-# Uses 12h timeframe with 1d HTF for fewer trades (target: 12-37/year) to minimize fee drag
+# Uses proven Camarilla structure from top performers with tight entry conditions
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 # Focus on BTC/ETH as primary symbols, SOL as secondary validation
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA34 to 12h timeframe (completed 1d bar only)
+    # Align daily EMA34 to 4h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
@@ -46,7 +47,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
