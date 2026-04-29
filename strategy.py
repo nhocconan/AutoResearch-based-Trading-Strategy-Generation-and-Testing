@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses actual Camarilla pivot levels from daily timeframe for key support/resistance.
 # EMA34 on 1d ensures we only trade in direction of higher timeframe trend.
 # Volume spike (>2.0x 20-period average) confirms breakout validity and reduces false signals.
 # Designed to work in both bull and bear markets: longs on R3/R4 breaks in uptrends, shorts on S3/S4 breaks in downtrends.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,13 +50,13 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 20-period average volume for confirmation (on 12h timeframe)
+    # Calculate 20-period average volume for confirmation (on 4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
