@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme with 12h EMA50 trend filter and volume spike
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-50 trades/year on 4h.
-# Williams %R captures momentum extremes that often precede reversals in both bull and bear markets.
-# 12h EMA50 filter ensures we trade with the intermediate-term trend, improving win rate.
-# Volume confirmation ensures reversals have conviction, reducing false signals in choppy markets.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike
+# Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume > 2.0x 20-bar avg
+# Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume > 2.0x 20-bar avg
+# Exit when price retouches Camarilla pivot point (mean reversion) or opposite breakout occurs
+# Session filter: 08-20 UTC only to reduce noise trades
+# Uses discrete position sizing (0.20) to minimize fee drag. Target: 15-37 trades/year on 1h.
+# Camarilla R3/S3 levels provide good breakout confirmation with reasonable frequency.
+# 4h EMA50 filter ensures we only trade with the intermediate-term trend, improving win rate.
+# Volume confirmation ensures breakouts have conviction, reducing false signals in choppy markets.
+# Session filter avoids low-liquidity periods that increase false breakouts.
 
-name = "4h_WilliamsR_Extreme_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,75 +28,111 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 14-period data for Williams %R calculation (can use 4h data directly)
-    if n < 14:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:  # Need at least a week of data for reliable pivots
         return np.zeros(n)
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels from prior 1d OHLC (using prior day's data to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+    prior_high = np.roll(high_1d, 1)
+    prior_low = np.roll(low_1d, 1)
+    prior_close = np.roll(close_1d, 1)
+    # Set first value to NaN since we don't have prior day for the first bar
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
+    prior_close[0] = np.nan
+    
+    # Camarilla calculations
+    # Pivot = (prior_high + prior_low + prior_close) / 3
+    pivot = (prior_high + prior_low + prior_close) / 3.0
+    # Range = prior_high - prior_low
+    range_val = prior_high - prior_low
+    # R3 = pivot + (range * 1.1/4)
+    # S3 = pivot - (range * 1.1/4)
+    camarilla_r3 = pivot + (range_val * 1.1 / 4.0)
+    camarilla_s3 = pivot - (range_val * 1.1 / 4.0)
+    camarilla_pivot = pivot  # Camarilla pivot point for exit
+    
+    # Align Camarilla levels to 1h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    # Calculate EMA(50) on 4h data
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 2.0 * volume_ma_20
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 20)  # Williams %R(14) and Volume MA(20)
+    start_idx = max(20, 20)  # Volume MA(20) and Camarilla need 20 bars (4h EMA50 handled by alignment)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+            
         vol_conf = volume_confirm[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        wr = williams_r[i]
-        ema_50 = ema_50_12h_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        pivot_pt = camarilla_pivot_aligned[i]
+        ema_50 = ema_50_4h_aligned[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when Williams %R < -80 (oversold) AND price > 12h EMA50 AND volume confirmation
-            if wr < -80 and curr_close > ema_50 and vol_conf:
-                signals[i] = 0.25
+            # Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume confirmation
+            if curr_high > r3 and curr_close > ema_50 and vol_conf:
+                signals[i] = 0.20
                 position = 1
-            # Short when Williams %R > -20 (overbought) AND price < 12h EMA50 AND volume confirmation
-            elif wr > -20 and curr_close < ema_50 and vol_conf:
-                signals[i] = -0.25
+            # Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume confirmation
+            elif curr_low < s3 and curr_close < ema_50 and vol_conf:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when Williams %R crosses above -50
-            if wr > -50:
+        elif position == 1:  # Long - exit when price retouches Camarilla pivot or breaks below Camarilla S3
+            if curr_close <= pivot_pt or curr_low < s3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:  # Short - exit when Williams %R crosses below -50
-            if wr < -50:
+                signals[i] = 0.20
+        elif position == -1:  # Short - exit when price retouches Camarilla pivot or breaks above Camarilla R3
+            if curr_close >= pivot_pt or curr_high > r3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
