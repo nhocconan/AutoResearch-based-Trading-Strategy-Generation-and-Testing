@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2x 20-bar avg
-# Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2x 20-bar avg
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > 1w EMA34 AND volume > 2x 20-bar avg
+# Short when price breaks below S3 AND close < 1w EMA34 AND volume > 2x 20-bar avg
 # Exit when price retouches the central pivot (P) level
 # Uses discrete position sizing (0.30) to balance profit and fee drag.
-# Target: 100-200 total trades over 4 years (25-50/year) on 4h.
-# Camarilla pivots provide precise intraday support/resistance levels.
-# 1d EMA34 filters counter-trend moves, volume confirmation ensures institutional participation.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
+# Camarilla pivots provide precise daily support/resistance levels.
+# 1w EMA34 filters counter-trend moves, volume confirmation ensures institutional participation.
 # Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,16 +27,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 1d timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Get 1d data for Camarilla pivot calculation (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
@@ -57,7 +57,7 @@ def generate_signals(prices):
     r3 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
     s3 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
+    # Align Camarilla levels to 1d timeframe (using previous day's levels)
     p_aligned = align_htf_to_ltf(prices, df_1d, p)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -70,18 +70,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA warmup and EMA50 alignment
+    start_idx = max(20, 34)  # volume MA warmup and EMA34 alignment
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(p_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(p_aligned[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        ema_50 = ema_50_12h_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
         curr_p = p_aligned[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
@@ -105,12 +105,12 @@ def generate_signals(prices):
                 signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R3 AND close > 12h EMA50 AND volume confirmation
-            if curr_close > curr_r3 and close[i] > ema_50 and vol_conf:
+            # Long when price breaks above R3 AND close > 1w EMA34 AND volume confirmation
+            if curr_close > curr_r3 and close[i] > ema_34 and vol_conf:
                 signals[i] = 0.30
                 position = 1
-            # Short when price breaks below S3 AND close < 12h EMA50 AND volume confirmation
-            elif curr_close < curr_s3 and close[i] < ema_50 and vol_conf:
+            # Short when price breaks below S3 AND close < 1w EMA34 AND volume confirmation
+            elif curr_close < curr_s3 and close[i] < ema_34 and vol_conf:
                 signals[i] = -0.30
                 position = -1
             else:
