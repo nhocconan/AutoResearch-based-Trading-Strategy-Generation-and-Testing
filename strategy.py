@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Long when price > Alligator Jaw (13-period SMMA shifted 8) and Lips > Teeth > Jaw (bullish alignment)
-# Short when price < Alligator Jaw and Lips < Teeth < Jaw (bearish alignment)
-# Volume confirmation: current volume > 1.5x 20-period average
-# Exit when Alligator lines cross (Lips crosses Teeth) or price crosses Jaw
-# Uses discrete position sizing (0.25) to target 12-30 trades/year on 12h timeframe.
-# Williams Alligator identifies trends effectively in both bull and bear markets by showing
-# when the market is sleeping (all lines intertwined) vs waking up (lines diverging).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 4h Donchian upper, 1d EMA34 up-trend, volume > 2.5x average (stricter filter)
+# Short when price breaks below 4h Donchian lower, 1d EMA34 down-trend, volume > 2.5x average
+# Exit when price crosses the 50% level (midpoint of Donchian channel)
+# Uses discrete position sizing (0.25) and strong volume filter to target 20-50 trades/year.
+# Designed to work in both bull and bear markets by following the higher timeframe trend (1d).
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,49 +29,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    # Get 4h data for Donchian channel (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Williams Alligator (SMMA = Smoothed Moving Average)
-    # Jaw: 13-period SMMA of median price, shifted 8 bars
-    # Teeth: 8-period SMMA of median price, shifted 5 bars  
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2.0
+    # Calculate 4h Donchian levels using previous 20 periods
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        if len(data) < period:
-            return np.full(len(data), np.nan)
-        result = np.full(len(data), np.nan)
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT_DATA) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Rolling max/min for upper/lower bands (using previous 20 periods, not including current)
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    jaw_raw = smma(median_price_12h, 13)
-    teeth_raw = smma(median_price_12h, 8)
-    lips_raw = smma(median_price_12h, 5)
-    
-    # Shift the lines: Jaw shifted 8, Teeth shifted 5, Lips shifted 3
-    jaw_shifted = np.full_like(jaw_raw, np.nan)
-    teeth_shifted = np.full_like(teeth_raw, np.nan)
-    lips_shifted = np.full_like(lips_raw, np.nan)
-    
-    if len(jaw_raw) > 8:
-        jaw_shifted[8:] = jaw_raw[:-8]
-    if len(teeth_raw) > 5:
-        teeth_shifted[5:] = teeth_raw[:-5]
-    if len(lips_raw) > 3:
-        lips_shifted[3:] = lips_raw[:-3]
-    
-    # Align 12h Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_shifted)
+    # Align 4h indicators to 4h timeframe (no additional delay needed for Donchian)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -100,52 +73,49 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        curr_jaw = jaw_aligned[i]
-        curr_teeth = teeth_aligned[i]
-        curr_lips = lips_aligned[i]
+        curr_upper = donchian_upper_aligned[i]
+        curr_lower = donchian_lower_aligned[i]
+        curr_mid = donchian_mid_aligned[i]
         curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Lips crosses below Teeth (bullish alignment broken) OR price below Jaw
-            if curr_lips < curr_teeth or curr_close < curr_jaw:
+            # Exit: price below 50% level (mean reversion to midpoint)
+            if curr_close < curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Lips crosses above Teeth (bearish alignment broken) OR price above Jaw
-            if curr_lips > curr_teeth or curr_close > curr_jaw:
+            # Exit: price above 50% level (mean reversion to midpoint)
+            if curr_close > curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.5x 20-period average (stricter filter)
+            vol_confirmed = curr_volume > 2.5 * curr_vol_ma
             
-            # Bullish alignment: Lips > Teeth > Jaw
-            bullish_alignment = curr_lips > curr_teeth and curr_teeth > curr_jaw
-            # Bearish alignment: Lips < Teeth < Jaw  
-            bearish_alignment = curr_lips < curr_teeth and curr_teeth < curr_jaw
-            
-            # Long when bullish alignment, price above Jaw, and volume confirmed
-            if bullish_alignment and curr_close > curr_jaw and vol_confirmed:
+            # Long when price breaks above upper band, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_upper and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when bearish alignment, price below Jaw, and volume confirmed
-            elif bearish_alignment and curr_close < curr_jaw and vol_confirmed:
+            # Short when price breaks below lower band, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_lower and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
