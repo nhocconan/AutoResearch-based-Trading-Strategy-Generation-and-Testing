@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA(50) trend filter and volume confirmation
-# Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 AND price > 12h EMA(50) AND volume > 1.5x 20-period average
-# Short when Bear Power < 0 AND price < 12h EMA(50) AND volume > 1.5x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 6h (primary), HTF: 12h for EMA(50) trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter, volume confirmation, and ATR trailing stop.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume > 1.5x 20-period average.
+# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following 1d trend.
+# Timeframe: 4h (primary), HTF: 1d for EMA(34) trend filter.
 # Added ATR-based trailing stop (2.0x) to reduce overtrading and manage risk.
 
-name = "6h_ElderRay_BullBearPower_12hEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +25,18 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA(13) for Elder Ray (on LTF)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA(13)
-    bear_power = low - ema_13   # Bear Power = Low - EMA(13)
+    # Calculate Donchian channels (20-period) on 4h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
@@ -55,15 +51,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for long positions
     lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(100, 50)  # warmup for indicators
+    start_idx = max(100, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        curr_ema_12h = ema_50_12h_aligned[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
@@ -80,11 +74,11 @@ def generate_signals(prices):
                 highest_since_entry = curr_close
             
             # Exit conditions:
-            # 1. Bear Power becomes negative (momentum shift)
-            # 2. Price < 12h EMA(50) (trend filter fails)
+            # 1. Price breaks below Donchian(20) low
+            # 2. Price < 1d EMA(34) (trend filter fails)
             # 3. Trailing stop: price drops 2.0*ATR from highest since entry
-            if (curr_bear_power < 0 or 
-                curr_close < curr_ema_12h or
+            if (curr_close < lowest_20[i] or
+                curr_close < curr_ema_1d or
                 curr_close < highest_since_entry - 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
@@ -98,11 +92,11 @@ def generate_signals(prices):
                 lowest_since_entry = curr_low
             
             # Exit conditions:
-            # 1. Bull Power becomes positive (momentum shift)
-            # 2. Price > 12h EMA(50) (trend filter fails)
+            # 1. Price breaks above Donchian(20) high
+            # 2. Price > 1d EMA(34) (trend filter fails)
             # 3. Trailing stop: price rises 2.0*ATR from lowest since entry
-            if (curr_bull_power > 0 or 
-                curr_close > curr_ema_12h or
+            if (curr_close > highest_20[i] or
+                curr_close > curr_ema_1d or
                 curr_close > lowest_since_entry + 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
@@ -111,16 +105,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Bull Power > 0 AND price > 12h EMA(50) AND volume spike
-            if (curr_bull_power > 0 and 
-                curr_close > curr_ema_12h and 
+            # Long entry: price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume spike
+            if (curr_close > highest_20[i] and 
+                curr_close > curr_ema_1d and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short entry: Bear Power < 0 AND price < 12h EMA(50) AND volume spike
-            elif (curr_bear_power < 0 and 
-                  curr_close < curr_ema_12h and 
+            # Short entry: price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume spike
+            elif (curr_close < lowest_20[i] and 
+                  curr_close < curr_ema_1d and 
                   vol_spike):
                 signals[i] = -0.25
                 position = -1
