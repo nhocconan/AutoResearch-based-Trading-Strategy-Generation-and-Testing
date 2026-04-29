@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + 1w EMA50 trend filter + volume confirmation
-# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > 1w EMA50 AND volume > 1.8x 20-bar avg
-# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < 1w EMA50 AND volume > 1.8x 20-bar avg
-# Exit when Alligator alignment breaks (jaws-teeth-lips not in order)
-# Uses discrete position sizing (0.25) to reduce fee drag and improve test generalization.
-# Target: 15-30 trades/year on 1d timeframe (60-120 total over 4 years) to avoid overtrading.
-# Williams Alligator identifies trend phases via smoothed medians; 1w EMA50 filters for higher-timeframe trend alignment.
-# Works in bull markets by capturing sustained uptrends and in bear markets by capturing downtrends with trend alignment preventing counter-trend trades.
+# Hypothesis: 6h Williams %R Extreme with 1d EMA50 trend filter and volume spike
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
+# Exit when Williams %R returns to -50 (mean reversion) or opposite extreme hit
+# Uses discrete position sizing (0.25) to reduce fee drag.
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to avoid overtrading.
+# Williams %R identifies exhaustion points; EMA50 ensures trend alignment; volume confirms conviction.
+# Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,86 +26,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator: Smoothed medians (Jaw=13, Teeth=8, Lips=5)
-    # Jaw: Smoothed median of 13 periods, shifted 8 bars forward
-    # Teeth: Smoothed median of 8 periods, shifted 5 bars forward  
-    # Lips: Smoothed median of 5 periods, shifted 3 bars forward
-    median = (high + low) / 2.0
+    # Williams %R calculation (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate smoothed medians using rolling median with smoothing
-    jaw_raw = pd.Series(median).rolling(window=13, min_periods=13).median().values
-    teeth_raw = pd.Series(median).rolling(window=8, min_periods=8).median().values
-    lips_raw = pd.Series(median).rolling(window=5, min_periods=5).median().values
-    
-    # Apply forward shifts (Alligator specific)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    
-    # Set NaN for shifted values that rolled from end
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 20)  # Alligator jaw and volume MA warmup
+    start_idx = max(20, 14)  # volume MA and Williams %R warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_jaw = jaw[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
+        curr_williams_r = williams_r[i]
         curr_close = close[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Alligator alignment breaks (not bullish: jaw < teeth < lips)
-            if not (curr_jaw < curr_teeth < curr_lips):
+            # Exit: Williams %R returns to -50 (mean reversion) or hits overbought
+            if curr_williams_r >= -50 or curr_williams_r > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator alignment breaks (not bearish: jaw > teeth > lips)
-            if not (curr_jaw > curr_teeth > curr_lips):
+            # Exit: Williams %R returns to -50 (mean reversion) or hits oversold
+            if curr_williams_r <= -50 or curr_williams_r < -80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when Alligator bullish alignment AND price > 1w EMA50 AND volume confirmation
-            if curr_jaw < curr_teeth < curr_lips and curr_close > curr_ema50_1w and vol_conf:
+            # Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume confirmation
+            if curr_williams_r < -80 and curr_close > curr_ema50_1d and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Alligator bearish alignment AND price < 1w EMA50 AND volume confirmation
-            elif curr_jaw > curr_teeth > curr_lips and curr_close < curr_ema50_1w and vol_conf:
+            # Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume confirmation
+            elif curr_williams_r > -20 and curr_close < curr_ema50_1d and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
