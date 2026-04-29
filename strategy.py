@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
-# Long when: price breaks above Donchian(20) upper band AND close > 1d EMA34 AND volume > 1.5x 20-period average volume
-# Short when: price breaks below Donchian(20) lower band AND close < 1d EMA34 AND volume > 1.5x 20-period average volume
-# Uses discrete sizing (0.25) to minimize fee churn. Donchian provides structure, EMA34 filters trend direction,
-# volume spike confirms institutional interest. Works in bull/bear via trend filter.
-# Timeframe: 12h (primary), HTF: 1d for EMA34.
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume spike confirmation
+# Long when: price breaks above Donchian(20) high AND 12h EMA50 rising AND volume > 1.5x 20-period avg volume
+# Short when: price breaks below Donchian(20) low AND 12h EMA50 falling AND volume > 1.5x 20-period avg volume
+# Uses discrete sizing (0.25) to minimize fee churn. Donchian provides structure, EMA50 trend filter avoids counter-trend trades,
+# volume spike confirms institutional interest. Works in bull/bear via trend filter + breakout logic.
+# Timeframe: 4h (primary), HTF: 12h for EMA50 trend.
 
-name = "12h_Donchian20_EMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +24,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 1d EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load HTF data ONCE before loop for 12h EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian(20) on 12h data
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = period20_high
-    donchian_lower = period20_low
+    # Calculate Donchian(20) on 4h data
+    period = 20
+    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
     # Calculate volume spike: volume > 1.5x 20-period average volume
-    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_vol_20)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = max(period, 50)  # warmup for Donchian and EMA
     
     for i in range(start_idx, n):
-        # Skip if EMA34 data not available
-        if np.isnan(ema_34_1d_aligned[i]):
+        # Skip if HTF EMA data not available
+        if np.isnan(ema_50_12h_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_50_12h_prev = ema_50_12h_aligned[i-1] if i > 0 else curr_ema_50_12h
         curr_volume_spike = volume_spike[i]
-        curr_ema_34 = ema_34_1d_aligned[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower band OR close crosses below EMA34
-            if (curr_low < curr_donchian_lower or
-                (i > 0 and close[i-1] >= ema_34_1d_aligned[i-1] and curr_close < curr_ema_34)):
+            # Exit conditions:
+            # 1. Price falls below Donchian(20) low
+            # 2. 12h EMA50 starts falling (trend change)
+            if (curr_low < curr_donchian_low or
+                curr_ema_50_12h < curr_ema_50_12h_prev):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper band OR close crosses above EMA34
-            if (curr_high > curr_donchian_upper or
-                (i > 0 and close[i-1] <= ema_34_1d_aligned[i-1] and curr_close > curr_ema_34)):
+            # Exit conditions:
+            # 1. Price rises above Donchian(20) high
+            # 2. 12h EMA50 starts rising (trend change)
+            if (curr_high > curr_donchian_high or
+                curr_ema_50_12h > curr_ema_50_12h_prev):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band AND close > EMA34 AND volume spike
-            if (curr_high > curr_donchian_upper and
-                curr_close > curr_ema_34 and
+            # Long entry: price breaks above Donchian high AND 12h EMA50 rising AND volume spike
+            if (curr_high > curr_donchian_high and
+                curr_ema_50_12h > curr_ema_50_12h_prev and
                 curr_volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower band AND close < EMA34 AND volume spike
-            elif (curr_low < curr_donchian_lower and
-                  curr_close < curr_ema_34 and
+            # Short entry: price breaks below Donchian low AND 12h EMA50 falling AND volume spike
+            elif (curr_low < curr_donchian_low and
+                  curr_ema_50_12h < curr_ema_50_12h_prev and
                   curr_volume_spike):
                 signals[i] = -0.25
                 position = -1
