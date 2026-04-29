@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume confirmation
-# Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends
-# When all three lines are aligned (Jaw < Teeth < Lips for uptrend, Jaw > Teeth > Lips for downtrend),
-# it indicates a strong trend. Combined with 1d EMA50 for higher timeframe alignment and volume confirmation
-# (>2.0x 20-period average) to filter weak moves. Designed to capture sustained trends in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
+# Donchian channels identify breakouts from price consolidation. EMA200 on 1d filters for
+# higher timeframe trend direction to avoid counter-trend trades. Volume confirmation
+# ensures breakouts have institutional participation. Designed to capture sustained
+# moves in both bull and bear markets while minimizing whipsaws in chop.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_EMA200_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,77 +30,70 @@ def generate_signals(prices):
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Williams Alligator components (smoothed moving averages)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # SMMA calculation using EMA as approximation (standard practice)
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Calculate Donchian channels on 4h timeframe
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Calculate 20-period average volume for confirmation (on 12h timeframe)
+    # Calculate 20-period average volume for confirmation (on 4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 13, 8, 5, 20)  # 1d EMA50, Alligator components, volume MA warmup
+    start_idx = max(200, donchian_window, 20)  # 1d EMA200, Donchian, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_jaw = jaw[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_ema_200 = ema_200_1d_aligned[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict threshold for fewer trades)
-        vol_confirm = curr_volume > 2.0 * curr_vol_ma
-        
-        # Alligator alignment conditions
-        # Uptrend: Jaw < Teeth < Lips (all lines aligned upward)
-        # Downtrend: Jaw > Teeth > Lips (all lines aligned downward)
-        alligator_long = curr_jaw < curr_teeth and curr_teeth < curr_lips
-        alligator_short = curr_jaw > curr_teeth and curr_teeth > curr_lips
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = curr_volume > 1.5 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Alligator alignment breaks OR price closes below 1d EMA50
-            if not alligator_long or curr_close < curr_ema_1d:
+            # Exit: price closes below Donchian low OR price closes below 1d EMA200
+            if curr_close < curr_donchian_low or curr_close < curr_ema_200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator alignment breaks OR price closes above 1d EMA50
-            if not alligator_short or curr_close > curr_ema_1d:
+            # Exit: price closes above Donchian high OR price closes above 1d EMA200
+            if curr_close > curr_donchian_high or curr_close > curr_ema_200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Alligator uptrend alignment + price above 1d EMA50 + volume confirmation
-            if (alligator_long and 
-                curr_close > curr_ema_1d and 
+            # Long entry: price breaks above Donchian high + price above 1d EMA200 + volume confirmation
+            if (curr_high > curr_donchian_high and 
+                curr_close > curr_ema_200 and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Alligator downtrend alignment + price below 1d EMA50 + volume confirmation
-            elif (alligator_short and 
-                  curr_close < curr_ema_1d and 
+            # Short entry: price breaks below Donchian low + price below 1d EMA200 + volume confirmation
+            elif (curr_low < curr_donchian_low and 
+                  curr_close < curr_ema_200 and 
                   vol_confirm):
                 signals[i] = -0.25
                 position = -1
