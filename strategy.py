@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
 # Long when price breaks above Camarilla R3 level AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
 # Short when price breaks below Camarilla S3 level AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
 # Exit when price reverts to Camarilla Pivot level (mean reversion)
 # Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 12h timeframe.
 # Camarilla levels provide precise support/resistance, 1d EMA34 filters counter-trend moves,
 # volume confirmation ensures breakout strength. This combination has worked well on ETH/SOL historically.
+# Designed to work in both bull (trend-following breakouts) and bear (mean reversion at pivot) markets.
 
 name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "12h"
@@ -24,7 +25,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
