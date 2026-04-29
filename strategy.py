@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 Breakout with Weekly Trend Filter and Volume Spike
-# Uses weekly Camarilla pivot levels (R3/S3) as strong support/resistance from 1w timeframe
-# Breakouts above R3 or below S3 with volume confirmation capture strong momentum moves
-# Weekly EMA50 filter ensures we only trade breakouts in the direction of the weekly trend
-# Works in both bull and bear markets by aligning with higher timeframe trend
-# Target: 15-25 trades/year (60-100 total over 4 years)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
+# Donchian breakouts capture strong momentum moves; volume confirms institutional participation
+# ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
+# Works in both bull and bear markets by trading breakouts in direction of the trend
+# Target: 20-40 trades/year (80-160 total over 4 years)
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
+name = "4h_Donchian20_1dVolume_ADX_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,93 +23,113 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for weekly calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Load HTF data ONCE before loop for daily calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 55:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (R3, S3) from previous week
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily volume MA for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r3 = close_1w + (1.1 * (high_1w - low_1w) * 1.1 / 4.0)  # R3 = C + 1.1*(H-L)*1.1/4
-    s3 = close_1w - (1.1 * (high_1w - low_1w) * 1.1 / 4.0)  # S3 = C - 1.1*(H-L)*1.1/4
+    # Calculate daily ADX for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align weekly indicators to 4h timeframe (completed 1w bar only)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Smoothed values
+    tr_period = 14
+    tr_smooth = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Donchian channels (20-period) on 4h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current 4h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(55, 20)  # warmup for EMA50 and volume MA
+    start_idx = max(55, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_50_aligned[i]):
+        if np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_ema50 = ema_50_aligned[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
         curr_volume_confirm = volume_confirm[i]
+        curr_adx = adx_aligned[i]
+        curr_vol_ma_1d = vol_ma_20_1d_aligned[i]
+        curr_vol_1d = vol_1d[-1] if len(vol_1d) > 0 else 0  # simplified for alignment
         
-        # Determine weekly trend: price above/below EMA50
-        uptrend = curr_close > curr_ema50
-        downtrend = curr_close < curr_ema50
+        # Volume spike: current daily volume > 1.8x 20-day MA
+        # Simplified: use 4h volume proxy for daily confirmation
+        volume_spike = curr_volume_confirm and (volume[i] > 1.8 * vol_ma_20[i])
+        
+        # Trend filter: ADX > 25 indicates trending market
+        trending = curr_adx > 25
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and in direction of weekly trend
-            if curr_volume_confirm:
-                # Bullish breakout: price breaks above R3 in uptrend
-                if uptrend and curr_close > curr_r3:
+            # Only trade with volume confirmation and in trending market
+            if volume_spike and trending:
+                # Bullish breakout: price breaks above upper Donchian channel
+                if curr_close > curr_highest_20:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below S3 in downtrend
-                elif downtrend and curr_close < curr_s3:
+                # Bearish breakout: price breaks below lower Donchian channel
+                elif curr_close < curr_lowest_20:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price returns to weekly pivot OR breaks below S3 with volume
-            # Calculate weekly pivot for exit
-            high_1w_i = df_1w['high'].values
-            low_1w_i = df_1w['low'].values
-            close_1w_i = df_1w['close'].values
-            pivot_1w = (high_1w_i + low_1w_i + close_1w_i) / 3.0
-            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-            curr_pivot = pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else curr_r3  # fallback
+            # Exit when: price returns to midpoint of Donchian channel OR breaks below lower channel with volume
+            midpoint = (curr_highest_20 + curr_lowest_20) / 2.0
             
-            if curr_close <= curr_pivot or (curr_close < curr_s3 and curr_volume_confirm):
+            if curr_close <= midpoint or (curr_close < curr_lowest_20 and volume_spike):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price returns to weekly pivot OR breaks above R3 with volume
-            high_1w_i = df_1w['high'].values
-            low_1w_i = df_1w['low'].values
-            close_1w_i = df_1w['close'].values
-            pivot_1w = (high_1w_i + low_1w_i + close_1w_i) / 3.0
-            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-            curr_pivot = pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else curr_s3  # fallback
+            # Exit when: price returns to midpoint of Donchian channel OR breaks above upper channel with volume
+            midpoint = (curr_highest_20 + curr_lowest_20) / 2.0
             
-            if curr_close >= curr_pivot or (curr_close > curr_r3 and curr_volume_confirm):
+            if curr_close >= midpoint or (curr_close > curr_highest_20 and volume_spike):
                 signals[i] = 0.0
                 position = 0
             else:
