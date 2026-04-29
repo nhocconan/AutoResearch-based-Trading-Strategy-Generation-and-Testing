@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period high, 1d EMA50 up-trend, volume > 1.8x average
-# Short when price breaks below 20-period low, 1d EMA50 down-trend, volume > 1.8x average
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 20-period high, 1d EMA34 up-trend, volume > 2.0x average
+# Short when price breaks below 20-period low, 1d EMA34 down-trend, volume > 2.0x average
 # Exit when price reverts to 20-period midpoint (mean reversion)
-# Uses discrete position sizing (0.25) and tight volume filter to limit trades to ~75-150 over 4 years.
+# Uses discrete position sizing (0.25) and tight volume filter to limit trades to ~20-50/year.
 # Uses 1d for signal direction/trend, 4h only for entry timing and breakout levels.
-# This strategy targets 20-50 trades/year per symbol to avoid fee drag while capturing strong breakouts.
+# Targets 75-200 total trades over 4 years to avoid fee drag while capturing strong breakouts.
 # Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_v1"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -46,15 +46,15 @@ def generate_signals(prices):
     low_20_aligned = align_htf_to_ltf(prices, df_4h, low_20)
     mid_20_aligned = align_htf_to_ltf(prices, df_4h, mid_20)
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,7 +62,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Volume and 1d EMA50 warmup
+    start_idx = max(20, 34)  # Volume and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -72,7 +72,7 @@ def generate_signals(prices):
             
         # Skip if any required data is NaN
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(mid_20_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(mid_20_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -84,7 +84,7 @@ def generate_signals(prices):
         curr_high20 = high_20_aligned[i]
         curr_low20 = low_20_aligned[i]
         curr_mid20 = mid_20_aligned[i]
-        curr_ema50_1d = ema_50_1d_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
@@ -105,15 +105,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average (tight filter)
-            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average (tight filter)
+            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
             
-            # Long when price breaks above 20-period high, 1d EMA50 up-trend, volume confirmed
-            if curr_high > curr_high20 and curr_close > curr_ema50_1d and vol_confirmed:
+            # Long when price breaks above 20-period high, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_high20 and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below 20-period low, 1d EMA50 down-trend, volume confirmed
-            elif curr_low < curr_low20 and curr_close < curr_ema50_1d and vol_confirmed:
+            # Short when price breaks below 20-period low, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_low20 and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
