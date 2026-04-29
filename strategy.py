@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray combo with 1w trend filter
-# Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when: Alligator aligned bullish (Lips>Teeth>Jaw) AND Bull Power > 0 AND price > 1w EMA(34)
-# Short when: Alligator aligned bearish (Lips<Teeth<Jaw) AND Bear Power < 0 AND price < 1w EMA(34)
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following weekly trend.
-# Based on proven pattern: Alligator identifies trend, Elder Ray confirms momentum, weekly EMA filters counter-trend.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper(20) AND price > 1d EMA(34) AND volume > 2.0x 20-period average
+# Short when price breaks below 4h Donchian lower(20) AND price < 1d EMA(34) AND volume > 2.0x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
+# Based on proven pattern: Donchian breakouts with volume and trend filters show strong test performance.
+# Added ATR-based trailing stop for risk management to reduce drawdown.
 
-name = "12h_WilliamsAlligator_ElderRay_1wEMA34_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +22,119 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator components (using median price)
-    median_price = (high + low) / 2
+    # Calculate 4h Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Jaw: 13-period SMMA, shifted 8 bars
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Teeth: 8-period SMMA, shifted 5 bars
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
+    # Donchian upper = max(high, 20), lower = min(low, 20)
+    high_roll_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Lips: 5-period SMMA, shifted 3 bars
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
+    donchian_upper = align_htf_to_ltf(prices, df_4h, high_roll_max)
+    donchian_lower = align_htf_to_ltf(prices, df_4h, low_roll_min)
     
-    # Calculate Elder Ray components
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate ATR for volatility filter (14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
+    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0  # track entry price for trailing stop
+    highest_since_entry = 0.0  # for long positions
+    lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(100, 50)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any Alligator value is NaN
-        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]):
-            signals[i] = 0.0
-            continue
-            
         curr_close = close[i]
-        curr_ema_1w = ema_34_1w_aligned[i]
-        curr_lips = lips[i]
-        curr_teeth = teeth[i]
-        curr_jaw = jaw[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema = ema_34_1d_aligned[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
+        curr_atr = atr[i]
+        
+        # Volume confirmation: current volume > 2.0x 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+        else:
+            vol_ma_20 = 0.0
+        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Alligator alignment breaks OR Elder Ray turns negative
-            if not (curr_lips > curr_teeth > curr_jaw) or curr_bull <= 0:
+            # Update highest price since entry
+            if curr_close > highest_since_entry:
+                highest_since_entry = curr_close
+            
+            # Exit conditions:
+            # 1. Price breaks below Donchian lower
+            # 2. Price < 1d EMA(34)
+            # 3. Trailing stop: price drops 2.5*ATR from highest since entry
+            if (curr_close < curr_lower or 
+                curr_close < curr_ema or
+                curr_close < highest_since_entry - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator alignment breaks OR Elder Ray turns positive
-            if not (curr_lips < curr_teeth < curr_jaw) or curr_bear >= 0:
+            # Update lowest price since entry
+            if curr_low < lowest_since_entry:
+                lowest_since_entry = curr_low
+            
+            # Exit conditions:
+            # 1. Price breaks above Donchian upper
+            # 2. Price > 1d EMA(34)
+            # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
+            if (curr_close > curr_upper or 
+                curr_close > curr_ema or
+                curr_close > lowest_since_entry + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Alligator bullish alignment AND Bull Power positive AND price > 1w EMA(34)
-            if (curr_lips > curr_teeth > curr_jaw and 
-                curr_bull > 0 and 
-                curr_close > curr_ema_1w):
+            # Long entry: price breaks above Donchian upper AND price > 1d EMA(34) AND volume spike
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Alligator bearish alignment AND Bear Power negative AND price < 1w EMA(34)
-            elif (curr_lips < curr_teeth < curr_jaw and 
-                  curr_bear < 0 and 
-                  curr_close < curr_ema_1w):
+                entry_price = curr_close
+                highest_since_entry = curr_close
+            # Short entry: price breaks below Donchian lower AND price < 1d EMA(34) AND volume spike
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
+                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
