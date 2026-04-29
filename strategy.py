@@ -4,14 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses tighter entry conditions (volume > 2x 20-period average) to reduce trade frequency
-# Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 2x 20-period average
-# Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 2x 20-period average
+# Uses tighter entry conditions (volume > 2.5x 20-period average) to reduce trade frequency
+# Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 2.5x 20-period average
+# Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 2.5x 20-period average
 # ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 15-25 trades/year on 4h timeframe (~60-100 total over 4 years)
+# Target: 10-20 trades/year on 4h timeframe (~40-80 total over 4 years)
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -78,12 +78,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average (tighter)
+        # Volume spike confirmation: current volume > 2.5x 20-period average (tighter)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 2.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
