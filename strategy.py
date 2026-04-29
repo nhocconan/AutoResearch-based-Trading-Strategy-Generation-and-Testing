@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 Breakout + 12h EMA50 Trend + Volume Spike
-# Long when price breaks above Camarilla R3 level AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below Camarilla S3 level AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when price reverts to Camarilla Pivot level (mean reversion)
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 19-50 trades/year on 4h timeframe.
-# Camarilla levels provide precise support/resistance, 12h EMA50 filters counter-trend moves,
-# volume confirmation ensures breakout strength. This combination has worked well on ETH/SOL historically.
-# Designed to work in both bull and bear markets via trend filter and mean-reversion exits.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation
+# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 1.5x 20-bar avg
+# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 1.5x 20-bar avg
+# Exit when price reverts to 10-day EMA (mean reversion in choppy markets)
+# Uses discrete position sizing (0.25) to reduce fee drag. Target: 10-30 trades/year on 1d timeframe.
+# Donchian channels provide clear breakout levels, 1w EMA50 filters counter-trend moves in bear markets,
+# volume confirmation ensures breakout strength. Designed to work in both bull and bear markets via trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,96 +24,77 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 12h data
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate EMA(50) on 1w data
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Donchian(20) channels from price data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    prev_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_close = df_1d['close'].shift(1).values # Previous day close
+    # Calculate 10-day EMA for exit (mean reversion)
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Handle first bar where shift creates NaN
-    if len(prev_high) > 0:
-        prev_high[0] = df_1d['high'].iloc[0]
-        prev_low[0] = df_1d['low'].iloc[0]
-        prev_close[0] = df_1d['close'].iloc[0]
-    
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_range = prev_high - prev_low
-    camarilla_R3 = prev_close + camarilla_range * 1.1 / 4.0
-    camarilla_S3 = prev_close - camarilla_range * 1.1 / 4.0
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA and EMA50 warmup
+    start_idx = max(20, 50)  # Donchian and EMA50 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
-            np.isnan(camarilla_S3_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(ema_10[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_ema50 = ema_50_12h_aligned[i]
-        curr_R3 = camarilla_R3_aligned[i]
-        curr_S3 = camarilla_S3_aligned[i]
-        curr_pivot = camarilla_pivot_aligned[i]
+        curr_ema50w = ema_50_1w_aligned[i]
+        curr_dchigh = donchian_high[i]
+        curr_dclow = donchian_low[i]
+        curr_ema10 = ema_10[i]
         curr_close = close[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price reverts to Camarilla Pivot level (mean reversion)
-            if curr_close <= curr_pivot:
+            # Exit: price reverts to 10-day EMA (mean reversion)
+            if curr_close <= curr_ema10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reverts to Camarilla Pivot level (mean reversion)
-            if curr_close >= curr_pivot:
+            # Exit: price reverts to 10-day EMA (mean reversion)
+            if curr_close >= curr_ema10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above Camarilla R3 AND price > 12h EMA50 AND volume confirmation
-            if curr_close > curr_R3 and curr_close > curr_ema50 and vol_conf:
+            # Long when price breaks above Donchian high AND price > 1w EMA50 AND volume confirmation
+            if curr_close > curr_dchigh and curr_close > curr_ema50w and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Camarilla S3 AND price < 12h EMA50 AND volume confirmation
-            elif curr_close < curr_S3 and curr_close < curr_ema50 and vol_conf:
+            # Short when price breaks below Donchian low AND price < 1w EMA50 AND volume confirmation
+            elif curr_close < curr_dclow and curr_close < curr_ema50w and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
