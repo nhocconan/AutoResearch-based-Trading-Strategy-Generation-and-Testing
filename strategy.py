@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla levels from daily chart provide robust support/resistance for 12h breakouts
-# 1d EMA34 ensures alignment with longer-term trend; volume >2.0x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
+# Camarilla levels provide precise intraday support/resistance; breakouts capture momentum
+# 12h EMA50 ensures alignment with medium-term trend; volume >2.0x confirms participation
+# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
+# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA50 trend filter avoids counter-trend trades
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,19 +32,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: volume > 2.0x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Precompute daily data for Camarilla levels (use previous day's levels)
+    # Precompute daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -60,12 +60,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 12h bars for daily levels
+    start_idx = max(96, 30, 14, 50)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(vol_ma_30[i]) or
             np.isnan(daily_high_aligned[i]) or
             np.isnan(daily_low_aligned[i]) or
@@ -77,7 +77,7 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         
         # Use previous day's levels (shift by 1)
         prev_high = daily_high_aligned[i-1]
@@ -93,12 +93,12 @@ def generate_signals(prices):
                 
                 # Only trade with volume confirmation and trend filter
                 if curr_volume_confirm:
-                    # Bullish entry: price breaks above R3 + above 1d EMA34
-                    if curr_high > r3 and curr_close > curr_ema_34_1d:
+                    # Bullish entry: price breaks above R3 + above 12h EMA50
+                    if curr_high > r3 and curr_close > curr_ema_50_12h:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish entry: price breaks below S3 + below 1d EMA34
-                    elif curr_low < s3 and curr_close < curr_ema_34_1d:
+                    # Bearish entry: price breaks below S3 + below 12h EMA50
+                    elif curr_low < s3 and curr_close < curr_ema_50_12h:
                         signals[i] = -0.25
                         position = -1
         
