@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period average)
-# Williams %R identifies overbought/oversold conditions; mean reversion trades fade extremes
-# 1d EMA34 provides primary trend filter: only take long when price > EMA34, short when price < EMA34
-# Volume confirmation ensures institutional participation; discrete sizing (0.25) minimizes fee churn
-# Works in both bull/bear markets: mean reversion effective in ranging markets, trend filter adapts to directional bias
-# Target: 80-180 total trades over 4 years (20-45/year) on 4h timeframe
+# Hypothesis: 6h Williams %R Mean Reversion with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period average)
+# Williams %R identifies overbought/oversold conditions; mean reversion from extremes works in ranging markets
+# 1d EMA34 provides trend filter to avoid counter-trend trades; volume confirmation ensures participation
+# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years on 6h timeframe
 
-name = "4h_WilliamsR_MeanRev_1dEMA34_VolumeConfirm_v3"
-timeframe = "4h"
+name = "6h_WilliamsR_MeanRev_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,12 +32,12 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R (14-period) on 4h timeframe
+    # Williams %R (14-period) on 6h timeframe
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate 20-period average volume for confirmation (on 4h timeframe)
+    # Calculate 20-period average volume for confirmation (on 6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,39 +53,39 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_ema_1d = ema_34_1d_aligned[i]
         curr_wr = williams_r[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = curr_volume > 1.5 * curr_vol_ma
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = curr_volume > 1.8 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Williams %R rises above -20 (overbought) OR price crosses below 1d EMA34
-            if curr_wr > -20 or curr_close < curr_ema_1d:
+            # Exit: Williams %R crosses above -50 (overbought) OR squeeze re-activates (volatility contraction proxy)
+            if curr_wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R falls below -80 (oversold) OR price crosses above 1d EMA34
-            if curr_wr < -80 or curr_close > curr_ema_1d:
+            # Exit: Williams %R crosses below -50 (oversold) OR squeeze re-activates
+            if curr_wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Williams %R below -80 (oversold) + price above 1d EMA34 + volume confirmation
+            # Long entry: Williams %R below -80 (oversold) + above 1d EMA34 + volume confirmation
             if (curr_wr < -80 and 
                 curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R above -20 (overbought) + price below 1d EMA34 + volume confirmation
+            # Short entry: Williams %R above -20 (overbought) + below 1d EMA34 + volume confirmation
             elif (curr_wr > -20 and 
                   curr_close < curr_ema_1d and 
                   vol_confirm):
