@@ -3,129 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with TK cross and 1d cloud filter
-# Ichimoku provides objective support/resistance via Kumo (cloud)
-# TK cross (Tenkan/Kijun) gives momentum signals with built-in confirmation
-# 1d cloud filter ensures alignment with higher timeframe trend to avoid counter-trend trades
-# Target: 50-150 total trades over 4 years (12-38/year) on 6h timeframe
-# Works in both bull and bear markets by using cloud as dynamic support/resistance
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period average)
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trending vs ranging markets
+# In trending markets (Lips > Teeth > Jaw for uptrend, reverse for downtrend), trade in direction of trend
+# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
+# Volume confirmation (>2.0x average) filters weak breakouts, reducing trade frequency
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 
-name = "6h_Ichimoku_TK_Cross_1dCloud_Filter"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough for Ichimoku calculations
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d Ichimoku components for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Ichimoku parameters: 9, 26, 52
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_9 + low_9) / 2
+    # Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=np.float64)
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA(i) = (SMMA(i-1) * (period-1) + arr[i]) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_26 + low_26) / 2
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = ((high_52 + low_52) / 2)
-    
-    # Align 1d Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Calculate 6h Ichimoku components for entry signals
-    high_9_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (high_9_6h + low_9_6h) / 2
-    
-    high_26_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (high_26_6h + low_26_6h) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B
-    # Senkou Span A and B need to be shifted, but for simplicity we use current values
-    # In practice, Senkou spans are plotted 26 periods ahead, but we use current for filter
-    # The cloud is between Senkou A and Senkou B
+    # Calculate 20-period average volume for confirmation (on 12h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 26)  # Ichimoku warmup
+    start_idx = max(50, 20, 13)  # 1d EMA50, volume MA, Alligator warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries and price position relative to cloud
-        senkou_a = senkou_a_1d_aligned[i]
-        senkou_b = senkou_b_1d_aligned[i]
+        curr_close = close[i]
+        curr_volume = volume[i]
+        curr_vol_ma = vol_ma_20[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
         
-        # Cloud top is the higher of Senkou A and B
-        cloud_top = max(senkou_a, senkou_b)
-        # Cloud bottom is the lower of Senkou A and B
-        cloud_bottom = min(senkou_a, senkou_b)
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = curr_volume > 2.0 * curr_vol_ma
         
-        # Price above cloud: bullish, Price below cloud: bearish
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # TK cross signals
-        tk_cross_bullish = tenkan_6h[i] > kijun_6h[i]
-        tk_cross_bearish = tenkan_6h[i] < kijun_6h[i]
+        # Alligator signals:
+        # Uptrend: Lips > Teeth > Jaw (Green > Red > Blue)
+        # Downtrend: Lips < Teeth < Jaw (Green < Red < Blue)
+        is_uptrend = curr_lips > curr_teeth > curr_jaw
+        is_downtrend = curr_lips < curr_teeth < curr_jaw
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price crosses below cloud OR TK cross turns bearish
-            if not price_above_cloud or not tk_cross_bullish:
+            # Exit: price closes below 1d EMA50 OR Alligator trend changes to downtrend
+            if curr_close < curr_ema_1d or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above cloud OR TK cross turns bullish
-            if not price_below_cloud or not tk_cross_bearish:
+            # Exit: price closes above 1d EMA50 OR Alligator trend changes to uptrend
+            if curr_close > curr_ema_1d or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price above cloud + bullish TK cross
-            if price_above_cloud and tk_cross_bullish:
+            # Long entry: Alligator uptrend + price above 1d EMA50 + volume confirmation
+            if (is_uptrend and 
+                curr_close > curr_ema_1d and 
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below cloud + bearish TK cross
-            elif price_below_cloud and tk_cross_bearish:
+            # Short entry: Alligator downtrend + price below 1d EMA50 + volume confirmation
+            elif (is_downtrend and 
+                  curr_close < curr_ema_1d and 
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
             else:
