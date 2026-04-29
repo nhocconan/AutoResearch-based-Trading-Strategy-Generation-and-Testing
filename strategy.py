@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d EMA50 trend filter and volume confirmation (>1.5x 20-period average)
-# Ichimoku identifies trend via Tenkan/Kijun cross and price relative to cloud (Senkou Span A/B).
-# 1d EMA50 ensures we trade only with the higher timeframe trend to avoid whipsaws.
-# Volume confirmation filters for institutional participation; discrete sizing (0.25) minimizes fee churn.
-# Effective in both bull and bear markets: catches strong trends when Ichimoku signals align, avoids chop when price is inside cloud.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Hypothesis: 12h Williams %R mean reversion with 1d ADX regime filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions (-20 to 0 = overbought, -80 to -100 = oversold).
+# 1d ADX > 25 filters for trending markets (avoid false signals in chop), ADX < 20 for ranging markets.
+# Volume confirmation (>1.8x 24-period average) ensures institutional participation.
+# In trending markets (ADX>25): mean revert at extremes (short at %R>-20, long at %R<-80).
+# In ranging markets (ADX<20): fade moves from 1d VWAP (short above VWAP, long below VWAP).
+# Discrete sizing (0.25) minimizes fee churn. Effective in both bull and bear markets by adapting to regime.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 
-name = "6h_Ichimoku_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1dADX_Regime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,101 +31,155 @@ def generate_signals(prices):
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Ichimoku components on 6h timeframe
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        smoothed = np.zeros_like(values)
+        smoothed[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    tr_14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
     
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # Not used for signals to avoid look-ahead
+    # DI+ and DI-
+    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
+    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
     
-    # Calculate 20-period average volume for confirmation (on 6h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    adx_14 = adx
+    
+    # Align 1d ADX to 12h timeframe
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate 1d VWAP for ranging regime
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume'].values).cumsum() / df_1d['volume'].values.cumsum()
+    vwap_1d[np.isnan(vwap_1d)] = 0  # Handle division by zero
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Williams %R on 12h timeframe (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
+    
+    # Calculate 24-period average volume for confirmation (on 12h timeframe)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 9, 26, 52, 20)  # 1d EMA50, Ichimoku periods, volume MA warmup
+    start_idx = max(14, 24)  # Williams %R, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_14_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
-        curr_tenkan = tenkan[i]
-        curr_kijun = kijun[i]
-        curr_senkou_a = senkou_a[i]
-        curr_senkou_b = senkou_b[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_wr = williams_r[i]
+        curr_adx = adx_14_aligned[i]
+        curr_vwap = vwap_1d_aligned[i]
+        curr_vol_ma = vol_ma_24[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = curr_volume > 1.5 * curr_vol_ma
+        # Volume confirmation: current volume > 1.8x 24-period average
+        vol_confirm = curr_volume > 1.8 * curr_vol_ma
         
-        # Ichimoku trend conditions
-        # Bullish: Price above cloud AND Tenkan > Kijun
-        # Bearish: Price below cloud AND Tenkan < Kijun
-        # Cloud top/bottom: Senkou Span A and B form the cloud boundaries
-        cloud_top = max(curr_senkou_a, curr_senkou_b)
-        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
-        
-        ichimoku_long = (curr_close > cloud_top) and (curr_tenkan > curr_kijun)
-        ichimoku_short = (curr_close < cloud_bottom) and (curr_tenkan < curr_kijun)
+        # Regime determination
+        is_trending = curr_adx > 25
+        is_ranging = curr_adx < 20
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Ichimoku turns bearish OR trend turns bearish (price below 1d EMA50)
-            if ichimoku_short or curr_close < curr_ema_1d:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-                
+            # Exit conditions based on regime
+            if is_trending:
+                # In trending market: exit when %R returns from oversold
+                if curr_wr > -50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # ranging market
+                # In ranging market: exit when price crosses VWAP
+                if curr_close > curr_vwap:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit: Ichimoku turns bullish OR trend turns bullish (price above 1d EMA50)
-            if ichimoku_long or curr_close > curr_ema_1d:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-                
+            # Exit conditions based on regime
+            if is_trending:
+                # In trending market: exit when %R returns from overbought
+                if curr_wr < -50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # ranging market
+                # In ranging market: exit when price crosses VWAP
+                if curr_close < curr_vwap:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+                    
         else:  # Flat - look for new entries
-            # Long entry: Ichimoku bullish AND above 1d EMA50 AND volume confirmation
-            if (ichimoku_long and 
-                curr_close > curr_ema_1d and 
-                vol_confirm):
-                signals[i] = 0.25
-                position = 1
-            # Short entry: Ichimoku bearish AND below 1d EMA50 AND volume confirmation
-            elif (ichimoku_short and 
-                  curr_close < curr_ema_1d and 
-                  vol_confirm):
-                signals[i] = -0.25
-                position = -1
+            if is_trending:
+                # Trending regime: mean reversion at extremes
+                # Long entry: Williams %R deeply oversold AND volume confirmation
+                if (curr_wr < -80 and vol_confirm):
+                    signals[i] = 0.25
+                    position = 1
+                # Short entry: Williams %R deeply overbought AND volume confirmation
+                elif (curr_wr > -20 and vol_confirm):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif is_ranging:
+                # Ranging regime: fade moves from VWAP
+                # Long entry: price below VWAP AND volume confirmation
+                if (curr_close < curr_vwap and vol_confirm):
+                    signals[i] = 0.25
+                    position = 1
+                # Short entry: price above VWAP AND volume confirmation
+                elif (curr_close > curr_vwap and vol_confirm):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
+                # Transition regime (ADX between 20-25): no trading
                 signals[i] = 0.0
     
     return signals
