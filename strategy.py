@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>2.0x 20-period average)
-# Donchian(20) captures medium-term structure; 1w EMA50 ensures alignment with weekly trend
-# Volume >2.0x average filters weak breakouts, targeting only strong momentum moves
-# Discrete position sizing (0.25) minimizes fee churn while maintaining exposure
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
+# Hypothesis: 12h Williams Alligator + 1d Volume Spike + Choppiness Regime Filter
+# Williams Alligator (JAWS=13, TEETH=8, LIPS=5 SMMA) identifies trend direction and strength
+# 1d volume spike (>2.0x 20-period average) confirms institutional participation
+# Choppiness Index (CHOP) > 61.8 = ranging market (fade extremes), CHOP < 38.2 = trending (ride trend)
+# This combination avoids whipsaws in sideways markets while capturing strong trends
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dVolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,74 +25,123 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d volume spike confirmation (>2.0x 20-period average)
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > 2.0 * vol_ma_20
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Calculate Donchian(20) channels on 1d timeframe
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Choppiness Index (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]  # First value
+    
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: CHOP = 100 * log10(TRSUM / (HH - LL)) / log10(14)
+    # Avoid division by zero
+    hl_range = hh - ll
+    chop = np.full_like(close_1d, 50.0)  # Default to neutral
+    valid = (hl_range > 0) & (~np.isnan(tr_sum))
+    chop[valid] = 100 * np.log10(tr_sum[valid] / hl_range[valid]) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate Williams Alligator on 12h timeframe (SMMA with specific periods)
+    # JAWS: 13-period SMMA, shifted 8 bars forward
+    # TEETH: 8-period SMMA, shifted 5 bars forward  
+    # LIPS: 5-period SMMA, shifted 3 bars forward
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        if len(source) < period:
+            return np.full_like(source, np.nan)
+        result = np.full_like(source, np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
+    
+    jaws = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift as per Alligator definition (JAWS 8, TEETH 5, LIPS 3)
+    jaws_shifted = np.roll(jaws, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # First values become NaN due to roll
+    jaws_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # 1w EMA50, Donchian/volume warmup
+    start_idx = max(20, 14, 13)  # Volume MA, Chop, Jaws warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vol_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(jaws_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        curr_vol_ma = vol_ma_20[i]
-        curr_ema_1w = ema_50_1w_aligned[i]
-        curr_upper = high_roll[i]
-        curr_lower = low_roll[i]
+        curr_vol_spike = vol_spike_aligned[i]
+        curr_chop = chop_aligned[i]
+        curr_jaws = jaws_shifted[i]
+        curr_teeth = teeth_shifted[i]
+        curr_lips = lips_shifted[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = curr_volume > 2.0 * curr_vol_ma
+        # Alligator trend detection:
+        # Uptrend: Lips > Teeth > Jaws (green, aligned upward)
+        # Downtrend: Lips < Teeth < Jaws (red, aligned downward)
+        # Otherwise: sideways/transition
+        is_uptrend = (curr_lips > curr_teeth) and (curr_teeth > curr_jaws)
+        is_downtrend = (curr_lips < curr_teeth) and (curr_teeth < curr_jaws)
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR price closes below 1w EMA50
-            if curr_close < curr_lower or curr_close < curr_ema_1w:
+            # Exit: trend turns down OR chop too high (ranging) OR no volume spike
+            if not is_uptrend or curr_chop > 61.8 or not curr_vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR price closes above 1w EMA50
-            if curr_close > curr_upper or curr_close > curr_ema_1w:
+            # Exit: trend turns up OR chop too high (ranging) OR no volume spike
+            if not is_downtrend or curr_chop > 61.8 or not curr_vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band + price above 1w EMA50 + volume confirmation
-            if (curr_close > curr_upper and 
-                curr_close > curr_ema_1w and 
-                vol_confirm):
+            # Long entry: clear uptrend + low chop (trending) + volume spike
+            if is_uptrend and curr_chop < 38.2 and curr_vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower band + price below 1w EMA50 + volume confirmation
-            elif (curr_close < curr_lower and 
-                  curr_close < curr_ema_1w and 
-                  vol_confirm):
+            # Short entry: clear downtrend + low chop (trending) + volume spike
+            elif is_downtrend and curr_chop < 38.2 and curr_vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
