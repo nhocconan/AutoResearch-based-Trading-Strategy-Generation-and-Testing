@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA34 trend filter and volume confirmation
-# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (close < EMA13) in bullish regime (price > 1d EMA34) with volume spike
-# Short when Bear Power < 0 (close < EMA13) AND Bull Power < 0 (close < EMA13) in bearish regime (price < 1d EMA34) with volume spike
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 (1d) in bullish regime (price > 1d EMA34) with volume spike
+# Short when price breaks below Camarilla S3 (1d) in bearish regime (price < 1d EMA34) with volume spike
 # Uses 1d EMA34 for trend filter to avoid counter-trend whipsaws
-# Volume confirmation ensures moves have institutional participation
+# Camarilla levels provide institutional pivot points that work well on 12h timeframe
 # Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 
-name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,36 +33,41 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA34 to 6h timeframe (completed 1d bar only)
+    # Align daily EMA34 to 12h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Elder Ray components: EMA13 for reference
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla pivot levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].shift(1).values  # Previous day close for Camarilla
     
-    # Bull Power = Close - EMA13
-    bull_power = close - ema13
-    # Bear Power = Close - EMA13 (same calculation, interpreted differently)
-    bear_power = close - ema13
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (more strict for 12h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # warmup for EMA34 and EMA13
+    start_idx = max(40, 24)  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]) or np.isnan(ema13[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
         curr_ema34 = ema34_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
@@ -72,29 +77,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: Bull Power > 0 AND Bear Power < 0 in bullish regime
-                # (close > EMA13 AND close < EMA13 is impossible, so we use:
-                # Bull Power > 0 means close > EMA13)
-                if is_bullish_regime and curr_bull_power > 0:
+                # Bullish entry: price breaks above Camarilla R3 in bullish regime
+                if is_bullish_regime and curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Bull Power < 0 AND Bear Power < 0 in bearish regime
-                # (close < EMA13 means both powers negative)
-                elif is_bearish_regime and curr_bull_power < 0:
+                # Bearish entry: price breaks below Camarilla S3 in bearish regime
+                elif is_bearish_regime and curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: Bull Power turns negative (close < EMA13) OR regime changes to bearish
-            if curr_bull_power <= 0 or not is_bullish_regime:
+            # Exit when: price falls below Camarilla S3 OR regime changes to bearish
+            if curr_close < curr_s3 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: Bull Power turns positive (close > EMA13) OR regime changes to bullish
-            if curr_bull_power >= 0 or not is_bearish_regime:
+            # Exit when: price rises above Camarilla R3 OR regime changes to bullish
+            if curr_close > curr_r3 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
