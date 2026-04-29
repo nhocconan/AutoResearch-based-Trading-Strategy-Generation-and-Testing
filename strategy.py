@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike filter and EMA50 trend
-# Long when price breaks above R3 AND 1d volume > 2x 20-bar average AND price > 1d EMA50
-# Short when price breaks below S3 AND 1d volume > 2x 20-bar average AND price < 1d EMA50
-# Exit when price retouches the central pivot (PP) level
-# Uses discrete sizing (0.25) to limit fee drag. Target: 25-40 trades/year on 4h.
-# Camarilla levels provide high-probability reversal points; volume confirms conviction.
-# 1d EMA50 ensures alignment with higher timeframe trend, reducing counter-trend trades.
+# Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+# Long when price breaks above Donchian(20) high AND weekly pivot bias is bullish AND volume > 1.5x 20-bar avg
+# Short when price breaks below Donchian(20) low AND weekly pivot bias is bearish AND volume > 1.5x 20-bar avg
+# Exit when price crosses Donchian(20) midpoint (mean reversion structure)
+# Weekly pivot bias: price above weekly Camarilla pivot (PP) = bullish, below = bearish
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 6h.
+# Donchian breakouts capture momentum; weekly pivot filters counter-trend moves; volume confirms conviction.
+# Works in both bull and bear markets by aligning with higher timeframe structure.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dWeeklyPivot_VolumeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,86 +26,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF filters
+    # Get 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly pivot points from daily data (using last 5 daily bars ≈ 1 week)
+    # We need at least 5 daily bars to calculate weekly OHLC
+    if len(df_1d) < 5:
+        return np.zeros(n)
     
-    # Calculate 1d volume spike filter (>2x 20-bar average)
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > 2.0 * volume_ma_20_1d
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Get last 5 daily bars for weekly calculation
+    weekly_high = np.max(df_1d['high'].iloc[-5:].values)
+    weekly_low = np.min(df_1d['low'].iloc[-5:].values)
+    weekly_close = df_1d['close'].iloc[-1]
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Typical price = (H + L + C) / 3
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    typical_price_1d_arr = typical_price_1d.values
+    # Calculate weekly pivot (PP) and support/resistance levels
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pp - weekly_low
+    weekly_s1 = 2 * weekly_pp - weekly_high
+    weekly_r2 = weekly_pp + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pp - (weekly_high - weekly_low)
+    weekly_r3 = weekly_r1 + (weekly_high - weekly_low)
+    weekly_s3 = weekly_s1 - (weekly_high - weekly_low)
     
-    # Camarilla levels: R4 = PP + 1.5*(H-L), R3 = PP + 1.25*(H-L), etc.
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    daily_range = high_1d - low_1d
+    # Weekly pivot bias: price above PP = bullish, below = bearish
+    weekly_bullish = weekly_close > weekly_pp
+    weekly_bearish = weekly_close < weekly_pp
     
-    # Pivot point (PP)
-    pp_1d = typical_price_1d_arr
-    # Resistance levels
-    r3_1d = pp_1d + 1.25 * daily_range
-    # Support levels
-    s3_1d = pp_1d - 1.25 * daily_range
+    # Align weekly bias to 6h timeframe (same bias for all 6h bars within the week)
+    # Create array of same length as df_1d with the bias value
+    weekly_bullish_array = np.full(len(df_1d), weekly_bullish, dtype=bool)
+    weekly_bearish_array = np.full(len(df_1d), weekly_bearish, dtype=bool)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish_array.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bearish_array.astype(float))
     
-    # Align Camarilla levels to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Donchian(20) calculation on 6h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Volume confirmation: >1.5x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.5 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # EMA50 needs 50 bars
+    start_idx = 20  # Donchian needs 20 bars
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(pp_1d_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(volume_ma_20[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
             signals[i] = 0.0
             continue
         
+        vol_conf = volume_confirm[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_50 = ema_50_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        pp = pp_1d_aligned[i]
-        vol_spike = volume_spike_1d_aligned[i]
+        dh = highest_high[i]  # Donchian high
+        dl = lowest_low[i]    # Donchian low
+        dm = donchian_mid[i]  # Donchian midpoint
+        weekly_bull = weekly_bullish_aligned[i] > 0.5
+        weekly_bear = weekly_bearish_aligned[i] > 0.5
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when price breaks above R3 AND volume spike AND price > 1d EMA50
-            if curr_close > r3 and vol_spike and curr_close > ema_50:
+            # Long when price breaks above Donchian high AND weekly bullish AND volume confirmation
+            if curr_close > dh and weekly_bull and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3 AND volume spike AND price < 1d EMA50
-            elif curr_close < s3 and vol_spike and curr_close < ema_50:
+            # Short when price breaks below Donchian low AND weekly bearish AND volume confirmation
+            elif curr_close < dl and weekly_bear and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when price retouches pivot point (PP)
-            if curr_close <= pp:
+        elif position == 1:  # Long - exit when price crosses Donchian midpoint (mean reversion)
+            if curr_close < dm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when price retouches pivot point (PP)
-            if curr_close >= pp:
+        elif position == -1:  # Short - exit when price crosses Donchian midpoint (mean reversion)
+            if curr_close > dm:
                 signals[i] = 0.0
                 position = 0
             else:
