@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w Supertrend trend filter and volume confirmation
-# Uses 1w Supertrend for robust trend detection in both bull/bear markets, Camarilla levels for precise
-# entry/exit at key support/resistance, and volume spike to confirm breakout strength.
-# ATR-based stoploss manages risk. Designed for low trade frequency (target: 15-25/year) to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR(14) stoploss
+# Donchian channels provide clear breakout levels; daily EMA50 filters for higher timeframe trend;
+# volume confirms breakout strength; ATR-based trailing stop manages risk.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing significant moves.
+# Works in both bull and bear markets by filtering breakouts with trend and volume.
 
-name = "1d_Camarilla_R3S3_Breakout_1wSupertrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,64 +24,32 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop for 1w calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop for 1d calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Supertrend (ATR=10, mult=3.0)
-    hl2_1w = (df_1w['high'] + df_1w['low']) / 2
-    atr_1w = pd.Series(
-        np.maximum(
-            np.maximum(df_1w['high'] - df_1w['low'],
-                       np.abs(df_1w['high'] - df_1w['close'].shift(1))),
-            np.abs(df_1w['low'] - df_1w['close'].shift(1))
-        )
-    ).rolling(window=10, min_periods=10).mean()
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    upper_band_1w = hl2_1w + (3.0 * atr_1w)
-    lower_band_1w = hl2_1w - (3.0 * atr_1w)
-    
-    supertrend_1w = np.full(len(df_1w), np.nan, dtype=float)
-    direction_1w = np.full(len(df_1w), np.nan, dtype=float)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(10, len(df_1w)):
-        if i == 10:
-            supertrend_1w[i] = upper_band_1w.iloc[i]
-            direction_1w[i] = 1
-        else:
-            if supertrend_1w[i-1] == upper_band_1w.iloc[i-1]:
-                supertrend_1w[i] = upper_band_1w.iloc[i] if close_1w.iloc[i] <= upper_band_1w.iloc[i] else lower_band_1w.iloc[i]
-                direction_1w[i] = -1 if supertrend_1w[i] == upper_band_1w.iloc[i] else 1
-            else:
-                supertrend_1w[i] = lower_band_1w.iloc[i] if close_1w.iloc[i] >= lower_band_1w.iloc[i] else upper_band_1w.iloc[i]
-                direction_1w[i] = 1 if supertrend_1w[i] == lower_band_1w.iloc[i] else -1
-    
-    # Extract close_1w for comparison
-    close_1w = df_1w['close']
-    
-    # Supertrend values and direction
-    supertrend_1w_vals = supertrend_1w.values
-    supertrend_dir_1w = direction_1w.values
-    
-    # Align to 1d timeframe
-    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w_vals)
-    supertrend_dir_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_dir_1w)
-    
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss and volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous day
-    prev_close = np.concatenate([[np.nan], close[:-1]])
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
+    # Calculate ATR percentile for volatility regime filter (avoid high volatility chop)
+    atr_percentile = pd.Series(atr).rolling(window=50, min_periods=20).apply(
+        lambda x: np.percentile(x, 50) if len(x) >= 20 else np.nan, raw=True
+    ).values
+    vol_regime_filter = atr <= atr_percentile  # Only trade in low/medium volatility regimes
     
-    camarilla_r3 = prev_close + 1.0 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.0 * (prev_high - prev_low)
+    # Calculate Donchian channels (20-period) from previous period
+    # Upper = max(high over last 20 periods), Lower = min(low over last 20 periods)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,15 +59,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     atr_at_entry = 0.0
-    max_high_since_entry = 0.0
-    min_low_since_entry = 0.0
+    max_high_since_entry = 0.0  # For trailing stop
+    min_low_since_entry = 0.0   # For trailing stop
     
-    start_idx = max(50, 20, 14)  # warmup for Supertrend, volume, ATR
+    start_idx = max(50, 20, 14)  # warmup for EMA50, Donchian, ATR
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(supertrend_1w_aligned[i]) or np.isnan(supertrend_dir_1w_aligned[i]) or \
-           np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
             
@@ -106,12 +74,12 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_open = open_price[i]
-        curr_supertrend = supertrend_1w_aligned[i]
-        curr_supertrend_dir = supertrend_dir_1w_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
-        curr_r3 = camarilla_r3[i]
-        curr_s3 = camarilla_s3[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
         curr_volume_confirm = volume_confirm[i]
+        curr_vol_regime = vol_regime_filter[i]
         
         # Handle position exits and stops
         if position == 1:  # Long position
@@ -126,11 +94,13 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Supertrend turns bearish (trend change)
-            # 3. Price drops below Camarilla S3 (breakout failed)
+            # 2. Price crosses below 1d EMA50 (trend change)
+            # 3. Price drops below Donchian lower (breakout failed)
+            # 4. Volatility regime shifts to high (avoid chop)
             if (curr_low <= stop_price or
-                curr_supertrend_dir == -1 or
-                curr_close < curr_s3):
+                curr_close < curr_ema_50_1d or
+                curr_close < curr_lower or
+                not curr_vol_regime):
                 signals[i] = 0.0
                 position = 0
                 max_high_since_entry = 0.0
@@ -150,11 +120,13 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Supertrend turns bullish (trend change)
-            # 3. Price rises above Camarilla R3 (breakout failed)
+            # 2. Price crosses above 1d EMA50 (trend change)
+            # 3. Price rises above Donchian upper (breakout failed)
+            # 4. Volatility regime shifts to high (avoid chop)
             if (curr_high >= stop_price or
-                curr_supertrend_dir == 1 or
-                curr_close > curr_r3):
+                curr_close > curr_ema_50_1d or
+                curr_close > curr_upper or
+                not curr_vol_regime):
                 signals[i] = 0.0
                 position = 0
                 max_high_since_entry = 0.0
@@ -163,9 +135,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R3 + Supertrend bullish + volume confirm
-            if (curr_close > curr_r3 and
-                curr_supertrend_dir == 1 and
+            # Only enter in low/medium volatility regimes to avoid whipsaws
+            if not curr_vol_regime:
+                signals[i] = 0.0
+                continue
+                
+            # Long entry: price breaks above Donchian upper + above 1d EMA50 + volume confirm
+            if (curr_close > curr_upper and
+                curr_close > curr_ema_50_1d and
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
@@ -173,9 +150,9 @@ def generate_signals(prices):
                 atr_at_entry = curr_atr
                 max_high_since_entry = curr_high
                 min_low_since_entry = curr_low
-            # Short entry: price breaks below Camarilla S3 + Supertrend bearish + volume confirm
-            elif (curr_close < curr_s3 and
-                  curr_supertrend_dir == -1 and
+            # Short entry: price breaks below Donchian lower + below 1d EMA50 + volume confirm
+            elif (curr_close < curr_lower and
+                  curr_close < curr_ema_50_1d and
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
