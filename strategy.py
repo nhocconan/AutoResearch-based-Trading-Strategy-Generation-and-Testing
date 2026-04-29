@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for ~30-50 trades/year to minimize fee drag while capturing strong moves
 # Works in bull/bear via trend filter and mean reversion exits
 
-name = "4h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v2"
 timeframe = "4h"
 leverage = 1.0
 
