@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses Donchian channel (20-period high/low) from daily candles for clear breakout levels
-# 1w EMA50 provides strong weekly trend filter to align with primary trend direction
-# Volume spike (1.8x 20-period average) confirms breakout validity with institutional participation
-# ATR-based trailing stop (2.0x ATR) manages risk while allowing trends to develop
-# Designed for low trade frequency (target: 7-25 trades/year) to minimize fee drag on 1d timeframe
-# Works in bull markets via long signals when price breaks above upper Donchian with weekly uptrend
-# Works in bear markets via short signals when price breaks below lower Donchian with weekly downtrend
-# Donchian channels work well in both trending and ranging markets by providing clear structure
+# Hypothesis: 6h Williams Alligator + 1d EMA50 trend filter + volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trendless markets when lines are intertwined
+# Entry when price crosses above/below all three lines with alignment to 1d EMA50 trend
+# Volume spike (1.8x 20-period average) confirms breakout validity
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag on 6h timeframe
+# Works in bull markets via long signals when price > Alligator lines with HTF uptrend
+# Works in bear markets via short signals when price < Alligator lines with HTF downtrend
+# Alligator excels in ranging markets by identifying when trends begin
 
-name = "1d_Donchian_Breakout_1wEMA50_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Williams_Alligator_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,22 +27,29 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period)
-    # Upper band = 20-period high
-    # Lower band = 20-period low
-    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    # Smoothed with 5, 3, 2 periods respectively
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
+    jaw = jaw.ewm(span=8, adjust=False, min_periods=8).mean()  # additional smoothing
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean()
+    teeth = teeth.ewm(span=5, adjust=False, min_periods=5).mean()  # additional smoothing
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean()
+    lips = lips.ewm(span=3, adjust=False, min_periods=3).mean()  # additional smoothing
     
-    # Calculate ATR for stoploss (using 14-period)
+    jaw = jaw.values
+    teeth = teeth.values
+    lips = lips.values
+    
+    # ATR for stoploss (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -53,18 +59,20 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(50, 20)  # warmup for EMA and Donchian
+    start_idx = 20  # warmup for Alligator and volume
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_upper = upper_band[i]
-        curr_lower = lower_band[i]
-        curr_ema_1w = ema_50_1w_aligned[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         
         # Volume spike confirmation: current volume > 1.8x 20-period average
@@ -74,14 +82,19 @@ def generate_signals(prices):
             vol_ma_20 = 0.0
         vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
         
+        # Alligator lines: Jaw (slowest), Teeth, Lips (fastest)
+        # In uptrend: Lips > Teeth > Jaw
+        # In downtrend: Lips < Teeth < Jaw
+        # Trendless: lines intertwined
+        
         # Handle exits and stoploss
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            # Trailing stop: 2.0 * ATR below highest high
-            stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR price breaks below upper band (failed breakout)
-            if curr_close < stop_price or curr_close < curr_upper:
+            # Trailing stop: 2.5 * ATR below highest high
+            stop_price = highest_high_since_entry - 2.5 * curr_atr
+            # Exit conditions: price below trailing stop OR price breaks below lips (failed trend)
+            if curr_close < stop_price or curr_close < curr_lips:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -91,10 +104,10 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
-            # Trailing stop: 2.0 * ATR above lowest low
-            stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR price breaks above lower band (failed breakout)
-            if curr_close > stop_price or curr_close > curr_lower:
+            # Trailing stop: 2.5 * ATR above lowest low
+            stop_price = lowest_low_since_entry + 2.5 * curr_atr
+            # Exit conditions: price above trailing stop OR price breaks above lips (failed trend)
+            if curr_close > stop_price or curr_close > curr_lips:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -102,15 +115,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Price breaks above upper Donchian AND price > 1w EMA50 AND volume spike
-            if curr_close > curr_upper and curr_close > curr_ema_1w and vol_spike:
+            # Long entry: Price > all three Alligator lines AND price > 1d EMA50 AND volume spike
+            # (Lips > Teeth > Jaw confirms uptrend)
+            if (curr_lips > curr_teeth and curr_teeth > curr_jaw and 
+                curr_close > curr_lips and curr_close > curr_ema_1d and vol_spike):
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
                 highest_high_since_entry = curr_high
-            # Short entry: Price breaks below lower Donchian AND price < 1w EMA50 AND volume spike
-            elif curr_close < curr_lower and curr_close < curr_ema_1w and vol_spike:
+            # Short entry: Price < all three Alligator lines AND price < 1d EMA50 AND volume spike
+            # (Lips < Teeth < Jaw confirms downtrend)
+            elif (curr_lips < curr_teeth and curr_teeth < curr_jaw and 
+                  curr_close < curr_lips and curr_close < curr_ema_1d and vol_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
                 lowest_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
