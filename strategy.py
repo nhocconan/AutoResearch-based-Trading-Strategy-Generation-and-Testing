@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R extreme with 1d EMA34 trend filter and volume spike
-# Williams %R identifies overbought/oversold conditions; extremes often precede reversals
-# 1d EMA34 ensures alignment with higher timeframe trend; volume >2.0x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
+# Camarilla levels provide precise intraday support/resistance; breakouts capture momentum
+# 12h EMA50 ensures alignment with medium-term trend; volume >2.0x confirms participation
+# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
 
-name = "12h_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,67 +22,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r[highest_high == lowest_low] = -50
+    # Calculate ATR for volatility (14-period)
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr2.iloc[0] = 0
+    tr3.iloc[0] = 0
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: volume > 2.0x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
+    # Precompute daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 34, 30)  # warmup: need 14 for Williams, 34 for EMA, 30 for volume MA
+    start_idx = max(96, 30, 14, 50)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(daily_high_aligned[i]) or
+            np.isnan(daily_low_aligned[i]) or
+            np.isnan(daily_close_aligned[i])):
             signals[i] = 0.0
             continue
             
+        curr_high = high[i]
+        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_williams_r = williams_r[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
+        
+        # Use previous day's levels (shift by 1)
+        prev_high = daily_high_aligned[i-1]
+        prev_low = daily_low_aligned[i-1]
+        prev_close = daily_close_aligned[i-1]
         
         if position == 0:  # Flat - look for new entries
-            if curr_volume_confirm:
-                # Bullish entry: Williams %R oversold (< -80) + price above 1d EMA34
-                if curr_williams_r < -80 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish entry: Williams %R overbought (> -20) + price below 1d EMA34
-                elif curr_williams_r > -20 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
-                    position = -1
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                s3 = prev_close - (range_val * 1.1 / 4)
+                
+                # Only trade with volume confirmation and trend filter
+                if curr_volume_confirm:
+                    # Bullish entry: price breaks above R3 + above 12h EMA50
+                    if curr_high > r3 and curr_close > curr_ema_50_12h:
+                        signals[i] = 0.25
+                        position = 1
+                    # Bearish entry: price breaks below S3 + below 12h EMA50
+                    elif curr_low < s3 and curr_close < curr_ema_50_12h:
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns above -50 (momentum fading)
-            if curr_williams_r > -50:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks below S3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                s3 = prev_close - (range_val * 1.1 / 4)
+                if curr_low < s3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns below -50 (momentum fading)
-            if curr_williams_r < -50:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks above R3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                if curr_high > r3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
