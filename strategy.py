@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
-# Donchian channels identify breakouts from price consolidation; EMA50 on 12h filters for higher timeframe trend alignment
-# Volume spike (>2.0x 20-period average) confirms breakout strength; designed to work in both bull and bear markets
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe with discrete position sizing to minimize fee drag
+# Hypothesis: 1d Camarilla Pivot R3/S3 Breakout with 1w EMA34 trend filter and volume confirmation
+# Camarilla pivots identify key intraday support/resistance levels derived from prior day's range
+# R3/S3 represent strong breakout levels - price closing beyond these indicates institutional interest
+# Combined with 1w EMA34 for higher timeframe trend alignment and volume confirmation (>1.8x 20-period average)
+# Designed to capture sustained moves in both bull and bear markets with tight entry conditions
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
 
-name = "4h_Donchian20_EMA50_12h_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,75 +25,80 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 1:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Donchian(20), 12h EMA50 warmup
+    start_idx = 1  # Need previous day's data for pivot calculation
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_12h_aligned[i]):
+        if np.isnan(ema_34_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate Donchian channels (20-period) up to current bar
-        highest_high = np.max(high[i-19:i+1])  # 20-period high including current
-        lowest_low = np.min(low[i-19:i+1])     # 20-period low including current
+        # Get previous day's OHLC for Camarilla pivot calculation
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
         
-        # Calculate 20-period average volume for confirmation
-        if i >= 19:
-            vol_ma_20 = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20 = np.nan
+        # Calculate Camarilla pivot levels
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        range_val = prev_high - prev_low
         
-        if np.isnan(vol_ma_20):
-            signals[i] = 0.0
-            continue
+        # Camarilla R3 and S3 levels
+        r3 = pivot + range_val * 1.1 / 4.0
+        s3 = pivot - range_val * 1.1 / 4.0
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_ema_12h = ema_50_12h_aligned[i]
+        curr_ema_1w = ema_34_1w_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = curr_volume > 2.0 * vol_ma_20
+        # Calculate 20-period average volume for confirmation
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[max(0, i-19):i+1])
+        else:
+            vol_ma_20 = 0
+        
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = curr_volume > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR below 12h EMA50
-            if curr_close < lowest_low or curr_close < curr_ema_12h:
+            # Exit: price closes below R3 (failed breakout) OR below 1w EMA34
+            if curr_close < r3 or curr_close < curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR above 12h EMA50
-            if curr_close > highest_high or curr_close > curr_ema_12h:
+            # Exit: price closes above S3 (failed breakdown) OR above 1w EMA34
+            if curr_close > s3 or curr_close > curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band + above 12h EMA50 + volume confirmation
-            if (curr_close > highest_high and 
-                curr_close > curr_ema_12h and 
+            # Long entry: price closes above R3 + above 1w EMA34 + volume confirmation
+            if (curr_close > r3 and 
+                curr_close > curr_ema_1w and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower band + below 12h EMA50 + volume confirmation
-            elif (curr_close < lowest_low and 
-                  curr_close < curr_ema_12h and 
+            # Short entry: price closes below S3 + below 1w EMA34 + volume confirmation
+            elif (curr_close < s3 and 
+                  curr_close < curr_ema_1w and 
                   vol_confirm):
                 signals[i] = -0.25
                 position = -1
