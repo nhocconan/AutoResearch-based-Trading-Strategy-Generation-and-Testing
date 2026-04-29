@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Uses Camarilla pivot levels (R3, S3) from daily candles for stronger breakout signals
+# Hypothesis: 12h Williams Fractal breakout with 1d trend filter and volume confirmation
+# Uses Williams Fractals (bearish/bullish) from daily candles for reversal signals
 # 1d EMA34 provides strong trend filter to avoid counter-trend trades
 # Volume spike (2.0x 20-period average) confirms breakout validity
 # ATR-based stoploss (1.5x ATR) manages risk with tight stops
 # Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag
-# Works in bull markets via R3 breakouts and in bear markets via S3 breakdowns with trend alignment
+# Works in bull markets via bullish fractal breaks and in bear markets via bearish fractal breaks with trend alignment
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,13 +27,34 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Williams Fractals on 1d data (need 5 bars: 2 left, center, 2 right)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    n_1d = len(high_1d)
+    bullish_fractal = np.full(n_1d, np.nan)
+    bearish_fractal = np.full(n_1d, np.nan)
+    
+    # Williams Fractal: bullish = low point with 2 higher lows on each side
+    # bearish = high point with 2 lower highs on each side
+    for i in range(2, n_1d - 2):
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+    
+    # Align fractals to 12h timeframe with 2-bar delay for confirmation
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -50,12 +71,12 @@ def generate_signals(prices):
     start_idx = 34  # warmup for EMA
     
     for i in range(start_idx, n):
-        # Need at least 2 previous days for Camarilla calculation (6h bars: 2 days = 4 bars)
-        if i < 4:  # 2 * 6h bars = 4 bars for 2 days
+        # Need at least 2 previous days for 12h bars (2 days = 4 bars)
+        if i < 4:
             signals[i] = 0.0
             continue
             
-        # Calculate Camarilla levels from previous 1d candle (4*6h bars ago)
+        # Calculate Camarilla levels from previous 1d candle (4*12h bars ago)
         prev_day_idx = i - 4
         if prev_day_idx < 0:
             signals[i] = 0.0
@@ -76,6 +97,8 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
+        curr_bullish_fractal = bullish_fractal_aligned[i]
+        curr_bearish_fractal = bearish_fractal_aligned[i]
         
         # Volume spike confirmation: current volume > 2.0x 20-period average
         if i >= 20:
@@ -106,13 +129,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > 1d EMA34 AND volume spike
-            if curr_high > r3 and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: price breaks above R3 AND price > 1d EMA34 AND bullish fractal confirmed AND volume spike
+            if (curr_high > r3 and curr_close > curr_ema_1d and 
+                not np.isnan(curr_bullish_fractal) and vol_spike):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: price breaks below S3 AND price < 1d EMA34 AND volume spike
-            elif curr_low < s3 and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: price breaks below S3 AND price < 1d EMA34 AND bearish fractal confirmed AND volume spike
+            elif (curr_low < s3 and curr_close < curr_ema_1d and 
+                  not np.isnan(curr_bearish_fractal) and vol_spike):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
