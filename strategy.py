@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume confirmation (>2.0x 20-period average)
-# Williams Alligator identifies trend absence (all lines intertwined) vs presence (lines aligned).
-# In trending markets: Jaw (13-period) > Teeth (8-period) > Lips (5-period) for uptrend; reverse for downtrend.
-# Combined with 1d EMA50 for higher timeframe trend alignment and volume confirmation for institutional participation.
-# Discrete sizing (0.25) minimizes fee churn. Works in both bull/bear markets by capturing strong trends.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Bollinger Band Width Percentile Regime + 12h EMA50 Trend + Volume Spike (>2.0x 20-period avg)
+# Uses BB Width percentile to detect low-volatility regimes (squeeze) where breakouts are more reliable
+# 12h EMA50 provides trend filter to avoid counter-trend whipsaws in bear markets
+# Volume spike confirms institutional participation; discrete sizing (0.30) minimizes fee churn
+# Works in both bull/bear markets: regime filter adapts to volatility conditions
+# Target: 100-200 total trades over 4 years (25-50/year) on 4h timeframe
 
-name = "12h_Williams_Alligator_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_BB_Width_Percentile_Regime_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,65 +25,56 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Williams Alligator (12h timeframe)
-    # Jaw: 13-period SMMA, smoothed by 8 periods
-    # Teeth: 8-period SMMA, smoothed by 5 periods  
-    # Lips: 5-period SMMA, smoothed by 3 periods
+    # Bollinger Bands (20, 2.0) on 4h timeframe
     close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # SMMA (Smoothed Moving Average) implementation
-    def smma(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        result = np.full(len(values), np.nan)
-        sma = values.rolling(window=period, min_periods=period).mean()
-        result[period-1] = sma.iloc[period-1]
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values.iloc[i]) / period
-        return result
+    # Bollinger Band Width (normalized)
+    bb_width = (bb_upper - bb_lower) / bb_middle  # percentage width
     
-    jaw = smma(close_s, 13)
-    # Smoothed by 8 periods
-    jaw_smooth = pd.Series(jaw).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # BB Width Percentile (50-period lookback) - identifies squeeze/expansion regimes
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
     
-    teeth = smma(close_s, 8)
-    # Smoothed by 5 periods
-    teeth_smooth = pd.Series(teeth).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Low volatility regime: BB Width below 30th percentile (squeeze)
+    low_vol_regime = bb_width_percentile < 0.30
     
-    lips = smma(close_s, 5)
-    # Smoothed by 3 periods
-    lips_smooth = pd.Series(lips).ewm(span=3, adjust=False, min_periods=3).mean().values
-    
-    # Calculate 20-period average volume for confirmation (on 12h timeframe)
+    # Calculate 20-period average volume for confirmation (on 4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 13+8, 8+5, 5+3, 20)  # 1d EMA50, Alligator components, volume MA warmup
+    start_idx = max(100, 50, 20)  # 12h EMA50, BB width percentile, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_smooth[i]) or 
-            np.isnan(teeth_smooth[i]) or np.isnan(lips_smooth[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bb_middle[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
-        curr_jaw = jaw_smooth[i]
-        curr_teeth = teeth_smooth[i]
-        curr_lips = lips_smooth[i]
+        curr_ema_12h = ema_50_12h_aligned[i]
+        curr_upper = bb_upper[i]
+        curr_lower = bb_lower[i]
+        curr_middle = bb_middle[i]
+        curr_low_vol = low_vol_regime[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
@@ -92,35 +83,35 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Alligator lines reverse (teeth crosses below lips) OR price below 1d EMA50
-            if curr_teeth < curr_lips or curr_close < curr_ema_1d:
+            # Exit: price closes below BB middle OR volatility expands too much (above 70th percentile)
+            if curr_close < curr_middle or bb_width_percentile[i] > 0.70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: Alligator lines reverse (teeth crosses above lips) OR price above 1d EMA50
-            if curr_teeth > curr_lips or curr_close > curr_ema_1d:
+            # Exit: price closes above BB middle OR volatility expands too much
+            if curr_close > curr_middle or bb_width_percentile[i] > 0.70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long entry: Lips > Teeth > Jaw (aligned up) + above 1d EMA50 + volume confirmation
-            if (curr_lips > curr_teeth and 
-                curr_teeth > curr_jaw and 
-                curr_close > curr_ema_1d and 
-                vol_confirm):
-                signals[i] = 0.25
+            # Long entry: breakout above BB upper + above 12h EMA50 + volume confirmation + low vol regime
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema_12h and 
+                vol_confirm and 
+                curr_low_vol):
+                signals[i] = 0.30
                 position = 1
-            # Short entry: Lips < Teeth < Jaw (aligned down) + below 1d EMA50 + volume confirmation
-            elif (curr_lips < curr_teeth and 
-                  curr_teeth < curr_jaw and 
-                  curr_close < curr_ema_1d and 
-                  vol_confirm):
-                signals[i] = -0.25
+            # Short entry: breakout below BB lower + below 12h EMA50 + volume confirmation + low vol regime
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema_12h and 
+                  vol_confirm and 
+                  curr_low_vol):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
