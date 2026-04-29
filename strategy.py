@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with volume confirmation and 1d EMA34 trend filter
+# Hypothesis: 12h Camarilla R3/S3 breakout with volume confirmation and 1d EMA34 trend filter
 # Uses proven Camarilla pivot structure with daily EMA34 trend and volume spike confirmation
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Works in bull/bear: volume spike confirms institutional interest, daily EMA34 filters counter-trend noise
-# Novelty: 4h timeframe (preferred for stability) with Camarilla R3/S3 breakout + volume spike + daily EMA34 trend
+# Novelty: 12h timeframe (preferred for stability) with Camarilla R3/S3 breakout + volume spike + daily EMA34 trend
 
-name = "4h_Camarilla_R3S3_VolumeSpike_1dEMA34_Trend_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_VolumeSpike_1dEMA34_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r3 = prev_close + camarilla_range
     s3 = prev_close - camarilla_range
     
-    # Align daily levels to 4h timeframe (wait for daily bar to close)
+    # Align daily levels to 12h timeframe (wait for daily bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
