@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d EMA50 Trend Filter and Volume Spike
-# Long when price breaks above Camarilla R3 AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below Camarilla S3 AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
-# Exit when price retests Camarilla pivot (PP) or opposite level (S3 for long, R3 for short)
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 12h timeframe.
-# Camarilla R3/S3 are stronger levels than R1/S1, reducing false breakouts. 1d EMA50 filters counter-trend moves,
-# volume confirmation ensures breakout strength. Works in bull via breakout continuation,
-# in bear via breakdown continuation. Novelty: using 12h timeframe (lower frequency) with R3/S3 levels.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 Trend Filter + Volume Confirmation
+# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 1.5x 20-bar avg
+# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 1.5x 20-bar avg
+# Exit when price retraces to 10-day EMA (adaptive stop)
+# Uses discrete sizing (0.25) to minimize fee drag. Target: 15-25 trades/year on 1d.
+# Donchian channels provide structural breakouts, 1w EMA50 filters counter-trend moves in bear markets,
+# volume confirmation ensures breakout validity. Works in bull via breakout continuation,
+# in bear via breakdown continuation when aligned with weekly trend.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,103 +26,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-period Donchian channels (using lookback period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Camarilla levels: based on previous bar's range
-    # R4 = close + (high-low)*1.1/2
-    # R3 = close + (high-low)*1.1/4
-    # R2 = close + (high-low)*1.1/6
-    # R1 = close + (high-low)*1.1/12
-    # PP = (high+low+close)/3
-    # S1 = close - (high-low)*1.1/12
-    # S2 = close - (high-low)*1.1/6
-    # S3 = close - (high-low)*1.1/4
-    # S4 = close - (high-low)*1.1/2
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate for each 1d bar (using previous bar's data to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Set first bar to NaN (no previous bar)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    # Calculate Camarilla levels
-    camarilla_pp = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    camarilla_range = prev_high_1d - prev_low_1d
-    camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4.0
-    camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4.0
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all 1d indicators to 12h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.5 * volume_ma_20
+    
+    # Adaptive exit: 10-day EMA
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA and EMA50 warmup
+    start_idx = max(20, 50)  # Donchian and EMA50 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i]) or 
+            np.isnan(ema_10[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_pp = camarilla_pp_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_ema50_1d = ema_50_1d_aligned[i]
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
+        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema10 = ema_10[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price retests Camarilla pivot (PP) or breaks below S3
-            if curr_low <= curr_pp or curr_close <= curr_s3:
+            # Exit: price closes below 10-day EMA
+            if curr_close < curr_ema10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price retests Camarilla pivot (PP) or breaks above R3
-            if curr_high >= curr_pp or curr_close >= curr_r3:
+            # Exit: price closes above 10-day EMA
+            if curr_close > curr_ema10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R3 AND price > 1d EMA50 AND volume confirmation
-            if curr_high > curr_r3 and curr_close > curr_ema50_1d and vol_conf:
+            # Long when price breaks above Donchian high AND price > 1w EMA50 AND volume confirmation
+            if curr_high > upper_band and curr_close > curr_ema50_1w and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3 AND price < 1d EMA50 AND volume confirmation
-            elif curr_low < curr_s3 and curr_close < curr_ema50_1d and vol_conf:
+            # Short when price breaks below Donchian low AND price < 1w EMA50 AND volume confirmation
+            elif curr_low < lower_band and curr_close < curr_ema50_1w and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
