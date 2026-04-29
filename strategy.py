@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses 4h primary timeframe with 1d HTF for trend and pivot calculation
-# Camarilla R3/S3 breakouts indicate strong momentum when aligned with 1d trend
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
+# Uses 1d primary timeframe with 1w HTF for trend and pivot calculation
+# Camarilla R3/S3 breakouts indicate strong momentum when aligned with 1w trend
 # Volume confirmation filters false breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-# Works in both bull and bear markets by following 1d trend while capturing 4h momentum
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# Works in both bull and bear markets by following 1w trend while capturing 1d momentum
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 1d calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop for 1w calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w EMA34 to 1d timeframe (completed 1w bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla pivot levels from prior 1d (using 1d data)
-    # Prior 1d period's OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels from prior 1w (using 1w data)
+    # Prior 1w period's OHLC for Camarilla calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Camarilla levels: R3/S3 are strongest breakout levels
     # R3 = close + (high - low) * 1.1/4
     # S3 = close - (high - low) * 1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4
-    r3_level = close_1d + camarilla_range
-    s3_level = close_1d - camarilla_range
+    camarilla_range = (high_1w - low_1w) * 1.1 / 4
+    r3_level = close_1w + camarilla_range
+    s3_level = close_1w - camarilla_range
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+    # Align Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_level)
     
-    # Volume confirmation: volume > 2.0x 20-period average (20*4h = ~3.3 days)
+    # Volume confirmation: volume > 2.0x 20-period average (20*1d = ~20 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
     
@@ -76,7 +76,7 @@ def generate_signals(prices):
         curr_s3 = s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
+        # Trend regime: bullish if price > 1w EMA34, bearish if price < 1w EMA34
         is_bullish_regime = curr_close > curr_ema34
         is_bearish_regime = curr_close < curr_ema34
         
