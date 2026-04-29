@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + Elder Ray + Volume Spike
-# Long when Alligator jaws < teeth < lips (bullish alignment) AND Elder Bull Power > 0 AND volume > 2.0x 20-bar avg
-# Short when Alligator jaws > teeth > lips (bearish alignment) AND Elder Bear Power < 0 AND volume > 2.0x 20-bar avg
-# Exit when Alligator alignment breaks OR Elder power reverses
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 12h timeframe.
-# Combines trend-following (Alligator) with momentum (Elder Ray) and volume confirmation
-# to capture strong moves while avoiding false signals in choppy markets.
-# Novelty: Uses 12h primary timeframe (less crowded than 4h/6h) with proven Williams Alligator and Elder Ray indicators
-# that work well in both bull and bear markets by adapting to trend strength and momentum.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation
+# Long when price breaks above Camarilla R1 AND price > 12h EMA50 AND volume > 1.8x 20-bar avg
+# Short when price breaks below Camarilla S1 AND price < 12h EMA50 AND volume > 1.8x 20-bar avg
+# Exit when price retests Camarilla pivot (central level)
+# Uses discrete position sizing (0.30) to balance return and risk. Target: 20-50 trades/year on 4h timeframe.
+# Combines intraday support/resistance (Camarilla) with HTF trend filter and volume confirmation
+# to capture strong breakouts while avoiding false signals in choppy markets.
 
-name = "12h_WilliamsAlligator_ElderRay_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,92 +25,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF indicators
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for Camarilla levels (based on previous 1d bar)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    prev_high_1d = df_1d['high'].values
+    prev_low_1d = df_1d['low'].values
+    prev_close_1d = df_1d['close'].values
     
-    # Williams Alligator (13,8,5 SMAs with 8,5,3 shifts)
-    # Jaws: 13-period SMA shifted 8 bars
-    # Teeth: 8-period SMA shifted 5 bars
-    # Lips: 5-period SMA shifted 3 bars
-    jaws_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    camarilla_range = prev_high_1d - prev_low_1d
+    camarilla_pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    camarilla_r1 = prev_close_1d + camarilla_range * 1.1 / 2.0
+    camarilla_s1 = prev_close_1d - camarilla_range * 1.1 / 2.0
     
-    # Elder Ray Index (13-period EMA of high and low)
-    # Bull Power = High - EMA13(Close)
-    # Bear Power = Low - EMA13(Close)
-    ema_13_close = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema_13_close
-    bear_power_1d = low_1d - ema_13_close
+    # Align Camarilla levels to 4h timeframe (they represent levels from previous 1d bar)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align all HTF indicators to 12h timeframe
-    jaws_12h = align_htf_to_ltf(prices, df_1d, jaws_1d)
-    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_12h = align_htf_to_ltf(prices, df_1d, lips_1d)
-    bull_power_12h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_12h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13+8)  # volume MA and Alligator warmup (13+8=21 for jaws)
+    start_idx = max(20, 50)  # volume MA and EMA50 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaws_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or 
-            np.isnan(bull_power_12h[i]) or np.isnan(bear_power_12h[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_jaws = jaws_12h[i]
-        curr_teeth = teeth_12h[i]
-        curr_lips = lips_12h[i]
-        curr_bull = bull_power_12h[i]
-        curr_bear = bear_power_12h[i]
+        curr_ema50_12h = ema_50_12h_aligned[i]
+        curr_pivot = camarilla_pivot_aligned[i]
+        curr_r1 = camarilla_r1_aligned[i]
+        curr_s1 = camarilla_s1_aligned[i]
         curr_close = close[i]
-        
-        # Check Alligator alignment
-        bullish_alignment = curr_jaws < curr_teeth < curr_lips
-        bearish_alignment = curr_jaws > curr_teeth > curr_lips
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Alligator bullish alignment breaks OR Elder Bull Power turns negative
-            if not bullish_alignment or curr_bull <= 0:
+            # Exit: price retests Camarilla pivot
+            if curr_close <= curr_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: Alligator bearish alignment breaks OR Elder Bear Power turns positive
-            if not bearish_alignment or curr_bear >= 0:
+            # Exit: price retests Camarilla pivot
+            if curr_close >= curr_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when Alligator bullish alignment AND Elder Bull Power > 0 AND volume confirmation
-            if bullish_alignment and curr_bull > 0 and vol_conf:
-                signals[i] = 0.25
+            # Long when price breaks above Camarilla R1 AND price > 12h EMA50 AND volume confirmation
+            if curr_close > curr_r1 and curr_close > curr_ema50_12h and vol_conf:
+                signals[i] = 0.30
                 position = 1
-            # Short when Alligator bearish alignment AND Elder Bear Power < 0 AND volume confirmation
-            elif bearish_alignment and curr_bear < 0 and vol_conf:
-                signals[i] = -0.25
+            # Short when price breaks below Camarilla S1 AND price < 12h EMA50 AND volume confirmation
+            elif curr_close < curr_s1 and curr_close < curr_ema50_12h and vol_conf:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
