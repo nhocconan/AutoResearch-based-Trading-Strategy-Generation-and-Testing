@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 1d Camarilla R3, 1d EMA34 up-trend, volume > 2.0x average
-# Short when price breaks below 1d Camarilla S3, 1d EMA34 down-trend, volume > 2.0x average
-# Exit when price crosses the 1d Camarilla pivot point (mean reversion)
-# Uses discrete position sizing (0.25) and strong volume filter to target 12-37 trades/year.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
-# This strategy focuses on key Camarilla levels (R3/S3) which act as strong support/resistance
-# in 6h timeframe, with 1d EMA34 providing trend filter and volume confirming institutional interest.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and chop regime filter
+# Long when price breaks above 12h Camarilla R3, 1d volume > 2.0x average, chop > 61.8 (range)
+# Short when price breaks below 12h Camarilla S3, 1d volume > 2.0x average, chop > 61.8 (range)
+# Exit when price reaches opposite Camarilla level (R3->S3 or S3->R3)
+# Uses discrete position sizing (0.25) targeting 12-30 trades/year on 12h timeframe.
+# Works in ranging markets by fading extremes with volume confirmation and regime filter.
 
-name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_VolumeSpike_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,41 +29,47 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla pivot levels and EMA34
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels using previous day's OHLC
+    # Calculate 1d Camarilla levels (R3, S3) using previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla calculations: based on previous day's range
-    # Pivot point = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1/2
-    # S3 = C - (H - L) * 1.1/2
-    range_1d = high_1d - low_1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r3 = close_1d + range_1d * 1.1 / 2.0
-    camarilla_s3 = close_1d - range_1d * 1.1 / 2.0
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d indicators to 6h timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 12h timeframe (no additional delay for pivots)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period average volume for confirmation (on 6h timeframe)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 12h data for price reference
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
+        return np.zeros(n)
+    
+    # Chop regime filter: 14-period chop > 61.8 indicates ranging market
+    TR1 = pd.Series(df_12h['high']).rolling(2).max() - pd.Series(df_12h['low']).rolling(2).min()
+    TR2 = abs(pd.Series(df_12h['high']) - pd.Series(df_12h['close']).shift(1))
+    TR3 = abs(pd.Series(df_12h['low']) - pd.Series(df_12h['close']).shift(1))
+    TR = pd.concat([TR1, TR2, TR3], axis=1).max(axis=1)
+    atr = TR.rolling(14, min_periods=14).mean()
+    chop = 100 * np.log10(atr.rolling(14, min_periods=14).sum() / np.log10(14)) / np.log10(14)
+    chop_values = chop.values
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_values)
+    
+    # Calculate 20-period average volume for confirmation (1d)
+    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Warmup for EMA34
+    start_idx = max(20, 14)  # Volume and chop warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -75,8 +79,7 @@ def generate_signals(prices):
             
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -86,22 +89,21 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
-        curr_pivot = pivot_1d_aligned[i]
-        curr_ema34_1d = ema_34_1d_aligned[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_chop = chop_aligned[i]
+        curr_vol_ma = vol_ma_20_1d_aligned[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price below pivot point (mean reversion to pivot)
-            if curr_close < curr_pivot:
+            # Exit: price reaches S3 level (opposite Camarilla level)
+            if curr_low <= curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above pivot point (mean reversion to pivot)
-            if curr_close > curr_pivot:
+            # Exit: price reaches R3 level (opposite Camarilla level)
+            if curr_high >= curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,13 +112,15 @@ def generate_signals(prices):
         else:  # Flat - look for new entries
             # Volume confirmation: current volume > 2.0x 20-period average (strong filter)
             vol_confirmed = curr_volume > 2.0 * curr_vol_ma
+            # Chop filter: chop > 61.8 indicates ranging market (good for mean reversion)
+            chop_filter = curr_chop > 61.8
             
-            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
-            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
+            # Long when price breaks above R3, volume confirmed, chop > 61.8 (range)
+            if curr_high > curr_r3 and vol_confirmed and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
-            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
+            # Short when price breaks below S3, volume confirmed, chop > 61.8 (range)
+            elif curr_low < curr_s3 and vol_confirmed and chop_filter:
                 signals[i] = -0.25
                 position = -1
             else:
