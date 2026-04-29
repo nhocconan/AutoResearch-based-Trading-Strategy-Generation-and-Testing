@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme + 1d EMA50 Trend + Volume Spike
+# Hypothesis: 6h Williams %R Extreme Reversion + 1d EMA50 Trend Filter + Volume Spike
 # Long when Williams %R(14) < -80 (oversold) AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
 # Short when Williams %R(14) > -20 (overbought) AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
-# Exit when Williams %R returns to neutral zone (-50) or opposite extreme triggers
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 12h timeframe.
-# Williams %R identifies momentum extremes, 1d EMA50 filters counter-trend moves,
-# volume confirmation ensures move strength. Works in both bull/bear via trend filter.
+# Exit when Williams %R reverts to -50 level (mean reversion)
+# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 6h timeframe.
+# Williams %R identifies exhaustion points, 1d EMA50 filters counter-trend moves in bear markets,
+# volume confirmation ensures reversal strength. Designed to work in both bull and bear markets.
 
-name = "12h_WilliamsRExtreme_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_WilliamsRExtreme_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,18 +33,16 @@ def generate_signals(prices):
     # Calculate EMA(50) on 1d data
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 12h timeframe
+    # Align EMA50 to 6h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R(14) on 12h data
+    # Calculate Williams %R(14) on 6h data
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -70,7 +68,7 @@ def generate_signals(prices):
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R returns to neutral (-50) or opposite extreme triggers
+            # Exit: Williams %R reverts to -50 level (mean reversion)
             if curr_williams >= -50:
                 signals[i] = 0.0
                 position = 0
@@ -78,7 +76,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral (-50) or opposite extreme triggers
+            # Exit: Williams %R reverts to -50 level (mean reversion)
             if curr_williams <= -50:
                 signals[i] = 0.0
                 position = 0
