@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>1.8x 20-period average)
-# Camarilla pivot levels provide high-probability intraday support/resistance
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
-# Volume spike confirms institutional participation, reducing false breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2x 20-period average)
+# Camarilla levels provide precise support/resistance; breakouts with volume confirm institutional participation
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades in bear markets
+# Volume spike filter reduces false breakouts during low-liquidity periods
+# Target: 75-150 total trades over 4 years (19-38/year) on 4h timeframe
 
 name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
 timeframe = "4h"
@@ -33,10 +33,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = df_1d['close'].values + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 4
-    camarilla_s3 = df_1d['close'].values - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 4
+    # Calculate Camarilla levels from previous 1d bar (OHLC)
+    # Need previous day's high, low, close - shift by 1 to avoid look-ahead
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla R3, S3 levels
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -64,12 +71,12 @@ def generate_signals(prices):
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        vol_confirm = curr_volume > 1.8 * curr_vol_ma
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = curr_volume > 2.0 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below S3 OR price closes below 1d EMA34
+            # Exit: price closes below Camarilla S3 OR below 1d EMA34
             if curr_close < curr_s3 or curr_close < curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
@@ -77,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 OR price closes above 1d EMA34
+            # Exit: price closes above Camarilla R3 OR above 1d EMA34
             if curr_close > curr_r3 or curr_close > curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
@@ -85,13 +92,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 + price above 1d EMA34 + volume confirmation
+            # Long entry: price breaks above Camarilla R3 + above 1d EMA34 + volume confirmation
             if (curr_high > curr_r3 and 
                 curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + price below 1d EMA34 + volume confirmation
+            # Short entry: price breaks below Camarilla S3 + below 1d EMA34 + volume confirmation
             elif (curr_low < curr_s3 and 
                   curr_close < curr_ema_1d and 
                   vol_confirm):
