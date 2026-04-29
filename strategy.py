@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume confirmation
-# H3/L3 are stronger reversal levels than R3/S3 in ranging markets, less prone to false breakouts
-# Long when price breaks above H3 with volume spike AND above 1d EMA50 (bullish trend)
-# Short when price breaks below L3 with volume spike AND below 1d EMA50 (bearish trend)
-# Exit when price returns to H4/L4 levels or trend reverses
-# Uses 12h timeframe to target 12-37 trades/year (50-150 total over 4 years) minimizing fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian channels provide clear trend-following structure: break above 20-period high = bullish momentum
+# Long when price breaks above Donchian upper band with volume spike AND above 1d EMA50 (bullish trend)
+# Short when price breaks below Donchian lower band with volume spike AND below 1d EMA50 (bearish trend)
+# Exit when price returns to opposite Donchian band or trend reverses
+# Uses 4h timeframe to target 20-50 trades/year (75-200 total over 4 years) minimizing fee drag
 # Works in both bull and bear markets by following the higher timeframe trend
 
-name = "12h_Camarilla_H3L3_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,33 +34,25 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe (completed 1d bar only)
+    # Align 1d EMA50 to 4h timeframe (completed 1d bar only)
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Range = high - low
-    price_range = high - low
+    # Calculate Donchian channels (20-period)
+    # Upper band = highest high over last 20 periods
+    # Lower band = lowest low over last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels for intraday (based on previous day)
-    # H4 = close + range * 1.1/2
-    # H3 = close + range * 1.1/4
-    # L3 = close - range * 1.1/4
-    # L4 = close - range * 1.1/2
-    camarilla_h3 = close + price_range * 1.1 / 4.0
-    camarilla_l3 = close - price_range * 1.1 / 4.0
-    camarilla_h4 = close + price_range * 1.1 / 2.0
-    camarilla_l4 = close - price_range * 1.1 / 2.0
-    
-    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 2.0x 20-period average (20*4h = 10 days)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # warmup for EMA50 and volume MA
+    start_idx = max(50, 20)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
@@ -72,10 +64,8 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema50 = ema50_aligned[i]
-        camarilla_h3_prev = camarilla_h3[i-1]  # Use previous day's levels
-        camarilla_l3_prev = camarilla_l3[i-1]
-        camarilla_h4_prev = camarilla_h4[i-1]
-        camarilla_l4_prev = camarilla_l4[i-1]
+        curr_donchian_upper = donchian_upper[i-1]  # Use previous period's bands
+        curr_donchian_lower = donchian_lower[i-1]
         curr_volume_confirm = volume_confirm[i]
         
         # Trend regime: bullish if price > 1d EMA50, bearish if price < 1d EMA50
@@ -85,26 +75,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: price breaks above H3 AND bullish regime
-                if curr_high > camarilla_h3_prev and is_bullish_regime:
+                # Bullish entry: price breaks above upper band AND bullish regime
+                if curr_high > curr_donchian_upper and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below L3 AND bearish regime
-                elif curr_low < camarilla_l3_prev and is_bearish_regime:
+                # Bearish entry: price breaks below lower band AND bearish regime
+                elif curr_low < curr_donchian_lower and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price returns to H4 OR regime changes to bearish
-            if curr_close >= camarilla_h4_prev or not is_bullish_regime:
+            # Exit when: price returns to lower band OR regime changes to bearish
+            if curr_close <= curr_donchian_lower or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price returns to L4 OR regime changes to bullish
-            if curr_close <= camarilla_l4_prev or not is_bearish_regime:
+            # Exit when: price returns to upper band OR regime changes to bullish
+            if curr_close >= curr_donchian_upper or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
