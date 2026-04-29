@@ -43,16 +43,32 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
+    # Precompute daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14, 50)  # warmup
+    start_idx = max(96, 30, 14, 50)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
             np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(daily_high_aligned[i]) or
+            np.isnan(daily_low_aligned[i]) or
+            np.isnan(daily_close_aligned[i])):
             signals[i] = 0.0
             continue
             
@@ -62,64 +78,37 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         curr_ema_50_12h = ema_50_12h_aligned[i]
         
+        # Use previous day's levels (shift by 1)
+        prev_high = daily_high_aligned[i-1]
+        prev_low = daily_low_aligned[i-1]
+        prev_close = daily_close_aligned[i-1]
+        
         if position == 0:  # Flat - look for new entries
-            # Calculate Camarilla levels from previous day
-            if i >= 96:  # Need at least 96 4h bars (4 days) for reliable daily levels
-                # Get daily high, low, close from 1d data
-                df_1d = get_htf_data(prices, '1d')
-                if len(df_1d) >= 2:
-                    # Align 1d data to 4h
-                    daily_high = df_1d['high'].values
-                    daily_low = df_1d['low'].values
-                    daily_close = df_1d['close'].values
-                    
-                    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-                    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-                    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-                    
-                    # Use previous day's levels (shift by 1)
-                    prev_high = daily_high_aligned[i-1]
-                    prev_low = daily_low_aligned[i-1]
-                    prev_close = daily_close_aligned[i-1]
-                    
-                    if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                        # Calculate Camarilla levels
-                        range_val = prev_high - prev_low
-                        r3 = prev_close + (range_val * 1.1 / 4)
-                        s3 = prev_close - (range_val * 1.1 / 4)
-                        
-                        # Only trade with volume confirmation and trend filter
-                        if curr_volume_confirm:
-                            # Bullish entry: price breaks above R3 + above 12h EMA50
-                            if curr_high > r3 and curr_close > curr_ema_50_12h:
-                                signals[i] = 0.25
-                                position = 1
-                            # Bearish entry: price breaks below S3 + below 12h EMA50
-                            elif curr_low < s3 and curr_close < curr_ema_50_12h:
-                                signals[i] = -0.25
-                                position = -1
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                s3 = prev_close - (range_val * 1.1 / 4)
+                
+                # Only trade with volume confirmation and trend filter
+                if curr_volume_confirm:
+                    # Bullish entry: price breaks above R3 + above 12h EMA50
+                    if curr_high > r3 and curr_close > curr_ema_50_12h:
+                        signals[i] = 0.25
+                        position = 1
+                    # Bearish entry: price breaks below S3 + below 12h EMA50
+                    elif curr_low < s3 and curr_close < curr_ema_50_12h:
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:  # Long position
             # Exit: price breaks below S3
-            if i >= 96:
-                df_1d = get_htf_data(prices, '1d')
-                if len(df_1d) >= 2:
-                    daily_low = df_1d['low'].values
-                    daily_close = df_1d['close'].values
-                    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-                    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-                    prev_low = daily_low_aligned[i-1]
-                    prev_close = daily_close_aligned[i-1]
-                    if not (np.isnan(prev_low) or np.isnan(prev_close)):
-                        range_val = prev_high - prev_low  # Note: prev_high from entry context
-                        s3 = prev_close - (range_val * 1.1 / 4)
-                        if curr_low < s3:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = 0.25
-                    else:
-                        signals[i] = 0.25
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                s3 = prev_close - (range_val * 1.1 / 4)
+                if curr_low < s3:
+                    signals[i] = 0.0
+                    position = 0
                 else:
                     signals[i] = 0.25
             else:
@@ -127,25 +116,12 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: price breaks above R3
-            if i >= 96:
-                df_1d = get_htf_data(prices, '1d')
-                if len(df_1d) >= 2:
-                    daily_high = df_1d['high'].values
-                    daily_close = df_1d['close'].values
-                    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-                    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
-                    prev_high = daily_high_aligned[i-1]
-                    prev_close = daily_close_aligned[i-1]
-                    if not (np.isnan(prev_high) or np.isnan(prev_close)):
-                        range_val = prev_high - prev_low  # Note: prev_low from entry context
-                        r3 = prev_close + (range_val * 1.1 / 4)
-                        if curr_high > r3:
-                            signals[i] = 0.0
-                            position = 0
-                        else:
-                            signals[i] = -0.25
-                    else:
-                        signals[i] = -0.25
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                if curr_high > r3:
+                    signals[i] = 0.0
+                    position = 0
                 else:
                     signals[i] = -0.25
             else:
