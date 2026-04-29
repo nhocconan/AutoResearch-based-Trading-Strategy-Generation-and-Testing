@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation (>2.0x 20-period average)
-# Camarilla R3/S3 levels provide strong support/resistance with lower false breakout rate than R4/S4
-# 1w EMA50 ensures alignment with weekly trend to avoid counter-trend trades in bear markets
-# Higher volume threshold (2.0x) filters weak breakouts, reducing trade frequency to optimal range
-# Target: 75-150 total trades over 4 years (19-38/year) on 4h timeframe
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation (>1.5x 20-period average)
+# Camarilla R3/S3 levels from prior week provide strong support/resistance
+# 1w EMA50 ensures alignment with weekly trend to avoid counter-trend trades
+# Volume confirmation filters weak breakouts
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,11 +53,11 @@ def generate_signals(prices):
     camarilla_r3 = prev_close_1w + camarilla_range * 1.1 / 4
     camarilla_s3 = prev_close_1w - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1d timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Calculate 20-period average volume for confirmation (on 4h timeframe)
+    # Calculate 20-period average volume for confirmation (on 1d timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -81,8 +81,8 @@ def generate_signals(prices):
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = curr_volume > 2.0 * curr_vol_ma
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = curr_volume > 1.5 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
