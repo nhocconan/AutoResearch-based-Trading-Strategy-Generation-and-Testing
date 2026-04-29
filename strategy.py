@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX (12,20) zero-line crossover with 1w EMA34 trend filter and volume confirmation (>1.5x 20-period average)
-# TRIX is a triple-smoothed EMA momentum oscillator that filters noise and identifies trend changes
-# Zero-line crossovers provide clean entry signals with low whipsaw
-# 1w EMA34 ensures alignment with weekly trend to avoid counter-trend trades
-# Volume confirmation filters weak signals; discrete sizing (0.25) minimizes fee churn
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike (>1.5x 20-period average)
+# Donchian breakout captures momentum in trending markets; 1d EMA50 ensures alignment with daily trend
+# Volume spike confirms institutional interest; discrete sizing (0.25) minimizes fee churn
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 
-name = "12h_TRIX_1wEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +23,38 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate TRIX (12,20) on 12h timeframe
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then % change over 1 period
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = pd.Series(ema3).pct_change(1).values * 100  # Convert to percentage
+    # Calculate Donchian channels (20-period) on 4h timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period average volume for confirmation (on 12h timeframe)
+    # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 12*3, 20)  # 1w EMA34, TRIX warmup (3*12 for triple EMA), volume MA warmup
+    start_idx = max(50, 20, 20)  # 1d EMA50, Donchian(20), volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(trix[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_trix = trix[i]
-        curr_trix_prev = trix[i-1] if i > 0 else 0
-        curr_ema_1w = ema_34_1w_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
@@ -68,31 +63,31 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: TRIX crosses below zero OR price closes below 1w EMA34
-            if curr_trix <= 0 and curr_trix_prev > 0 or curr_close < curr_ema_1w:
+            # Exit: price closes below Donchian lower (20) OR below 1d EMA50
+            if curr_close < lowest_20[i] or curr_close < curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above zero OR price closes above 1w EMA34
-            if curr_trix >= 0 and curr_trix_prev < 0 or curr_close > curr_ema_1w:
+            # Exit: price closes above Donchian upper (20) OR above 1d EMA50
+            if curr_close > highest_20[i] or curr_close > curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: TRIX crosses above zero (bullish momentum) + price above 1w EMA34 + volume confirmation
-            if (curr_trix > 0 and curr_trix_prev <= 0 and 
-                curr_close > curr_ema_1w and 
+            # Long entry: price breaks above Donchian upper (20) + above 1d EMA50 + volume confirmation
+            if (curr_close > highest_20[i] and 
+                curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX crosses below zero (bearish momentum) + price below 1w EMA34 + volume confirmation
-            elif (curr_trix < 0 and curr_trix_prev >= 0 and 
-                  curr_close < curr_ema_1w and 
+            # Short entry: price breaks below Donchian lower (20) + below 1d EMA50 + volume confirmation
+            elif (curr_close < lowest_20[i] and 
+                  curr_close < curr_ema_1d and 
                   vol_confirm):
                 signals[i] = -0.25
                 position = -1
