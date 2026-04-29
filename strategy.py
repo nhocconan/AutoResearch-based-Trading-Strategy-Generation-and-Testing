@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR(14) stoploss
-# Donchian channels provide clear breakout levels; daily EMA50 filters for higher timeframe trend;
-# volume confirms breakout strength; ATR-based stop manages risk. Designed for 4h timeframe
-# to target 20-50 trades/year, minimizing fee drag while capturing significant moves in both bull and bear markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA50 trend + volume spike + ATR(14) stoploss
+# Camarilla levels from daily provide key support/resistance; 4h EMA50 filters for intermediate trend;
+# volume confirms breakout strength; ATR-based trailing stop manages risk in both bull and bear markets.
+# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag while capturing significant moves.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,9 +45,15 @@ def generate_signals(prices):
     ).values
     vol_regime_filter = atr <= atr_percentile  # Only trade in low/medium volatility regimes
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # R4 = close + 1.5*(high-low), R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low)
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + 1.0 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.0 * (prev_high - prev_low)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,11 +66,11 @@ def generate_signals(prices):
     max_high_since_entry = 0.0  # For trailing stop
     min_low_since_entry = 0.0   # For trailing stop
     
-    start_idx = max(50, 20, 14)  # warmup for EMA50, Donchian, ATR
+    start_idx = max(50, 20, 14)  # warmup for EMA50, volume, ATR
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]):
             signals[i] = 0.0
             continue
             
@@ -74,8 +80,8 @@ def generate_signals(prices):
         curr_open = open_price[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
+        curr_r3 = camarilla_r3[i]
+        curr_s3 = camarilla_s3[i]
         curr_volume_confirm = volume_confirm[i]
         curr_vol_regime = vol_regime_filter[i]
         
@@ -93,11 +99,11 @@ def generate_signals(prices):
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
             # 2. Price crosses below 1d EMA50 (trend change)
-            # 3. Price drops below Donchian low (breakout failed)
+            # 3. Price drops below Camarilla S3 (breakout failed)
             # 4. Volatility regime shifts to high (avoid chop)
             if (curr_low <= stop_price or
                 curr_close < curr_ema_50_1d or
-                curr_close < curr_donchian_low or
+                curr_close < curr_s3 or
                 not curr_vol_regime):
                 signals[i] = 0.0
                 position = 0
@@ -119,11 +125,11 @@ def generate_signals(prices):
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
             # 2. Price crosses above 1d EMA50 (trend change)
-            # 3. Price rises above Donchian high (breakout failed)
+            # 3. Price rises above Camarilla R3 (breakout failed)
             # 4. Volatility regime shifts to high (avoid chop)
             if (curr_high >= stop_price or
                 curr_close > curr_ema_50_1d or
-                curr_close > curr_donchian_high or
+                curr_close > curr_r3 or
                 not curr_vol_regime):
                 signals[i] = 0.0
                 position = 0
@@ -138,8 +144,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
                 
-            # Long entry: price breaks above Donchian high + above 1d EMA50 + volume confirm
-            if (curr_close > curr_donchian_high and
+            # Long entry: price breaks above Camarilla R3 + above 1d EMA50 + volume confirm
+            if (curr_close > curr_r3 and
                 curr_close > curr_ema_50_1d and
                 curr_volume_confirm):
                 signals[i] = 0.25
@@ -148,8 +154,8 @@ def generate_signals(prices):
                 atr_at_entry = curr_atr
                 max_high_since_entry = curr_high
                 min_low_since_entry = curr_low
-            # Short entry: price breaks below Donchian low + below 1d EMA50 + volume confirm
-            elif (curr_close < curr_donchian_low and
+            # Short entry: price breaks below Camarilla S3 + below 1d EMA50 + volume confirm
+            elif (curr_close < curr_s3 and
                   curr_close < curr_ema_50_1d and
                   curr_volume_confirm):
                 signals[i] = -0.25
