@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation
-# Donchian channels capture established trends; breakouts with volume and 1w EMA50 alignment ride momentum
-# Designed for ~7-25 trades/year to minimize fee drag while participating in strong trends
-# Works in bull/bear via 1w EMA50 trend filter - only trades in direction of weekly momentum
-# Uses strict volume confirmation (>2.0x 20-period average) to reduce false breakouts
-# Exits on 2.0x ATR stoploss or when price retests the broken Donchian level
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakouts capture momentum; 1d EMA50 ensures alignment with higher timeframe trend
+# Volume confirmation (>1.5x 20-period average) reduces false breakouts
+# Designed for ~20-50 trades/year to minimize fee drag while participating in established trends
+# Works in bull/bear via 1d EMA50 trend filter - only trades in direction of 1d momentum
+# Uses ATR-based trailing stop (2.5x ATR) for risk management
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +24,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR (14-period) for stoploss
+    # Calculate ATR (14-period) for stoploss and position sizing
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -45,68 +45,76 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_at_entry = 0.0
-    breakout_level = 0.0  # Track the broken Donchian level for exit
+    highest_high_since_entry = 0.0  # for trailing stop
+    lowest_low_since_entry = 0.0    # for trailing stop
     
-    start_idx = 50  # Donchian and EMA warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_highest = highest_high[i]
-        curr_lowest = lowest_low[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price retests broken lower Donchian level
-            if curr_close < entry_price - 2.0 * curr_atr or curr_close < breakout_level:
+            # Update highest high since entry for trailing stop
+            highest_high_since_entry = max(highest_high_since_entry, curr_high)
+            
+            # Exit: trailing stop hit (2.5x ATR from highest high) or price breaks below Donchian low
+            if curr_close < highest_high_since_entry - 2.5 * curr_atr or curr_close < curr_donchian_low:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0  # reset
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price retests broken upper Donchian level
-            if curr_close > entry_price + 2.0 * curr_atr or curr_close > breakout_level:
+            # Update lowest low since entry for trailing stop
+            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            
+            # Exit: trailing stop hit (2.5x ATR from lowest low) or price breaks above Donchian high
+            if curr_close > lowest_low_since_entry + 2.5 * curr_atr or curr_close > curr_donchian_high:
                 signals[i] = 0.0
                 position = 0
+                lowest_low_since_entry = 0.0  # reset
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new breakout entries
-            # Volume confirmation: current volume > 2.0x 20-period average
-            vol_confirm = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = curr_volume > 1.5 * curr_vol_ma
             
-            # Long breakout when price closes above upper Donchian with 1w EMA50 uptrend and volume confirmation
-            if curr_close > curr_highest and curr_close > curr_ema50_1w and vol_confirm:
+            # Long breakout when price closes above Donchian high with 1d EMA50 uptrend and volume confirmation
+            if curr_close > curr_donchian_high and curr_close > curr_ema50_1d and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-                breakout_level = curr_lowest  # Exit if price retests the broken lower level
-            # Short breakout when price closes below lower Donchian with 1w EMA50 downtrend and volume confirmation
-            elif curr_close < curr_lowest and curr_close < curr_ema50_1w and vol_confirm:
+                highest_high_since_entry = curr_high
+            # Short breakout when price closes below Donchian low with 1d EMA50 downtrend and volume confirmation
+            elif curr_close < curr_donchian_low and curr_close < curr_ema50_1d and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-                breakout_level = curr_highest  # Exit if price retests the broken upper level
+                lowest_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
