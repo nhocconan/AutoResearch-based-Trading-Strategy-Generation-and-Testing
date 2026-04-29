@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Uses 1w EMA34 to filter trend direction (avoid counter-trend trades in ranging/choppy markets)
-# Donchian(20) breakout captures strong momentum moves with clear structure
-# Volume > 1.5x 20-period average confirms institutional participation
-# Discrete position sizing (0.25) with opposite Donchian(10) exit for risk control
-# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag
-# Works in bull/bear via 1w EMA34 trend filter - only trades in direction of weekly trend
-# Designed for BTC/ETH focus with proven Donchian structure + volume confirmation edge
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels from 1d HTF for precise entry/exit zones
+# 1d EMA34 provides strong trend filter to avoid counter-trend trades in ranging markets
+# Volume > 2.0x average confirms institutional participation and reduces false breakouts
+# Discrete position sizing (0.25) with Camarilla H3/L3 exit for quick profit taking
+# Designed for ~12-25 trades/year to minimize fee drag while capturing strong moves
+# Works in bull/bear via trend filter - only trades in direction of 1d EMA34
+# Target: BTC/ETH focus with proven Camarilla structure + volume confirmation edge
 
-name = "1d_Donchian20_1wEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +26,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period for entry, 10-period for exit)
-    # Donchian upper = max(high, lookback)
-    # Donchian lower = min(low, lookback)
-    high_roll_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    high_roll_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_roll_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    h3_1d = close_1d + range_1d * 1.1 / 6.0
+    l3_1d = close_1d - range_1d * 1.1 / 6.0
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Get 1d data for EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,13 +71,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Donchian(20) and 1w EMA34 warmup
+    start_idx = max(20, 34)  # Volume MA and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll_20[i]) or np.isnan(low_roll_20[i]) or 
-            np.isnan(high_roll_10[i]) or np.isnan(low_roll_10[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -64,40 +88,44 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_donchian_high_20 = high_roll_20[i]
-        curr_donchian_low_20 = low_roll_20[i]
-        curr_donchian_high_10 = high_roll_10[i]
-        curr_donchian_low_10 = low_roll_10[i]
-        curr_ema34_1w = ema_34_1w_aligned[i]
+        curr_r3 = r3_1d_aligned[i]
+        curr_s3 = s3_1d_aligned[i]
+        curr_h3 = h3_1d_aligned[i]
+        curr_l3 = l3_1d_aligned[i]
+        curr_r4 = r4_1d_aligned[i]
+        curr_s4 = s4_1d_aligned[i]
+        curr_r1 = r1_1d_aligned[i]
+        curr_s1 = s1_1d_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price below Donchian(10) lower band (tight stop/profit)
-            if curr_close < curr_donchian_low_10:
+            # Exit: price below Camarilla S3 (tight profit taking)
+            if curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above Donchian(10) upper band (tight stop/profit)
-            if curr_close > curr_donchian_high_10:
+            # Exit: price above Camarilla R3 (tight profit taking)
+            if curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = curr_volume > 1.5 * curr_vol_ma
+            # Volume spike confirmation: current volume > 2.0x 20-period average
+            vol_spike = curr_volume > 2.0 * curr_vol_ma
             
-            # Long when price breaks above Donchian(20) upper band with 1w EMA34 uptrend and volume confirmation
-            if curr_close > curr_donchian_high_20 and curr_close > curr_ema34_1w and vol_confirm:
+            # Long when price breaks above R3 with 1d EMA34 uptrend and volume spike
+            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian(20) lower band with 1w EMA34 downtrend and volume confirmation
-            elif curr_close < curr_donchian_low_20 and curr_close < curr_ema34_1w and vol_confirm:
+            # Short when price breaks below S3 with 1d EMA34 downtrend and volume spike
+            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
