@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation + ATR(14) trailing stop
-# Donchian channels provide clear breakout levels; daily EMA50 filters for higher timeframe trend alignment;
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation + ATR(14) trailing stop
+# Donchian channels provide clear structure for breakouts; weekly EMA50 filters for higher timeframe trend;
 # volume confirms breakout strength; ATR-based trailing stop manages risk in both bull and bear markets.
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag while capturing significant moves.
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing significant moves.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,14 +23,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop for 1d calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop for 1w calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss and volatility filter
     tr1 = high[1:] - low[1:]
@@ -42,8 +42,6 @@ def generate_signals(prices):
     # Calculate Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             signals[i] = 0.0
             continue
             
@@ -68,10 +66,10 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_open = open_price[i]
-        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
+        curr_upper = highest_high[i]
+        curr_lower = lowest_low[i]
         curr_volume_confirm = volume_confirm[i]
         
         # Handle position exits and stops
@@ -87,10 +85,10 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses below 1d EMA50 (trend change)
+            # 2. Price crosses below 1w EMA50 (trend change)
             # 3. Price drops below Donchian lower (breakout failed)
             if (curr_low <= stop_price or
-                curr_close < curr_ema_50_1d or
+                curr_close < curr_ema_50_1w or
                 curr_close < curr_lower):
                 signals[i] = 0.0
                 position = 0
@@ -111,10 +109,10 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses above 1d EMA50 (trend change)
+            # 2. Price crosses above 1w EMA50 (trend change)
             # 3. Price rises above Donchian upper (breakout failed)
             if (curr_high >= stop_price or
-                curr_close > curr_ema_50_1d or
+                curr_close > curr_ema_50_1w or
                 curr_close > curr_upper):
                 signals[i] = 0.0
                 position = 0
@@ -124,9 +122,9 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper + above 1d EMA50 + volume confirm
+            # Long entry: price breaks above Donchian upper + above 1w EMA50 + volume confirm
             if (curr_close > curr_upper and
-                curr_close > curr_ema_50_1d and
+                curr_close > curr_ema_50_1w and
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
@@ -134,9 +132,9 @@ def generate_signals(prices):
                 atr_at_entry = curr_atr
                 max_high_since_entry = curr_high
                 min_low_since_entry = curr_low
-            # Short entry: price breaks below Donchian lower + below 1d EMA50 + volume confirm
+            # Short entry: price breaks below Donchian lower + below 1w EMA50 + volume confirm
             elif (curr_close < curr_lower and
-                  curr_close < curr_ema_50_1d and
+                  curr_close < curr_ema_50_1w and
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
