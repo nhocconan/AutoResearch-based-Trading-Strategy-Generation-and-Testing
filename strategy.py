@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 12h trend filter and volume confirmation
-# Long when price > cloud AND Tenkan > Kijun AND price > 12h EMA50 AND volume > 1.5x 20-bar avg
-# Short when price < cloud AND Tenkan < Kijun AND price < 12h EMA50 AND volume > 1.5x 20-bar avg
-# Exit when price crosses Tenkan-Kijun line or opposite cloud boundary
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-30 trades/year on 6h.
-# Ichimoku provides dynamic support/resistance and trend direction. 12h EMA50 filters counter-trend moves.
-# Volume confirmation ensures institutional participation. Strategy avoids overtrading with strict confluence.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit when price crosses Camarilla H4/L4 levels (mean reversion to median)
+# Uses discrete position sizing (0.30) to balance return and fee drag.
+# Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+# Camarilla levels provide high-probability reversal points; 1d EMA34 filters counter-trend moves.
+# Volume spike ensures institutional participation, reducing false breakouts.
 
-name = "6h_Ichimoku_Cloud_12hEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,97 +26,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1d = df_1d['close'].values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku Cloud components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
+    # Calculate Camarilla levels from previous day's OHLC
+    # Need to align daily OHLC to 4h bars
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 1:
+        return np.zeros(n)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
+    # Extract daily OHLC values
+    daily_high = df_1d_ohlc['high'].values
+    daily_low = df_1d_ohlc['low'].values
+    daily_close = df_1d_ohlc['close'].values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
+    # Align daily OHLC to 4h timeframe (each value represents the prior day's close)
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d_ohlc, daily_close)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2.0
+    # Calculate Camarilla levels for each 4h bar based on prior day's OHLC
+    # Camarilla R3/S3 and H4/L4 levels
+    daily_range = daily_high_aligned - daily_low_aligned
+    camarilla_h4 = daily_close_aligned + daily_range * 1.1 / 2
+    camarilla_l4 = daily_close_aligned - daily_range * 1.1 / 2
+    camarilla_r3 = daily_close_aligned + daily_range * 1.1 / 4
+    camarilla_s3 = daily_close_aligned - daily_range * 1.1 / 4
     
-    # The cloud is between senkou_a and senkou_b
-    # Upper cloud boundary: max(senkou_a, senkou_b)
-    # Lower cloud boundary: min(senkou_a, senkou_b)
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 50, 20)  # Ichimoku(52), EMA50, volume MA all need warmup
+    start_idx = max(34, 20)  # EMA34 and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(upper_cloud[i]) or 
-            np.isnan(lower_cloud[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(camarilla_h4[i]) or 
+            np.isnan(camarilla_l4[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
         curr_close = close[i]
-        ema_50 = ema_50_12h_aligned[i]
+        ema_34 = ema_34_1d_aligned[i]
         
-        # Ichimoku conditions
-        price_above_cloud = curr_close > upper_cloud[i]
-        price_below_cloud = curr_close < lower_cloud[i]
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
+        # Camarilla levels
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
+        h4 = camarilla_h4[i]
+        l4 = camarilla_l4[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price < Tenkan-Kijun midpoint OR price < lower cloud
-            exit_condition = (curr_close < (tenkan[i] + kijun[i]) / 2.0) or (curr_close < lower_cloud[i])
-            if exit_condition:
+            # Exit: price crosses below H4 (mean reversion to median)
+            if curr_close < h4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price > Tenkan-Kijun midpoint OR price > upper cloud
-            exit_condition = (curr_close > (tenkan[i] + kijun[i]) / 2.0) or (curr_close > upper_cloud[i])
-            if exit_condition:
+            # Exit: price crosses above L4 (mean reversion to median)
+            if curr_close > l4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when price > cloud AND Tenkan > Kijun AND price > 12h EMA50 AND volume confirmation
-            if price_above_cloud and tenkan_above_kijun and curr_close > ema_50 and vol_conf:
-                signals[i] = 0.25
+            # Long when price breaks above R3 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r3 and curr_close > ema_34 and vol_conf:
+                signals[i] = 0.30
                 position = 1
-            # Short when price < cloud AND Tenkan < Kijun AND price < 12h EMA50 AND volume confirmation
-            elif price_below_cloud and tenkan_below_kijun and curr_close < ema_50 and vol_conf:
-                signals[i] = -0.25
+            # Short when price breaks below S3 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s3 and curr_close < ema_34 and vol_conf:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
