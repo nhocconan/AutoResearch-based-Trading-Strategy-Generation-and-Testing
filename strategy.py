@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian channels provide robust structure for breakouts in both bull and bear markets
-# 1d EMA34 ensures medium-term alignment; volume >1.8x confirms institutional participation
-# ATR-based stoploss and discrete sizing (0.25) control risk and minimize fee churn
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian breakouts capture medium-term momentum; 1d EMA34 ensures alignment with daily trend
+# Volume >1.8x 30-period average confirms participation; discrete sizing (0.25) minimizes fee churn
+# Works in bull/bear: breakouts catch momentum moves, EMA34 trend filter avoids counter-trend trades
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for volatility and stoploss (14-period)
+    # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -51,15 +50,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30, 20, 14)  # warmup
+    start_idx = max(34, 30, 20)  # warmup: need EMA34, volume MA, Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i])):
             signals[i] = 0.0
             continue
             
@@ -70,20 +69,18 @@ def generate_signals(prices):
         curr_ema_34_1d = ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: price breaks above Donchian upper + above 1d EMA34
+                # Bullish entry: price breaks above upper Donchian + above 1d EMA34
                 if curr_high > highest_20[i] and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian lower + below 1d EMA34
+                # Bearish entry: price breaks below lower Donchian + below 1d EMA34
                 elif curr_low < lowest_20[i] and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Stoploss: 2x ATR below entry (tracked via signal=0)
-            # Exit: price breaks below Donchian lower
+            # Exit: price breaks below lower Donchian
             if curr_low < lowest_20[i]:
                 signals[i] = 0.0
                 position = 0
@@ -91,8 +88,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2x ATR above entry (tracked via signal=0)
-            # Exit: price breaks above Donchian upper
+            # Exit: price breaks above upper Donchian
             if curr_high > highest_20[i]:
                 signals[i] = 0.0
                 position = 0
