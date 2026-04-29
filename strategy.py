@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 20-bar avg
-# Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 24-bar avg
+# Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 24-bar avg
 # Exit when price crosses 1d EMA34 (trend change)
-# Uses discrete position sizing (0.25) to control risk and minimize fee churn
-# Camarilla R3/S3 levels provide stronger support/resistance than R1/S1, reducing false breakouts
-# Volume spike ensures institutional participation, 1d EMA34 filters counter-trend noise
-# Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to avoid overtrading
+# Uses discrete position sizing (0.30) to balance capture and risk.
+# Camarilla R3/S3 levels provide strong support/resistance for filtered entries.
+# Volume confirmation ensures participation, 1d EMA34 aligns with long-term trend.
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to avoid overtrading.
+# Works in both bull and bear: trend filter prevents counter-trend trades, volume confirms validity.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,24 +47,24 @@ def generate_signals(prices):
     r3 = close_1d + 1.1 * camarilla_range / 4
     s3 = close_1d - 1.1 * camarilla_range / 4
     
-    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
+    # Align Camarilla levels to 12h timeframe (use previous 1d bar's levels)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: >2.0x 20-bar average volume (strict to avoid overtrading)
+    # Volume confirmation: >2.0x 24-bar average volume (strict to avoid overtrading)
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > 2.0 * volume_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # volume MA and EMA34 warmup
+    start_idx = max(24, 34)  # volume MA and EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ma_20[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
@@ -80,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price crosses above 1d EMA34 (trend change)
@@ -88,16 +89,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
             # Long when price breaks above R3 AND close > 1d EMA34 AND volume confirmation
             if curr_close > curr_r3 and curr_close > curr_ema34_1d and vol_conf:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short when price breaks below S3 AND close < 1d EMA34 AND volume confirmation
             elif curr_close < curr_s3 and curr_close < curr_ema34_1d and vol_conf:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
