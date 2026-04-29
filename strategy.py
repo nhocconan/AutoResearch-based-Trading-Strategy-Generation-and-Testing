@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
-# Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation
+# Long when close > R3 AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
+# Short when close < S3 AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
 # Exit on opposite Camarilla level (S3 for longs, R3 for shorts) OR ATR-based stoploss (2.0x ATR)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
-# Camarilla levels provide institutional support/resistance. 1d EMA34 filters counter-trend moves.
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
+# Camarilla levels provide institutional support/resistance. 12h EMA50 filters counter-trend moves.
 # Volume spike confirms institutional participation. ATR stoploss manages risk in volatile markets.
 # This strategy avoids overtrading by requiring confluence of 3 strong conditions.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +26,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_12h = df_12h['close'].values
+    # Calculate EMA(50) on 12h data
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -68,11 +68,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20, 14)  # EMA34, volume MA, ATR all need warmup
+    start_idx = max(50, 20, 14)  # EMA50, volume MA, ATR all need warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
             np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -81,7 +81,7 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_34 = ema_34_1d_aligned[i]
+        ema_50 = ema_50_12h_aligned[i]
         r3_level = R3[i]
         s3_level = S3[i]
         r4_level = R4[i]
@@ -114,13 +114,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when close > R3 AND price > 1d EMA34 AND volume confirmation
-            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
+            # Long when close > R3 AND price > 12h EMA50 AND volume confirmation
+            if curr_close > r3_level and curr_close > ema_50 and vol_conf:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short when close < S3 AND price < 1d EMA34 AND volume confirmation
-            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
+            # Short when close < S3 AND price < 12h EMA50 AND volume confirmation
+            elif curr_close < s3_level and curr_close < ema_50 and vol_conf:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
