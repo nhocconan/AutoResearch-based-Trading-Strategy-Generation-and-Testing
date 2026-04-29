@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d trend filter
-# Uses proven Donchian breakout structure with daily EMA50 trend and volume spike confirmation
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Works in bull/bear: volume spike confirms institutional interest, daily EMA50 filters counter-trend noise
-# Novelty: 4h timeframe with Donchian(20) breakout (proven family) + volume spike + daily EMA50 trend
+# Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w trend filter
+# Uses proven Donchian breakout structure with weekly EMA50 trend and volume spike confirmation
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Works in bull/bear: volume spike confirms institutional interest, weekly EMA50 filters counter-trend noise
+# Novelty: 1d timeframe with Donchian(20) breakout (proven family) + volume spike + weekly EMA50 trend
 
-name = "4h_Donchian20_VolumeSpike_1dEMA50_Trend_v1"
-timeframe = "4h"
+name = "1d_Donchian20_VolumeSpike_1wEMA50_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,13 +27,13 @@ def generate_signals(prices):
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50)  # warmup for Donchian and daily EMA
+    start_idx = 20  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
@@ -62,31 +62,9 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: price breaks above upper Donchian with volume and above daily EMA50
+                # Bullish entry: price breaks above upper Donchian with volume and above weekly EMA50
                 if curr_high > curr_high_20 and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below lower Donchian with volume and below daily EMA50
-                elif curr_low < curr_low_20 and curr_close < curr_ema_50:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
-        
-        elif position == 1:  # Long position
-            # Exit when price breaks below lower Donchian (reversal signal)
-            if curr_low < curr_low_20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:  # Short position
-            # Exit when price breaks above upper Donchian (reversal signal)
-            if curr_high > curr_high_20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-    
-    return signals
+                #
