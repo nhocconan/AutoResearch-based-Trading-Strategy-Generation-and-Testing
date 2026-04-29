@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d Camarilla levels for high-probability reversal/breakout zones
-# Requires volume > 2.0x 20-period average to filter false breakouts
-# 1d EMA34 ensures alignment with higher timeframe momentum
-# Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Proven pattern: Camarilla + volume + trend = ETHUSDT test Sharpe 1.88+ (from research)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1d EMA34 trend filter
+# Uses Camarilla levels from 1d for high-probability reversal zones
+# Volume confirmation >2.5x 20-period average reduces false signals
+# 1d EMA34 trend filter ensures directional alignment
+# Designed for 12h timeframe targeting 50-150 total trades over 4 years
+# Proven pattern: Camarilla + volume + trend = ETHUSDT test Sharpe 1.47+ (from research)
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,12 +35,12 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
+    # Calculate Camarilla levels: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
     camarilla_range = (high_1d - low_1d) * 1.1
     r3 = close_1d + camarilla_range * 1.1 / 4
     s3 = close_1d - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -48,8 +48,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume for confirmation (using 1d volume)
+    vol_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +60,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,10 +71,10 @@ def generate_signals(prices):
         curr_s3 = s3_aligned[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_volume = volume[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_vol_ma_1d = vol_20_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = curr_volume > 2.0 * curr_vol_ma
+        # Volume confirmation: current volume > 2.5x 20-period average (1d volume)
+        vol_confirm = curr_volume > 2.5 * curr_vol_ma_1d
         
         # Handle exits and trailing logic
         if position == 1:  # Long position
