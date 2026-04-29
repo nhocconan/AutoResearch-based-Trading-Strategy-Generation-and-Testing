@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakouts capture momentum bursts after consolidation periods
-# Daily EMA34 ensures we trade breakouts in direction of higher timeframe trend
-# Volume confirmation validates breakout strength and reduces false signals
-# Works in bull markets (trend continuation) and bear markets (trend resumption after pullbacks)
-# Target: 20-50 trades/year (80-200 total over 4 years)
+# Donchian breakouts capture momentum in both bull and bear markets
+# Daily EMA34 filter ensures we trade in direction of higher timeframe trend
+# Volume confirmation validates breakout strength
+# ATR-based stoploss and profit taking using signal=0 for exits
+# Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,30 +37,42 @@ def generate_signals(prices):
     # Calculate Donchian Channel (20) on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Calculate ATR(14) for stoploss and position sizing
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(40, 34, 20, 20)  # warmup for all indicators
+    start_idx = max(40, 34, 20, 14, 20)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_donch_upper = donchian_upper[i]
-        curr_donch_lower = donchian_lower[i]
-        curr_volume_confirm = volume_confirm[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         curr_ema34_1d = ema34_1d_aligned[i]
+        curr_atr = atr[i]
+        curr_volume_confirm = volume_confirm[i]
         
         # Determine trend regime from daily EMA34
         bullish_regime = curr_close > curr_ema34_1d
@@ -70,28 +82,30 @@ def generate_signals(prices):
             # Look for Donchian breakout with volume confirmation
             if curr_volume_confirm:
                 # Bullish breakout: price breaks above upper Donchian in bullish regime
-                if bullish_regime and curr_close > curr_donch_upper:
-                    signals[i] = 0.30
+                if bullish_regime and curr_close > curr_donchian_high:
+                    signals[i] = 0.25
                     position = 1
+                    entry_price = curr_close
                 # Bearish breakout: price breaks below lower Donchian in bearish regime
-                elif bearish_regime and curr_close < curr_donch_lower:
-                    signals[i] = -0.30
+                elif bearish_regime and curr_close < curr_donchian_low:
+                    signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price crosses below lower Donchian OR trend regime changes
-            if curr_close < curr_donch_lower or not bullish_regime:
+            # Exit when: stoploss hit (2*ATR below entry) OR price crosses below Donchian low
+            if curr_low <= entry_price - 2.0 * curr_atr or curr_close < curr_donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price crosses above upper Donchian OR trend regime changes
-            if curr_close > curr_donch_upper or not bearish_regime:
+            # Exit when: stoploss hit (2*ATR above entry) OR price crosses above Donchian high
+            if curr_high >= entry_price + 2.0 * curr_atr or curr_close > curr_donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
