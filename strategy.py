@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted RSI (VRSI) with 1d ADX regime filter
-# VRSI = RSI calculated on volume-weighted price (typical price * volume) / volume
-# More sensitive to institutional participation than price-only RSI
-# Long when VRSI < 30 and 1d ADX > 25 (trending up)
-# Short when VRSI > 70 and 1d ADX > 25 (trending down)
-# Volume weighting filters out low-conviction moves, ADX ensures we only trade strong trends
-# Works in bull/bear: trends persist across regimes, volume confirms real money participation
-# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe
+# Hypothesis: 12h Williams %R with 1d EMA50 trend filter and volume spike confirmation
+# Williams %R measures overbought/oversold levels: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Oversold: %R < -80 (potential long), Overbought: %R > -20 (potential short)
+# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
+# Volume confirmation (>2.0x 30-period average) ensures institutional participation
+# Works in bull/bear: volume confirms trend strength, 1d EMA50 filters whipsaws during consolidation
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_VRSI_ADX_Regime_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_VolumeSpike_1dEMA50_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,108 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Typical price
-    typical_price = (high + low + close) / 3.0
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume-weighted typical price
-    vol_weighted_tp = typical_price * volume
-    
-    # Calculate VRSI (RSI of volume-weighted typical price)
-    # RSI calculation: gain/loss over period, then RS = avg_gain/avg_loss, RSI = 100 - (100/(1+RS))
-    vol_weighted_series = pd.Series(vol_weighted_tp)
-    delta = vol_weighted_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    period = 14
-    alpha = 1.0 / period
-    avg_gain = gain.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
-    
-    # Avoid division by zero
-    rs = avg_gain / (avg_loss + 1e-10)
-    v_rsi = 100.0 - (100.0 / (1.0 + rs))
-    v_rsi = v_rsi.values
-    
-    # Calculate 1d ADX for regime filter
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # True Range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing)
-    tr_period = 14
-    tr_smooth = pd.Series(tr).ewm(alpha=1.0/tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1.0/tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1.0/tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100.0 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100.0 * dm_minus_smooth / (tr_smooth + 1e-10)
-    
-    # DX and ADX
-    dx = 100.0 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1.0/tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume confirmation: volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(period, tr_period) + 5  # warmup for VRSI and ADX
+    start_idx = max(30, 14, 50)  # warmup for volume MA, Williams %R, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(v_rsi[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_30[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
             
-        curr_vrsi = v_rsi[i]
-        curr_adx = adx_aligned[i]
+        curr_close = close[i]
+        curr_williams_r = williams_r[i]
+        curr_volume_confirm = volume_confirm[i]
+        curr_ema_50 = ema_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade in strong trends (ADX > 25)
-            if curr_adx > 25.0:
-                # Long: oversold in uptrend
-                if curr_vrsi < 30.0:
+            # Only trade with volume confirmation and trend filter
+            if curr_volume_confirm:
+                # Bullish entry: Williams %R oversold (< -80) and price above 1d EMA50
+                if curr_williams_r < -80 and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
-                # Short: overbought in downtrend
-                elif curr_vrsi > 70.0:
+                    entry_price = curr_close
+                # Bearish entry: Williams %R overbought (> -20) and price below 1d EMA50
+                elif curr_williams_r > -20 and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when VRSI returns to neutral territory (50)
-            if curr_vrsi >= 50.0:
+            # Exit when Williams %R rises above -50 (momentum weakening)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when VRSI returns to neutral territory (50)
-            if curr_vrsi <= 50.0:
+            # Exit when Williams %R falls below -50 (momentum weakening)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
