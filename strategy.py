@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and chop regime filter
-# Donchian(20) captures price channel breakouts; volume > 1.5x 20-period MA confirms strength
-# Choppiness Index (CHOP) > 61.8 = ranging (mean revert at bands), CHOP < 38.2 = trending (breakout follow)
-# Works in both bull/bear by adapting to regime: breakout in trending, mean revert in ranging
-# Target: 20-50 trades/year (80-200 total over 4 years)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla levels provide precise intraday support/resistance; EMA34 filters trend direction;
+# Volume confirms breakout strength. Works in bull/bear by trading breakouts in trend direction.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
-name = "4h_Donchian20_Breakout_VolumeChop_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,94 +22,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 1d chop regime
+    # Load HTF data ONCE before loop for 1d calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Camarilla: 
+    # H4 = Close + 1.5*(High-Low)
+    # L4 = Close - 1.5*(High-Low)
+    # H3 = Close + 1.125*(High-Low)
+    # L3 = Close - 1.125*(High-Low)
+    # H2 = Close + 0.75*(High-Low)
+    # L2 = Close - 0.75*(High-Low)
+    # H1 = Close + 0.5*(High-Low)
+    # L1 = Close - 0.5*(High-Low)
+    # We focus on H3/L3 and H4/L4 for breakouts
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Choppiness Index on 1d (14-period)
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (HH(14) - LL(14))))
-    # Simplified: CHOP = 100 * LOG10( SUM(TR(14)) / (LOG10(14) * (MAX(HIGH,14) - MIN(LOW,14))) )
-    tr1 = pd.Series(df_1d['high']).rolling(14, min_periods=14).max() - pd.Series(df_1d['low']).rolling(14, min_periods=14).min()
-    tr2 = abs(pd.Series(df_1d['high']).rolling(14, min_periods=14).max() - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']).rolling(14, min_periods=14).min() - pd.Series(df_1d['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = tr.rolling(14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(df_1d['high']).rolling(14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1d['low']).rolling(14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_sum / (np.log10(14) * (highest_high_14 - lowest_low_14)))
-    chop = np.where((highest_high_14 - lowest_low_14) == 0, 50, chop_raw)  # neutral when no range
+    daily_range = prev_day_high - prev_day_low
+    h3 = prev_day_close + 1.125 * daily_range
+    l3 = prev_day_close - 1.125 * daily_range
+    h4 = prev_day_close + 1.5 * daily_range
+    l4 = prev_day_close - 1.5 * daily_range
     
-    # Align chop to 4h timeframe (completed 1d bar only)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Camarilla levels to 12h timeframe (completed daily bar only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # warmup for Donchian and volume MA
+    start_idx = max(50, 34, 24)  # warmup for EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(chop_aligned[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume_confirm = volume_confirm[i]
-        curr_chop = chop_aligned[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
-        
-        # Regime determination
-        # CHOP > 61.8 = ranging (mean revert)
-        # CHOP < 38.2 = trending (follow breakout)
-        # 38.2 <= CHOP <= 61.8 = transition (no clear signal)
+        curr_ema_34 = ema_34_aligned[i]
+        curr_volume_spike = volume_spike[i]
+        curr_h3 = h3_aligned[i]
+        curr_l3 = l3_aligned[i]
+        curr_h4 = h4_aligned[i]
+        curr_l4 = l4_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if curr_chop < 38.2:  # Trending regime - follow breakout
-                # Long on upside breakout with volume
-                if curr_high > curr_highest_high and curr_volume_confirm:
-                    signals[i] = 0.30
-                    position = 1
-                # Short on downside breakout with volume
-                elif curr_low < curr_lowest_low and curr_volume_confirm:
-                    signals[i] = -0.30
-                    position = -1
-                    
-            elif curr_chop > 61.8:  # Ranging regime - mean revert at bands
-                # Long near lower band with volume
-                if curr_low <= curr_lowest_low * 1.001 and curr_volume_confirm:  # near lower band
-                    signals[i] = 0.30
-                    position = 1
-                # Short near upper band with volume
-                elif curr_high >= curr_highest_high * 0.999 and curr_volume_confirm:  # near upper band
-                    signals[i] = -0.30
-                    position = -1
+            # Long breakout: price breaks above H3/H4 with volume spike and uptrend
+            if curr_close > curr_h3 and curr_volume_spike and curr_close > curr_ema_34:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price breaks below L3/L4 with volume spike and downtrend
+            elif curr_close < curr_l3 and curr_volume_spike and curr_close < curr_ema_34:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit on downside break of lower band OR chop > 61.8 (range) with price near middle
-            if curr_low < curr_lowest_low or (curr_chop > 61.8 and curr_close > (curr_highest_high + curr_lowest_low) / 2):
+            # Exit when: price breaks below L3 (reversal) OR trend changes
+            if curr_close < curr_l3 or curr_close < curr_ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit on upside break of upper band OR chop > 61.8 (range) with price near middle
-            if curr_high > curr_highest_high or (curr_chop > 61.8 and curr_close < (curr_highest_high + curr_lowest_low) / 2):
+            # Exit when: price breaks above H3 (reversal) OR trend changes
+            if curr_close > curr_h3 or curr_close > curr_ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
