@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R Mean Reversion with 1w EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions on 1d: long when %R < -80 (oversold) and price > 1w EMA34 (uptrend bias)
-#                 short when %R > -20 (overbought) and price < 1w EMA34 (downtrend bias)
-# Volume confirmation (>1.5x 20-period average) ensures participation
-# Designed for ~10-25 trades/year on 1d timeframe to minimize fee drag
-# Uses 1w trend filter to avoid counter-trend trades in strong markets
-# Works in both bull (follows 1w trend) and bear (mean reversion within trend) markets
+# Hypothesis: 6h Ichimoku Cloud Breakout with 12h Trend Filter
+# Uses Ichimoku system (Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span) on 6h for entry signals
+# 12h EMA50 provides trend filter to avoid counter-trend trades
+# Long when price breaks above cloud AND Tenkan > Kijun (bullish TK cross) in uptrend (price > 12h EMA50)
+# Short when price breaks below cloud AND Tenkan < Kijun (bearish TK cross) in downtrend (price < 12h EMA50)
+# Designed for ~20-40 trades/year on 6h timeframe to minimize fee drag
+# Ichimoku works well in both trending and ranging markets by providing dynamic support/resistance
 
-name = "1d_WilliamsR_MeanRev_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_CloudBreakout_12hEMA50_TrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,76 +25,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter (HTF = 1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for EMA50 trend filter (HTF = 12h)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Williams %R (14-period) on 1d data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Ichimoku calculations (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate 20-period average volume for confirmation (on 1d data)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # For signal generation, we need current close vs close 26 periods ago
+    close_lagged_26 = np.roll(close, 26)
+    close_lagged_26[:26] = np.nan  # First 26 values are invalid
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 34  # Warmup for Williams %R, volume MA, and 1w EMA
+    start_idx = 52  # Need Senkou Span B warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(close_lagged_26[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
-        curr_ema34_1w = ema_34_1w_aligned[i]
-        curr_volume = volume[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_tenkan = tenkan_sen[i]
+        curr_kijun = kijun_sen[i]
+        curr_senkou_a = senkou_span_a[i]
+        curr_senkou_b = senkou_span_b[i]
+        curr_ema50_12h = ema_50_12h_aligned[i]
+        curr_close_lagged = close_lagged_26[i]
+        
+        # Cloud boundaries (Senkou Span A/B form the cloud)
+        cloud_top = max(curr_senkou_a, curr_senkou_b)
+        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
+        
+        # Bullish TK cross: Tenkan > Kijun
+        tk_bullish = curr_tenkan > curr_kijun
+        # Bearish TK cross: Tenkan < Kijun
+        tk_bearish = curr_tenkan < curr_kijun
+        
+        # Price above/below cloud
+        price_above_cloud = curr_close > cloud_top
+        price_below_cloud = curr_close < cloud_bottom
+        
+        # Chikou confirmation: current close vs price 26 periods ago
+        chikou_bullish = curr_close > curr_close_lagged
+        chikou_bearish = curr_close < curr_close_lagged
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R returns to neutral (> -50) or reverse signal
-            if curr_williams_r > -50:
+            # Exit: price breaks below cloud OR TK cross turns bearish
+            if price_below_cloud or not tk_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral (< -50) or reverse signal
-            if curr_williams_r < -50:
+            # Exit: price breaks above cloud OR TK cross turns bullish
+            if price_above_cloud or not tk_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = curr_volume > 1.5 * curr_vol_ma
+            # Trend filter: 12h EMA50
+            uptrend = curr_close > curr_ema50_12h
+            downtrend = curr_close < curr_ema50_12h
             
-            # Long entry: Williams %R oversold (< -80) in uptrend (price > 1w EMA34)
-            if vol_confirm and curr_close > curr_ema34_1w:
-                if curr_williams_r < -80:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-            # Short entry: Williams %R overbought (> -20) in downtrend (price < 1w EMA34)
-            elif vol_confirm and curr_close < curr_ema34_1w:
-                if curr_williams_r > -20:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
+            # Long entry: bullish TK cross + price above cloud + chikou bullish + uptrend
+            if tk_bullish and price_above_cloud and chikou_bullish and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: bearish TK cross + price below cloud + chikou bearish + downtrend
+            elif tk_bearish and price_below_cloud and chikou_bearish and downtrend:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
     
