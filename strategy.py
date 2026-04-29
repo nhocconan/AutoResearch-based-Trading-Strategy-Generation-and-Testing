@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation
-# Long when price breaks above 1d Camarilla R3 AND price > 1d EMA(34) AND volume > 1.5x 20-period average
-# Short when price breaks below 1d Camarilla S3 AND price < 1d EMA(34) AND volume > 1.5x 20-period average
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R1 AND price > 1d EMA(34) AND volume > 1.5x 20-period average
+# Short when price breaks below 1d Camarilla S1 AND price < 1d EMA(34) AND volume > 1.5x 20-period average
 # Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Proven pattern from DB: 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT achieved test Sharpe=1.882 on ETHUSDT
+# Proven pattern from DB: 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS achieved test Sharpe=2.055 on ETHUSDT
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,19 +34,19 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d Camarilla levels (based on previous 1d bar's OHLC)
-    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
     # We'll use the previous completed 1d bar for calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4
-    r3_1d = close_1d + camarilla_range
-    s3_1d = close_1d - camarilla_range
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
     
-    # Align Camarilla levels to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
@@ -66,8 +66,8 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema = ema_34_1d_aligned[i]
-        curr_r3 = r3_1d_aligned[i]
-        curr_s3 = s3_1d_aligned[i]
+        curr_r1 = r1_1d_aligned[i]
+        curr_s1 = s1_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         if i >= 20:
@@ -78,30 +78,30 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price breaks below S3 OR price < 1d EMA(34)
-            if curr_close < curr_s3 or curr_close < curr_ema:
+            # Exit: price breaks below S1 OR price < 1d EMA(34)
+            if curr_close < curr_s1 or curr_close < curr_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 OR price > 1d EMA(34)
-            if curr_close > curr_r3 or curr_close > curr_ema:
+            # Exit: price breaks above R1 OR price > 1d EMA(34)
+            if curr_close > curr_r1 or curr_close > curr_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > 1d EMA(34) AND volume spike
-            if (curr_close > curr_r3 and 
+            # Long entry: price breaks above R1 AND price > 1d EMA(34) AND volume spike
+            if (curr_close > curr_r1 and 
                 curr_close > curr_ema and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 AND price < 1d EMA(34) AND volume spike
-            elif (curr_close < curr_s3 and 
+            # Short entry: price breaks below S1 AND price < 1d EMA(34) AND volume spike
+            elif (curr_close < curr_s1 and 
                   curr_close < curr_ema and 
                   vol_spike):
                 signals[i] = -0.25
