@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Donchian upper channel AND price > 12h EMA50 with volume > 2x 20-period average
-# Short when price breaks below Donchian lower channel AND price < 12h EMA50 with volume spike
-# Uses 12h EMA for trend direction (more responsive than daily) to catch trends earlier while avoiding chop
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX regime filter and volume confirmation
+# Long when price breaks above Donchian upper channel in bullish regime (ADX>25) with volume spike
+# Short when price breaks below Donchian lower channel in bearish regime (ADX>25) with volume spike
+# Uses 1w ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
 # Volume confirmation ensures breakouts have institutional participation
-# Discrete position sizing (0.25) to minimize fee churn
-# Target: 25-35 trades/year (100-140 total over 4 years) to stay within fee drag limits
+# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_Trend_v3"
-timeframe = "4h"
+name = "1d_Donchian20_1wADX25_VolumeSpike_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,17 +24,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 12h calculations
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop for weekly calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Calculate 1w ADX(14) for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Donchian(20) channels on 4h
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[1:period+1])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1]/period) + data[i]
+        return result
+    
+    atr_1w = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1w = wilders_smooth(dx, 14)
+    
+    # Align weekly ADX to 1d timeframe (completed 1w bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Donchian(20) channels on 1d
     donchian_window = 20
     upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
@@ -47,11 +85,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for EMA and Donchian
+    start_idx = max(35, 20)  # warmup for ADX and Donchian
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
             signals[i] = 0.0
             continue
             
@@ -60,18 +98,21 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_upper = upper_channel[i]
         curr_lower = lower_channel[i]
-        curr_ema = ema_12h_aligned[i]
+        curr_adx = adx_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
+        # Regime filter: only trade in trending markets (ADX > 25)
+        is_trending = curr_adx > 25
+        
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation
-            if curr_volume_confirm:
-                # Bullish breakout: price breaks above upper Donchian channel AND above 12h EMA50 (uptrend)
-                if curr_close > curr_upper and curr_close > curr_ema:
+            # Only trade with volume confirmation and in trending regime
+            if is_trending and curr_volume_confirm:
+                # Bullish breakout: price breaks above upper Donchian channel
+                if curr_close > curr_upper:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below lower Donchian channel AND below 12h EMA50 (downtrend)
-                elif curr_close < curr_lower and curr_close < curr_ema:
+                # Bearish breakout: price breaks below lower Donchian channel
+                elif curr_close < curr_lower:
                     signals[i] = -0.25
                     position = -1
         
