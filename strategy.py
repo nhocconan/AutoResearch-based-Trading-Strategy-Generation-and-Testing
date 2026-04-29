@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses Camarilla R3/S3 levels for breakouts with confirmation from higher timeframe trend
-# Volume > 1.5x average to ensure institutional participation
-# Discrete position sizing (0.25) and pivot point mean reversion exit
-# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses tighter Camarilla levels (R3/S3) for selective breakouts
+# Volume confirmation > 1.8x average to filter weak breakouts
+# 1d EMA34 trend filter ensures alignment with daily momentum
+# Discrete position sizing (0.25) and mean reversion exit at pivot point
+# Designed for fewer trades (<150/year) while maintaining edge in both bull and bear markets
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +29,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
+    # Get 1d data for EMA34 trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -59,7 +60,7 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
@@ -112,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
             
             # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
             if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
