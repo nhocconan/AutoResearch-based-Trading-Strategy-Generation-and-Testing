@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume spike + ATR(14) stoploss
-# Donchian breakout captures momentum; 1d EMA50 filters for higher timeframe trend alignment;
-# volume confirms breakout strength; ATR-based trailing stop manages risk in both bull and bear markets.
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag while capturing significant moves.
+# Hypothesis: 1d Williams %R mean reversal + 1w Supertrend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions on daily timeframe;
+# weekly Supertrend filters for higher timeframe trend direction to avoid counter-trend trades;
+# volume confirmation ensures breakout/mean reversion has participation;
+# Target: 20-30 trades/year (80-120 total over 4 years) to balance opportunity and fee drag.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_MeanRev_1wSupertrend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,125 +24,120 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop for 1d calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop for 1w calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w Supertrend for trend filter
+    atr_period = 10
+    multiplier = 3.0
     
-    # Calculate ATR(14) for stoploss and volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # True Range
+    tr1 = pd.Series(df_1w['high']).diff().abs()
+    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['close']).shift()).abs()
+    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close']).shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_vals = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Basic Upper and Lower Bands
+    basic_ub = (df_1w['high'] + df_1w['low']) / 2 + multiplier * atr_vals
+    basic_lb = (df_1w['high'] + df_1w['low']) / 2 - multiplier * atr_vals
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Final Upper and Lower Bands
+    final_ub = basic_ub.copy()
+    final_lb = basic_lb.copy()
+    for i in range(1, len(df_1w)):
+        if basic_ub.iloc[i] < final_ub.iloc[i-1] or df_1w['close'].iloc[i-1] > final_ub.iloc[i-1]:
+            final_ub.iloc[i] = basic_ub.iloc[i]
+        else:
+            final_ub.iloc[i] = final_ub.iloc[i-1]
+            
+        if basic_lb.iloc[i] > final_lb.iloc[i-1] or df_1w['close'].iloc[i-1] < final_lb.iloc[i-1]:
+            final_lb.iloc[i] = basic_lb.iloc[i]
+        else:
+            final_lb.iloc[i] = final_lb.iloc[i-1]
+    
+    # Supertrend direction: 1 for uptrend, -1 for downtrend
+    supertrend_dir = np.ones(len(df_1w), dtype=float) * np.nan
+    for i in range(len(df_1w)):
+        if i == 0:
+            supertrend_dir[i] = 1.0  # start with uptrend assumption
+        else:
+            if supertrend_dir[i-1] == 1.0 and df_1w['close'].iloc[i] <= final_ub.iloc[i]:
+                supertrend_dir[i] = -1.0
+            elif supertrend_dir[i-1] == -1.0 and df_1w['close'].iloc[i] >= final_lb.iloc[i]:
+                supertrend_dir[i] = 1.0
+            else:
+                supertrend_dir[i] = supertrend_dir[i-1]
+    
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1w, supertrend_dir)
+    
+    # Calculate Williams %R(14) for mean reversion signals
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
+    
+    # Volume confirmation: volume > 1.2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.2 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_at_entry = 0.0
-    max_high_since_entry = 0.0  # For trailing stop
-    min_low_since_entry = 0.0   # For trailing stop
     
-    start_idx = max(50, 20, 14)  # warmup for EMA50, Donchian, ATR
+    start_idx = max(14, 20)  # warmup for Williams %R, volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(supertrend_dir_aligned[i]) or np.isnan(williams_r[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_open = open_price[i]
-        curr_ema_50_1d = ema_50_1d_aligned[i]
-        curr_atr = atr[i]
-        curr_donch_high = donchian_high[i]
-        curr_donch_low = donchian_low[i]
+        curr_williams_r = williams_r[i]
+        curr_supertrend_dir = supertrend_dir_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Handle position exits and stops
+        # Handle position exits
         if position == 1:  # Long position
-            # Update trailing stop: highest high since entry
-            max_high_since_entry = max(max_high_since_entry, curr_high)
-            # Dynamic stoploss: ATR-based trailing stop
-            trail_stop = max_high_since_entry - 2.5 * curr_atr
-            # Fixed stoploss: 2.0 * ATR below entry
-            fixed_stop = entry_price - 2.0 * atr_at_entry
-            # Use the tighter of the two stops
-            stop_price = max(trail_stop, fixed_stop)
-            
             # Exit conditions:
-            # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses below 1d EMA50 (trend change)
-            # 3. Price drops below Donchian low (breakout failed)
-            if (curr_low <= stop_price or
-                curr_close < curr_ema_50_1d or
-                curr_close < curr_donch_low):
+            # 1. Williams %R rises above -20 (overbought)
+            # 2. Weekly Supertrend turns down (trend change)
+            if (curr_williams_r > -20 or curr_supertrend_dir == -1.0):
                 signals[i] = 0.0
                 position = 0
-                max_high_since_entry = 0.0
-                min_low_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update trailing stop: lowest low since entry
-            min_low_since_entry = min(min_low_since_entry, curr_low)
-            # Dynamic stoploss: ATR-based trailing stop
-            trail_stop = min_low_since_entry + 2.5 * curr_atr
-            # Fixed stoploss: 2.0 * ATR above entry
-            fixed_stop = entry_price + 2.0 * atr_at_entry
-            # Use the tighter of the two stops
-            stop_price = min(trail_stop, fixed_stop)
-            
             # Exit conditions:
-            # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses above 1d EMA50 (trend change)
-            # 3. Price rises above Donchian high (breakout failed)
-            if (curr_high >= stop_price or
-                curr_close > curr_ema_50_1d or
-                curr_close > curr_donch_high):
+            # 1. Williams %R falls below -80 (oversold)
+            # 2. Weekly Supertrend turns up (trend change)
+            if (curr_williams_r < -80 or curr_supertrend_dir == 1.0):
                 signals[i] = 0.0
                 position = 0
-                max_high_since_entry = 0.0
-                min_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high + above 1d EMA50 + volume confirm
-            if (curr_close > curr_donch_high and
-                curr_close > curr_ema_50_1d and
+            # Long entry: Williams %R below -80 (oversold) + weekly uptrend + volume confirm
+            if (curr_williams_r < -80 and
+                curr_supertrend_dir == 1.0 and
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-                max_high_since_entry = curr_high
-                min_low_since_entry = curr_low
-            # Short entry: price breaks below Donchian low + below 1d EMA50 + volume confirm
-            elif (curr_close < curr_donch_low and
-                  curr_close < curr_ema_50_1d and
+            # Short entry: Williams %R above -20 (overbought) + weekly downtrend + volume confirm
+            elif (curr_williams_r > -20 and
+                  curr_supertrend_dir == -1.0 and
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-                max_high_since_entry = curr_high
-                min_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
