@@ -3,101 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Fractal breakout with 1w EMA34 trend filter and volume confirmation
-# Williams Fractals identify potential reversal points; breakouts capture momentum
-# 1w EMA34 ensures alignment with weekly trend; volume >1.8x confirms participation
-# Discrete sizing (0.25) minimizes fee churn. Target: 40-80 total trades over 4 years (10-20/year)
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla levels provide precise intraday support/resistance from 1d OHLC
+# Breakouts at R3/S3 with volume >2.0x confirm institutional participation
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend whipsaws
+# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
 
-name = "1d_WilliamsFractal_Breakout_1wEMA34_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Fractals: 5-bar pattern (2 left, 2 right)
-    # Bullish fractal: low[i-2] > low[i] and low[i-1] > low[i] and low[i+1] > low[i] and low[i+2] > low[i]
-    # Bearish fractal: high[i-2] < high[i] and high[i-1] < high[i] and high[i+1] < high[i] and high[i+2] < high[i]
-    bullish_fractal = np.zeros(n, dtype=bool)
-    bearish_fractal = np.zeros(n, dtype=bool)
-    
-    for i in range(2, n-2):
-        if (low[i-2] > low[i] and low[i-1] > low[i] and 
-            low[i+1] > low[i] and low[i+2] > low[i]):
-            bullish_fractal[i] = True
-        if (high[i-2] < high[i] and high[i-1] < high[i] and 
-            high[i+1] < high[i] and high[i+2] < high[i]):
-            bearish_fractal[i] = True
-    
-    # Calculate ATR for volatility (14-period)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = 0
-    tr3.iloc[0] = 0
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d Camarilla levels (R3, S3) from prior 1d OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Prior 1d OHLC (shifted by 1 to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Camarilla calculations
+    camarilla_high = high_1d[-1]  # Use most recent completed 1d candle
+    camarilla_low = low_1d[-1]
+    camarilla_close = close_1d[-1]
+    camarilla_range = camarilla_high - camarilla_low
+    
+    # Camarilla R3 and S3 levels
+    r3 = camarilla_close + camarilla_range * 1.1 / 4
+    s3 = camarilla_close - camarilla_range * 1.1 / 4
+    
+    # Expand to full length for alignment
+    r3_full = np.full(len(df_1d), r3)
+    s3_full = np.full(len(df_1d), s3)
+    
+    # Align to 6h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_full)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_full)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for fractals and volume MA
+    start_idx = max(20, 34)  # warmup for volume and EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1w = ema_34_1w_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_ema_34 = ema_34_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: bullish fractal breakout + above 1w EMA34
-                if bullish_fractal[i] and curr_close > curr_ema_34_1w:
+                # Bullish entry: price breaks above R3 + above 1d EMA34
+                if curr_close > curr_r3 and curr_close > curr_ema_34:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: bearish fractal breakout + below 1w EMA34
-                elif bearish_fractal[i] and curr_close < curr_ema_34_1w:
+                # Bearish entry: price breaks below S3 + below 1d EMA34
+                elif curr_close < curr_s3 and curr_close < curr_ema_34:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: bearish fractal breakout (potential reversal)
-            if bearish_fractal[i]:
+            # Exit: price breaks below S3 (mean reversion) or reverses below EMA34
+            if curr_close < curr_s3 or curr_close < curr_ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bullish fractal breakout (potential reversal)
-            if bullish_fractal[i]:
+            # Exit: price breaks above R3 (mean reversion) or reverses above EMA34
+            if curr_close > curr_r3 or curr_close > curr_ema_34:
                 signals[i] = 0.0
                 position = 0
             else:
