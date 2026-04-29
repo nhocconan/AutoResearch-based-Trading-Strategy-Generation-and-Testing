@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
-# Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + ADX > 25
-# Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + ADX > 25
-# Exit when price crosses Donchian(10) midpoint or ADX < 20 (range regime)
-# Uses discrete position sizing (0.30) to balance capture and risk.
-# Donchian channels provide clear structure, volume confirms breakout strength, ADX filters for trending markets.
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to avoid overtrading.
-# Works in both bull and bear markets by only trading strong breakouts in trending conditions (ADX>25).
+# Hypothesis: 4h Williams %R + 1d Volume Spike + 1w EMA34 Trend Filter
+# Long when Williams %R < -80 (oversold), 1d volume > 1.5x 20-period average, and close > 1w EMA34
+# Short when Williams %R > -20 (overbought), 1d volume > 1.5x 20-period average, and close < 1w EMA34
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Uses discrete position sizing (0.25) to limit fee drag and manage drawdown.
+# Williams %R identifies extreme price reversals, volume spike confirms participation,
+# 1w EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades.
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to stay within trade limits.
+# Works in both bull and bear markets by fading extremes only when volume confirms and trend aligns.
 
-name = "4h_Donchian20_Volume_ADX_Regime_v1"
+name = "4h_WilliamsR_VolumeSpike_1wEMA34_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,100 +27,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike confirmation
+    # Get 1d data for volume spike filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d average volume for spike detection
+    # Calculate 1d volume 20-period average for spike detection
     vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate Donchian channels (20-period for entry, 10-period for exit)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_mid_10 = (donchian_high_10 + donchian_low_10) / 2.0
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Calculate ADX (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate Williams %R (14-period)
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Smoothed TR, DM+, DM- (14-period)
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when range is zero
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 20)  # Donchian20, ADX, and volume MA warmup
+    start_idx = max(14, 20, 34)  # Williams %R, volume MA, and 1w EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
+        curr_williams_r = williams_r[i]
+        curr_vol_ma_20 = vol_ma_20_aligned[i]
         curr_volume = volume[i]
-        curr_vol_ma_20_1d = vol_ma_20_1d_aligned[i]
-        curr_adx = adx[i]
-        curr_donchian_high_20 = donchian_high_20[i]
-        curr_donchian_low_20 = donchian_low_20[i]
-        curr_donchian_mid_10 = donchian_mid_10[i]
+        curr_ema34_1w = ema_34_1w_aligned[i]
+        curr_close = close[i]
+        
+        # Volume spike condition: current volume > 1.5x 20-period average
+        volume_spike = curr_volume > 1.5 * curr_vol_ma_20
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian(10) midpoint OR ADX < 20 (range regime)
-            if curr_close < curr_donchian_mid_10 or curr_adx < 20.0:
+            # Exit: Williams %R crosses above -50 (exiting oversold)
+            if curr_williams_r > -50.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian(10) midpoint OR ADX < 20 (range regime)
-            if curr_close > curr_donchian_mid_10 or curr_adx < 20.0:
+            # Exit: Williams %R crosses below -50 (exiting overbought)
+            if curr_williams_r < -50.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume spike condition: current volume > 1.5x 1d average volume
-            volume_spike = curr_volume > 1.5 * curr_vol_ma_20_1d
-            
-            # Long when price breaks above Donchian(20) high + volume spike + ADX > 25
-            if curr_close > curr_donchian_high_20 and volume_spike and curr_adx > 25.0:
-                signals[i] = 0.30
+            # Long when Williams %R < -80 (oversold), volume spike, and close > 1w EMA34
+            if curr_williams_r < -80.0 and volume_spike and curr_close > curr_ema34_1w:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Donchian(20) low + volume spike + ADX > 25
-            elif curr_close < curr_donchian_low_20 and volume_spike and curr_adx > 25.0:
-                signals[i] = -0.30
+            # Short when Williams %R > -20 (overbought), volume spike, and close < 1w EMA34
+            elif curr_williams_r > -20.0 and volume_spike and curr_close < curr_ema34_1w:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
