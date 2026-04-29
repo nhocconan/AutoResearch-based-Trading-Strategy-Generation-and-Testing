@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w ADX regime filter and volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX regime filter and volume confirmation
 # Long when price breaks above Donchian upper channel in bullish regime (ADX>25) with volume spike
 # Short when price breaks below Donchian lower channel in bearish regime (ADX>25) with volume spike
 # Uses 1w ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
 # Volume confirmation ensures breakouts have institutional participation
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drift
 
-name = "12h_Donchian20_1wADX25_VolumeSpike_Regime_v1"
-timeframe = "12h"
+name = "1d_Donchian20_1wADX25_VolumeSpike_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -70,10 +70,10 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx_1w = wilders_smooth(dx, 14)
     
-    # Align weekly ADX to 12h timeframe (completed 1w bar only)
+    # Align weekly ADX to 1d timeframe (completed 1w bar only)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Donchian(20) channels on 12h
+    # Donchian(20) channels on 1d
     donchian_window = 20
     upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
