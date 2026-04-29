@@ -3,23 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation
-# Uses Williams Alligator (jaw/teeth/lips) to identify trendless markets and avoid false signals
-# 1w EMA50 as strong trend filter to only trade in direction of weekly trend
-# Volume > 2.0x average confirms institutional participation to reduce false signals
-# ATR-based stoploss (2.0x ATR) manages risk in volatile markets
-# Discrete position sizing (0.25) to minimize fee churn
-# Designed for ~10-25 trades/year to avoid fee drag while capturing strong trends
-# Works in bull/bear via 1w EMA50 trend filter - only trades in direction of weekly trend
-# Target: BTC/ETH focus with proven Williams Alligator structure + volume confirmation edge
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Uses Camarilla pivot levels from daily timeframe for structure
+# Breakout at R3/S3 with continuation when price closes beyond R4/S4
+# 1d EMA50 as trend filter to avoid counter-trend trades
+# Volume > 2.0x average confirms institutional participation
+# Designed for ~20-40 trades/year to minimize fee drag while capturing strong moves
+# Works in bull/bear via 1d EMA50 trend filter - only trades in direction of daily trend
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,23 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivots and EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator on 1d data (smoothed with 5-period SMA)
-    # Jaw: 13-period SMA, shifted 8 bars into future
-    # Teeth: 8-period SMA, shifted 5 bars into future  
-    # Lips: 5-period SMA, shifted 3 bars into future
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot range
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * rng * 1.1 / 4
+    camarilla_s3 = close_1d - 1.1 * rng * 1.1 / 4
+    camarilla_r4 = close_1d + 1.1 * rng * 1.1 / 2
+    camarilla_s4 = close_1d - 1.1 * rng * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -60,12 +70,13 @@ def generate_signals(prices):
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = max(13+8, 8+5, 5+3, 50, 14, 20)  # Alligator, EMA, ATR, volume warmup
+    start_idx = max(50, 14, 20)  # EMA, ATR, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -73,25 +84,26 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
-        curr_jaw = jaw[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
+        curr_r4 = camarilla_r4_aligned[i]
+        curr_s4 = camarilla_s4_aligned[i]
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or Alligator lines cross (teeth below lips)
-            if curr_close < entry_price - 2.0 * atr_at_entry or curr_teeth < curr_lips:
+            # Exit: stoploss hit or price below S3 (reversal signal)
+            if curr_close < entry_price - 2.5 * atr_at_entry or curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or Alligator lines cross (teeth above lips)
-            if curr_close > entry_price + 2.0 * atr_at_entry or curr_teeth > curr_lips:
+            # Exit: stoploss hit or price above R3 (reversal signal)
+            if curr_close > entry_price + 2.5 * atr_at_entry or curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,18 +113,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 2.0x 20-period average
             vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Alligator alignment: lips > teeth > jaw = uptrend, lips < teeth < jaw = downtrend
-            alligator_long = curr_lips > curr_teeth and curr_teeth > curr_jaw
-            alligator_short = curr_lips < curr_teeth and curr_teeth < curr_jaw
-            
-            # Long when Alligator shows uptrend with 1w EMA50 uptrend and volume confirmation
-            if alligator_long and curr_close > curr_ema50_1w and vol_confirm:
+            # Long when price breaks above R3 with 1d EMA50 uptrend and volume confirmation
+            # Requires close beyond R4 for confirmation of strong breakout
+            if curr_high > curr_r3 and curr_close > curr_r4 and curr_close > curr_ema50_1d and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 atr_at_entry = curr_atr
-            # Short when Alligator shows downtrend with 1w EMA50 downtrend and volume confirmation
-            elif alligator_short and curr_close < curr_ema50_1w and vol_confirm:
+            # Short when price breaks below S3 with 1d EMA50 downtrend and volume confirmation
+            # Requires close below S4 for confirmation of strong breakdown
+            elif curr_low < curr_s3 and curr_close < curr_s4 and curr_close < curr_ema50_1d and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
