@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2x 20-period average)
-# Camarilla levels provide institutional support/resistance; breakouts with volume confirm institutional participation
-# 1d EMA34 filters for higher timeframe trend alignment; discrete sizing (0.25) minimizes fee churn
-# Works in both bull/bear markets: Camarilla levels adapt to volatility, volume confirmation ensures follow-through
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+# Hypothesis: 12h Bollinger Band Squeeze Breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period average)
+# Bollinger Band squeeze (low volatility) precedes explosive moves; breakout direction filtered by 1d EMA34
+# Volume confirmation ensures institutional participation; discrete sizing (0.25) minimizes fee churn
+# Works in both bull/bear markets: squeeze captures volatility contraction/expansion cycles universal across regimes
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_BB_Squeeze_Breakout_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,77 +33,75 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla: based on previous day's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # first bar fallback
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Bollinger Bands (20, 2.0) on 12h timeframe
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # normalized width
     
-    range_val = prev_high - prev_low
-    camarilla_r3 = prev_close + range_val * 1.1 / 4
-    camarilla_s3 = prev_close - range_val * 1.1 / 4
-    camarilla_r4 = prev_close + range_val * 1.1 / 2
-    camarilla_s4 = prev_close - range_val * 1.1 / 2
+    # Bollinger Band Squeeze: width below 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Volume confirmation: current volume > 2x 20-period average (on 4h timeframe)
+    # Calculate 20-period average volume for confirmation (on 12h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # 1d EMA34, volume MA warmup
+    start_idx = max(50, 20, 20)  # 1d EMA34, BB middle, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bb_middle[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_ema_1d = ema_34_1d_aligned[i]
-        curr_r3 = camarilla_r3[i]
-        curr_s3 = camarilla_s3[i]
-        curr_r4 = camarilla_r4[i]
-        curr_s4 = camarilla_s4[i]
+        curr_upper = bb_upper[i]
+        curr_lower = bb_lower[i]
+        curr_squeeze = squeeze[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
-        vol_confirm = curr_volume > 2.0 * curr_vol_ma
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = curr_volume > 1.8 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below camarilla S3 OR below 1d EMA34
-            if curr_close < curr_s3 or curr_close < curr_ema_1d:
+            # Exit: price closes below BB middle OR squeeze re-activates (volatility contraction)
+            if curr_close < bb_middle[i] or curr_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above camarilla R3 OR above 1d EMA34
-            if curr_close > curr_r3 or curr_close > curr_ema_1d:
+            # Exit: price closes above BB middle OR squeeze re-activates
+            if curr_close > bb_middle[i] or curr_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: breakout above camarilla R3 + above 1d EMA34 + volume confirmation
-            if (curr_close > curr_r3 and 
+            # Long entry: breakout above BB upper + above 1d EMA34 + volume confirmation + squeeze release
+            if (curr_close > curr_upper and 
                 curr_close > curr_ema_1d and 
-                vol_confirm):
+                vol_confirm and 
+                not curr_squeeze):  # squeeze released (expanding volatility)
                 signals[i] = 0.25
                 position = 1
-            # Short entry: breakout below camarilla S3 + below 1d EMA34 + volume confirmation
-            elif (curr_close < curr_s3 and 
+            # Short entry: breakout below BB lower + below 1d EMA34 + volume confirmation + squeeze release
+            elif (curr_close < curr_lower and 
                   curr_close < curr_ema_1d and 
-                  vol_confirm):
+                  vol_confirm and 
+                  not curr_squeeze):  # squeeze released
                 signals[i] = -0.25
                 position = -1
             else:
