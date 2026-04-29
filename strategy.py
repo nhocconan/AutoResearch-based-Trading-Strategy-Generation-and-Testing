@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter + volume confirmation
-# Camarilla levels provide high-probability reversal points; breakouts beyond R3/S3 indicate strong momentum
-# Weekly EMA50 ensures trades align with higher timeframe trend (avoid counter-trend in strong moves)
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with Daily Regime Filter
+# Bollinger Band squeeze (low volatility) precedes expansion breakouts in both bull and bear markets
+# Daily trend filter (price vs 50 EMA) ensures we trade breakouts in direction of higher timeframe trend
 # Volume confirmation validates breakout strength
-# Works in bull/bear/range by trading breakouts only when aligned with weekly trend
-# Target: 10-20 trades/year (40-80 total over 4 years)
+# Works in all regimes: squeeze breakouts capture volatility expansion after consolidation
+# Target: 12-25 trades/year (48-100 total over 4 years)
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_BBSqueeze_DailyTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,84 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop for weekly calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Load HTF data ONCE before loop for daily calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate Bollinger Bands (20, 2.0) on 6h data
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2.0 * bb_std)
+    bb_lower = bb_middle - (2.0 * bb_std)
+    
+    # Bollinger Band Width: (Upper - Lower) / Middle
+    bb_width = np.where(bb_middle != 0, (bb_upper - bb_lower) / bb_middle, 0)
+    
+    # Bollinger Band Squeeze: BB Width < 5th percentile of last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.05).values
+    squeeze_condition = bb_width < bb_width_percentile
+    
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and Camarilla calculation
+    start_idx = max(60, 50, 20, 20)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_percentile[i]):
             signals[i] = 0.0
             continue
             
-        # Need prior day's OHLC for Camarilla calculation
-        if i == 0:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Camarilla levels from previous day
-        phigh = high[i-1]
-        plow = low[i-1]
-        pclose = close[i-1]
-        
-        # Avoid division by zero in case phigh == plow
-        if phigh == plow:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-            
-        # Calculate Camarilla levels
-        range_val = phigh - plow
-        r3 = pclose + (range_val * 1.1 / 4)
-        s3 = pclose - (range_val * 1.1 / 4)
-        r4 = pclose + (range_val * 1.1 / 2)
-        s4 = pclose - (range_val * 1.1 / 2)
-        
         curr_close = close[i]
-        curr_open = open_price[i]
-        curr_volume = volume[i]
-        curr_ema50_1w = ema50_1w_aligned[i]
+        curr_bb_upper = bb_upper[i]
+        curr_bb_lower = bb_lower[i]
+        curr_squeeze = squeeze_condition[i]
+        curr_volume_confirm = volume_confirm[i]
+        curr_ema50_1d = ema50_1d_aligned[i]
         
-        # Volume confirmation: volume > 1.8x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = curr_volume > (1.8 * vol_ma_20)
-        else:
-            volume_confirm = False
+        # Determine trend regime from daily EMA50
+        bullish_regime = curr_close > curr_ema50_1d
+        bearish_regime = curr_close < curr_ema50_1d
         
         if position == 0:  # Flat - look for new entries
-            # Long breakout: price closes above R3 with volume confirmation
-            if curr_close > r3 and volume_confirm and curr_close > curr_ema50_1w:
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price closes below S3 with volume confirmation
-            elif curr_close < s3 and volume_confirm and curr_close < curr_ema50_1w:
-                signals[i] = -0.25
-                position = -1
-                
+            # Look for breakout after Bollinger Band squeeze
+            if not curr_squeeze and curr_volume_confirm:
+                # Bullish breakout: price breaks above upper BB in bullish regime
+                if bullish_regime and curr_close > curr_bb_upper:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish breakout: price breaks below lower BB in bearish regime
+                elif bearish_regime and curr_close < curr_bb_lower:
+                    signals[i] = -0.25
+                    position = -1
+        
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price closes below R3 (breakout failed) OR crosses below weekly EMA50
-            if curr_close < r3 or curr_close < curr_ema50_1w:
+            # Exit when: price crosses below middle BB OR squeeze returns (low volatility)
+            if curr_close < bb_middle[i] or squeeze_condition[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
+        
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price closes above S3 (breakout failed) OR crosses above weekly EMA50
-            if curr_close > s3 or curr_close > curr_ema50_1w:
+            # Exit when: price crosses above middle BB OR squeeze returns (low volatility)
+            if curr_close > bb_middle[i] or squeeze_condition[i]:
                 signals[i] = 0.0
                 position = 0
             else:
