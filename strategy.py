@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses 4h HTF for trend direction (more stable than 1h) and 1h for precise entry timing
-# Session filter (08-20 UTC) reduces noise trades during low-volume periods
-# Discrete position sizing: 0.20 to minimize fee churn
-# Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long: Close > Donchian Upper(20) AND price > 1d EMA50 AND volume > 1.5x 24-bar avg
+# Short: Close < Donchian Lower(20) AND price < 1d EMA50 AND volume > 1.5x 24-bar avg
+# Exit: Close crosses Donchian midpoint OR price crosses 1d EMA50 OR ATR stoploss (2.5 * ATR)
+# Using 12h primary timeframe reduces trade frequency to avoid fee drag while capturing medium-term trends
+# 1d EMA50 provides stable trend filter that works in both bull and bear markets
+# Volume confirmation ensures breakouts have institutional participation
+# Discrete position sizing: 0.25 for long/short to balance return and drawdown
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_1dEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,104 +25,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-compute session hours (08-20 UTC) once before loop
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR for stoploss (using 14-period)
+    # Calculate ATR for stoploss (using 20-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 20)  # warmup for indicators
+    start_idx = max(60, 24, 60)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Calculate Camarilla pivot levels from previous day
-        # Need at least 24 hours of data (24 1h bars) for previous day
+        # Calculate Donchian channels from previous 24 bars (12h * 2 = 1 day lookback)
         if i >= 24:
-            # Get previous day's high, low, close (24*1h bars = 24h)
-            prev_day_high = np.max(high[i-24:i])   # Previous day's high (excluding current bar)
-            prev_day_low = np.min(low[i-24:i])     # Previous day's low
-            prev_day_close = close[i-1]            # Previous day's close (1 bar ago)
-            
-            # Calculate Camarilla levels
-            range_val = prev_day_high - prev_day_low
-            camarilla_h3 = prev_day_close + range_val * 1.1 / 6
-            camarilla_l3 = prev_day_close - range_val * 1.1 / 6
-            camarilla_h3l3_mid = (camarilla_h3 + camarilla_l3) / 2.0
+            donchian_high = np.max(high[i-24:i])   # Upper band
+            donchian_low = np.min(low[i-24:i])    # Lower band
+            donchian_mid = (donchian_high + donchian_low) / 2.0
         else:
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_4h = ema_50_4h_aligned[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
+        # Volume confirmation: current volume > 1.5x 24-period average
+        if i >= 24:
+            vol_ma_24 = np.mean(volume[i-24:i])
         else:
-            vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+            vol_ma_24 = 0.0
+        vol_confirm = volume[i] > 1.5 * vol_ma_24 if vol_ma_24 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
-            # Stoploss: 2 * ATR below entry
-            stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: Close below H3/L3 midpoint OR price below 4h EMA50 OR stoploss hit
-            if curr_close < camarilla_h3l3_mid or curr_close < curr_ema_4h or curr_close < stop_price:
+            # Stoploss: 2.5 * ATR below entry
+            stop_price = entry_price - 2.5 * curr_atr
+            # Exit conditions: Close below Donchian midpoint OR price below 1d EMA50 OR stoploss hit
+            if curr_close < donchian_mid or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Stoploss: 2 * ATR above entry
-            stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: Close above H3/L3 midpoint OR price above 4h EMA50 OR stoploss hit
-            if curr_close > camarilla_h3l3_mid or curr_close > curr_ema_4h or curr_close > stop_price:
+            # Stoploss: 2.5 * ATR above entry
+            stop_price = entry_price + 2.5 * curr_atr
+            # Exit conditions: Close above Donchian midpoint OR price above 1d EMA50 OR stoploss hit
+            if curr_close > donchian_mid or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Close > Camarilla H3 AND price > 4h EMA50 AND volume spike
-            if (curr_close > camarilla_h3 and 
-                curr_close > curr_ema_4h and
-                vol_spike):
-                signals[i] = 0.20
+            # Long entry: Close > Donchian Upper AND price > 1d EMA50 AND volume confirmation
+            if (curr_close > donchian_high and 
+                curr_close > curr_ema_1d and
+                vol_confirm):
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: Close < Camarilla L3 AND price < 4h EMA50 AND volume spike
-            elif (curr_close < camarilla_l3 and 
-                  curr_close < curr_ema_4h and
-                  vol_spike):
-                signals[i] = -0.20
+            # Short entry: Close < Donchian Lower AND price < 1d EMA50 AND volume confirmation
+            elif (curr_close < donchian_low and 
+                  curr_close < curr_ema_1d and
+                  vol_confirm):
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
             else:
