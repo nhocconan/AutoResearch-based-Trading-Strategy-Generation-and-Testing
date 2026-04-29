@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above recent Williams bullish fractal AND price > 1d EMA50 AND volume > 2.0x 20-period average
-# Short when price breaks below recent Williams bearish fractal AND price < 1d EMA50 AND volume > 2.0x 20-period average
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2.0x 20-period average
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2.0x 20-period average
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 15-25 trades/year on 12h timeframe (~60-100 total over 4 years)
-# Williams Fractals provide structural support/resistance levels that work in both bull and bear markets
-# Volume confirmation ensures breakouts have conviction
-# 1d EMA50 filter ensures we trade with the higher timeframe trend
-# Tight entry conditions reduce overtrading and fee drag
+# Target: 15-25 trades/year on 4h timeframe (~60-100 total over 4 years)
+# Williams %R is effective in ranging markets and catches reversals in bear rallies
+# Works in bull markets via mean reversion longs during pullbacks
+# Works in bear markets via mean reversion shorts during relief rallies
 
-name = "12h_Williams_Fractal_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +29,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
@@ -46,40 +45,20 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Williams Fractals on 1d timeframe
-    # Bearish fractal: high[n-2] < high[n-1] and high[n] < high[n-1] and high[n-3] < high[n-1] and high[n-4] < high[n-1]
-    # Bullish fractal: low[n-2] > low[n-1] and low[n] > low[n-1] and low[n-3] > low[n-1] and low[n-4] > low[n-1]
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
-    
-    # Need at least 5 points to calculate fractals
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] < high_1d[i-1] and 
-            high_1d[i-3] < high_1d[i-1] and 
-            high_1d[i-4] < high_1d[i-1]):
-            bearish_fractal[i-1] = high_1d[i-1]  # Place value at the center bar (i-1)
-        
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] > low_1d[i-1] and 
-            low_1d[i-3] > low_1d[i-1] and 
-            low_1d[i-4] > low_1d[i-1]):
-            bullish_fractal[i-1] = low_1d[i-1]  # Place value at the center bar (i-1)
-    
-    # Align Williams Fractals to 12h timeframe with additional delay for confirmation
-    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                         ((highest_high - close) / (highest_high - lowest_low)) * -100, 
+                         -50)  # neutral when no range
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(100, 60, 50)  # warmup for EMA, fractals calculation, and ATR
+    start_idx = max(100, 50, 14, 50)  # warmup for EMA, ATR, Williams %R
     
     for i in range(start_idx, n):
         curr_close = close[i]
@@ -87,11 +66,10 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
-        curr_bearish = bearish_fractal_aligned[i]
-        curr_bullish = bullish_fractal_aligned[i]
+        curr_williams_r = williams_r[i]
         
-        # Skip if fractal levels are not available
-        if np.isnan(curr_bearish) or np.isnan(curr_bullish):
+        # Skip if Williams %R is not available
+        if np.isnan(curr_williams_r):
             signals[i] = 0.0
             continue
         
@@ -130,13 +108,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above recent bullish fractal AND price > 1d EMA50 AND volume spike
-            if curr_close > curr_bullish and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
+            if curr_williams_r < -80 and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: price breaks below recent bearish fractal AND price < 1d EMA50 AND volume spike
-            elif curr_close < curr_bearish and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
+            elif curr_williams_r > -20 and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
