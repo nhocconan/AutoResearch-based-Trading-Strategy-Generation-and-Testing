@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA34 trend filter and volume confirmation
-# Alligator: Jaw (EMA13), Teeth (EMA8), Lips (EMA5) - all shifted forward
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA34 AND volume > 1.5x 20-bar avg
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA34 AND volume > 1.5x 20-bar avg
-# Exit when Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw)
+# Hypothesis: 6h Bollinger Band Width Regime + Donchian Breakout with 1d Volume Spike
+# Long when: BBW < 20th percentile (low volatility squeeze) AND price breaks above Donchian(20) high AND 1d volume > 1.5x 20-day avg
+# Short when: BBW < 20th percentile (low volatility squeeze) AND price breaks below Donchian(20) low AND 1d volume > 1.5x 20-day avg
+# Exit when price returns to Donchian midpoint (mean reversion) OR BBW > 50th percentile (volatility expansion)
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
-# Alligator identifies trend phases: sleeping (intertwined), waking (diverging), eating (trending).
-# 1w EMA34 filters counter-trend moves on weekly timeframe, volume confirmation ensures participation.
-# Works in bull markets (bullish Alligator alignment) and bear markets (bearish alignment).
+# Target: 75-150 total trades over 4 years (19-37/year) on 6h.
+# Bollinger Band Width identifies low-volatility regimes ripe for breakouts.
+# Donchian channels provide objective breakout levels.
+# 1d volume filter ensures institutional participation.
+# Works in both bull and bear markets as it trades volatility contractions/expansions, not direction.
 
-name = "1d_WilliamsAlligator_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_BBW_Regime_Donchian_Breakout_VolumeConfirm_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,72 +28,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Bollinger Band Width (20,2) - regime filter
+    close_series = pd.Series(close)
+    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20  # Normalized width
+    
+    # Percentile rank of BBW (20-bar lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Donchian Channel (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Get 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA(34) on 1w data
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    volume_1d = df_1d['volume'].values
+    # Calculate 20-day volume average on 1d
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    # Calculate Williams Alligator components
-    # Jaw: EMA(13) shifted by 8 bars
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
-    # Teeth: EMA(8) shifted by 5 bars
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
-    # Lips: EMA(5) shifted by 3 bars
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
-    
-    # Volume confirmation: >1.5x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    # Volume spike: current 1d volume > 1.5x 20-day average
+    volume_spike = volume_1d_aligned > 1.5 * volume_ma_20_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 34)  # Alligator jaw warmup and EMA34 alignment
+    start_idx = 100  # Warmup for BBW percentile (100-bar lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(lips[i]) or 
-            np.isnan(teeth[i]) or np.isnan(jaw[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_conf = volume_confirm[i]
-        ema_34 = ema_34_1w_aligned[i]
-        curr_lips = lips[i]
-        curr_teeth = teeth[i]
-        curr_jaw = jaw[i]
+        bbw_percentile = bb_width_percentile[i]
+        vol_spike = volume_spike[i]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        donch_high_i = donch_high[i]
+        donch_low_i = donch_low[i]
+        donch_mid_i = donch_mid[i]
         
-        # Handle exits and position management
+        # Handle exits
         if position == 1:  # Long position
-            # Exit: Alligator bullish alignment breaks (Lips <= Teeth or Teeth <= Jaw)
-            if curr_lips <= curr_teeth or curr_teeth <= curr_jaw:
+            # Exit: price returns to Donchian midpoint OR BBW > 50th percentile (vol expansion)
+            if curr_close <= donch_mid_i or bbw_percentile > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator bearish alignment breaks (Lips >= Teeth or Teeth >= Jaw)
-            if curr_lips >= curr_teeth or curr_teeth >= curr_jaw:
+            # Exit: price returns to Donchian midpoint OR BBW > 50th percentile (vol expansion)
+            if curr_close >= donch_mid_i or bbw_percentile > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA34 AND volume confirmation
-            if curr_lips > curr_teeth and curr_teeth > curr_jaw and close[i] > ema_34 and vol_conf:
+            # Low volatility regime: BBW < 20th percentile (squeeze)
+            low_vol_regime = bbw_percentile < 20
+            
+            # Long when: low vol AND price breaks above Donchian high AND 1d volume spike
+            if low_vol_regime and curr_high > donch_high_i and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA34 AND volume confirmation
-            elif curr_lips < curr_teeth and curr_teeth < curr_jaw and close[i] < ema_34 and vol_conf:
+            # Short when: low vol AND price breaks below Donchian low AND 1d volume spike
+            elif low_vol_regime and curr_low < donch_low_i and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
