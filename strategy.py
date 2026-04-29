@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based stoploss
-# Uses Donchian channel breakouts for structural entry signals
-# Volume confirmation > 1.5x average to filter weak breakouts
-# ATR-based trailing stoploss to manage risk in both bull and bear markets
-# Discrete position sizing (0.25) to minimize fee churn
-# Designed for fewer, higher-quality trades with strong risk control
+# Hypothesis: 4h Williams %R extreme with 1d EMA200 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal potential reversals
+# 1d EMA200 ensures alignment with higher timeframe trend (only long in uptrend, short in downtrend)
+# Volume spike (> 2.5x average) confirms conviction behind the move
+# Discrete position sizing (0.25) and exit on %R normalization to avoid whipsaws
+# Designed for low trade frequency and edge in both bull and bear markets
 
-name = "4h_Donchian20_VolumeSpike_ATRStop_v2"
+name = "4h_WilliamsR_Extreme_1dEMA200_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,30 +29,28 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Donchian channel (20-period)
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Get 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    # Calculate ATR (14-period) for stoploss
-    atr_period = 14
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate Williams %R on 4h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(donchian_window, atr_period, 20)  # Warmup period
+    start_idx = max(20, 14, 200)  # Warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -61,65 +59,46 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
+        curr_ema200_1d = ema_200_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
+        curr_volume = volume[i]
         
-        # Handle position management and exits
+        # Handle exits and position management
         if position == 1:  # Long position
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            
-            # Exit conditions:
-            # 1. ATR-based trailing stop: price drops 2.5*ATR from highest since entry
-            # 2. Mean reversion: price retreats to middle of Donchian channel
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2.0
-            if curr_close <= highest_since_entry - 2.5 * curr_atr or curr_close <= donchian_middle:
+            # Exit: Williams %R returns above -50 (normalizing from oversold)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            
-            # Exit conditions:
-            # 1. ATR-based trailing stop: price rises 2.5*ATR from lowest since entry
-            # 2. Mean reversion: price advances to middle of Donchian channel
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2.0
-            if curr_close >= lowest_since_entry + 2.5 * curr_atr or curr_close >= donchian_middle:
+            # Exit: Williams %R returns below -50 (normalizing from overbought)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.5x 20-period average
+            vol_confirmed = curr_volume > 2.5 * curr_vol_ma
             
-            # Long when price breaks above upper Donchian band with volume confirmation
-            if curr_high > highest_high[i] and vol_confirmed:
+            # Long when Williams %R < -90 (extreme oversold), 1d EMA200 uptrend, volume confirmed
+            if curr_williams_r < -90 and curr_close > curr_ema200_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_high
-            # Short when price breaks below lower Donchian band with volume confirmation
-            elif curr_low < lowest_low[i] and vol_confirmed:
+            # Short when Williams %R > -10 (extreme overbought), 1d EMA200 downtrend, volume confirmed
+            elif curr_williams_r > -10 and curr_close < curr_ema200_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
