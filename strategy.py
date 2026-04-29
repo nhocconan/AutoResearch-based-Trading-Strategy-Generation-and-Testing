@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
 # Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
 # Exit on opposite Camarilla level (S3 for longs, R3 for shorts) OR ATR-based stoploss (2.0x ATR)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
 # Camarilla levels provide institutional support/resistance. 1d EMA34 filters counter-trend moves.
 # Volume spike confirms institutional participation. ATR stoploss manages risk in volatile markets.
 # This strategy avoids overtrading by requiring confluence of 3 strong conditions.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,13 +28,13 @@ def generate_signals(prices):
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 12h timeframe
+    # Align EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for stoploss
@@ -68,7 +68,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20, 14)  # EMA34, volume MA, ATR all need warmup
+    start_idx = max(50, 20, 14)  # EMA34, volume MA, ATR all need warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
