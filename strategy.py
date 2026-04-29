@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop
-# Long when price breaks above Donchian upper band (20-period high) AND volume > 1.5x 20-bar avg
-# Short when price breaks below Donchian lower band (20-period low) AND volume > 1.5x 20-bar avg
-# Exit long when price crosses below Donchian middle (10-period average of high/low) OR trailing stop hit
-# Exit short when price crosses above Donchian middle OR trailing stop hit
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 trades over 4 years.
-# Donchian channels provide clear structure; volume confirms institutional participation.
-# Works in bull markets (breakouts continue trends) and bear markets (breakouts catch reversals).
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit when price crosses opposite Camarilla level (S3 for longs, R3 for shorts)
+# Uses discrete position sizing (0.25) to minimize fee churn while capturing moves.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Camarilla levels provide mathematical support/resistance; 1d EMA34 filters counter-trend moves.
+# Volume spike ensures institutional participation, reducing false breakouts.
+# Works in bull markets (trend continuation via breakouts) and bear markets (mean reversion within trend via exits).
 
-name = "4h_Donchian20_VolumeConfirm_ATRTrail_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,89 +27,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels: 20-period high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_high + donchian_low) / 2
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    close_1d = df_1d['close'].values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: >1.5x 20-bar average volume
+    # Get 1d data for Camarilla pivot levels (using prior day's OHLC)
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Extract prior day's OHLC (1d timeframe)
+    # We need the completed prior day's OHLC to calculate today's Camarilla levels
+    # Shift by 1 to use only completed prior day
+    prior_high = np.roll(df_1d['high'].values, 1)
+    prior_low = np.roll(df_1d['low'].values, 1)
+    prior_close = np.roll(df_1d['close'].values, 1)
+    # Set first value to NaN as we don't have prior day
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
+    prior_close[0] = np.nan
+    
+    # Align prior day OHLC to 6h timeframe
+    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
+    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
+    prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close)
+    
+    # Calculate Camarilla levels for each 6h bar based on prior day's OHLC
+    # Camarilla R3 = Close + (High - Low) * 1.1/4
+    # Camarilla S3 = Close - (High - Low) * 1.1/4
+    # Camarilla R4 = Close + (High - Low) * 1.1/2
+    # Camarilla S4 = Close - (High - Low) * 1.1/2
+    # We use R3/S3 for entries/exits as they are stronger levels
+    range_hl = prior_high_aligned - prior_low_aligned
+    r3 = prior_close_aligned + range_hl * 1.1 / 4
+    s3 = prior_close_aligned - range_hl * 1.1 / 4
+    r4 = prior_close_aligned + range_hl * 1.1 / 2
+    s4 = prior_close_aligned - range_hl * 1.1 / 2
+    
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_high = 0.0  # for long trailing stop
-    lowest_low = 0.0    # for short trailing stop
     
-    start_idx = 20  # Donchian/ATR warmup
+    start_idx = max(34, 1) + 1  # EMA34 warmup + 1 for prior day shift
     
     for i in range(start_idx, n):
-        # Skip if volume MA not ready
-        if np.isnan(volume_ma_20[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_atr = atr[i]
+        ema_34 = ema_34_1d_aligned[i]
         
-        # Donchian levels
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        middle = donchian_middle[i]
+        # Camarilla levels
+        r3_level = r3[i]
+        s3_level = s3[i]
+        r4_level = r4[i]
+        s4_level = s4[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Update highest high for trailing stop
-            highest_high = max(highest_high, curr_high)
-            
-            # Exit conditions: price < middle OR trailing stop hit
-            if curr_close < middle or curr_close < (highest_high - 2.5 * curr_atr):
+            # Exit: price crosses below S3 (mean reversion to median)
+            if curr_close < s3_level:
                 signals[i] = 0.0
                 position = 0
-                highest_high = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low for trailing stop
-            lowest_low = min(lowest_low, curr_low)
-            
-            # Exit conditions: price > middle OR trailing stop hit
-            if curr_close > middle or curr_close > (lowest_low + 2.5 * curr_atr):
+            # Exit: price crosses above R3 (mean reversion to median)
+            if curr_close > r3_level:
                 signals[i] = 0.0
                 position = 0
-                lowest_low = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above upper band AND volume confirmation
-            if curr_close > upper and vol_conf:
+            # Long when price breaks above R3 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_high = curr_high
-            # Short when price breaks below lower band AND volume confirmation
-            elif curr_close < lower and vol_conf:
+            # Short when price breaks below S3 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                lowest_low = curr_low
             else:
                 signals[i] = 0.0
     
