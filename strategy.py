@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 1.5x 20-period average
-# Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 1.5x 20-period average
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Camarilla R4 AND price > 1d EMA34 AND volume > 1.5x 20-period average
+# Short when price breaks below Camarilla S4 AND price < 1d EMA34 AND volume > 1.5x 20-period average
 # Uses ATR-based trailing stop (1.5x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 12-37 trades/year on 12h timeframe (~50-150 total over 4 years)
+# Target: 20-30 trades/year on 4h timeframe (~80-120 total over 4 years)
+# Uses tighter Camarilla levels (R4/S4) vs R3/S3 to reduce trade frequency and improve win rate
 # Works in bull markets via long breakouts with 1d uptrend
 # Works in bear markets via short breakdowns with 1d downtrend
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,20 +46,20 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Calculate Camarilla levels from previous day (using daily data)
-    # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
     # We use previous day's OHLC to calculate today's levels
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla R3 and S3 levels
+    # Calculate Camarilla R4 and S4 levels
     camarilla_range = prev_high - prev_low
-    camarilla_R3 = prev_close + (camarilla_range * 1.1 / 4)
-    camarilla_S3 = prev_close - (camarilla_range * 1.1 / 4)
+    camarilla_R4 = prev_close + (camarilla_range * 1.1 / 2)
+    camarilla_S4 = prev_close - (camarilla_range * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,11 +74,11 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_R3 = camarilla_R3_aligned[i]
-        curr_S3 = camarilla_S3_aligned[i]
+        curr_R4 = camarilla_R4_aligned[i]
+        curr_S4 = camarilla_S4_aligned[i]
         
         # Skip if Camarilla levels are not available
-        if np.isnan(curr_R3) or np.isnan(curr_S3):
+        if np.isnan(curr_R4) or np.isnan(curr_S4):
             signals[i] = 0.0
             continue
         
@@ -116,13 +117,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R3 AND price > 1d EMA34 AND volume spike
-            if curr_close > curr_R3 and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: price breaks above Camarilla R4 AND price > 1d EMA34 AND volume spike
+            if curr_close > curr_R4 and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: price breaks below Camarilla S3 AND price < 1d EMA34 AND volume spike
-            elif curr_close < curr_S3 and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: price breaks below Camarilla S4 AND price < 1d EMA34 AND volume spike
+            elif curr_close < curr_S4 and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
