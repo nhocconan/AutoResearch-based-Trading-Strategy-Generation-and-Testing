@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme with 1d EMA200 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (<-90 or >-10) signal potential reversals
-# 1d EMA200 provides higher timeframe trend alignment to avoid counter-trend trades
-# Volume confirmation >1.8x average filters weak signals
-# Discrete position sizing (0.25) reduces fee churn while maintaining edge
-# Designed to work in both bull and bear markets by capturing mean reversions at extremes
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA200 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13 to detect trend strength
+# Uses 1d EMA200 for higher timeframe trend alignment (works in both bull/bear markets)
+# Volume confirmation > 1.8x average to filter weak signals
+# Discrete position sizing (0.25) with ATR-based stop loss via signal=0
+# Designed to capture strong trends while avoiding whipsaws in ranging markets
 
-name = "4h_WilliamsR_Extreme_1dEMA200_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA200_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,20 +39,25 @@ def generate_signals(prices):
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Williams %R on 4h data (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate ATR(14) for stop loss and Elder Ray smoothing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate EMA13 for Elder Ray (using close prices)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(20, 14)  # Volume and Williams %R warmup
+    start_idx = max(50, 200)  # Warmup for EMA200 and ATR
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -61,8 +66,9 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -70,39 +76,59 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_williams_r = williams_r[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
         curr_ema200_1d = ema_200_1d_aligned[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_atr = atr[i]
+        
+        # Calculate 20-period average volume for confirmation
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+        else:
+            vol_ma_20 = np.nan
+        
+        if np.isnan(vol_ma_20):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirmed = curr_volume > 1.8 * vol_ma_20
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R returns above -50 (mean reversion)
-            if curr_williams_r > -50:
+            # Exit: stop loss (2.0 * ATR below entry) or bear power turns negative
+            stop_loss = entry_price - 2.0 * curr_atr
+            if curr_low <= stop_loss or curr_bear > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R returns below -50 (mean reversion)
-            if curr_williams_r < -50:
+            # Exit: stop loss (2.0 * ATR above entry) or bull power turns positive
+            stop_loss = entry_price + 2.0 * curr_atr
+            if curr_high >= stop_loss or curr_bull < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation
+            if not vol_confirmed:
+                signals[i] = 0.0
+                continue
             
-            # Long when Williams %R < -90 (extreme oversold), 1d EMA200 up-trend, volume confirmed
-            if curr_williams_r < -90 and curr_close > curr_ema200_1d and vol_confirmed:
+            # Long when bull power > 0 (strong buying), price above 1d EMA200 (uptrend), volume confirmed
+            if curr_bull > 0 and curr_close > curr_ema200_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when Williams %R > -10 (extreme overbought), 1d EMA200 down-trend, volume confirmed
-            elif curr_williams_r > -10 and curr_close < curr_ema200_1d and vol_confirmed:
+                entry_price = curr_close
+            # Short when bear power < 0 (strong selling), price below 1d EMA200 (downtrend), volume confirmed
+            elif curr_bear < 0 and curr_close < curr_ema200_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
     
