@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Camarilla R3, 1w EMA50 up-trend, volume > 2.0x average
-# Short when price breaks below Camarilla S3, 1w EMA50 down-trend, volume > 2.0x average
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla R3, 1d EMA34 up-trend, volume > 1.8x average
+# Short when price breaks below Camarilla S3, 1d EMA34 down-trend, volume > 1.8x average
 # Exit when price crosses the Camarilla pivot point (mean reversion)
-# Uses discrete position sizing (0.25) and tight volume confirmation to target 12-37 trades/year
+# Uses discrete position sizing (0.20) and volume confirmation to target 25-50 trades/year
 # Designed to work in both bull and bear markets by following the higher timeframe trend
+# Added choppiness filter to reduce whipsaws in ranging markets
 
-name = "12h_Camarilla_R3S3_1wEMA50_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,14 +30,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for Camarilla pivot levels and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
@@ -60,11 +56,11 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
@@ -72,10 +68,47 @@ def generate_signals(prices):
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate 4h choppiness index (CHOP) for regime filter
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        """Calculate Choppiness Index"""
+        atr_sum = np.zeros_like(close_arr)
+        tr = np.maximum(high_arr - low_arr, 
+                       np.maximum(np.abs(high_arr - np.roll(close_arr, 1)),
+                                np.abs(low_arr - np.roll(close_arr, 1))))
+        tr[0] = high_arr[0] - low_arr[0]  # First TR
+        
+        # Wilder's smoothing (ATR)
+        atr = np.zeros_like(close_arr)
+        atr[period-1] = np.nanmean(tr[:period])  # Seed with simple average
+        
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        # Calculate highest high and lowest low over period
+        hh = np.zeros_like(close_arr)
+        ll = np.zeros_like(close_arr)
+        for i in range(len(close_arr)):
+            if i < period:
+                hh[i] = np.nan
+                ll[i] = np.nan
+            else:
+                hh[i] = np.max(high_arr[i-period+1:i+1])
+                ll[i] = np.min(low_arr[i-period+1:i+1])
+        
+        # CHOP = 100 * log10(sum(ATR)/ (HH - LL)) / log10(period)
+        chop = np.full_like(close_arr, 50.0, dtype=float)
+        for i in range(period, len(close_arr)):
+            if hh[i] > ll[i]:
+                chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / (hh[i] - ll[i])) / np.log10(period)
+        
+        return chop
+    
+    chop = calculate_chop(high, low, close, 14)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Volume and 1w EMA50 warmup
+    start_idx = max(20, 34, 14)  # Volume, 1d EMA34, and CHOP warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -85,7 +118,7 @@ def generate_signals(prices):
             
         # Skip if any required data is NaN
         if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -96,8 +129,9 @@ def generate_signals(prices):
         curr_pp = pp_aligned[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
+        curr_chop = chop[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
@@ -106,7 +140,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit: price above pivot point (mean reversion to pivot)
@@ -114,19 +148,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average (tighter)
-            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
+            # Chop filter: avoid trading in extremely choppy markets (CHOP > 61.8)
+            chop_filter = curr_chop <= 61.8
             
-            # Long when price breaks above R3, 1w EMA50 up-trend, volume confirmed
-            if curr_high > curr_r3 and curr_close > curr_ema50_1w and vol_confirmed:
-                signals[i] = 0.25
+            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed, not too choppy
+            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed and chop_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short when price breaks below S3, 1w EMA50 down-trend, volume confirmed
-            elif curr_low < curr_s3 and curr_close < curr_ema50_1w and vol_confirmed:
-                signals[i] = -0.25
+            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed, not too choppy
+            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed and chop_filter:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
