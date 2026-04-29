@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA34 trend + volume spike
-# Long when Williams %R(14) < -80 (oversold), 1d EMA34 up-trend, volume > 1.8x average
-# Short when Williams %R(14) > -20 (overbought), 1d EMA34 down-trend, volume > 1.8x average
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# Uses 1d for trend filter, 6h for Williams %R and volume confirmation.
-# Designed to capture mean reversion in both bull and bear markets by following higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3, 1d EMA34 up-trend, volume > 2.0x average
+# Short when price breaks below S3, 1d EMA34 down-trend, volume > 2.0x average
+# Exit when price crosses the 50% level (midpoint between R3 and S3)
+# Uses discrete position sizing (0.25) and strong volume filter to target 12-37 trades/year.
+# Uses 1d for signal direction/trend, 12h only for entry timing and Camarilla levels.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,16 +30,25 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 6h data for Williams %R calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    # Get 12h data for Camarilla levels (based on previous period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 6h Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_6h['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_6h['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    # Calculate 12h Camarilla levels using previous period
+    high_prev = df_12h['high'].shift(1).values
+    low_prev = df_12h['low'].shift(1).values
+    close_prev = df_12h['close'].shift(1).values
+    range_prev = high_prev - low_prev
+    
+    camarilla_r3 = close_prev + range_prev * 1.1 / 4
+    camarilla_s3 = close_prev - range_prev * 1.1 / 4
+    camarilla_mid = (camarilla_r3 + camarilla_s3) / 2.0
+    
+    # Align 12h indicators to 12h timeframe (no additional delay needed for Camarilla)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_12h, camarilla_mid)
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -65,43 +75,49 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_williams_r = williams_r_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
+        curr_mid = camarilla_mid_aligned[i]
         curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (mean reversion)
-            if curr_williams_r > -50:
+            # Exit: price below 50% level (mean reversion)
+            if curr_close < curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (mean reversion)
-            if curr_williams_r < -50:
+            # Exit: price above 50% level (mean reversion)
+            if curr_close > curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirmed = volume[i] > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average (strong filter)
+            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
             
-            # Long when Williams %R < -80 (oversold), 1d EMA34 up-trend, volume confirmed
-            if curr_williams_r < -80 and curr_close > curr_ema34_1d and vol_confirmed:
+            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when Williams %R > -20 (overbought), 1d EMA34 down-trend, volume confirmed
-            elif curr_williams_r > -20 and curr_close < curr_ema34_1d and vol_confirmed:
+            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
