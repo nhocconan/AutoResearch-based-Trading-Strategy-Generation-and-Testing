@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian channel (20-period high/low) for clear breakout levels
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses Donchian channel (20-period high/low) on 12h timeframe for clear breakout levels
 # 1d EMA50 provides stronger trend filter than shorter EMAs to reduce whipsaw in bear markets
 # Volume spike (2.0x 20-period average) confirms breakout validity
-# ATR-based stoploss (2.0x ATR) manages risk with reasonable stops
-# Designed for moderate trade frequency (target: 75-200 total over 4 years) to minimize fee drag
-# Works in bull markets via trend-following breaks and avoids counter-trend trades via 1d EMA filter
+# ATR-based stoploss (2.0x ATR) manages risk with wider stops to avoid premature exits
+# Targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# Works in bull markets via trend-following breaks and avoids counter-trend trades via 1d EMA50 filter
 
-name = "4h_Donchian_Breakout_1dEMA50_VolumeConfirm_v2"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
