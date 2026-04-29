@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Uses Donchian channel for structural breakouts, filtered by 12h EMA50 trend direction.
-# Volume spike (>1.8x 20-period average) confirms breakout strength.
-# ATR-based trailing stop (2.5x ATR) manages risk.
-# Designed for ~30-60 trades/year on 4h timeframe to balance opportunity and fee drag.
-# Works in both bull and bear markets via 12h trend filter - only takes breakouts in trend direction.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses weekly EMA50 to filter breakouts in trend direction (bullish above EMA50, bearish below).
+# Donchian channels from 1d data provide structural breakout levels.
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Designed for ~15-30 trades/year on 1d timeframe to minimize fee drag while capturing high-probability moves.
+# Works in both bull and bear markets via 1w trend filter - only trades breakouts in trend direction.
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,21 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA50 trend filter (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels from 1d data (20-period)
+    # Upper band = 20-period high, Lower band = 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period average volume for confirmation (on 4h data)
+    # Calculate 20-period average volume for confirmation (on 1d data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate ATR (14-period) for stoploss
@@ -52,12 +55,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # Donchian, volume MA and ATR warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -65,64 +68,46 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
-        curr_upper = highest_high[i]
-        curr_lower = lowest_low[i]
+        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
         curr_atr = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: trailing stoploss or price closes below Donchian lower
-            if curr_close < curr_highest_since_entry - 2.5 * curr_atr or curr_close < curr_lower:
+            # Exit: stoploss hit or price closes below Donchian lower (mean reversion)
+            if curr_close < entry_price - 2.0 * curr_atr or curr_close < curr_lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                # Update highest high since entry for trailing stop
-                if 'highest_since_entry' not in locals():
-                    highest_since_entry = curr_high
-                else:
-                    highest_since_entry = max(highest_since_entry, curr_high)
                 
         elif position == -1:  # Short position
-            # Exit: trailing stoploss or price closes above Donchian upper
-            if curr_close > curr_lowest_since_entry + 2.5 * curr_atr or curr_close > curr_upper:
+            # Exit: stoploss hit or price closes above Donchian upper (mean reversion)
+            if curr_close > entry_price + 2.0 * curr_atr or curr_close > curr_upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-                # Update lowest low since entry for trailing stop
-                if 'lowest_since_entry' not in locals():
-                    lowest_since_entry = curr_low
-                else:
-                    lowest_since_entry = min(lowest_since_entry, curr_low)
                 
         else:  # Flat - look for new entries
-            # Reset tracking variables
-            if 'highest_since_entry' in locals():
-                del highest_since_entry
-            if 'lowest_since_entry' in locals():
-                del lowest_since_entry
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = curr_volume > 1.5 * curr_vol_ma
             
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirm = curr_volume > 1.8 * curr_vol_ma
-            
-            # Long entry: bullish breakout above Donchian upper in uptrend (price > 12h EMA50)
-            if vol_confirm and curr_close > curr_ema50_12h:
+            # Long entry: bullish breakout above upper band in uptrend (price > 1w EMA50)
+            if vol_confirm and curr_close > curr_ema50_1w:
                 if curr_high > curr_upper:  # Breakout above upper band
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                    highest_since_entry = curr_high
-            # Short entry: bearish breakdown below Donchian lower in downtrend (price < 12h EMA50)
-            elif vol_confirm and curr_close < curr_ema50_12h:
+            # Short entry: bearish breakdown below lower band in downtrend (price < 1w EMA50)
+            elif vol_confirm and curr_close < curr_ema50_1w:
                 if curr_low < curr_lower:  # Breakdown below lower band
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
-                    lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
