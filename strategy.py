@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 AND price > 1w EMA34 AND volume > 2.0x 20-period average
-# Short when price breaks below Camarilla S3 AND price < 1w EMA34 AND volume > 2.0x 20-period average
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 AND price > 1w EMA34 AND volume > 1.5x 20-period average
+# Short when price breaks below Camarilla S3 AND price < 1w EMA34 AND volume > 1.5x 20-period average
 # Uses ATR-based trailing stop (2.5x ATR) for risk management
-# Discrete position sizing (0.25) to balance return and fee drag
-# Target: 12-37 trades/year on 12h timeframe (~50-150 total over 4 years) to minimize fee drag
+# Discrete position sizing (0.25) to minimize fee drag
+# Target: 15-25 trades/year on 1d timeframe (~60-100 total over 4 years) to minimize fee drag
 # Works in bull markets via long breakouts with 1w uptrend
 # Works in bear markets via short breakdowns with 1w downtrend
+# Uses stricter volume confirmation (1.5x) and HTF trend (1w EMA34) to reduce overtrading
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S3_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,9 +45,9 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous week (using weekly data)
+    # Calculate Camarilla levels from previous day (using daily data)
     # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
-    # We use previous week's OHLC to calculate current week's levels
+    # We use previous day's OHLC to calculate today's levels
     prev_close = df_1w['close'].shift(1).values
     prev_high = df_1w['high'].shift(1).values
     prev_low = df_1w['low'].shift(1).values
@@ -56,7 +57,7 @@ def generate_signals(prices):
     camarilla_R3 = prev_close + (camarilla_range * 1.1 / 4)
     camarilla_S3 = prev_close - (camarilla_range * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 1d timeframe
     camarilla_R3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_R3)
     camarilla_S3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_S3)
     
@@ -81,12 +82,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation: current volume > 2.0x 20-period average
+        # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
