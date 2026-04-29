@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 20-period 12h high AND price > 1d EMA34 with volume > 1.5x average
-# Short when price breaks below 20-period 12h low AND price < 1d EMA34 with volume > 1.5x average
-# Exit on opposite breakout or volume drying up (< 0.8x average)
-# Trend filter avoids counter-trend trades in bear markets. Works in both bull/bear by following 1d EMA34.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance; breakout above R3 or below S3 indicates strong momentum.
+# Combined with 1d EMA34 trend filter to ensure trades align with higher timeframe direction.
+# Volume spike confirms institutional participation. Works in both bull and bear markets by following 1d trend.
+# Target: 75-150 total trades over 4 years (19-37/year) to minimize fee drag.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,26 +32,40 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for previous day
+    # Based on previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Camarilla formulas:
+    # R4 = close + ((high - low) * 1.1 / 2)
+    # R3 = close + ((high - low) * 1.1 / 4)
+    # S3 = close - ((high - low) * 1.1 / 4)
+    # S4 = close - ((high - low) * 1.1 / 2)
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + (camarilla_range * 1.1 / 4)
+    s3 = prev_close - (camarilla_range * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
-    volume_exit = volume < (0.8 * vol_ma_20)  # Exit on low volume
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 34, 20)  # warmup for EMA34, volume MA, and Donchian
+    start_idx = max(50, 34, 20)  # warmup for EMA34, volume MA, and Camarilla (need previous day)
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             continue
             
@@ -60,10 +73,9 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema34 = ema34_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_volume_exit = volume_exit[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
         
         # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
         is_bullish_regime = curr_close > curr_ema34
@@ -72,26 +84,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: price breaks above Donchian high AND bullish regime
-                if curr_high > curr_highest_high and is_bullish_regime:
+                # Bullish entry: price breaks above R3 AND bullish regime
+                if curr_high > curr_r3 and is_bullish_regime:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian low AND bearish regime
-                elif curr_low < curr_lowest_low and is_bearish_regime:
+                # Bearish entry: price breaks below S3 AND bearish regime
+                elif curr_low < curr_s3 and is_bearish_regime:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price breaks below Donchian low OR regime changes to bearish OR volume dries up
-            if curr_low < curr_lowest_low or not is_bullish_regime or curr_volume_exit:
+            # Exit when: price breaks below S3 (reversal) OR regime changes to bearish
+            if curr_low < curr_s3 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price breaks above Donchian high OR regime changes to bullish OR volume dries up
-            if curr_high > curr_highest_high or not is_bearish_regime or curr_volume_exit:
+            # Exit when: price breaks above R3 (reversal) OR regime changes to bullish
+            if curr_high > curr_r3 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
