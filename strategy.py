@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 1d EMA34 with volume spike
-# Short when price breaks below Donchian(20) low AND price < 1d EMA34 with volume spike
-# Uses 1d EMA34 for trend filter to avoid counter-trend whipsaws
-# Volume confirmation ensures moves have institutional participation
-# Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 20-day high AND price > 1w EMA50 with volume > 1.5x 20-day average
+# Short when price breaks below 20-day low AND price < 1w EMA50 with volume > 1.5x 20-day average
+# Uses 1w EMA50 for trend filter to avoid counter-trend whipsaws in bear markets
+# Volume confirmation ensures breakouts have institutional participation
+# Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag on 1d timeframe
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,72 +24,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for daily calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Load HTF data ONCE before loop for weekly calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily EMA34 to 4h timeframe (completed 1d bar only)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly EMA50 to daily timeframe (completed 1w bar only)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on daily data
+    # Donchian high = highest high over past 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low = lowest low over past 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # warmup for EMA34 and Donchian
+    start_idx = max(50, 20)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema34_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+        if np.isnan(ema50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_highest_20 = highest_20[i]
-        curr_lowest_20 = lowest_20[i]
-        curr_ema34 = ema34_aligned[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_ema50 = ema50_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
-        is_bullish_regime = curr_close > curr_ema34
-        is_bearish_regime = curr_close < curr_ema34
+        # Trend regime: bullish if price > 1w EMA50, bearish if price < 1w EMA50
+        is_bullish_regime = curr_close > curr_ema50
+        is_bearish_regime = curr_close < curr_ema50
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: break above Donchian high AND bullish regime
-                if curr_high > curr_highest_20 and is_bullish_regime:
+                # Bullish entry: price breaks above 20-day high in bullish regime
+                if is_bullish_regime and curr_high > curr_donchian_high:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: break below Donchian low AND bearish regime
-                elif curr_low < curr_lowest_20 and is_bearish_regime:
+                # Bearish entry: price breaks below 20-day low in bearish regime
+                elif is_bearish_regime and curr_low < curr_donchian_low:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price breaks below Donchian low OR regime changes to bearish
-            if curr_low < curr_lowest_20 or not is_bullish_regime:
+            # Exit when: price breaks below 20-day low OR regime changes to bearish
+            if curr_low < curr_donchian_low or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price breaks above Donchian high OR regime changes to bullish
-            if curr_high > curr_highest_20 or not is_bearish_regime:
+            # Exit when: price breaks above 20-day high OR regime changes to bullish
+            if curr_high > curr_donchian_high or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
