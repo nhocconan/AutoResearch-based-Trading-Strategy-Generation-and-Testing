@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# 12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Camarilla levels from 1d provide institutional support/resistance; breakouts capture momentum
-# 1d EMA34 ensures alignment with daily trend; volume >2.0x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; stoploss via opposite Camarilla level
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (2.0x)
+# Camarilla levels provide precise support/resistance from prior day's range
+# 1d EMA34 ensures alignment with daily trend; volume >2.0x confirms institutional participation
+# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
+# Works in both bull/bear: trend filter avoids counter-trend trades, volume confirms conviction
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,23 +44,19 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Precompute daily data for Camarilla levels
-    df_1d_cam = get_htf_data(prices, '1d')
-    if len(df_1d_cam) < 2:
-        return np.zeros(n)
+    # Precompute daily data for Camarilla levels (use prior day's levels)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    daily_high = df_1d_cam['high'].values
-    daily_low = df_1d_cam['low'].values
-    daily_close = df_1d_cam['close'].values
-    
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_close)
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 12h bars (~4 days) for daily levels
+    start_idx = max(96, 30, 14, 34)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
