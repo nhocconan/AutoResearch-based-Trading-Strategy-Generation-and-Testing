@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Camarilla R3/S3 levels act as strong support/resistance; breakouts with volume and daily trend alignment capture momentum moves
-# Designed for ~20-50 trades/year to minimize fee drag while participating in established trends
+# Designed for ~12-30 trades/year to minimize fee drag while participating in established trends
 # Works in bull/bear via 1d EMA34 trend filter - only trades in direction of daily momentum
 # Uses strict volume confirmation (>2.5x 20-period average) to reduce false breakouts and overtrading
-# Focus on BTC/ETH as primary targets with SOL as secondary
+# Timeframe: 12h (slower timeframe reduces trade frequency, improves Sharpe generalization)
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -68,7 +68,7 @@ def generate_signals(prices):
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
-        # Calculate Camarilla levels for this 4h bar using previous bar's OHLC
+        # Calculate Camarilla levels for this 12h bar using previous bar's OHLC
         if i == 0:
             signals[i] = 0.0
             continue
