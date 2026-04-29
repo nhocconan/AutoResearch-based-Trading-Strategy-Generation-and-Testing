@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Camarilla pivot levels (R3/S3) from 1d for clear breakout levels
-# 1d EMA50 provides trend filter to avoid counter-trend trades
-# Volume spike (1.8x 20-period average) confirms breakout validity
-# ATR-based stoploss (2.0x ATR) manages risk
-# Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag
-# Works in bull markets via trend-following breaks and avoids counter-trend trades in bear markets
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation + ATR stoploss
+# Uses Donchian channel (20-period high/low) for clear breakout levels
+# 1d EMA50 provides stronger trend filter to reduce whipsaw in bear markets
+# Volume spike (2.0x 20-period average) confirms breakout validity
+# ATR-based stoploss (2.0x ATR) manages risk with wider stops to avoid premature exits
+# Designed for moderate trade frequency (target: 100-200 total over 4 years) to minimize fee drag
+# Works in bull markets via trend-following breaks and avoids counter-trend trades via 1d EMA filter
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,27 +50,14 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA
     
     for i in range(start_idx, n):
-        # Need at least 1 previous day for Camarilla calculation
-        if i < 1:
+        # Need at least 20 previous bars for Donchian calculation
+        if i < 20:
             signals[i] = 0.0
             continue
             
-        # Get previous 1d OHLC for Camarilla calculation
-        prev_idx = i - 1
-        if prev_idx < 0:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Camarilla levels from previous 1d bar
-        prev_high = high[prev_idx]
-        prev_low = low[prev_idx]
-        prev_close = close[prev_idx]
-        
-        # Camarilla pivot levels
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        range_hl = prev_high - prev_low
-        r3 = pivot + (range_hl * 1.1 / 4.0)  # R3 level
-        s3 = pivot - (range_hl * 1.1 / 4.0)  # S3 level
+        # Calculate Donchian levels from previous 20 bars
+        lookback_high = np.max(high[i-20:i])
+        lookback_low = np.min(low[i-20:i])
         
         curr_close = close[i]
         curr_high = high[i]
@@ -78,19 +65,19 @@ def generate_signals(prices):
         curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         
-        # Volume spike confirmation: current volume > 1.8x 20-period average
+        # Volume spike confirmation: current volume > 2.0x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
             # Stoploss: 2.0 * ATR below entry
             stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: price below S3 OR price below 1d EMA50 OR stoploss hit
-            if curr_close < s3 or curr_close < curr_ema_1d or curr_close < stop_price:
+            # Exit conditions: price below Donchian low OR price below 1d EMA50 OR stoploss hit
+            if curr_close < lookback_low or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,21 +86,21 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Stoploss: 2.0 * ATR above entry
             stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: price above R3 OR price above 1d EMA50 OR stoploss hit
-            if curr_close > r3 or curr_close > curr_ema_1d or curr_close > stop_price:
+            # Exit conditions: price above Donchian high OR price above 1d EMA50 OR stoploss hit
+            if curr_close > lookback_high or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > 1d EMA50 AND volume spike
-            if curr_high > r3 and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: price breaks above Donchian high AND price > 1d EMA50 AND volume spike
+            if curr_high > lookback_high and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: price breaks below S3 AND price < 1d EMA50 AND volume spike
-            elif curr_low < s3 and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: price breaks below Donchian low AND price < 1d EMA50 AND volume spike
+            elif curr_low < lookback_low and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
