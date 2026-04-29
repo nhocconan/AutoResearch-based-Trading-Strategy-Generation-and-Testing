@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike
 # Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
 # Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
 # Exit on opposite Camarilla level touch (long exit at S3, short exit at R3)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
 # Camarilla levels provide institutional support/resistance. EMA34 filters counter-trend moves.
 # Volume spike confirms institutional participation. Works in both bull and bear markets.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 12h timeframe
+    # Align EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous day
