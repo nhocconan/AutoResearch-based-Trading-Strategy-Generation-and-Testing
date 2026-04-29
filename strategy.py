@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses tighter Camarilla levels (R3/S3) for fewer, higher-quality breakouts
-# Volume confirmation > 1.8x average to filter weak breakouts
-# 1d EMA34 trend filter ensures alignment with higher timeframe momentum
-# Discrete position sizing (0.25) and mean reversion exit at pivot point
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-# Works in both bull and bear markets by following higher timeframe trend with volatility filters
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla R3/S3 levels for balanced breakout frequency
+# 1d EMA34 ensures alignment with daily trend (works in both bull and bear markets)
+# Volume confirmation > 1.5x average to filter weak breakouts
+# Discrete position sizing (0.25) and pivot point exit for mean reversion
+# Designed to achieve 20-40 trades/year per symbol with Sharpe > 0
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +29,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and Camarilla pivot levels
+    # Get 1d data for EMA34 trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -61,7 +60,7 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
@@ -114,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.8x 20-period average
-            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
             
             # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
             if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
