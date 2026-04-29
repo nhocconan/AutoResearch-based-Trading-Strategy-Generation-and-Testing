@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike
-# Camarilla levels from daily provide key support/resistance; breakouts capture momentum
-# 1w EMA34 ensures alignment with long-term trend; volume >1.8x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
+# Hypothesis: 1d Williams Alligator with 1w EMA34 trend filter and volume confirmation
+# Williams Alligator (jaw/teeth/lips) identifies trend absence/presence via smoothed MAs
+# 1w EMA34 ensures alignment with weekly trend; volume >1.5x confirms participation
+# Discrete sizing (0.25) minimizes fee churn; target 30-100 total trades over 4 years
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_WilliamsAlligator_1wEMA34_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,91 +39,64 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_30)
+    # Volume confirmation: volume > 1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_50)
     
-    # Precompute daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Williams Alligator: jaw (13), teeth (8), lips (5) - all smoothed with future shift
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().shift(3).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 12h bars for daily levels
+    start_idx = max(jaw_period + 8, teeth_period + 5, lips_period + 3, 34, 50)
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
             np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
-            np.isnan(daily_high_aligned[i]) or
-            np.isnan(daily_low_aligned[i]) or
-            np.isnan(daily_close_aligned[i])):
+            np.isnan(vol_ma_50[i]) or
+            np.isnan(jaw[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
         curr_ema_34_1w = ema_34_1w_aligned[i]
         
-        # Use previous day's levels (shift by 1)
-        prev_high = daily_high_aligned[i-1]
-        prev_low = daily_low_aligned[i-1]
-        prev_close = daily_close_aligned[i-1]
-        
         if position == 0:  # Flat - look for new entries
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                s3 = prev_close - (range_val * 1.1 / 4)
-                
-                # Only trade with volume confirmation and trend filter
-                if curr_volume_confirm:
-                    # Bullish entry: price breaks above R3 + above 1w EMA34
-                    if curr_high > r3 and curr_close > curr_ema_34_1w:
-                        signals[i] = 0.25
-                        position = 1
-                    # Bearish entry: price breaks below S3 + below 1w EMA34
-                    elif curr_low < s3 and curr_close < curr_ema_34_1w:
-                        signals[i] = -0.25
-                        position = -1
+            # Only trade with volume confirmation and trend filter
+            if curr_volume_confirm:
+                # Bullish entry: lips > teeth > jaw (aligned) + price > weekly EMA34
+                if lips[i] > teeth[i] > jaw[i] and curr_close > curr_ema_34_1w:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish entry: lips < teeth < jaw (aligned) + price < weekly EMA34
+                elif lips[i] < teeth[i] < jaw[i] and curr_close < curr_ema_34_1w:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                s3 = prev_close - (range_val * 1.1 / 4)
-                if curr_low < s3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: lips < teeth (Alligator sleeping) or price crosses below weekly EMA34
+            if lips[i] < teeth[i] or curr_close < curr_ema_34_1w:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                if curr_high > r3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: lips > teeth (Alligator sleeping) or price crosses above weekly EMA34
+            if lips[i] > teeth[i] or curr_close > curr_ema_34_1w:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
