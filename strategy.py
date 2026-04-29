@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Long: Close > Camarilla R3 AND price > 4h EMA50 AND volume > 2.0x 20-bar avg
-# Short: Close < Camarilla S3 AND price < 4h EMA50 AND volume > 2.0x 20-bar avg
-# Exit: Close crosses Camarilla H3/L3 OR price crosses 4h EMA50 OR ATR stoploss (2.0)
-# Uses 4h HTF for trend (more stable than 1h) and 1d HTF for Camarilla pivots (structure)
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# Position size: 0.20 discrete to minimize fee churn
-# Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long: Close > Camarilla R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short: Close < Camarilla S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit: Close crosses Camarilla midpoint (H5/L5) OR price crosses 1d EMA34 OR ATR stoploss (2.0)
+# Using 1d HTF for trend filter provides more stable signals than 6h alone, reducing whipsaws
+# Volume spike confirms institutional participation and reduces false breakouts
+# Camarilla levels from daily timeframe provide institutional support/resistance
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+# Discrete position sizing: 0.30 for long/short, 0.0 for flat to minimize fee churn
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +27,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 50 or len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d Camarilla pivots (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    camarilla_h3 = pivot + range_1d * 1.1 / 4
-    camarilla_l3 = pivot - range_1d * 1.1 / 4
-    camarilla_r3 = pivot + range_1d * 1.1 / 2
-    camarilla_s3 = pivot - range_1d * 1.1 / 2
-    
-    # Align Camarilla levels to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -76,18 +52,42 @@ def generate_signals(prices):
     start_idx = max(50, 20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
+        # Calculate Camarilla levels from previous 1d bar (using daily OHLC)
+        # Need to get the previous completed 1d bar's OHLC
+        # We'll use the aligned 1d data to get the previous bar's values
+        if i >= 6:  # Need at least one 6h bar to get previous 1d bar
+            # Get index of previous completed 1d bar in aligned array
+            # Since 1d = 4 * 6h bars, we look back 4 positions in the 1d aligned data
+            idx_1d = i // 4
+            if idx_1d >= 1:
+                # Get previous completed 1d bar's OHLC from the original 1d dataframe
+                prev_1d_idx = idx_1d - 1
+                if prev_1d_idx < len(df_1d):
+                    prev_high = df_1d['high'].iloc[prev_1d_idx]
+                    prev_low = df_1d['low'].iloc[prev_1d_idx]
+                    prev_close = df_1d['close'].iloc[prev_1d_idx]
+                    
+                    # Calculate Camarilla levels
+                    range_val = prev_high - prev_low
+                    camarilla_h5 = prev_close + range_val * 1.1 / 2
+                    camarilla_l5 = prev_close - range_val * 1.1 / 2
+                    camarilla_h3 = prev_close + range_val * 1.1 / 4
+                    camarilla_l3 = prev_close - range_val * 1.1 / 4
+                    camarilla_h4 = prev_close + range_val * 1.1 / 3
+                    camarilla_l4 = prev_close - range_val * 1.1 / 3
+                else:
+                    signals[i] = 0.0
+                    continue
+            else:
+                signals[i] = 0.0
+                continue
+        else:
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_4h = ema_50_4h_aligned[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_h3 = h3_aligned[i]
-        curr_l3 = l3_aligned[i]
         
         # Volume spike confirmation: current volume > 2.0x 20-period average
         if i >= 20:
@@ -100,36 +100,38 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: Close below H3 OR price below 4h EMA50 OR stoploss hit
-            if curr_close < curr_h3 or curr_close < curr_ema_4h or curr_close < stop_price:
+            # Exit conditions: Close below Camarilla H5/L5 midpoint OR price below 1d EMA34 OR stoploss hit
+            camarilla_mid = (camarilla_h5 + camarilla_l5) / 2.0
+            if curr_close < camarilla_mid or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: Close above L3 OR price above 4h EMA50 OR stoploss hit
-            if curr_close > curr_l3 or curr_close > curr_ema_4h or curr_close > stop_price:
+            # Exit conditions: Close above Camarilla H5/L5 midpoint OR price above 1d EMA34 OR stoploss hit
+            camarilla_mid = (camarilla_h5 + camarilla_l5) / 2.0
+            if curr_close > camarilla_mid or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long entry: Close > R3 AND price > 4h EMA50 AND volume spike
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_4h and
+            # Long entry: Close > Camarilla H3 AND price > 1d EMA34 AND volume spike
+            if (curr_close > camarilla_h3 and 
+                curr_close > curr_ema_1d and
                 vol_spike):
-                signals[i] = 0.20
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
-            # Short entry: Close < S3 AND price < 4h EMA50 AND volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_4h and
+            # Short entry: Close < Camarilla L3 AND price < 1d EMA34 AND volume spike
+            elif (curr_close < camarilla_l3 and 
+                  curr_close < curr_ema_1d and
                   vol_spike):
-                signals[i] = -0.20
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
             else:
