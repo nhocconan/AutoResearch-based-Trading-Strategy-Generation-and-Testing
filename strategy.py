@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation
-# Long when price breaks above R1 AND close > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short when price breaks below S1 AND close < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when price crosses 12h EMA50 (trend change)
-# Uses discrete position sizing (0.30) to balance capture and risk.
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
+# Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Uses discrete position sizing (0.25) to balance capture and risk.
 # Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to avoid overtrading.
-# Camarilla R1/S1 levels provide tighter support/resistance for earlier breakout detection.
-# Volume spike confirms participation, reducing false breakouts.
-# 12h EMA50 trend filter ensures alignment with medium-term direction, working in both bull and bear regimes.
+# Williams %R identifies exhaustion points in both bull and bear markets.
+# Volume confirmation ensures participation, reducing false signals.
+# 1d EMA34 trend filter ensures alignment with higher-timeframe direction.
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA50_VolumeSpike_v1"
+name = "4h_WilliamsR_MeanReversion_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,29 +27,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter and Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous 12h bar
-    # Camarilla formula: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    camarilla_range = high_12h - low_12h
-    r1 = close_12h + 1.1 * camarilla_range / 12
-    s1 = close_12h - 1.1 * camarilla_range / 12
-    
-    # Align Camarilla levels to 4h timeframe (use previous 12h bar's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Calculate Williams %R (14-period) on 4h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
     # Volume confirmation: >2.0x 20-bar average volume (stricter to avoid overtrading)
     volume_series = pd.Series(volume)
@@ -59,46 +51,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # volume MA and EMA50 warmup
+    start_idx = max(20, 14, 34)  # volume MA, Williams %R, and EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
-        curr_r1 = r1_aligned[i]
-        curr_s1 = s1_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_williams_r = williams_r[i]
         curr_close = close[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price crosses below 12h EMA50 (trend change)
-            if curr_close < curr_ema50_12h:
+            # Exit: Williams %R crosses above -50 (momentum weakening)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above 12h EMA50 (trend change)
-            if curr_close > curr_ema50_12h:
+            # Exit: Williams %R crosses below -50 (momentum weakening)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when price breaks above R1 AND close > 12h EMA50 AND volume confirmation
-            if curr_close > curr_r1 and curr_close > curr_ema50_12h and vol_conf:
-                signals[i] = 0.30
+            # Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume confirmation
+            if curr_williams_r < -80 and curr_close > curr_ema34_1d and vol_conf:
+                signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S1 AND close < 12h EMA50 AND volume confirmation
-            elif curr_close < curr_s1 and curr_close < curr_ema50_12h and vol_conf:
-                signals[i] = -0.30
+            # Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume confirmation
+            elif curr_williams_r > -20 and curr_close < curr_ema34_1d and vol_conf:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
