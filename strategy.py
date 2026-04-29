@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H4/L4 breakout with 1w EMA50 trend filter and volume spike
-# Uses Camarilla pivot levels from weekly timeframe for stronger structural support/resistance.
-# Only takes long breakouts above H4 in uptrend (price > 1w EMA50) and short breakdowns below L4 in downtrend.
-# Volume confirmation (>2.0x 20-period average) filters weak breakouts.
-# Designed for ~25-50 trades/year on 4h timeframe to minimize fee drag while capturing high-probability moves.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses weekly EMA50 for trend filter and daily Donchian channels for breakout signals.
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Designed for ~15-30 trades/year on 1d timeframe to minimize fee drag while capturing high-probability moves.
 # Works in both bull and bear markets via 1w trend filter - only trades breakouts in trend direction.
 
-name = "4h_Camarilla_H4L4_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivots and EMA50 trend (HTF = 1w)
+    # Get 1w data for EMA50 trend filter (HTF = 1w)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -34,41 +33,27 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla pivot levels from 1w OHLC
-    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    #            H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_arr = df_1w['close'].values
+    # Calculate 20-period Donchian channels on 1d data
+    # Upper channel = highest high of last 20 periods
+    # Lower channel = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    camarilla_h4 = close_1w_arr + 1.5 * (high_1w - low_1w)
-    camarilla_l4 = close_1w_arr - 1.5 * (high_1w - low_1w)
-    
-    # Align Camarilla levels to 4h timeframe (with 1-bar delay for completed 1w bar)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # Calculate 20-period average volume for confirmation (on 4h data)
+    # Calculate 20-period average volume for confirmation (on 1d data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR (14-period) for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # Volume MA and ATR warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -76,42 +61,41 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema50_1w = ema_50_1w_aligned[i]
-        curr_h4 = camarilla_h4_aligned[i]
-        curr_l4 = camarilla_l4_aligned[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_atr = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price closes below Camarilla L4 (mean reversion)
-            if curr_close < entry_price - 2.0 * curr_atr or curr_close < curr_l4:
+            # Exit: price closes below Donchian lower channel (mean reversion)
+            if curr_close < curr_lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price closes above Camarilla H4 (mean reversion)
-            if curr_close > entry_price + 2.0 * curr_atr or curr_close > curr_h4:
+            # Exit: price closes above Donchian upper channel (mean reversion)
+            if curr_close > curr_upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average
-            vol_confirm = curr_volume > 2.0 * curr_vol_ma
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = curr_volume > 1.5 * curr_vol_ma
             
-            # Long entry: bullish breakout above H4 in uptrend (price > 1w EMA50)
+            # Long entry: bullish breakout above upper channel in uptrend (price > 1w EMA50)
             if vol_confirm and curr_close > curr_ema50_1w:
-                if curr_high > curr_h4:  # Breakout above H4
+                if curr_high > curr_upper:  # Breakout above upper channel
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-            # Short entry: bearish breakdown below L4 in downtrend (price < 1w EMA50)
+            # Short entry: bearish breakdown below lower channel in downtrend (price < 1w EMA50)
             elif vol_confirm and curr_close < curr_ema50_1w:
-                if curr_low < curr_l4:  # Breakdown below L4
+                if curr_low < curr_lower:  # Breakdown below lower channel
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
