@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper, 1d EMA34 up-trend, volume > 2.5x average (stricter filter)
-# Short when price breaks below 4h Donchian lower, 1d EMA34 down-trend, volume > 2.5x average
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper, 1d EMA34 up-trend, volume > 1.8x average
+# Short when price breaks below 12h Donchian lower, 1d EMA34 down-trend, volume > 1.8x average
 # Exit when price crosses the 50% level (midpoint of Donchian channel)
-# Uses discrete position sizing (0.25) and stronger volume filter to target 20-50 trades/year.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# Uses discrete position sizing (0.25) and volume filter to target 12-37 trades/year on 12h timeframe.
+# Designed to work in both bull and bear markets by following the higher timeframe (1d) trend.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,24 +29,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for Donchian channel (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for Donchian channel (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian levels using previous 20 periods
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 12h Donchian levels using previous 20 periods
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Rolling max/min for upper/lower bands (using previous 20 periods, not including current)
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().shift(1).values
     donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Align 4h indicators to 4h timeframe (no additional delay needed for Donchian)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    # Align 12h indicators to 12h timeframe (no additional delay needed for Donchian)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -64,7 +64,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Volume and 1d EMA34 warmup
+    start_idx = max(20, 34)  # Donchian and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -107,8 +107,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.5x 20-period average (stricter filter)
-            vol_confirmed = curr_volume > 2.5 * curr_vol_ma
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirmed = curr_volume > 1.8 * curr_vol_ma
             
             # Long when price breaks above upper band, 1d EMA34 up-trend, volume confirmed
             if curr_high > curr_upper and curr_close > curr_ema34_1d and vol_confirmed:
