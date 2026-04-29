@@ -45,6 +45,30 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=24, adjust=False, min_periods=24).mean().values
     
+    # Calculate Camarilla levels for 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
+    # Initialize arrays for Camarilla levels
+    camarilla_R3 = np.full_like(close_1d_arr, np.nan)
+    camarilla_S3 = np.full_like(close_1d_arr, np.nan)
+    
+    # Calculate Camarilla levels for each 1d bar (starting from index 1 to avoid lookback issues)
+    for j in range(1, len(close_1d_arr)):
+        # Camarilla levels use previous day's high, low, close
+        H = high_1d[j-1]
+        L = low_1d[j-1]
+        C = close_1d_arr[j-1]
+        range_hl = H - L
+        
+        camarilla_R3[j] = C + range_hl * 1.1 / 4
+        camarilla_S3[j] = C - range_hl * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
@@ -58,42 +82,6 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        
-        # Calculate Camarilla levels from previous 1d bar (need completed 1d bar)
-        # Get previous completed 1d bar index
-        if i >= 96:  # 96 * 15min = 24h = 1d (assuming 15m data, but we're on 12h so adjust)
-            # For 12h timeframe, we need to look back 2 bars for previous day
-            # Actually, since we're using 12h candles, we need to get the 1d HTF data properly
-            # We'll use the HTF data we already loaded
-            pass
-        
-        # Since we're on 12h timeframe, we need to calculate Camarilla from 1d HTF data
-        # We need to align the 1d Camarilla levels to the 12h timeframe
-        # We'll calculate Camarilla levels for each 1d bar and then align them
-        
-        # Calculate Camarilla levels for 1d data
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d_arr = df_1d['close'].values
-        
-        # Initialize arrays for Camarilla levels
-        camarilla_R3 = np.full_like(close_1d_arr, np.nan)
-        camarilla_S3 = np.full_like(close_1d_arr, np.nan)
-        
-        # Calculate Camarilla levels for each 1d bar (starting from index 2 to avoid lookback issues)
-        for j in range(2, len(close_1d_arr)):
-            # Camarilla levels use previous day's high, low, close
-            H = high_1d[j-1]
-            L = low_1d[j-1]
-            C = close_1d_arr[j-1]
-            range_hl = H - L
-            
-            camarilla_R3[j] = C + range_hl * 1.1 / 4
-            camarilla_S3[j] = C - range_hl * 1.1 / 4
-        
-        # Align Camarilla levels to 12h timeframe
-        camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-        camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
         
         # Get current Camarilla levels
         curr_R3 = camarilla_R3_aligned[i]
