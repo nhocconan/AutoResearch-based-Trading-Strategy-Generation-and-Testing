@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume confirmation
-# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > 1d EMA50 AND volume > 1.3x 20-period average
-# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < 1d EMA50 AND volume > 1.3x 20-period average
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 AND price > 4h EMA50 AND volume > 2.0x 24-period average
+# Short when price breaks below Camarilla S3 AND price < 4h EMA50 AND volume > 2.0x 24-period average
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
-# Discrete position sizing (0.25) to minimize fee drag
-# Target: 12-25 trades/year on 12h timeframe (~50-100 total over 4 years)
-# Williams Alligator identifies trend inception and continuation, effective in both bull and bear markets
-# 1d EMA50 filter ensures we only trade with the higher timeframe trend
-# Volume confirmation reduces false breakouts
+# Discrete position sizing (0.20) to minimize fee drag
+# Session filter: 08-20 UTC to avoid low-liquidity hours
+# Target: 15-35 trades/year on 1h timeframe (~60-140 total over 4 years)
+# Works in bull markets via long breakouts with 4h uptrend
+# Works in bear markets via short breakdowns with 4h downtrend
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R3_S3_Breakout_4hEMA50_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +27,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Pre-compute session filter (UTC hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -45,69 +48,55 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Williams Alligator on 12h timeframe
-    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
-    # Teeth (red): 8-period SMMA, shifted 5 bars forward
-    # Lips (green): 5-period SMMA, shifted 3 bars forward
-    # SMMA = smoothed moving average (similar to EMA but with different smoothing)
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA(i) = (SMMA(i-1) * (period-1) + arr[i]) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Camarilla levels from previous 4h bar (using 4h data)
+    # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # We use previous 4h bar's OHLC to calculate current levels
+    prev_close_4h = df_4h['close'].shift(1).values
+    prev_high_4h = df_4h['high'].shift(1).values
+    prev_low_4h = df_4h['low'].shift(1).values
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Calculate Camarilla R3 and S3 levels
+    camarilla_range_4h = prev_high_4h - prev_low_4h
+    camarilla_R3_4h = prev_close_4h + (camarilla_range_4h * 1.1 / 4)
+    camarilla_S3_4h = prev_close_4h - (camarilla_range_4h * 1.1 / 4)
     
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Invalidate the shifted values that don't have enough lookback
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Align Camarilla levels to 1h timeframe
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_R3_4h)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_S3_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(50, 50, 13)  # warmup for EMA and Alligator
+    start_idx = max(100, 50, 50)  # warmup for EMA and ATR
     
     for i in range(start_idx, n):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+            
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_ema_4h = ema_50_4h_aligned[i]
         curr_atr = atr[i]
-        curr_jaw = jaw_shifted[i]
-        curr_teeth = teeth_shifted[i]
-        curr_lips = lips_shifted[i]
+        curr_R3 = camarilla_R3_aligned[i]
+        curr_S3 = camarilla_S3_aligned[i]
         
-        # Skip if Alligator values are not available
-        if np.isnan(curr_jaw) or np.isnan(curr_teeth) or np.isnan(curr_lips):
+        # Skip if Camarilla levels are not available
+        if np.isnan(curr_R3) or np.isnan(curr_S3):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation: current volume > 1.3x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
+        # Volume spike confirmation: current volume > 2.0x 24-period average
+        if i >= 24:
+            vol_ma_24 = np.mean(volume[i-24:i])
         else:
-            vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.3 * vol_ma_20 if vol_ma_20 > 0 else False
-        
-        # Bullish alignment: jaws < teeth < lips
-        bullish_alignment = curr_jaw < curr_teeth < curr_lips
-        # Bearish alignment: jaws > teeth > lips
-        bearish_alignment = curr_jaw > curr_teeth > curr_lips
+            vol_ma_24 = 0.0
+        vol_spike = volume[i] > 2.0 * vol_ma_24 if vol_ma_24 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
@@ -121,7 +110,7 @@ def generate_signals(prices):
                 position = 0
                 highest_high_since_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
@@ -134,17 +123,17 @@ def generate_signals(prices):
                 position = 0
                 lowest_low_since_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new entries
-            # Long entry: bullish alignment AND price > 1d EMA50 AND volume spike
-            if bullish_alignment and curr_close > curr_ema_1d and vol_spike:
-                signals[i] = 0.25
+            # Long entry: price breaks above Camarilla R3 AND price > 4h EMA50 AND volume spike
+            if curr_close > curr_R3 and curr_close > curr_ema_4h and vol_spike:
+                signals[i] = 0.20
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: bearish alignment AND price < 1d EMA50 AND volume spike
-            elif bearish_alignment and curr_close < curr_ema_1d and vol_spike:
-                signals[i] = -0.25
+            # Short entry: price breaks below Camarilla S3 AND price < 4h EMA50 AND volume spike
+            elif curr_close < curr_S3 and curr_close < curr_ema_4h and vol_spike:
+                signals[i] = -0.20
                 position = -1
                 lowest_low_since_entry = curr_low
             else:
