@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA50 AND volume > 1.3x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA50 AND volume > 1.3x 20-period average
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above 20-day Donchian upper AND price > 1w EMA50 AND volume > 1.5x 20-period average
+# Short when price breaks below 20-day Donchian lower AND price < 1w EMA50 AND volume > 1.5x 20-period average
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 12-30 trades/year on 12h timeframe (~50-120 total over 4 years)
+# Target: 15-25 trades/year on 1d timeframe (~60-100 total over 4 years)
 # Works in bull markets via long breakouts with 1w uptrend
 # Works in bear markets via short breakdowns with 1w downtrend
-# Uses 1w EMA50 for strong trend filter to reduce false breakouts and improve win rate
 
-name = "12h_Donchian_20_Breakout_1wEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian_20_Breakout_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,17 +44,22 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) from price data
-    # Upper = highest high over last 20 periods, Lower = lowest low over last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period)
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(lookback-1, n):
+        upper[i] = np.max(high[i-lookback+1:i+1])
+        lower[i] = np.min(low[i-lookback+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(100, 50, 20)  # warmup for EMA and ATR
+    start_idx = max(lookback, 50, 50)  # warmup for Donchian and ATR
     
     for i in range(start_idx, n):
         curr_close = close[i]
@@ -63,20 +67,20 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
-        curr_upper = highest_high[i]
-        curr_lower = lowest_low[i]
+        curr_upper = upper[i]
+        curr_lower = lower[i]
         
         # Skip if Donchian levels are not available
         if np.isnan(curr_upper) or np.isnan(curr_lower):
             signals[i] = 0.0
             continue
         
-        # Volume spike confirmation: current volume > 1.3x 20-period average
+        # Volume spike confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.3 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
