@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume spike
-# Long when Bull Power > 0 AND price > 12h EMA50 AND volume > 2.0x 20-bar avg
-# Short when Bear Power < 0 AND price < 12h EMA50 AND volume > 2.0x 20-bar avg
-# Exit when Elder Power crosses zero or opposite Elder Power signal occurs
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 6h.
-# Elder Ray measures bull/bear strength via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Works in both bull and bear markets by trading with the intermediate trend (12h EMA50)
-# Volume confirmation ensures signals have conviction, reducing false signals in choppy markets.
+# Hypothesis: 12h Williams Alligator with 1w/1d HTF trend filter and volume confirmation
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > 1w EMA34 AND volume > 1.8x 24-bar avg
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < 1w EMA34 AND volume > 1.8x 24-bar avg
+# Exit when Alligator alignment reverses or volume drops below 1.2x average
+# Uses Williams Alligator (SMAs with specific offsets) to identify trend phases
+# 1w EMA34 filter ensures we only trade with the long-term trend
+# Volume confirmation ensures breakouts have conviction
+# Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years)
 
-name = "6h_ElderRay_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,70 +26,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA(13) for Elder Ray
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Williams Alligator components on 12h data (using median prices)
+    median_price = (high + low) / 2.0
+    
+    # Jaw: 13-period SMMA, shifted 8 bars ahead
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift 8 bars ahead
+    jaw[:8] = np.nan  # first 8 values invalid after shift
+    
+    # Teeth: 8-period SMMA, shifted 5 bars ahead
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift 5 bars ahead
+    teeth[:5] = np.nan  # first 5 values invalid after shift
+    
+    # Lips: 5-period SMMA, shifted 3 bars ahead
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift 3 bars ahead
+    lips[:3] = np.nan  # first 3 values invalid after shift
+    
+    # Volume confirmation: >1.8x 24-bar average volume
     volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_ma_24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_24
+    volume_exit = volume < 1.2 * volume_ma_24  # exit when volume drops
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Volume MA(20) and EMA13 need 20 and 13 bars respectively
+    start_idx = max(24, 13, 8, 5)  # Volume MA(24) and Alligator components
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
+        vol_exit_cond = volume_exit[i]
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
-        ema_50 = ema_50_12h_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        
+        # Check Alligator alignment
+        bullish_alignment = jaw_val < teeth_val < lips_val  # jaws < teeth < lips
+        bearish_alignment = jaw_val > teeth_val > lips_val  # jaws > teeth > lips
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND price > 12h EMA50 AND volume confirmation
-            if bull > 0 and curr_close > ema_50 and vol_conf:
+            # Long when bullish alignment AND price > 1w EMA34 AND volume confirmation
+            if bullish_alignment and curr_close > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Bear Power < 0 AND price < 12h EMA50 AND volume confirmation
-            elif bear < 0 and curr_close < ema_50 and vol_conf:
+            # Short when bearish alignment AND price < 1w EMA34 AND volume confirmation
+            elif bearish_alignment and curr_close < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when Bull Power <= 0 or Bear Power >= 0
-            if bull <= 0 or bear >= 0:
+        elif position == 1:  # Long - exit when alignment reverses or volume drops
+            if not bullish_alignment or vol_exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when Bear Power >= 0 or Bull Power <= 0
-            if bear >= 0 or bull <= 0:
+        elif position == -1:  # Short - exit when alignment reverses or volume drops
+            if not bearish_alignment or vol_exit_cond:
                 signals[i] = 0.0
                 position = 0
             else:
