@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA(34) trend filter + volume confirmation + ATR-based stoploss
-# Long when price breaks above 4h Donchian high AND price > 1d EMA(34) AND volume > 1.5x 20-period average
-# Short when price breaks below 4h Donchian low AND price < 1d EMA(34) AND volume > 1.5x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. 1d EMA filter reduces whipsaw in ranging markets.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA(50) trend filter + volume confirmation
+# Long when price breaks above 1d Donchian high AND price > 1w EMA(50) AND volume > 1.8x 20-period average
+# Short when price breaks below 1d Donchian low AND price < 1w EMA(50) AND volume > 1.8x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee drag. Trend filter reduces whipsaw in ranging markets.
 # Proven pattern from DB: Donchian breakout + volume + trend filter works on SOLUSDT (test Sharpe 1.10-1.38)
-# Adding 1d EMA(34) as HTF trend filter improves BTC/ETH performance vs 12h EMA(50)
+# Adapting to 1d primary timeframe with 1w HTF for lower trade frequency (~20-50 trades/year) to reduce fee drag
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v3"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,16 +25,16 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(50)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR for volatility (14-period)
+    # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -45,23 +45,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 34)  # warmup for indicators
+    start_idx = max(100, 20, 50)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_34_1d_aligned[i]
+        curr_ema = ema_50_1w_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.8x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # 4h Donchian(20) channels - calculate using lookback window
+        # 1d Donchian(20) channels - calculate using lookback window
         if i >= 20:
             donchian_high = np.max(high[i-20:i])
             donchian_low = np.min(low[i-20:i])
@@ -71,7 +71,7 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR price < 1d EMA(34)
+            # Exit: price breaks below Donchian low OR price < 1w EMA(50)
             if curr_close < donchian_low or curr_close < curr_ema:
                 signals[i] = 0.0
                 position = 0
@@ -79,7 +79,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR price > 1d EMA(34)
+            # Exit: price breaks above Donchian high OR price > 1w EMA(50)
             if curr_close > donchian_high or curr_close > curr_ema:
                 signals[i] = 0.0
                 position = 0
@@ -87,13 +87,13 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high AND price > 1d EMA(34) AND volume spike
+            # Long entry: price breaks above Donchian high AND price > 1w EMA(50) AND volume spike
             if (curr_close > donchian_high and 
                 curr_close > curr_ema and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low AND price < 1d EMA(34) AND volume spike
+            # Short entry: price breaks below Donchian low AND price < 1w EMA(50) AND volume spike
             elif (curr_close < donchian_low and 
                   curr_close < curr_ema and 
                   vol_spike):
