@@ -3,127 +3,128 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + chop regime filter
-# Donchian breakouts capture momentum in trending markets; chop filter avoids whipsaws in ranging markets
-# Volume confirmation ensures breakouts have institutional participation
-# Works in bull via long breakouts, bear via short breakouts, range via chop filter disabling entries
-# Target: 25-40 trades/year on 4h timeframe (100-160 total over 4 years) to minimize fee drag
+# Hypothesis: 1d KAMA + RSI(14) + choppiness regime filter (CHOP > 61.8) for mean reversion
+# In choppy markets (CHOP > 61.8), price tends to revert to KAMA (adaptive trend)
+# Long when RSI < 30 and price < KAMA(10, ER=2,30) in chop
+# Short when RSI > 70 and price > KAMA(10, ER=2,30) in chop
+# Uses 1w EMA50 as higher timeframe trend filter: only take longs when price > 1w EMA50,
+# only shorts when price < 1w EMA50 to avoid fighting major trends
+# Designed for ~7-25 trades/year on 1d timeframe with strict entry conditions
+# Works in both bull and bear via 1w EMA50 trend filter and chop regime confirmation
 
-name = "4h_Donchian20_VolumeChop_Regime_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopRegime_1wEMA50_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for chop regime filter (HTF = 1d)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA50 trend filter (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate chop regime on 1d: high-low range vs ATR
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range for 1d
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate KAMA (adaptive moving average) on 1d
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    close_s = pd.Series(close)
+    change = abs(close_s - close_s.shift(10))
+    volatility = abs(close_s.diff()).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    # Chopiness = (sum of true range over n periods) / (max(high) - min(low) over same period) * 100
-    # Higher chop = more ranging, lower chop = more trending
-    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = max_high_14 - min_low_14
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
-    chop_value = (tr_sum_14 / chop_denominator) * 100
+    # Calculate RSI(14)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Chop regime: > 61.8 = ranging (chop), < 38.2 = trending
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_value)
-    
-    # Calculate Donchian channels on 4h
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR (14-period) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Choppiness Index (CHOP) - measures trend vs range
+    # CHOP > 61.8 = ranging/choppy market (good for mean reversion)
+    # CHOP < 38.2 = trending market (avoid mean reversion)
+    atr_period = 14
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_sum = tr.rolling(window=atr_period, min_periods=atr_period).sum()
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max()
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(atr_period)
+    chop = chop.fillna(50).values  # neutral when undefined
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, donchian_window)  # warmup for Donchian and volume MA
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_chop = chop_aligned[i]
-        curr_vol_ma = vol_ma_20[i]
-        curr_atr = atr[i]
+        curr_kama = kama[i]
+        curr_rsi = rsi[i]
+        curr_chop = chop[i]
+        curr_ema50_1w = ema_50_1w_aligned[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price breaks below Donchian low (trend reversal)
-            if curr_close < entry_price - 1.5 * curr_atr or curr_close < curr_donchian_low:
+            # Exit: RSI > 50 (mean reversion complete) or chop < 38.2 (trending market)
+            if curr_rsi > 50 or curr_chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price breaks above Donchian high (trend reversal)
-            if curr_close > entry_price + 1.5 * curr_atr or curr_close > curr_donchian_high:
+            # Exit: RSI < 50 (mean reversion complete) or chop < 38.2 (trending market)
+            if curr_rsi < 50 or curr_chop < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = curr_volume > 1.5 * curr_vol_ma
-            
-            # Only trade in trending regime (chop < 38.2)
-            if curr_chop < 38.2 and vol_confirm:
-                # Long entry: price breaks above Donchian high
-                if curr_close > curr_donchian_high:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                # Short entry: price breaks below Donchian low
-                elif curr_close < curr_donchian_low:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
+            # Only trade in choppy/ranging markets (CHOP > 61.8)
+            if curr_chop > 61.8:
+                # Regime filter: only trade with higher timeframe trend
+                # Longs only when price > 1w EMA50 (bullish higher TF)
+                # Shorts only when price < 1w EMA50 (bearish higher TF)
+                if curr_close > curr_ema50_1w:
+                    # Long setup: oversold RSI + price below KAMA (mean reversion long)
+                    if curr_rsi < 30 and curr_close < curr_kama:
+                        signals[i] = 0.25
+                        position = 1
+                elif curr_close < curr_ema50_1w:
+                    # Short setup: overbought RSI + price above KAMA (mean reversion short)
+                    if curr_rsi > 70 and curr_close > curr_kama:
+                        signals[i] = -0.25
+                        position = -1
+                # If price == EMA50_1w, stay flat (no trade)
             else:
                 signals[i] = 0.0
     
