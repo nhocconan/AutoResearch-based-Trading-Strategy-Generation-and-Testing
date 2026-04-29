@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation
 # Uses moderate Camarilla levels (H3/L3) to balance signal quality and frequency
 # 1d EMA34 provides strong trend filter for regime alignment
 # Volume > 1.8x average confirms institutional participation
 # Discrete position sizing (0.25) with Camarilla H4/L4 mean reversion exit
-# Designed for ~12-37 trades/year to minimize fee drag while capturing strong moves
+# Designed for ~30-50 trades/year to minimize fee drag while capturing strong moves
 # Works in bull/bear via trend filter and mean reversion exits
 
-name = "12h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -69,7 +69,7 @@ def generate_signals(prices):
     h4_shifted[0] = np.nan
     l4_shifted[0] = np.nan
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3_shifted)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_shifted)
