@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-# Uses RSI(14) on 1h for oversold/overbought signals, filtered by 4h EMA50 trend direction.
-# Only takes long positions when RSI < 30 and price > 4h EMA50 (uptrend pullback).
-# Only takes short positions when RSI > 70 and price < 4h EMA50 (downtrend bounce).
-# Volume confirmation (>1.5x 20-period average) ensures momentum behind the move.
-# Designed for ~20-40 trades/year on 1h timeframe to minimize fee drag while capturing high-probability mean reversion in trending markets.
-# Works in both bull and bear markets via 4h trend filter - only trades mean reversion in trend direction.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA50 trend filter and volume spike
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Only takes long when Bull Power > 0 and increasing (bullish momentum) in uptrend (price > 1d EMA50)
+# Only takes short when Bear Power < 0 and decreasing (bearish momentum) in downtrend (price < 1d EMA50)
+# Volume confirmation (>2.0x 20-period average) filters weak signals
+# Designed for ~25-40 trades/year on 6h timeframe to minimize fee drag while capturing momentum shifts
+# Works in both bull and bear markets via 1d trend filter - only trades in trend direction
 
-name = "1h_RSI_MeanReversion_4hEMA50_VolumeFilter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +24,92 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 4h data for EMA50 trend filter (HTF = 4h)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA50 trend filter (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate RSI(14) on 1h
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 20-period average volume for confirmation (on 1h data)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Calculate 20-period average volume for confirmation (on 6h data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ATR (14-period) for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # RSI and volume MA warmup
+    start_idx = 20  # Volume MA and ATR warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_rsi = rsi_values[i]
-        curr_ema50_4h = ema_50_4h_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = curr_volume > 1.5 * curr_vol_ma
+        curr_atr = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral (50) or stoploss via signal=0
-            if curr_rsi >= 50:
+            # Exit: stoploss hit or Elder Ray turns bearish (Bull Power <= 0)
+            if curr_close < entry_price - 2.0 * curr_atr or curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral (50) or stoploss via signal=0
-            if curr_rsi <= 50:
+            # Exit: stoploss hit or Elder Ray turns bullish (Bear Power >= 0)
+            if curr_close > entry_price + 2.0 * curr_atr or curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: RSI oversold (<30) in uptrend (price > 4h EMA50) with volume confirmation
-            if vol_confirm and curr_rsi < 30 and curr_close > curr_ema50_4h:
-                signals[i] = 0.20
-                position = 1
-                entry_price = curr_close
-            # Short entry: RSI overbought (>70) in downtrend (price < 4h EMA50) with volume confirmation
-            elif vol_confirm and curr_rsi > 70 and curr_close < curr_ema50_4h:
-                signals[i] = -0.20
-                position = -1
-                entry_price = curr_close
+            # Volume confirmation: current volume > 2.0x 20-period average
+            vol_confirm = curr_volume > 2.0 * curr_vol_ma
+            
+            # Long entry: Bull Power > 0 and increasing (bullish momentum) in uptrend
+            if vol_confirm and curr_close > curr_ema50_1d:
+                if curr_bull_power > 0 and curr_bull_power > bull_power[i-1]:  # Increasing bull power
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+            # Short entry: Bear Power < 0 and decreasing (bearish momentum) in downtrend
+            elif vol_confirm and curr_close < curr_ema50_1d:
+                if curr_bear_power < 0 and curr_bear_power < bear_power[i-1]:  # Decreasing bear power (more negative)
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
             else:
                 signals[i] = 0.0
     
