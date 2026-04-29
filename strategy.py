@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian upper channel in bullish regime (12h EMA50 up) with volume spike
-# Short when price breaks below Donchian lower channel in bearish regime (12h EMA50 down) with volume spike
-# Uses 12h EMA50 to filter for trending markets, avoiding whipsaws in ranging conditions
-# Volume confirmation ensures breakouts have institutional participation
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
+# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session filter
+# Long when RSI(2) < 10 and price > 4h EMA50 (bullish regime)
+# Short when RSI(2) > 90 and price < 4h EMA50 (bearish regime)
+# Uses 4h EMA50 for trend filter to avoid mean reversion in strong trends
+# Session filter (08-20 UTC) reduces noise trades
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag
+# Works in bull/bear: mean reversion in ranges, trend filter avoids false signals
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_Trend_v2"
-timeframe = "4h"
+name = "1h_RSI2_4hEMA50_MeanRev_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +25,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 12h calculations
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 55:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 12h EMA to 4h timeframe (completed 12h bar only)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate RSI(2) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Donchian(20) channels on 4h
-    donchian_window = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Wilder's smoothing for RSI
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[1:period+1])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    avg_gain = wilders_smooth(gain, 2)
+    avg_loss = wilders_smooth(loss, 2)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for EMA and Donchian
+    start_idx = 52  # warmup for RSI(2) and EMA50
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
             
+        # Only trade during session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_upper = upper_channel[i]
-        curr_lower = lower_channel[i]
-        curr_ema = ema_12h_aligned[i]
-        curr_volume_confirm = volume_confirm[i]
-        
-        # Trend filter: bullish if price above EMA, bearish if price below EMA
-        is_bullish = curr_close > curr_ema
-        is_bearish = curr_close < curr_ema
+        curr_rsi = rsi[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation
-            if curr_volume_confirm:
-                # Bullish breakout: price breaks above upper Donchian channel in bullish regime
-                if curr_close > curr_upper and is_bullish:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish breakout: price breaks below lower Donchian channel in bearish regime
-                elif curr_close < curr_lower and is_bearish:
-                    signals[i] = -0.25
-                    position = -1
+            # Mean reversion entries with trend filter
+            if curr_rsi < 10 and curr_close > curr_ema_50_4h:
+                # Bullish mean reversion in uptrend
+                signals[i] = 0.20
+                position = 1
+            elif curr_rsi > 90 and curr_close < curr_ema_50_4h:
+                # Bearish mean reversion in downtrend
+                signals[i] = -0.20
+                position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price returns to middle of channel OR breaks below lower channel with volume
-            middle_channel = (curr_upper + curr_lower) / 2.0
-            
-            if curr_close <= middle_channel or (curr_close < curr_lower and curr_volume_confirm):
+            # Exit when RSI returns to neutral (50) or reverses
+            if curr_rsi >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price returns to middle of channel OR breaks above upper channel with volume
-            middle_channel = (curr_upper + curr_lower) / 2.0
-            
-            if curr_close >= middle_channel or (curr_close > curr_upper and curr_volume_confirm):
+            # Exit when RSI returns to neutral (50) or reverses
+            if curr_rsi <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
