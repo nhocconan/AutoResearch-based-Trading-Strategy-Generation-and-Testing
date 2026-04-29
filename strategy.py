@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-# Long when price breaks above Donchian upper channel in bullish regime (ADX>25) with volume spike
-# Short when price breaks below Donchian lower channel in bearish regime (ADX>25) with volume spike
-# Uses 1d ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
-# Volume confirmation ensures breakouts have institutional participation
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drift
+# Hypothesis: 4h Donchian(20) breakout with 1d volume regime filter (volume > 1.5x 20d avg) and ATR-based trailing stop
+# Long when price breaks above Donchian upper channel in high-volume regime
+# Short when price breaks below Donchian lower channel in high-volume regime
+# Uses 1d volume to filter for institutional participation, avoiding low-volume breakouts
+# ATR trailing stop (2.5x ATR) to protect gains and limit drawdown
+# Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag
 
-name = "4h_Donchian20_1dADX25_VolumeSpike_Regime_v1"
+name = "4h_Donchian20_1dVolumeRegime_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,67 +29,38 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d 20-period volume average for regime filter
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_regime = df_1d['volume'].values > (1.5 * vol_ma_20_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[1:period+1])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1]/period) + data[i]
-        return result
-    
-    atr_1d = wilders_smooth(tr, 14)
-    dm_plus_smooth = wilders_smooth(dm_plus, 14)
-    dm_minus_smooth = wilders_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smooth(dx, 14)
-    
-    # Align daily ADX to 4h timeframe (completed 1d bar only)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align daily volume regime to 4h timeframe (completed 1d bar only)
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     
     # Donchian(20) channels on 4h
     donchian_window = 20
     upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    # ATR(14) for trailing stop
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    
+    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0  # for long trailing stop
+    lowest_low_since_entry = 0    # for short trailing stop
     
-    start_idx = max(35, 20)  # warmup for ADX and Donchian
+    start_idx = max(35, 20)  # warmup for ATR and Donchian
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
+        if np.isnan(volume_regime_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
@@ -98,39 +69,42 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_upper = upper_channel[i]
         curr_lower = lower_channel[i]
-        curr_adx = adx_aligned[i]
-        curr_volume_confirm = volume_confirm[i]
-        
-        # Regime filter: only trade in trending markets (ADX > 25)
-        is_trending = curr_adx > 25
+        curr_volume_regime = volume_regime_aligned[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and in trending regime
-            if is_trending and curr_volume_confirm:
+            # Only trade in high-volume regime (institutional participation)
+            if curr_volume_regime:
                 # Bullish breakout: price breaks above upper Donchian channel
                 if curr_close > curr_upper:
                     signals[i] = 0.25
                     position = 1
+                    highest_high_since_entry = curr_high
                 # Bearish breakout: price breaks below lower Donchian channel
                 elif curr_close < curr_lower:
                     signals[i] = -0.25
                     position = -1
+                    lowest_low_since_entry = curr_low
         
-        elif position == 1:  # Long position - exit conditions
-            # Exit when: price returns to middle of channel OR breaks below lower channel with volume
-            middle_channel = (curr_upper + curr_lower) / 2.0
+        elif position == 1:  # Long position
+            # Update highest high since entry
+            if curr_high > highest_high_since_entry:
+                highest_high_since_entry = curr_high
             
-            if curr_close <= middle_channel or (curr_close < curr_lower and curr_volume_confirm):
+            # ATR trailing stop: exit if price drops 2.5x ATR from highest high
+            if curr_close < (highest_high_since_entry - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
-        elif position == -1:  # Short position - exit conditions
-            # Exit when: price returns to middle of channel OR breaks above upper channel with volume
-            middle_channel = (curr_upper + curr_lower) / 2.0
+        elif position == -1:  # Short position
+            # Update lowest low since entry
+            if curr_low < lowest_low_since_entry:
+                lowest_low_since_entry = curr_low
             
-            if curr_close >= middle_channel or (curr_close > curr_upper and curr_volume_confirm):
+            # ATR trailing stop: exit if price rises 2.5x ATR from lowest low
+            if curr_close > (lowest_low_since_entry + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
