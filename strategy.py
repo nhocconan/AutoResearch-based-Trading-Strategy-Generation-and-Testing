@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Donchian channels capture structural breakouts; 1w EMA34 ensures alignment with weekly trend
-# Volume > 1.8x 20-period average confirms participation; discrete sizing (0.25) minimizes fee churn
-# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
+# Camarilla R1/S1 provides precise daily pivot-based breakout levels
+# 1d EMA34 ensures alignment with higher-timeframe trend
+# Volume > 2.0x 30-period average confirms institutional participation
+# Discrete sizing (0.25) minimizes fee churn; ATR-based stoploss via signal=0 on break of opposite level
+# Works in bull/bear: breakouts capture momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss (14-period)
+    # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -32,20 +34,21 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    # Volume confirmation: volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Precompute daily data for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute daily data for Camarilla levels (using 1d data for 12h strategy)
+    # Since we're on 12h timeframe, we use 1d data to calculate Camarilla levels
+    # that update once per day
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -60,13 +63,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20, 14, 34)  # warmup: need 20 days for Donchian, 20 for volume, 14 for ATR, 34 for EMA
+    # Warmup: need sufficient data for all indicators
+    start_idx = max(34, 30, 14)  # EMA34, volume MA30, ATR14
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i]) or
             np.isnan(daily_high_aligned[i]) or
             np.isnan(daily_low_aligned[i]) or
             np.isnan(daily_close_aligned[i])):
@@ -77,34 +81,37 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1w = ema_34_1w_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         
-        # Use previous day's levels (shift by 1)
+        # Use previous day's levels (shift by 1 to avoid look-ahead)
         prev_high = daily_high_aligned[i-1]
         prev_low = daily_low_aligned[i-1]
+        prev_close = daily_close_aligned[i-1]
         
         if position == 0:  # Flat - look for new entries
-            if not (np.isnan(prev_high) or np.isnan(prev_low)):
-                # Calculate Donchian levels (20-period)
-                upper_channel = prev_high
-                lower_channel = prev_low
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                # Calculate Camarilla levels (R1/S1)
+                range_val = prev_high - prev_low
+                r1 = prev_close + (range_val * 1.1 / 12)
+                s1 = prev_close - (range_val * 1.1 / 12)
                 
                 # Only trade with volume confirmation and trend filter
                 if curr_volume_confirm:
-                    # Bullish entry: price breaks above upper channel + above 1w EMA34
-                    if curr_high > upper_channel and curr_close > curr_ema_34_1w:
+                    # Bullish entry: price breaks above R1 + above 1d EMA34
+                    if curr_high > r1 and curr_close > curr_ema_34_1d:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish entry: price breaks below lower channel + below 1w EMA34
-                    elif curr_low < lower_channel and curr_close < curr_ema_34_1w:
+                    # Bearish entry: price breaks below S1 + below 1d EMA34
+                    elif curr_low < s1 and curr_close < curr_ema_34_1d:
                         signals[i] = -0.25
                         position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower channel
-            if not (np.isnan(prev_high) or np.isnan(prev_low)):
-                lower_channel = prev_low
-                if curr_low < lower_channel:
+            # Exit: price breaks below S1 (opposite level)
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                s1 = prev_close - (range_val * 1.1 / 12)
+                if curr_low < s1:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -113,10 +120,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper channel
-            if not (np.isnan(prev_high) or np.isnan(prev_low)):
-                upper_channel = prev_high
-                if curr_high > upper_channel:
+            # Exit: price breaks above R1 (opposite level)
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                r1 = prev_close + (range_val * 1.1 / 12)
+                if curr_high > r1:
                     signals[i] = 0.0
                     position = 0
                 else:
