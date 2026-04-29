@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
 # Long when price breaks above R3 AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
 # Short when price breaks below S3 AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
 # Exit when price crosses opposite Camarilla level (S3 for longs, R3 for shorts)
 # Uses discrete position sizing (0.25) to minimize fee churn while capturing moves.
-# Target: 75-150 total trades over 4 years (19-37/year) on 4h.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 # Camarilla R3/S3 are strong intraday levels with good breakout reliability.
 # 1d EMA50 filters counter-trend moves, volume spike ensures institutional participation.
 # Works in bull markets (trend continuation via breakouts) and bear markets (mean reversion within trend via exits).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(50) on 1d data
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
+    # Align EMA50 to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Get 1d data for Camarilla pivot levels (using prior bar's OHLC)
@@ -53,12 +53,12 @@ def generate_signals(prices):
     prior_low[0] = np.nan
     prior_close[0] = np.nan
     
-    # Align prior bar OHLC to 4h timeframe
+    # Align prior bar OHLC to 12h timeframe
     prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
     prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
     prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close)
     
-    # Calculate Camarilla levels for each 4h bar based on prior bar's OHLC
+    # Calculate Camarilla levels for each 12h bar based on prior bar's OHLC
     # Camarilla R3 = Close + (High - Low) * 1.1/4
     # Camarilla S3 = Close - (High - Low) * 1.1/4
     # We use R3/S3 for entries/exits as they are strong intraday levels
