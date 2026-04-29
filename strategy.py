@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses Camarilla pivot levels from 4h: breakout at R1/S1 with continuation (not fade)
-# Volume confirmation (>1.5x 20-period average) ensures institutional participation
-# Trend filter uses 4h EMA50 to avoid counter-trend trades in both bull and bear markets
-# Session filter (08-20 UTC) reduces noise trades
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-# Designed for 1h timeframe to capture swings with controlled frequency
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses Camarilla pivot levels from 12h: breakout at R3/S3 with continuation (not fade)
+# Volume confirmation (>2.0x 48-period average) ensures institutional participation
+# Trend filter uses 1d EMA34 to avoid counter-trend trades in both bull and bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Designed for 12h timeframe to capture swings with controlled frequency
 # BTC/ETH focus: requires EMA alignment and volume confirmation to avoid SOL-only bias
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA50_Volume_Session"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter and Camarilla pivot calculation (HTF = 4h)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA34 trend filter (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from prior 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from prior 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Camarilla pivot formula
-    pivot = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
     
-    # Resistance levels (focus on R1 for breakout)
-    r1 = pivot + (range_4h * 1.1 / 12)
-    # Support levels (focus on S1 for breakout)
-    s1 = pivot - (range_4h * 1.1 / 12)
+    # Resistance levels (focus on R3 for breakout)
+    r3 = pivot + (range_12h * 1.1 / 4)
+    # Support levels (focus on S3 for breakout)
+    s3 = pivot - (range_12h * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe (delayed by one 4h bar for look-ahead avoidance)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Align Camarilla levels to 12h timeframe (delayed by one 12h bar for look-ahead avoidance)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
     
     # Calculate ATR(14) for stoploss
     tr1 = pd.Series(high - low)
@@ -61,41 +65,32 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period average volume for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 48-period average volume for confirmation (2 days of 12h bars)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = max(50, 20, 14)  # EMA50, volume MA, and ATR warmup
+    start_idx = max(34, 48, 14)  # EMA34, volume MA, and ATR warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Skip if outside trading session
-        if not in_session[i]:
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema50_4h = ema_50_4h_aligned[i]
-        curr_r1 = r1_aligned[i]
-        curr_s1 = s1_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_atr = atr[i]
         curr_volume = volume[i]
-        curr_vol_ma = vol_ma_20[i]
+        curr_vol_ma = vol_ma_48[i]
         
         # Handle stoploss and exits
         if position == 1:  # Long position
@@ -103,40 +98,40 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.0 * atr_at_entry:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price breaks below S1 or trend turns down
-            elif curr_close < curr_s1 or curr_close < curr_ema50_4h:
+            # Exit: price breaks below S3 or trend turns down
+            elif curr_close < curr_s3 or curr_close < curr_ema34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Stoploss: price closes above entry + 2.0 * ATR_at_entry
             if curr_close > entry_price + 2.0 * atr_at_entry:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price breaks above R1 or trend turns up
-            elif curr_close > curr_r1 or curr_close > curr_ema50_4h:
+            # Exit: price breaks above R3 or trend turns up
+            elif curr_close > curr_r3 or curr_close > curr_ema34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 48-period average
+            vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long entry: price breaks above R1 in uptrend (price > EMA50_4h)
-            if vol_confirm and curr_close > curr_ema50_4h:
-                if curr_high > curr_r1:  # Break above R1
-                    signals[i] = 0.20
+            # Long entry: price breaks above R3 in uptrend (price > EMA34_1d)
+            if vol_confirm and curr_close > curr_ema34_1d:
+                if curr_high > curr_r3:  # Break above R3
+                    signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
-            # Short entry: price breaks below S1 in downtrend (price < EMA50_4h)
-            elif vol_confirm and curr_close < curr_ema50_4h:
-                if curr_low < curr_s1:  # Break below S1
-                    signals[i] = -0.20
+            # Short entry: price breaks below S3 in downtrend (price < EMA34_1d)
+            elif vol_confirm and curr_close < curr_ema34_1d:
+                if curr_low < curr_s3:  # Break below S3
+                    signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
