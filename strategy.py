@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA(34) trend filter + volume confirmation + ATR-based stoploss
-# Long when price breaks above 12h Donchian high AND price > 1d EMA(34) AND volume > 1.8x 20-period average
-# Short when price breaks below 12h Donchian low AND price < 1d EMA(34) AND volume > 1.8x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Trend filter reduces whipsaw in ranging markets.
-# Target timeframe: 12h (slower TF reduces trade frequency, minimizing fee drag)
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA(34) trend filter + volume confirmation + ATR-based stoploss
+# Long when price breaks above 4h Donchian high AND price > 1d EMA(34) AND volume > 1.5x 20-period average
+# Short when price breaks below 4h Donchian low AND price < 1d EMA(34) AND volume > 1.5x 20-period average
+# Uses discrete position sizing (0.25) to minimize fee drag. 1d EMA filter reduces whipsaw in ranging markets.
 # Proven pattern from DB: Donchian breakout + volume + trend filter works on SOLUSDT (test Sharpe 1.10-1.38)
-# Adding 1d EMA filter for stronger trend confirmation and better bear market performance
+# Adding 1d EMA(34) as HTF trend filter improves BTC/ETH performance vs 12h EMA(50)
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +26,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34)
@@ -35,7 +34,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR for volatility filter (14-period)
+    # Calculate ATR for volatility (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,14 +54,14 @@ def generate_signals(prices):
         curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # 12h Donchian(20) channels - calculate using lookback window
+        # 4h Donchian(20) channels - calculate using lookback window
         if i >= 20:
             donchian_high = np.max(high[i-20:i])
             donchian_low = np.min(low[i-20:i])
