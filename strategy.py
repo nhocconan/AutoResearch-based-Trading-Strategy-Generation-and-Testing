@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with volume spike and 1d EMA34 trend filter
-# Uses standard Camarilla levels (R3/S3 = C ± (H-L)*1.1/4) for reliable reversal signals
-# Volume spike (>2.0x 30-period average) confirms institutional participation
-# 1d EMA34 trend filter ensures trades align with higher timeframe momentum
-# Works in bull/bear: volume confirms breakout validity, 1d EMA34 filters counter-trend noise
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout with volume spike and ATR-based position sizing
+# Donchian breakout captures strong momentum moves, volume confirms institutional interest
+# ATR stoploss limits downside during volatile periods (e.g., 2022 crash)
+# Works in bull/bear: volume filter avoids fakeouts, ATR adapts to volatility regimes
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "12h_Camarilla_R3S3_VolumeSpike_1dEMA34_Trend_v2"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ATR_Stop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/4 (standard reversal bands)
-    camarilla_range = (prev_high - prev_low) * 1.1 / 4.0
-    r3 = prev_close + camarilla_range
-    s3 = prev_close - camarilla_range
-    
-    # Align daily levels to 12h timeframe (wait for daily bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: volume > 2.0x 30-period average
+    # Volume confirmation: >2.0x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # ATR(14) for volatility-based stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    atr_stop = 0.0
     
-    start_idx = max(30, 34)  # warmup for volume MA and 1d EMA
+    start_idx = max(30, 20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma_30[i]) or np.isnan(ema_34_aligned[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_30[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34 = ema_34_aligned[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: price breaks above R3 with volume and above 1d EMA34
-                if curr_high > curr_r3 and curr_close > curr_ema_34:
+                # Bullish breakout: price closes above upper Donchian band
+                if curr_close > high_20[i]:
                     signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below S3 with volume and below 1d EMA34
-                elif curr_low < curr_s3 and curr_close < curr_ema_34:
+                    atr_stop = entry_price - 2.5 * curr_atr
+                # Bearish breakout: price closes below lower Donchian band
+                elif curr_close < low_20[i]:
                     signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
+                    atr_stop = entry_price + 2.5 * curr_atr
         
         elif position == 1:  # Long position
-            # Exit when price breaks below S3 (reversal signal)
-            if curr_low < curr_s3:
+            # Trail stop: exit if price drops below ATR-based stop
+            if curr_low < atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
+                # Update stop if price moves favorably
+                new_stop = curr_close - 2.5 * curr_atr
+                if new_stop > atr_stop:
+                    atr_stop = new_stop
                 signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit when price breaks above R3 (reversal signal)
-            if curr_high > curr_r3:
+            # Trail stop: exit if price rises above ATR-based stop
+            if curr_high > atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
+                # Update stop if price moves favorably
+                new_stop = curr_close + 2.5 * curr_atr
+                if new_stop < atr_stop:
+                    atr_stop = new_stop
                 signals[i] = -0.30
     
     return signals
