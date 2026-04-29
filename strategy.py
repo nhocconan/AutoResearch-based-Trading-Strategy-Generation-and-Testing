@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; in strong trends, these can precede continuations.
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above R3 AND 1d EMA34 uptrend AND volume spike
+# Short when price breaks below S3 AND 1d EMA34 downtrend AND volume spike
+# Uses discrete position sizing (0.30) to minimize fee churn. Works in both bull/bear by following 1d trend.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits.
 
-name = "12h_WilliamsR_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,69 +25,73 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop for 1d calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R (14-period) on 12h data
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    period_williams = 14
-    highest_high = pd.Series(high).rolling(window=period_williams, min_periods=period_williams).max().values
-    lowest_low = pd.Series(low).rolling(window=period_williams, min_periods=period_williams).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where(highest_high == lowest_low, -50, williams_r)
+    # Previous day's OHLC for Camarilla levels (use prior completed 1d bar)
+    # align_htf_to_ltf with additional_delay_bars=1 ensures we use yesterday's close
+    prev_close = align_htf_to_ltf(prices, df_1d, close_1d, additional_delay_bars=1)
+    prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
+    prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Camarilla levels: R3/S3 = close ± 1.1*(high-low)/2
+    R3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    S3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period_williams, 50, 20)  # warmup for Williams %R, EMA50, volume MA
+    start_idx = 20  # warmup for volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_aligned[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_williams = williams_r[i]
-        curr_ema50 = ema50_aligned[i]
+        curr_R3 = R3[i]
+        curr_S3 = S3[i]
+        curr_ema34 = ema34_aligned[i]
         curr_volume_confirm = volume_confirm[i]
+        
+        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
+        is_bullish_regime = curr_close > curr_ema34
+        is_bearish_regime = curr_close < curr_ema34
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
             if curr_volume_confirm:
-                # Bullish entry: oversold AND uptrend regime
-                if curr_williams < -80 and curr_close > curr_ema50:
-                    signals[i] = 0.25
+                # Bullish entry: price > R3 AND bullish regime
+                if curr_close > curr_R3 and is_bullish_regime:
+                    signals[i] = 0.30
                     position = 1
-                # Bearish entry: overbought AND downtrend regime
-                elif curr_williams > -20 and curr_close < curr_ema50:
-                    signals[i] = -0.25
+                # Bearish entry: price < S3 AND bearish regime
+                elif curr_close < curr_S3 and is_bearish_regime:
+                    signals[i] = -0.30
                     position = -1
         
-        elif position == 1:  # Long position - exit conditions
-            # Exit when: no longer oversold OR trend changes to downtrend
-            if curr_williams > -50 or curr_close < curr_ema50:
+        elif position == 1:  # Long position - exit when price < S3 or regime changes
+            if curr_close < curr_S3 or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
-        elif position == -1:  # Short position - exit conditions
-            # Exit when: no longer overbought OR trend changes to uptrend
-            if curr_williams < -50 or curr_close > curr_ema50:
+        elif position == -1:  # Short position - exit when price > R3 or regime changes
+            if curr_close > curr_R3 or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
