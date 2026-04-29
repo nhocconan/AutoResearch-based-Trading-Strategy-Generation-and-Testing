@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud Breakout with 12h Trend Filter
-# Uses Ichimoku system (Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span) on 6h for entry signals
-# 12h EMA50 provides trend filter to avoid counter-trend trades
-# Long when price breaks above cloud AND Tenkan > Kijun (bullish TK cross) in uptrend (price > 12h EMA50)
-# Short when price breaks below cloud AND Tenkan < Kijun (bearish TK cross) in downtrend (price < 12h EMA50)
-# Designed for ~20-40 trades/year on 6h timeframe to minimize fee drag
-# Ichimoku works well in both trending and ranging markets by providing dynamic support/resistance
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakout captures momentum; 1d EMA50 ensures trend alignment to avoid counter-trend trades
+# Volume confirmation (>1.8x 20-period average) filters weak breakouts
+# Designed for ~20-40 trades/year on 4h timeframe to minimize fee drag
+# ATR-based stoploss (2.5 ATR) and time-based exit (max 10 bars) control risk
+# Works in bull markets (breakouts with trend) and bear markets (breakouts with trend filter)
 
-name = "6h_Ichimoku_CloudBreakout_12hEMA50_TrendFilter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,108 +24,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA50 trend filter (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Ichimoku calculations (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate Donchian channels (20-period) for breakout signals
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Chikou Span (Lagging Span): close plotted 26 periods behind
-    # For signal generation, we need current close vs close 26 periods ago
-    close_lagged_26 = np.roll(close, 26)
-    close_lagged_26[:26] = np.nan  # First 26 values are invalid
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    entry_bar = 0
     
-    start_idx = 52  # Need Senkou Span B warmup
+    start_idx = 20  # Donchian and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(close_lagged_26[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_tenkan = tenkan_sen[i]
-        curr_kijun = kijun_sen[i]
-        curr_senkou_a = senkou_span_a[i]
-        curr_senkou_b = senkou_span_b[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
-        curr_close_lagged = close_lagged_26[i]
-        
-        # Cloud boundaries (Senkou Span A/B form the cloud)
-        cloud_top = max(curr_senkou_a, curr_senkou_b)
-        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
-        
-        # Bullish TK cross: Tenkan > Kijun
-        tk_bullish = curr_tenkan > curr_kijun
-        # Bearish TK cross: Tenkan < Kijun
-        tk_bearish = curr_tenkan < curr_kijun
-        
-        # Price above/below cloud
-        price_above_cloud = curr_close > cloud_top
-        price_below_cloud = curr_close < cloud_bottom
-        
-        # Chikou confirmation: current close vs price 26 periods ago
-        chikou_bullish = curr_close > curr_close_lagged
-        chikou_bearish = curr_close < curr_close_lagged
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
+        curr_atr = atr[i]
+        curr_vol_ma = vol_ma_20[i]
+        curr_highest_high = highest_high[i]
+        curr_lowest_low = lowest_low[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price breaks below cloud OR TK cross turns bearish
-            if price_below_cloud or not tk_bullish:
+            # Exit conditions: Donchian break below lower band OR ATR stoploss OR time-based exit
+            if (curr_low <= curr_lowest_low or  # Donchian lower band break
+                curr_close <= entry_price - 2.5 * curr_atr or  # ATR stoploss
+                i - entry_bar >= 10):  # Time-based exit (max 10 bars)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above cloud OR TK cross turns bullish
-            if price_above_cloud or not tk_bearish:
+            # Exit conditions: Donchian break above upper band OR ATR stoploss OR time-based exit
+            if (curr_high >= curr_highest_high or  # Donchian upper band break
+                curr_close >= entry_price + 2.5 * curr_atr or  # ATR stoploss
+                i - entry_bar >= 10):  # Time-based exit (max 10 bars)
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Trend filter: 12h EMA50
-            uptrend = curr_close > curr_ema50_12h
-            downtrend = curr_close < curr_ema50_12h
+            # Volume confirmation: current volume > 1.8x 20-period average
+            vol_confirm = curr_volume > 1.8 * curr_vol_ma
             
-            # Long entry: bullish TK cross + price above cloud + chikou bullish + uptrend
-            if tk_bullish and price_above_cloud and chikou_bullish and uptrend:
-                signals[i] = 0.25
-                position = 1
-            # Short entry: bearish TK cross + price below cloud + chikou bearish + downtrend
-            elif tk_bearish and price_below_cloud and chikou_bearish and downtrend:
-                signals[i] = -0.25
-                position = -1
+            # Long entry: price breaks above Donchian upper band in uptrend (price > 1d EMA50)
+            if vol_confirm and curr_close > curr_ema50_1d:
+                if curr_high > curr_highest_high:  # Break above upper band
+                    signals[i] = 0.30
+                    position = 1
+                    entry_price = curr_close
+                    entry_bar = i
+            # Short entry: price breaks below Donchian lower band in downtrend (price < 1d EMA50)
+            elif vol_confirm and curr_close < curr_ema50_1d:
+                if curr_low < curr_lowest_low:  # Break below lower band
+                    signals[i] = -0.30
+                    position = -1
+                    entry_price = curr_close
+                    entry_bar = i
             else:
                 signals[i] = 0.0
     
