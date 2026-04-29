@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Uses tight Camarilla levels (R3/S3) from weekly data for high-probability breakouts
-# 1w EMA50 provides strong trend filter to avoid counter-trend trades in BTC/ETH
-# Volume > 1.5x average confirms participation and reduces false breakouts
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses tight Camarilla levels (R3/S3) for high-probability breakouts in trending markets
+# 1d EMA34 provides strong trend filter to avoid counter-trend trades
+# Volume > 2.0x average confirms institutional participation and reduces false breakouts
 # Discrete position sizing (0.25) with Camarilla R4/S4 mean reversion exit
-# Designed for ~15-30 trades/year to minimize fee drag while capturing strong moves
-# Works in bull/bear via trend filter - only trades in direction of 1w EMA50
+# Designed for ~20-50 trades/year to minimize fee drag while capturing strong moves
+# Works in bull/bear via trend filter - only trades in direction of 1d EMA34
 
-name = "12h_Camarilla_R3S3_1wEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1w data for EMA50 trend filter and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA34 trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1w Camarilla pivot levels (based on previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla calculations based on previous week
+    # Camarilla calculations based on previous day
     # Pivot point = (H + L + C) / 3
-    pp = (high_1w + low_1w + close_1w) / 3.0
+    pp = (high_1d + low_1d + close_1d) / 3.0
     # R3 = C + (H - L) * 1.1 / 4
-    r3 = close_1w + (high_1w - low_1w) * 1.1 / 4.0
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     # S3 = C - (H - L) * 1.1 / 4
-    s3 = close_1w - (high_1w - low_1w) * 1.1 / 4.0
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     # R4 = C + (H - L) * 1.1 / 2
-    r4 = close_1w + (high_1w - low_1w) * 1.1 / 2.0
+    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
     # S4 = C - (H - L) * 1.1 / 2
-    s4 = close_1w - (high_1w - low_1w) * 1.1 / 2.0
+    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Use previous week's values (shift by 1) to avoid look-ahead
+    # Use previous day's values (shift by 1) to avoid look-ahead
     pp_shifted = np.roll(pp, 1)
     r3_shifted = np.roll(r3, 1)
     s3_shifted = np.roll(s3, 1)
@@ -64,12 +65,12 @@ def generate_signals(prices):
     r4_shifted[0] = np.nan
     s4_shifted[0] = np.nan
     
-    # Align 1w indicators to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_shifted)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_shifted)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_shifted)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_shifted)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_shifted)
+    # Align 1d indicators to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_shifted)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_shifted)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -77,13 +78,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Volume and 1w EMA50 warmup
+    start_idx = max(20, 34)  # Volume and 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -96,7 +97,7 @@ def generate_signals(prices):
         curr_s3 = s3_aligned[i]
         curr_r4 = r4_aligned[i]
         curr_s4 = s4_aligned[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
@@ -117,15 +118,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirmed = curr_volume > 1.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average
+            vol_confirmed = curr_volume > 2.0 * curr_vol_ma
             
-            # Long when price breaks above R3, 1w EMA50 up-trend, volume confirmed
-            if curr_high > curr_r3 and curr_close > curr_ema50_1w and vol_confirmed:
+            # Long when price breaks above R3, 1d EMA34 up-trend, volume confirmed
+            if curr_high > curr_r3 and curr_close > curr_ema34_1d and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below S3, 1w EMA50 down-trend, volume confirmed
-            elif curr_low < curr_s3 and curr_close < curr_ema50_1w and vol_confirmed:
+            # Short when price breaks below S3, 1d EMA34 down-trend, volume confirmed
+            elif curr_low < curr_s3 and curr_close < curr_ema34_1d and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
             else:
