@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h EMA50 trend filter and volume confirmation
-# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA50 AND volume > 1.5x average
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA50 AND volume > 1.5x average
-# Exit when Williams %R reverses to neutral zone (-50) or trend changes
-# Williams %R identifies exhaustion points effective in both bull and bear markets
-# Uses 4h timeframe to balance trade frequency and signal quality
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# Hypothesis: 1h Bollinger Band squeeze breakout with 4h EMA50 trend filter and 1d volume spike confirmation
+# Enter long when: price breaks above upper BB(20,2) AND 4h EMA50 uptrend AND 1d volume > 2x 20-day average
+# Enter short when: price breaks below lower BB(20,2) AND 4h EMA50 downtrend AND 1d volume > 2x 20-day average
+# Exit when: price returns to middle BB(20) OR trend reverses
+# Bollinger squeeze identifies low volatility periods preceding breakouts effective in both bull and bear markets
+# Uses 1h for precise entry timing, 4h for trend direction, 1d for volume confirmation to reduce false signals
+# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
 
-name = "4h_WilliamsR_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_BB_Squeeze_4hEMA50_Trend_1dVolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,76 +25,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 12h calculations
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 1h Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2.0
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
+    middle_bb = sma_20
+    
+    # Load HTF data ONCE before loop for 4h and 1d calculations
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 12h EMA50 to 4h timeframe (completed 12h bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate Williams %R(14) on 4h timeframe
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Calculate 1d volume confirmation: volume > 2x 20-day average
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_20_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # warmup for EMA50, EMA13, and Williams %R
+    start_idx = max(bb_period, 50, 20)  # warmup for BB, EMA50, and volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_aligned[i]):
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_spike_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_ema50 = ema50_aligned[i]
-        curr_williams_r = williams_r[i]
-        curr_volume_confirm = volume_confirm[i]
+        curr_upper_bb = upper_bb[i]
+        curr_lower_bb = lower_bb[i]
+        curr_middle_bb = middle_bb[i]
+        curr_ema50 = ema50_4h_aligned[i]
+        curr_volume_spike = volume_spike_aligned[i] > 0.5  # boolean threshold
         
-        # Trend regime: bullish if price > 12h EMA50, bearish if price < 12h EMA50
+        # Trend regime: bullish if price > 4h EMA50, bearish if price < 4h EMA50
         is_bullish_regime = curr_close > curr_ema50
         is_bearish_regime = curr_close < curr_ema50
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
-            if curr_volume_confirm:
-                # Bullish entry: Williams %R < -80 (oversold) AND bullish regime
-                if curr_williams_r < -80 and is_bullish_regime:
-                    signals[i] = 0.25
+            if curr_volume_spike:
+                # Bullish entry: price breaks above upper BB AND bullish regime
+                if curr_close > curr_upper_bb and is_bullish_regime:
+                    signals[i] = 0.20
                     position = 1
-                # Bearish entry: Williams %R > -20 (overbought) AND bearish regime
-                elif curr_williams_r > -20 and is_bearish_regime:
-                    signals[i] = -0.25
+                # Bearish entry: price breaks below lower BB AND bearish regime
+                elif curr_close < curr_lower_bb and is_bearish_regime:
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: Williams %R >= -50 (reversing from oversold) OR regime changes to bearish
-            if curr_williams_r >= -50 or not is_bullish_regime:
+            # Exit when: price returns to middle BB OR regime changes to bearish
+            if curr_close < curr_middle_bb or not is_bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: Williams %R <= -50 (reversing from overbought) OR regime changes to bullish
-            if curr_williams_r <= -50 or not is_bearish_regime:
+            # Exit when: price returns to middle BB OR regime changes to bullish
+            if curr_close > curr_middle_bb or not is_bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
