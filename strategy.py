@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike + ATR stoploss
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume confirmation
 # Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
 # Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
-# Exit on opposite Camarilla level touch OR ATR-based stoploss (2.0x ATR)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
+# Exit on opposite Camarilla level (S3 for longs, R3 for shorts)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
 # Camarilla levels provide institutional support/resistance. EMA34 filters counter-trend moves.
-# Volume spike confirms institutional participation. ATR stoploss manages risk in volatile markets.
+# Volume spike confirms institutional participation. Works in both bull and bear via trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,10 +33,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 4h timeframe
+    # Align EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss (optional, using Camarilla exit instead)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,12 +67,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20, 14)  # EMA34, volume MA, ATR all need warmup
+    start_idx = max(34, 20)  # EMA34 and volume MA need warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -85,28 +85,19 @@ def generate_signals(prices):
         s3_level = S3[i]
         r4_level = R4[i]
         s4_level = S4[i]
-        atr_val = atr[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Check stoploss: close < entry_price - 2.0 * ATR
-            if curr_close < entry_price - 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
             # Check exit: close < S3 (opposite level)
-            elif curr_close < s3_level:
+            if curr_close < s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Check stoploss: close > entry_price + 2.0 * ATR
-            if curr_close > entry_price + 2.0 * atr_val:
-                signals[i] = 0.0
-                position = 0
             # Check exit: close > R3 (opposite level)
-            elif curr_close > r3_level:
+            if curr_close > r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
