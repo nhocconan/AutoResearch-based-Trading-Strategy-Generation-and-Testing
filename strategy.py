@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter, volume confirmation, and ATR trailing stop
-# Long when price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume > 2.0x 20-period average
-# Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 4h (primary), HTF: 1d for EMA(34) trend filter.
-# Added ATR-based trailing stop (2.5x) to reduce overtrading and manage risk.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Long when price breaks above 20-period high AND price > 1d EMA(50) AND volume > 1.8x 20-period average
+# Short when price breaks below 20-period low AND price < 1d EMA(50) AND volume > 1.8x 20-period average
+# Uses ATR-based trailing stop (2.5x) and discrete position sizing (0.25) to minimize fee drag.
+# Works in both bull and bear by following HTF trend.
+# Timeframe: 12h (primary), HTF: 1d for EMA(50) trend filter.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,19 +26,15 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34)
+    # Calculate 1d EMA(50)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR for volatility filter and trailing stop (14-period)
+    # Calculate ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -51,21 +47,29 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for long positions
     lowest_since_entry = 0.0   # for short positions
     
-    start_idx = max(100, 34, 20)  # warmup for indicators
+    start_idx = max(100, 50)  # warmup for indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
+        # Volume confirmation: current volume > 1.8x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 1.8 * vol_ma_20 if vol_ma_20 > 0 else False
+        
+        # Donchian channels (20-period)
+        if i >= 20:
+            donchian_high = np.max(high[i-20:i])
+            donchian_low = np.min(low[i-20:i])
+        else:
+            donchian_high = curr_high
+            donchian_low = curr_low
         
         # Handle exits
         if position == 1:  # Long position
@@ -74,10 +78,10 @@ def generate_signals(prices):
                 highest_since_entry = curr_close
             
             # Exit conditions:
-            # 1. Price breaks below Donchian(20) low (trend reversal)
-            # 2. Price < 1d EMA(34) (trend filter fails)
+            # 1. Price breaks below 20-period low (Donchian reversal)
+            # 2. Price < 1d EMA(50) (trend filter fails)
             # 3. Trailing stop: price drops 2.5*ATR from highest since entry
-            if (curr_close < lowest_20[i] or 
+            if (curr_close < donchian_low or 
                 curr_close < curr_ema_1d or
                 curr_close < highest_since_entry - 2.5 * curr_atr):
                 signals[i] = 0.0
@@ -92,10 +96,10 @@ def generate_signals(prices):
                 lowest_since_entry = curr_low
             
             # Exit conditions:
-            # 1. Price breaks above Donchian(20) high (trend reversal)
-            # 2. Price > 1d EMA(34) (trend filter fails)
+            # 1. Price breaks above 20-period high (Donchian reversal)
+            # 2. Price > 1d EMA(50) (trend filter fails)
             # 3. Trailing stop: price rises 2.5*ATR from lowest since entry
-            if (curr_close > highest_20[i] or 
+            if (curr_close > donchian_high or 
                 curr_close > curr_ema_1d or
                 curr_close > lowest_since_entry + 2.5 * curr_atr):
                 signals[i] = 0.0
@@ -105,15 +109,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian(20) high AND price > 1d EMA(34) AND volume spike
-            if (curr_close > highest_20[i] and 
+            # Long entry: price breaks above 20-period high AND price > 1d EMA(50) AND volume spike
+            if (curr_close > donchian_high and 
                 curr_close > curr_ema_1d and 
                 vol_spike):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short entry: price breaks below Donchian(20) low AND price < 1d EMA(34) AND volume spike
-            elif (curr_close < lowest_20[i] and 
+            # Short entry: price breaks below 20-period low AND price < 1d EMA(50) AND volume spike
+            elif (curr_close < donchian_low and 
                   curr_close < curr_ema_1d and 
                   vol_spike):
                 signals[i] = -0.25
