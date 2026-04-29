@@ -3,22 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d for direction and 1h for timing
-# 4h Donchian(20) breakout defines the primary trend direction
-# 1d EMA50 confirms higher timeframe trend alignment
-# 1h RSI(14) with extreme thresholds (<20 for long, >80 for short) provides precise entry timing
-# Volume confirmation (>1.5x 20-period average) filters weak breakouts
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe
-# Uses discrete position sizes (0.0, ±0.20) to minimize fee churn
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation (>1.5x 20-period average)
+# Camarilla levels identify key intraday support/resistance; breaks at R3/S3 indicate strong momentum
+# 1w EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades in bear markets
+# Volume confirmation filters weak breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
 
-name = "1h_Donchian20_1dEMA50_RSI_Extreme_Volume"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1wEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,56 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 1 or len(df_1d) < 1:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period) for trend direction
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    highest_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_20_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_20_4h)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d EMA50 for higher timeframe trend filter
+    # Calculate 1d OHLC for Camarilla levels (using prior 1d close)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Prior 1-day OHLC (shifted by 1 to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1h RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values
+    # Calculate prior 1-day OHLC (yesterday's values)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # First value is NaN (no prior day)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Calculate 1h volume MA(20) for confirmation
+    # Calculate Camarilla levels for current day based on prior day OHLC
+    # Camarilla R3/S3: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_range = prev_high_1d - prev_low_1d
+    camarilla_r3 = prev_close_1d + camarilla_range * 1.1 / 4
+    camarilla_s3 = prev_close_1d - camarilla_range * 1.1 / 4
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 20-period average volume for confirmation (on 6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # Warmup for 1d EMA50, 4h Donchian, 1h RSI
+    start_idx = max(34, 20)  # 1w EMA34, volume MA warmup
     
     for i in range(start_idx, n):
-        # Skip if outside trading session or missing data
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        if (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -84,45 +83,42 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
-        curr_rsi = rsi_values[i]
-        curr_donchian_high = donchian_high_4h_aligned[i]
-        curr_donchian_low = donchian_low_4h_aligned[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_ema_1w = ema_34_1w_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = curr_volume > 1.5 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian lower OR RSI > 70 (overbought)
-            if curr_close < curr_donchian_low or curr_rsi > 70:
+            # Exit: price closes below Camarilla S3 OR price closes below 1w EMA34
+            if curr_close < curr_s3 or curr_close < curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian upper OR RSI < 30 (oversold)
-            if curr_close > curr_donchian_high or curr_rsi < 30:
+            # Exit: price closes above Camarilla R3 OR price closes above 1w EMA34
+            if curr_close > curr_r3 or curr_close > curr_ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price above 4h Donchian upper + price above 1d EMA50 + RSI < 20 (oversold) + volume confirmation
-            if (curr_close > curr_donchian_high and 
-                curr_close > curr_ema_1d and 
-                curr_rsi < 20 and 
+            # Long entry: price breaks above Camarilla R3 + price above 1w EMA34 + volume confirmation
+            if (curr_close > curr_r3 and 
+                curr_close > curr_ema_1w and 
                 vol_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price below 4h Donchian lower + price below 1d EMA50 + RSI > 80 (overbought) + volume confirmation
-            elif (curr_close < curr_donchian_low and 
-                  curr_close < curr_ema_1d and 
-                  curr_rsi > 80 and 
+            # Short entry: price breaks below Camarilla S3 + price below 1w EMA34 + volume confirmation
+            elif (curr_close < curr_s3 and 
+                  curr_close < curr_ema_1w and 
                   vol_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
