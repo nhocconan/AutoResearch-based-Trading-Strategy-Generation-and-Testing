@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout + 1w EMA50 trend + volume spike + ATR(14) stoploss
-# Camarilla levels from daily provide key support/resistance; weekly EMA50 filters for higher timeframe trend;
-# volume confirms breakout strength; ATR-based trailing stop manages risk in both bull and bear markets.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing significant moves.
+# Hypothesis: 6h Camarilla R3/S3 breakout + 12h EMA50 trend + volume spike
+# Uses 6h primary timeframe with 12h HTF for trend confirmation.
+# Camarilla levels from 6h provide intraday support/resistance; 12h EMA50 filters for higher timeframe trend;
+# volume confirms breakout strength. Discrete position sizing (0.25) minimizes fee churn.
+# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag while capturing significant moves.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,16 +24,16 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop for 1w calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop for 12h calculations
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate ATR(14) for stoploss and volatility filter
+    # Calculate ATR(14) for volatility regime filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -45,8 +46,7 @@ def generate_signals(prices):
     ).values
     vol_regime_filter = atr <= atr_percentile  # Only trade in low/medium volatility regimes
     
-    # Calculate Camarilla levels from previous day
-    # R4 = close + 1.5*(high-low), R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low)
+    # Calculate Camarilla levels from previous 6h bar
     prev_close = np.concatenate([[np.nan], close[:-1]])
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
@@ -70,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]):
             signals[i] = 0.0
             continue
             
@@ -78,7 +78,7 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_open = open_price[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         curr_atr = atr[i]
         curr_r3 = camarilla_r3[i]
         curr_s3 = camarilla_s3[i]
@@ -98,11 +98,11 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses below 1w EMA50 (trend change)
+            # 2. Price crosses below 12h EMA50 (trend change)
             # 3. Price drops below Camarilla S3 (breakout failed)
             # 4. Volatility regime shifts to high (avoid chop)
             if (curr_low <= stop_price or
-                curr_close < curr_ema_50_1w or
+                curr_close < curr_ema_50_12h or
                 curr_close < curr_s3 or
                 not curr_vol_regime):
                 signals[i] = 0.0
@@ -124,11 +124,11 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Stoploss hit (trailing or fixed)
-            # 2. Price crosses above 1w EMA50 (trend change)
+            # 2. Price crosses above 12h EMA50 (trend change)
             # 3. Price rises above Camarilla R3 (breakout failed)
             # 4. Volatility regime shifts to high (avoid chop)
             if (curr_high >= stop_price or
-                curr_close > curr_ema_50_1w or
+                curr_close > curr_ema_50_12h or
                 curr_close > curr_r3 or
                 not curr_vol_regime):
                 signals[i] = 0.0
@@ -144,9 +144,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
                 
-            # Long entry: price breaks above Camarilla R3 + above 1w EMA50 + volume confirm
+            # Long entry: price breaks above Camarilla R3 + above 12h EMA50 + volume confirm
             if (curr_close > curr_r3 and
-                curr_close > curr_ema_50_1w and
+                curr_close > curr_ema_50_12h and
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
@@ -154,9 +154,9 @@ def generate_signals(prices):
                 atr_at_entry = curr_atr
                 max_high_since_entry = curr_high
                 min_low_since_entry = curr_low
-            # Short entry: price breaks below Camarilla S3 + below 1w EMA50 + volume confirm
+            # Short entry: price breaks below Camarilla S3 + below 12h EMA50 + volume confirm
             elif (curr_close < curr_s3 and
-                  curr_close < curr_ema_50_1w and
+                  curr_close < curr_ema_50_12h and
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
