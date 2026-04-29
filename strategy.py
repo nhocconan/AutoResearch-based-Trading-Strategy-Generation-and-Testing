@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume confirmation (>1.5x 20-period average)
-# Donchian breakouts capture strong momentum moves; 12h EMA50 ensures alignment with higher timeframe trend
-# Volume confirmation filters breakouts lacking participation; works in both bull/bear markets
-# ATR-based stoploss (2.5x ATR) manages risk; discrete position sizing (0.25) minimizes fee churn
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation (>1.5x 20-period average)
+# Camarilla pivot points identify key intraday support/resistance levels; breakouts above R3 or below S3 with volume
+# indicate strong institutional participation. 4h EMA50 ensures alignment with higher timeframe trend to avoid
+# counter-trend whipsaws. Volume confirmation filters breakouts lacking conviction. Designed for 1h timeframe
+# to capture medium-term moves while minimizing fee impact through discrete position sizing (0.20) and session filter
+# (08-20 UTC) to reduce noise trades. Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "4h_Donchian20_VolumeSpike_12hEMA50_Trend_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,90 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR for volatility and stoploss (14-period ATR)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = 0  # First bar has no previous close
-    tr3.iloc[0] = 0
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate previous day's Camarilla levels (using daily data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Camarilla calculations: based on previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Avoid look-ahead: use only completed previous day's data
+    range_ = prev_high - prev_low
+    camarilla_r3 = prev_close + range_ * 1.1 / 4
+    camarilla_s3 = prev_close - range_ * 1.1 / 4
+    
+    # Align Camarilla levels to 1h timeframe (wait for daily close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour  # Pre-compute session hours
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(20, 14, 20, 50)  # warmup for Donchian, ATR, volume MA, 12h EMA
+    start_idx = max(20, 50)  # warmup for volume MA and 4h EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
+        # Check session filter
+        if not in_session[i]:
+            signals[i] = 0.0 if position == 0 else signals[i-1]  # Hold position outside session
+            continue
+            
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
-        curr_atr = atr[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend filter
-            if curr_volume_confirm:
-                # Bullish breakout: price above upper Donchian + price above 12h EMA50
-                if curr_close > high_ma_20[i-1] and curr_close > curr_ema_50_12h:
-                    signals[i] = 0.25
+            # Only trade with volume confirmation, session active, and trend filter
+            if curr_volume_confirm and in_session[i]:
+                # Bullish breakout: price above Camarilla R3 + price above 4h EMA50
+                if curr_close > camarilla_r3_aligned[i] and curr_close > curr_ema_50_4h:
+                    signals[i] = 0.20
                     position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                # Bearish breakout: price below lower Donchian + price below 12h EMA50
-                elif curr_close < low_ma_20[i-1] and curr_close < curr_ema_50_12h:
-                    signals[i] = -0.25
+                # Bearish breakout: price below Camarilla S3 + price below 4h EMA50
+                elif curr_close < camarilla_s3_aligned[i] and curr_close < curr_ema_50_4h:
+                    signals[i] = -0.20
                     position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Track highest high since entry for trailing stop
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price breaks below lower Donchian OR ATR trailing stop hit
-            if (curr_close < low_ma_20[i-1] or 
-                curr_close < highest_since_entry - 2.5 * curr_atr):
+            # Exit: price breaks below Camarilla S3 (mean reversion) OR loses 4h EMA50 support
+            if (curr_close < camarilla_s3_aligned[i] or 
+                curr_close < curr_ema_50_4h):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Track lowest low since entry for trailing stop
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price breaks above upper Donchian OR ATR trailing stop hit
-            if (curr_close > high_ma_20[i-1] or 
-                curr_close > lowest_since_entry + 2.5 * curr_atr):
+            # Exit: price breaks above Camarilla R3 (mean reversion) OR loses 4h EMA50 resistance
+            if (curr_close > camarilla_r3_aligned[i] or 
+                curr_close > curr_ema_50_4h):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
