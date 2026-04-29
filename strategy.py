@@ -4,13 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Uses 1d EMA50 for strong trend alignment (reduces whipsaw in ranging markets)
-# Volume spike > 2.0x 20-period average to ensure institutional participation
-# Mean reversion exit at Camarilla R4/S4 levels for tighter risk/reward
-# Discrete position sizing (0.25) to minimize fee churn
-# Designed for lower trade frequency (<100/year) while maintaining edge in both bull and bear regimes
+# Uses Camarilla R3/S3 levels for structured entries with 1d EMA50 as trend filter
+# Volume confirmation > 2.0x average to filter weak breakouts and reduce trade frequency
+# Discrete position sizing (0.25) and mean reversion exit at pivot point
+# Designed for lower trade frequency (<200 total 4h trades) to avoid fee drag while maintaining edge
 
-name = "4h_Camarilla_R3S3_1dEMA50_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dEMA50_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +28,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA50 trend filter and Camarilla levels
+    # Get 1d data for EMA50 trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -51,30 +50,19 @@ def generate_signals(prices):
     r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     # S3 = C - (H - L) * 1.1 / 4
     s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
-    # R4 = C + (H - L) * 1.1 / 2
-    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    # S4 = C - (H - L) * 1.1 / 2
-    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
     # Use previous day's values (shift by 1) to avoid look-ahead
     pp_shifted = np.roll(pp, 1)
     r3_shifted = np.roll(r3, 1)
     s3_shifted = np.roll(s3, 1)
-    r4_shifted = np.roll(r4, 1)
-    s4_shifted = np.roll(s4, 1)
     pp_shifted[0] = np.nan
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
-    r4_shifted[0] = np.nan
-    s4_shifted[0] = np.nan
     
     # Align 1d indicators to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_shifted)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_shifted)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_shifted)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -92,8 +80,7 @@ def generate_signals(prices):
             
         # Skip if any required data is NaN
         if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -104,30 +91,28 @@ def generate_signals(prices):
         curr_pp = pp_aligned[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
         curr_ema50_1d = ema_50_1d_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price below S4 (mean reversion to strong support)
-            if curr_close < curr_s4:
+            # Exit: price below pivot point (mean reversion to pivot)
+            if curr_close < curr_pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above R4 (mean reversion to strong resistance)
-            if curr_close > curr_r4:
+            # Exit: price above pivot point (mean reversion to pivot)
+            if curr_close > curr_pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.0x 20-period average
+            # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
             vol_confirmed = curr_volume > 2.0 * curr_vol_ma
             
             # Long when price breaks above R3, 1d EMA50 up-trend, volume confirmed
