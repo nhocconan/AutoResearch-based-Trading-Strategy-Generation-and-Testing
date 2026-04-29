@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
-# Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
-# Exit on opposite Camarilla level (S3 for longs, R3 for shorts) OR ATR-based stoploss (2.0x ATR)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-40 trades/year on 4h.
-# Camarilla levels provide institutional support/resistance. 1d EMA34 filters counter-trend moves.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
+# Long when Bull Power > 0 AND price > 1d EMA50 AND volume > 1.8x 20-bar avg
+# Short when Bear Power < 0 AND price < 1d EMA50 AND volume > 1.8x 20-bar avg
+# Exit on opposite zero-cross OR ATR-based stoploss (2.0x ATR)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-30 trades/year on 6h.
+# Elder Ray measures bull/bear strength via EMA13. 1d EMA50 filters counter-trend moves.
 # Volume spike confirms institutional participation. ATR stoploss manages risk in volatile markets.
 # This strategy avoids overtrading by requiring confluence of 3 strong conditions.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +26,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA(50) on 1d data
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -44,35 +44,26 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous day
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Use previous day's typical price for Camarilla calculation
-    prev_typical = pd.Series(typical_price).shift(1).values
-    # Calculate range
-    daily_range = high - low
-    prev_range = pd.Series(daily_range).shift(1).values
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Using 13-period EMA as per standard Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # Bull Power
+    bear_power = low - ema_13   # Bear Power
     
-    # Camarilla levels
-    R3 = prev_typical + (prev_range * 1.1 / 4)
-    S3 = prev_typical - (prev_range * 1.1 / 4)
-    R4 = prev_typical + (prev_range * 1.1 / 2)
-    S4 = prev_typical - (prev_range * 1.1 / 2)
-    
-    # Volume confirmation: >2.0x 20-bar average volume
+    # Volume confirmation: >1.8x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20, 14)  # EMA34, volume MA, ATR all need warmup
+    start_idx = max(50, 20, 13)  # EMA50(1d), volume MA, EMA13 all need warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(volume_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -81,11 +72,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_34 = ema_34_1d_aligned[i]
-        r3_level = R3[i]
-        s3_level = S3[i]
-        r4_level = R4[i]
-        s4_level = S4[i]
+        ema_50 = ema_50_1d_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         atr_val = atr[i]
         
         # Handle exits and position management
@@ -94,8 +83,8 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Check exit: close < S3 (opposite level)
-            elif curr_close < s3_level:
+            # Check exit: Bull Power <= 0 (momentum fading)
+            elif bull_val <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,21 +95,21 @@ def generate_signals(prices):
             if curr_close > entry_price + 2.0 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Check exit: close > R3 (opposite level)
-            elif curr_close > r3_level:
+            # Check exit: Bear Power >= 0 (momentum fading)
+            elif bear_val >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when close > R3 AND price > 1d EMA34 AND volume confirmation
-            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
+            # Long when Bull Power > 0 AND price > 1d EMA50 AND volume confirmation
+            if bull_val > 0 and curr_close > ema_50 and vol_conf:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short when close < S3 AND price < 1d EMA34 AND volume confirmation
-            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
+            # Short when Bear Power < 0 AND price < 1d EMA50 AND volume confirmation
+            elif bear_val < 0 and curr_close < ema_50 and vol_conf:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
