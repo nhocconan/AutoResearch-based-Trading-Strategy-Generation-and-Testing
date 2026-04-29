@@ -3,57 +3,49 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width regime + 1d Donchian(20) breakout + volume confirmation
-# Bollinger Band Width (BBW) < 20th percentile = low volatility squeeze (range regime)
-# BBW > 80th percentile = high volatility expansion (trend regime)
-# In range regime: fade at Bollinger Bands (long at lower band, short at upper band)
-# In trend regime: breakout in direction of 1d Donchian(20) (long at upper band, short at lower band)
-# Volume confirmation: >1.5x 20-bar average volume
+# Hypothesis: 12h Williams %R Extreme with 1w EMA34 trend filter and volume confirmation
+# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R < -80 (oversold) AND price > 1w EMA34 AND volume > 1.5x 20-bar avg
+# Short when %R > -20 (overbought) AND price < 1w EMA34 AND volume > 1.5x 20-bar avg
+# Exit when %R crosses back above -50 (for longs) or below -50 (for shorts)
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
-# BBW percentile regime filter adapts to changing market conditions (bull/bear/range).
-# Donchian breakout provides structure, volume confirms participation.
-# Works in range markets (mean reversion at bands) and trending markets (breakout continuation).
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Williams %R identifies exhaustion points; extreme readings often precede reversals.
+# 1w EMA34 filters counter-trend moves, volume confirmation ensures participation.
+# Works in bull markets (buying oversold dips) and bear markets (selling overbought rallies).
 
-name = "6h_BBW_Regime_Donchian_Breakout_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsRExtreme_1wEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian(20) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # Calculate Donchian(20) on 1d data
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    # Align Donchian levels to 6h timeframe
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Bollinger Bands (20, 2) on 6h close
-    close_series = pd.Series(close)
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2.0 * std_20
-    lower_band = sma_20 - 2.0 * std_20
-    # Bollinger Band Width
-    bb_width = (upper_band - lower_band) / sma_20
-    # Calculate 50-bar percentile rank of BBW (regime filter)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values * 100
+    # Calculate Williams %R(14) on 12h data
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Avoid division by zero
+    rr_diff = highest_high - lowest_low
+    williams_r = np.where(rr_diff != 0, (highest_high - close) / rr_diff * -100, -50)
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -63,79 +55,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Bollinger Bands warmup and percentile rank
+    start_idx = max(lookback, 34)  # Williams %R warmup and EMA34 alignment
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(high_20_1d_aligned[i]) or 
-            np.isnan(low_20_1d_aligned[i]) or np.isnan(bb_width_pct[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        bbw_pct = bb_width_pct[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        donch_high = high_20_1d_aligned[i]
-        donch_low = low_20_1d_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
+        curr_wr = williams_r[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: price crosses below SMA20 (mean reversion) or Donchian breakdown in trend regime
-            if bbw_pct < 20:  # range regime: exit at mean
-                if close[i] < sma_20[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # trend regime: exit at Donchian breakdown
-                if close[i] < donch_low:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-                    
+            # Exit: Williams %R crosses back above -50 (momentum fading)
+            if curr_wr > -50:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit: price crosses above SMA20 (mean reversion) or Donchian breakout in trend regime
-            if bbw_pct < 20:  # range regime: exit at mean
-                if close[i] > sma_20[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # trend regime: exit at Donchian breakout
-                if close[i] > donch_high:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-                    
+            # Exit: Williams %R crosses back below -50 (momentum fading)
+            if curr_wr < -50:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+                
         else:  # Flat - look for new entries
-            # Range regime (BBW < 20th percentile): mean reversion at Bollinger Bands
-            if bbw_pct < 20:
-                # Long at lower band with volume confirmation
-                if low[i] <= lower and vol_conf:
-                    signals[i] = 0.25
-                    position = 1
-                # Short at upper band with volume confirmation
-                elif high[i] >= upper and vol_conf:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            # Trend regime (BBW > 80th percentile): breakout in direction of 1d Donchian
-            elif bbw_pct > 80:
-                # Long breakout above upper band with volume confirmation and Donchian support
-                if high[i] >= upper and vol_conf and close[i] > donch_low:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakdown below lower band with volume confirmation and Donchian resistance
-                elif low[i] <= lower and vol_conf and close[i] < donch_high:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            else:  # neutral regime (20 <= BBW <= 80): no trades
+            # Long when Williams %R < -80 (oversold) AND price > 1w EMA34 AND volume confirmation
+            if curr_wr < -80 and close[i] > ema_34 and vol_conf:
+                signals[i] = 0.25
+                position = 1
+            # Short when Williams %R > -20 (overbought) AND price < 1w EMA34 AND volume confirmation
+            elif curr_wr > -20 and close[i] < ema_34 and vol_conf:
+                signals[i] = -0.25
+                position = -1
+            else:
                 signals[i] = 0.0
     
     return signals
