@@ -3,107 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX + Volume Spike + Choppiness Regime Filter
-# Long when TRIX crosses above zero AND volume > 2.0x 20-bar avg AND Choppiness Index < 38.2 (trending)
-# Short when TRIX crosses below zero AND volume > 2.0x 20-bar avg AND Choppiness Index < 38.2
-# Exit when TRIX crosses zero in opposite direction
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 19-50 trades/year on 4h timeframe.
-# TRIX is a momentum oscillator that filters noise and identifies trend changes.
-# Volume confirmation ensures breakout strength. Choppiness filter avoids ranging markets.
-# This combination has worked well on ETH historically and should generalize to BTC.
+# Hypothesis: 6h Ichimoku Cloud + TK Cross + Weekly Trend Filter
+# Long when: Tenkan > Kijun (TK Cross bullish) AND price > Kumo cloud (from 1d) AND weekly EMA50 uptrend
+# Short when: Tenkan < Kijun (TK Cross bearish) AND price < Kumo cloud AND weekly EMA50 downtrend
+# Exit when: TK Cross reverses OR price re-enters cloud
+# Uses Ichimoku for trend/momentum, weekly EMA for higher-timeframe bias, cloud for dynamic support/resistance
+# Designed to capture sustained moves in both bull and bear markets via trend alignment and volatility-based cloud
 
-name = "4h_TRIX_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_1dCloud_1wEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
-    # ROC = (close - close_prev) / close_prev * 100
-    close_series = pd.Series(close)
-    roc = close_series.pct_change() * 100
-    ema1 = roc.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.values
+    # Get 1d data for Ichimoku cloud calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need 52 for Senkou Span B
+        return np.zeros(n)
     
-    # Volume confirmation: >2.0x 20-bar average volume
-    volume_series = pd.Series(volume)
-    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 2.0 * volume_ma_20
+    # Get 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Choppiness Index (14-period) - measures whether market is choppy (ranging) or trending
-    # CHOP = 100 * log10(sum(ATR) / (log(n) * (highest_high - lowest_low))) / log10(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Calculate Ichimoku components on 1d data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = df_1d['high'].rolling(window=9, min_periods=9).max().values
+    period9_low = df_1d['low'].rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = df_1d['high'].rolling(window=26, min_periods=26).max().values
+    period26_low = df_1d['low'].rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
     
-    # Avoid division by zero
-    denominator = np.log10(14) * (hh - ll)
-    chop_raw = np.where(denominator != 0, 
-                        np.sum(pd.Series(atr).rolling(window=14, min_periods=14).sum().values) / denominator,
-                        100)
-    chop = 100 * np.log10(np.maximum(chop_raw, 1e-10)) / np.log10(14)
-    chop = np.nan_to_num(chop, nan=50.0)  # Replace NaN with neutral value
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2.0)
     
-    # Trending regime: CHOP < 38.2
-    trending_regime = chop < 38.2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period52_high = df_1d['high'].rolling(window=52, min_periods=52).max().values
+    period52_low = df_1d['low'].rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2.0
+    
+    # Align Ichimoku components to 6h timeframe (they are already forward-shifted by 26 in calculation)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(45, 20, 14)  # TRIX warmup + volume MA + chop warmup
+    start_idx = max(52, 50)  # Ichimoku and EMA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_conf = volume_confirm[i]
-        curr_trix = trix[i]
-        curr_trix_prev = trix[i-1] if i > 0 else 0
-        is_trending = trending_regime[i]
+        curr_tenkan = tenkan_6h[i]
+        curr_kijun = kijun_6h[i]
+        curr_senkou_a = senkou_a_6h[i]
+        curr_senkou_b = senkou_b_6h[i]
+        curr_ema50w = ema_50_1w_aligned[i]
+        curr_close = close[i]
+        
+        # Determine cloud top and bottom
+        cloud_top = max(curr_senkou_a, curr_senkou_b)
+        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: TRIX crosses below zero
-            if curr_trix <= 0 and curr_trix_prev > 0:
+            # Exit: TK Cross bearish OR price re-enters cloud
+            if curr_tenkan < curr_kijun or (curr_close > cloud_bottom and curr_close < cloud_top):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above zero
-            if curr_trix >= 0 and curr_trix_prev < 0:
+            # Exit: TK Cross bullish OR price re-enters cloud
+            if curr_tenkan > curr_kijun or (curr_close > cloud_bottom and curr_close < cloud_top):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when TRIX crosses above zero AND volume confirmation AND trending regime
-            if curr_trix > 0 and curr_trix_prev <= 0 and vol_conf and is_trending:
+            # Long when: TK Cross bullish AND price above cloud AND weekly EMA50 uptrend
+            if curr_tenkan > curr_kijun and curr_close > cloud_top and curr_close > curr_ema50w:
                 signals[i] = 0.25
                 position = 1
-            # Short when TRIX crosses below zero AND volume confirmation AND trending regime
-            elif curr_trix < 0 and curr_trix_prev >= 0 and vol_conf and is_trending:
+            # Short when: TK Cross bearish AND price below cloud AND weekly EMA50 downtrend
+            elif curr_tenkan < curr_kijun and curr_close < cloud_bottom and curr_close < curr_ema50w:
                 signals[i] = -0.25
                 position = -1
             else:
