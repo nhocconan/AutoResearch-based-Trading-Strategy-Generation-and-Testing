@@ -3,25 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
-# Camarilla levels provide precise intraday support/resistance; breakouts capture momentum
-# 12h EMA50 ensures alignment with medium-term trend; volume >2.0x confirms participation
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA50 trend filter avoids counter-trend trades
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA200 trend filter and volume spike
+# Uses 4h for medium-term trend direction (EMA200), 1h for precise entry timing
+# Volume > 2.0x 20-period average confirms institutional participation
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours
+# Discrete sizing (0.20) minimizes fee churn; targets 60-150 total trades over 4 years
+# Works in bull/bear: breakouts catch momentum, volume filter ensures legitimacy, EMA200 avoids counter-trend trades
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA200_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Precompute session hours (08-20 UTC) once before loop
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
@@ -32,17 +36,17 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate 4h EMA200 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     # Precompute daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -60,16 +64,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 50)  # warmup: need 96 4h bars for daily levels
+    start_idx = max(96, 20, 14, 200)  # warmup: need 96 4h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
+            np.isnan(ema_200_4h_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or
             np.isnan(daily_high_aligned[i]) or
             np.isnan(daily_low_aligned[i]) or
             np.isnan(daily_close_aligned[i])):
+            signals[i] = 0.0
+            continue
+            
+        # Session filter: 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             signals[i] = 0.0
             continue
             
@@ -77,7 +86,7 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_200_4h = ema_200_4h_aligned[i]
         
         # Use previous day's levels (shift by 1)
         prev_high = daily_high_aligned[i-1]
@@ -93,13 +102,13 @@ def generate_signals(prices):
                 
                 # Only trade with volume confirmation and trend filter
                 if curr_volume_confirm:
-                    # Bullish entry: price breaks above R3 + above 12h EMA50
-                    if curr_high > r3 and curr_close > curr_ema_50_12h:
-                        signals[i] = 0.25
+                    # Bullish entry: price breaks above R3 + above 4h EMA200
+                    if curr_high > r3 and curr_close > curr_ema_200_4h:
+                        signals[i] = 0.20
                         position = 1
-                    # Bearish entry: price breaks below S3 + below 12h EMA50
-                    elif curr_low < s3 and curr_close < curr_ema_50_12h:
-                        signals[i] = -0.25
+                    # Bearish entry: price breaks below S3 + below 4h EMA200
+                    elif curr_low < s3 and curr_close < curr_ema_200_4h:
+                        signals[i] = -0.20
                         position = -1
         
         elif position == 1:  # Long position
@@ -111,9 +120,9 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Exit: price breaks above R3
@@ -124,8 +133,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
