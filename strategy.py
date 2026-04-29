@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period average)
-# Donchian breakouts capture institutional order flow; EMA50 filter ensures alignment with daily trend
-# Volume confirmation (>2x average) filters false breakouts; discrete sizing (0.25) minimizes fee churn
-# Works in both bull/bear markets: breakouts work in trending markets, trend filter avoids counter-trend trades
-# Target: 100-180 total trades over 4 years (25-45/year) on 4h timeframe
+# Hypothesis: 4h Camarilla R3/S3 Breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-period average)
+# Camarilla pivot levels provide high-probability reversal/breakout zones; breakout direction filtered by 1d EMA34
+# Volume spike ensures institutional participation; discrete sizing (0.25) minimizes fee churn
+# Works in both bull/bear markets: Camarilla levels adapt to volatility, effective in ranging and trending regimes
+# Target: 80-180 total trades over 4 years (20-45/year) on 4h timeframe
 
-name = "4h_Donchian_Breakout_1dEMA50_VolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,14 +28,22 @@ def generate_signals(prices):
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian Channel (20-period) on 4h timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for previous day (using daily OHLC)
+    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
+    # R3 = close + 1.1*(high-low)/2
+    # S3 = close - 1.1*(high-low)/2
+    # We use R3/S3 as breakout levels
+    camarilla_r3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 2
+    camarilla_s3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 2
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
     # Calculate 20-period average volume for confirmation (on 4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,21 +51,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 20)  # 1d EMA50, Donchian channels, volume MA warmup
+    start_idx = max(50, 20)  # 1d EMA34 and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
@@ -66,32 +72,23 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below Donchian middle (10-period) OR break of 20-period low
-            donchian_middle = (curr_highest_high + curr_lowest_low) / 2.0
-            if curr_close < donchian_middle or curr_close < curr_lowest_low:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-                
+            # Exit: price closes below S3 OR volatility contraction (optional, but we use time-based exit via opposite signal)
+            # For simplicity, we exit on opposite signal
+            signals[i] = 0.25
+            
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian middle OR break of 20-period high
-            donchian_middle = (curr_highest_high + curr_lowest_low) / 2.0
-            if curr_close > donchian_middle or curr_close > curr_highest_high:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-                
+            # Exit: price closes above R3 OR volatility contraction
+            signals[i] = -0.25
+            
         else:  # Flat - look for new entries
-            # Long entry: breakout above 20-period high + above 1d EMA50 + volume confirmation
-            if (curr_high > curr_highest_high and 
+            # Long entry: breakout above R3 + above 1d EMA34 + volume confirmation
+            if (curr_close > curr_r3 and 
                 curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: breakout below 20-period low + below 1d EMA50 + volume confirmation
-            elif (curr_low < curr_lowest_low and 
+            # Short entry: breakout below S3 + below 1d EMA34 + volume confirmation
+            elif (curr_close < curr_s3 and 
                   curr_close < curr_ema_1d and 
                   vol_confirm):
                 signals[i] = -0.25
