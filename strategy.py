@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike
-# Uses Williams %R(14) to identify oversold/overbought conditions
-# Trend filter uses 1d EMA34 to ensure trades align with higher timeframe momentum
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike
+# Uses Donchian channel from 1d: breakout above upper or below lower with continuation
 # Volume confirmation (>2.0x 24-period average) ensures institutional participation
-# Designed for 4h timeframe to capture swings with controlled trade frequency (~15-35 trades/year)
-# BTC/ETH focus: requires both Williams %R extreme and EMA alignment to avoid whipsaws
+# Trend filter uses 1w EMA50 to avoid counter-trend trades in both bull and bear markets
+# Designed for 1d timeframe to capture major swings with controlled trade frequency (~10-25 trades/year)
+# BTC/ETH focus: requires EMA alignment and volume confirmation, avoids SOL-only bias
 
-name = "4h_WilliamsR_MeanRev_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter (HTF = 1d)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA50 trend filter (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = pd.Series(high - low)
@@ -56,64 +49,70 @@ def generate_signals(prices):
     entry_price = 0.0
     atr_at_entry = 0.0
     
-    start_idx = max(34, 24, 14)  # EMA34, volume MA, and ATR warmup
+    start_idx = max(50, 24, 14)  # EMA50, volume MA, and ATR warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema34_1d = ema_34_1d_aligned[i]
-        curr_williams_r = williams_r[i]
+        curr_ema50_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_24[i]
         
+        # Calculate Donchian channels from prior 20 periods
+        if i >= 20:
+            lookback_high = np.max(high[i-20:i])
+            lookback_low = np.min(low[i-20:i])
+        else:
+            signals[i] = 0.0
+            continue
+        
         # Handle stoploss and exits
         if position == 1:  # Long position
-            # Stoploss: price closes below entry - 2.0 * ATR_at_entry
-            if curr_close < entry_price - 2.0 * atr_at_entry:
+            # Stoploss: price closes below entry - 2.5 * ATR_at_entry
+            if curr_close < entry_price - 2.5 * atr_at_entry:
                 signals[i] = 0.0
                 position = 0
-            # Exit: Williams %R exits oversold territory or trend turns down
-            elif curr_williams_r > -20 or curr_close < curr_ema34_1d:
+            # Exit: price breaks below lower Donchian or trend turns down
+            elif curr_close < lookback_low or curr_close < curr_ema50_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Stoploss: price closes above entry + 2.0 * ATR_at_entry
-            if curr_close > entry_price + 2.0 * atr_at_entry:
+            # Stoploss: price closes above entry + 2.5 * ATR_at_entry
+            if curr_close > entry_price + 2.5 * atr_at_entry:
                 signals[i] = 0.0
                 position = 0
-            # Exit: Williams %R exits overbought territory or trend turns up
-            elif curr_williams_r < -80 or curr_close > curr_ema34_1d:
+            # Exit: price breaks above upper Donchian or trend turns up
+            elif curr_close > lookback_high or curr_close > curr_ema50_1w:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
             # Volume confirmation: current volume > 2.0x 24-period average
             vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long entry: Williams %R oversold (< -80) in uptrend (close > EMA34_1d)
-            if vol_confirm and curr_close > curr_ema34_1d:
-                if curr_williams_r < -80:  # Oversold condition
-                    signals[i] = 0.25
+            # Long entry: price breaks above upper Donchian in uptrend (price > EMA50_1w)
+            if vol_confirm and curr_close > curr_ema50_1w:
+                if curr_high > lookback_high:  # Break above upper Donchian
+                    signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
-            # Short entry: Williams %R overbought (> -20) in downtrend (close < EMA34_1d)
-            elif vol_confirm and curr_close < curr_ema34_1d:
-                if curr_williams_r > -20:  # Overbought condition
-                    signals[i] = -0.25
+            # Short entry: price breaks below lower Donchian in downtrend (price < EMA50_1w)
+            elif vol_confirm and curr_close < curr_ema50_1w:
+                if curr_low < lookback_low:  # Break below lower Donchian
+                    signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
                     atr_at_entry = curr_atr
