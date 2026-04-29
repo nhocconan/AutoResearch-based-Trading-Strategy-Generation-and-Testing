@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 1d EMA34 for trend alignment and 6h volume spike confirmation
 # Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 24-period average
 # Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 24-period average
-# Uses ATR-based trailing stop (2.0x ATR) for risk management
+# ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee churn
-# Target: 20-50 trades/year on 4h timeframe to avoid fee drag while capturing strong breakouts
+# Target: 12-37 trades/year on 6h timeframe to avoid fee drag while capturing strong breakouts
 # Works in bull markets via long R3 breakouts with 1d uptrend
 # Works in bear markets via short S3 breakdowns with 1d downtrend
 # Volume confirmation with higher threshold ensures breakouts have strong institutional participation
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -51,7 +51,7 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = 34  # warmup for EMA and ATR
+    start_idx = 50  # warmup for EMA and ATR
     
     for i in range(start_idx, n):
         curr_close = close[i]
@@ -62,21 +62,16 @@ def generate_signals(prices):
         
         # Calculate Camarilla pivot levels from previous day's range
         # Need previous day's high, low, close - use 1d data
-        if i >= 1:  # Need at least 1 bar back for previous day in 4h timeframe (6 bars = 1 day)
-            # Get previous day's OHLC from 1d data aligned to current 4h bar
+        if i >= 2:  # Need at least 2 bars back for previous day in 6h timeframe
+            # Get previous day's OHLC from 1d data aligned to current 6h bar
             high_1d = df_1d['high'].values
             low_1d = df_1d['low'].values
             close_1d = df_1d['close'].values
             
-            # Get previous day's OHLC (6 bars back in 4h = 1 day back)
-            if len(high_1d) >= 2:
-                prev_high_1d = high_1d[-2]
-                prev_low_1d = low_1d[-2]
-                prev_close_1d = close_1d[-2]
-            else:
-                prev_high_1d = high_1d[-1]
-                prev_low_1d = low_1d[-1]
-                prev_close_1d = close_1d[-1]
+            # Get previous day's OHLC (4 bars back in 6h = 1 day back)
+            prev_high_1d = high_1d[-4] if len(high_1d) >= 4 else high_1d[-1]
+            prev_low_1d = low_1d[-4] if len(low_1d) >= 4 else low_1d[-1]
+            prev_close_1d = close_1d[-4] if len(close_1d) >= 4 else close_1d[-1]
             
             # Calculate Camarilla levels
             pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
@@ -84,7 +79,7 @@ def generate_signals(prices):
             r3 = pivot + (range_val * 1.1 / 4)  # R3 level
             s3 = pivot - (range_val * 1.1 / 4)  # S3 level
         else:
-            # Not enough data, use current bar approximations
+            # Not enough 1d data, use current bar approximations
             r3 = curr_high
             s3 = curr_low
         
