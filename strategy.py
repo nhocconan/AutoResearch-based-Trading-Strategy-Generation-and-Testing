@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI(14) + Choppiness regime filter
-# Long when: KAMA rising (bullish trend), RSI < 30 (oversold), and choppy market (CHOP > 61.8)
-# Short when: KAMA falling (bearish trend), RSI > 70 (overbought), and choppy market (CHOP > 61.8)
-# Uses KAMA for adaptive trend, RSI for mean reversion in chop, Choppiness index to filter ranging markets.
-# Works in bull/bear via trend filter (KAMA) + mean reversion in ranging conditions (RSI extremes).
-# Timeframe: 1d (primary), HTF: 1w for higher timeframe trend context (not used in this version but available).
+# Hypothesis: 6h Volume-Weighted RSI + 12h Supertrend + 1d ADX Regime Filter
+# Long when: VW-RSI < 30 (oversold) AND 12h Supertrend = uptrend AND 1d ADX > 25 (trending market)
+# Short when: VW-RSI > 70 (overbought) AND 12h Supertrend = downtrend AND 1d ADX > 25 (trending market)
+# Uses VW-RSI for mean reversion in trends, Supertrend for trend direction, ADX to avoid ranging markets.
+# Works in bull/bear via trend filter (Supertrend) + volatility filter (ADX) to catch pullbacks in strong trends.
+# Timeframe: 6h (primary), HTF: 12h for Supertrend, 1d for ADX.
 
-name = "1d_KAMA_RSI_Chop_Filter_v1"
-timeframe = "1d"
+name = "6h_VolWeightedRSI_Supertrend_ADX_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,138 +24,178 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Efficiency Ratio (ER) = |Change| / Sum(|daily changes|)
-    change = np.abs(np.diff(close, n=1))
-    change = np.insert(change, 0, 0)  # align length
-    abs_change = np.abs(np.diff(close, n=1))
-    abs_change = np.insert(abs_change, 0, 0)
+    # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 10-period ER
-    er_num = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    er_num = np.insert(er_num, 0, [0]*10)  # pad first 10
-    er_den = np.zeros(n)
-    for i in range(n):
-        if i >= 10:
-            er_den[i] = np.sum(abs_change[i-9:i+1])  # sum of last 10 abs changes
+    if len(df_12h) < 10 or len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate 12h Supertrend (ATR=10, mult=3.0)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # ATR calculation
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_12h = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Basic Upper and Lower Bands
+    hl2 = (high_12h + low_12h) / 2.0
+    upper_basic = hl2 + (3.0 * atr_12h)
+    lower_basic = hl2 - (3.0 * atr_12h)
+    
+    # Final Upper and Lower Bands
+    final_upper = np.zeros_like(close_12h)
+    final_lower = np.zeros_like(close_12h)
+    supertrend = np.zeros_like(close_12h)
+    trend = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(len(close_12h)):
+        if i == 0:
+            final_upper[i] = upper_basic[i]
+            final_lower[i] = lower_basic[i]
+            supertrend[i] = final_upper[i]
+            trend[i] = 1
         else:
-            er_den[i] = np.sum(abs_change[:i+1]) if i > 0 else 1  # avoid div by zero
-    er = np.where(er_den != 0, er_num / er_den, 0)
+            if close_12h[i-1] > final_upper[i-1]:
+                final_upper[i] = max(upper_basic[i], final_upper[i-1])
+            else:
+                final_upper[i] = upper_basic[i]
+                
+            if close_12h[i-1] < final_lower[i-1]:
+                final_lower[i] = min(lower_basic[i], final_lower[i-1])
+            else:
+                final_lower[i] = lower_basic[i]
+            
+            if trend[i-1] == -1 and close_12h[i] > final_upper[i]:
+                trend[i] = 1
+            elif trend[i-1] == 1 and close_12h[i] < final_lower[i]:
+                trend[i] = -1
+            else:
+                trend[i] = trend[i-1]
+            
+            supertrend[i] = final_lower[i] if trend[i] == 1 else final_upper[i]
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Align Supertrend and trend to 6h
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    trend_aligned = align_htf_to_ltf(prices, df_12h, trend)
     
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, n=1)
-    delta = np.insert(delta, 0, 0)
+    # True Range
+    tr1_1d = np.abs(high_1d[1:] - low_1d[1:])
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr_1d
+    di_minus = 100 * dm_minus_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h Volume-Weighted RSI (14-period)
+    # Typical Price
+    tp = (high + low + close) / 3.0
+    
+    # Volume-weighted typical price change
+    vtp = tp * volume
+    
+    # Changes in VWTP
+    delta = np.diff(vtp, prepend=vtp[0])
+    
+    # Separate gains and losses
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            avg_gain[i] = np.mean(gain[:i+1]) if i > 0 else 0
-            avg_loss[i] = np.mean(loss[:i+1]) if i > 0 else 0
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Average gains and losses (volume-weighted)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    # RS and RSI
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (CHOP)
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(14)
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of ATR over 14 periods
-    sum_atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            sum_atr[i] = np.sum(atr[:i+1])
-        else:
-            sum_atr[i] = np.sum(atr[i-13:i+1])
-    
-    # Max(high) - Min(low) over 14 periods
-    max_high = np.zeros(n)
-    min_low = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            max_high[i] = np.max(high[:i+1])
-            min_low[i] = np.min(low[:i+1])
-        else:
-            max_high[i] = np.max(high[i-13:i+1])
-            min_low[i] = np.min(low[i-13:i+1])
-    
-    # Avoid division by zero
-    range_hl = max_high - min_low
-    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(14), 50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = max(50, 34)  # warmup for indicators
     
     for i in range(start_idx, n):
-        curr_kama = kama[i]
-        curr_kama_prev = kama[i-1]
+        # Skip if HTF data not available
+        if np.isnan(trend_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
+            continue
+            
         curr_rsi = rsi[i]
-        curr_chop = chop[i]
+        curr_trend = trend_aligned[i]
+        curr_adx = adx_aligned[i]
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit when: KAMA turns down OR RSI > 50 (mean reversion) OR chop < 38.2 (trending)
-            if (curr_kama < curr_kama_prev or
-                curr_rsi > 50 or
-                curr_chop < 38.2):
+            # Exit conditions:
+            # 1. VW-RSI > 70 (overbought)
+            # 2. 12h trend turns down
+            # 3. ADX < 20 (losing trend strength)
+            if (curr_rsi > 70 or
+                curr_trend == -1 or
+                curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when: KAMA turns up OR RSI < 50 (mean reversion) OR chop < 38.2 (trending)
-            if (curr_kama > curr_kama_prev or
-                curr_rsi < 50 or
-                curr_chop < 38.2):
+            # Exit conditions:
+            # 1. VW-RSI < 30 (oversold)
+            # 2. 12h trend turns up
+            # 3. ADX < 20 (losing trend strength)
+            if (curr_rsi < 30 or
+                curr_trend == 1 or
+                curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: KAMA rising, RSI oversold (<30), choppy market (CHOP > 61.8)
-            if (curr_kama > curr_kama_prev and
-                curr_rsi < 30 and
-                curr_chop > 61.8):
+            # Long entry: VW-RSI < 30 (oversold) AND 12h uptrend AND ADX > 25 (strong trend)
+            if (curr_rsi < 30 and
+                curr_trend == 1 and
+                curr_adx > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: KAMA falling, RSI overbought (>70), choppy market (CHOP > 61.8)
-            elif (curr_kama < curr_kama_prev and
-                  curr_rsi > 70 and
-                  curr_chop > 61.8):
+            # Short entry: VW-RSI > 70 (overbought) AND 12h downtrend AND ADX > 25 (strong trend)
+            elif (curr_rsi > 70 and
+                  curr_trend == -1 and
+                  curr_adx > 25):
                 signals[i] = -0.25
                 position = -1
             else:
