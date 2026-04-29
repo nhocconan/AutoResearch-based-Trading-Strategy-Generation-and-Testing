@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Williams Alligator: Jaw (13-period SMMA smoothed 8), Teeth (8-period SMMA smoothed 5), Lips (5-period SMMA smoothed 3)
-# Long: Lips > Teeth > Jaw AND price > 1d EMA34 AND volume > 1.5x 20-bar avg
-# Short: Lips < Teeth < Jaw AND price < 1d EMA34 AND volume > 1.5x 20-bar avg
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
-# Alligator identifies trend initiation/continuation; EMA34 filters for higher timeframe trend; volume confirms momentum
+# Hypothesis: 4h Donchian channel breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long: Close > Donchian Upper(20) AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short: Close < Donchian Lower(20) AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit: Close crosses Donchian midpoint OR price crosses 1d EMA34
+# Works in bull via breakout continuation, in bear via mean reversion at channel extremes
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 
-name = "12h_Williams_Alligator_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,86 +34,76 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator components (SMMA with smoothing)
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        result = np.full(len(values), np.nan)
-        # First value is SMA
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    # Jaw: 13-period SMMA smoothed 8
-    jaw_raw = smma(close, 13)
-    jaw = smma(jaw_raw, 8)
-    # Teeth: 8-period SMMA smoothed 5
-    teeth_raw = smma(close, 8)
-    teeth = smma(teeth_raw, 5)
-    # Lips: 5-period SMMA smoothed 3
-    lips_raw = smma(close, 5)
-    lips = smma(lips_raw, 3)
+    # Calculate ATR for stoploss (using 14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 50  # warmup for Alligator components
+    start_idx = max(34, 20, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if Alligator values not ready
-        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]):
+        # Calculate Donchian channels (20-period)
+        if i >= 20:
+            donch_high = np.max(high[i-20:i])
+            donch_low = np.min(low[i-20:i])
+            donch_mid = (donch_high + donch_low) / 2.0
+        else:
             signals[i] = 0.0
             continue
-            
+        
         curr_close = close[i]
         curr_ema_1d = ema_34_1d_aligned[i]
+        curr_atr = atr[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_ma_20[i]):
-            signals[i] = 0.0
-            continue
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume spike confirmation: current volume > 2.0x 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+        else:
+            vol_ma_20 = 0.0
+        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
         
-        # Alligator alignment
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        
-        # Handle exits
+        # Handle exits and stoploss
         if position == 1:  # Long position
-            # Exit: Alligator loses alignment (Lips < Teeth OR Teeth < Jaw) OR price < 1d EMA34
-            if not (lips_above_teeth and teeth_above_jaw) or curr_close < curr_ema_1d:
+            # Stoploss: 2 * ATR below entry
+            stop_price = entry_price - 2.0 * curr_atr
+            # Exit conditions: Close below Donchian mid OR price below 1d EMA34 OR stoploss hit
+            if curr_close < donch_mid or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator loses alignment (Lips > Teeth OR Teeth > Jaw) OR price > 1d EMA34
-            if not (lips_below_teeth and teeth_below_jaw) or curr_close > curr_ema_1d:
+            # Stoploss: 2 * ATR above entry
+            stop_price = entry_price + 2.0 * curr_atr
+            # Exit conditions: Close above Donchian mid OR price above 1d EMA34 OR stoploss hit
+            if curr_close > donch_mid or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Lips > Teeth > Jaw AND price > 1d EMA34 AND volume confirmation
-            if (lips_above_teeth and teeth_above_jaw and
+            # Long entry: Close > Donchian Upper AND price > 1d EMA34 AND volume spike
+            if (curr_close > donch_high and 
                 curr_close > curr_ema_1d and
-                vol_confirm):
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Lips < Teeth < Jaw AND price < 1d EMA34 AND volume confirmation
-            elif (lips_below_teeth and teeth_below_jaw and
+                entry_price = curr_close
+            # Short entry: Close < Donchian Lower AND price < 1d EMA34 AND volume spike
+            elif (curr_close < donch_low and 
                   curr_close < curr_ema_1d and
-                  vol_confirm):
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
     
