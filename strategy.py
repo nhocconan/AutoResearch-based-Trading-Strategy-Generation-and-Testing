@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + ADX Regime with 12h EMA50 trend filter
-# Long when Bull Power > 0, ADX > 25 (trending), and close > 12h EMA50
-# Short when Bear Power < 0, ADX > 25 (trending), and close < 12h EMA50
-# Exit when ADX < 20 (range regime) or trend EMA crossover
-# Uses discrete position sizing (0.25) to balance capture and risk.
-# Elder Ray measures bull/bear power via EMA13, ADX filters for trending markets.
-# 12h EMA50 provides higher-timeframe trend alignment to avoid counter-trend trades.
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to avoid overtrading.
-# Works in both bull and bear markets by only trading in strong trends (ADX>25) with the 12h trend.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
+# Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + ADX > 25
+# Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + ADX > 25
+# Exit when price crosses Donchian(10) midpoint or ADX < 20 (range regime)
+# Uses discrete position sizing (0.30) to balance capture and risk.
+# Donchian channels provide clear structure, volume confirms breakout strength, ADX filters for trending markets.
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to avoid overtrading.
+# Works in both bull and bear markets by only trading strong breakouts in trending conditions (ADX>25).
 
-name = "6h_ElderRay_ADX_Regime_12hEMA50_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_ADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +24,24 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for volume spike confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d average volume for spike detection
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Elder Bull/Bear Power (13-period EMA)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Donchian channels (20-period for entry, 10-period for exit)
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (donchian_high_10 + donchian_low_10) / 2.0
     
     # Calculate ADX (14-period)
     # True Range
@@ -73,46 +75,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 13, 50)  # ADX, Elder Power, and 12h EMA50 warmup
+    start_idx = max(20, 14, 20)  # Donchian20, ADX, and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx[i])):
+        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        curr_ema50_12h = ema_50_12h_aligned[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
-        curr_adx = adx[i]
         curr_close = close[i]
+        curr_volume = volume[i]
+        curr_vol_ma_20_1d = vol_ma_20_1d_aligned[i]
+        curr_adx = adx[i]
+        curr_donchian_high_20 = donchian_high_20[i]
+        curr_donchian_low_20 = donchian_low_20[i]
+        curr_donchian_mid_10 = donchian_mid_10[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: ADX < 20 (range regime) OR trend EMA crossover (close < 12h EMA50)
-            if curr_adx < 20.0 or curr_close < curr_ema50_12h:
+            # Exit: price crosses below Donchian(10) midpoint OR ADX < 20 (range regime)
+            if curr_close < curr_donchian_mid_10 or curr_adx < 20.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: ADX < 20 (range regime) OR trend EMA crossover (close > 12h EMA50)
-            if curr_adx < 20.0 or curr_close > curr_ema50_12h:
+            # Exit: price crosses above Donchian(10) midpoint OR ADX < 20 (range regime)
+            if curr_close > curr_donchian_mid_10 or curr_adx < 20.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long when Bull Power > 0, ADX > 25 (strong trend), and close > 12h EMA50
-            if curr_bull > 0 and curr_adx > 25.0 and curr_close > curr_ema50_12h:
-                signals[i] = 0.25
+            # Volume spike condition: current volume > 1.5x 1d average volume
+            volume_spike = curr_volume > 1.5 * curr_vol_ma_20_1d
+            
+            # Long when price breaks above Donchian(20) high + volume spike + ADX > 25
+            if curr_close > curr_donchian_high_20 and volume_spike and curr_adx > 25.0:
+                signals[i] = 0.30
                 position = 1
-            # Short when Bear Power < 0, ADX > 25 (strong trend), and close < 12h EMA50
-            elif curr_bear < 0 and curr_adx > 25.0 and curr_close < curr_ema50_12h:
-                signals[i] = -0.25
+            # Short when price breaks below Donchian(20) low + volume spike + ADX > 25
+            elif curr_close < curr_donchian_low_20 and volume_spike and curr_adx > 25.0:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
