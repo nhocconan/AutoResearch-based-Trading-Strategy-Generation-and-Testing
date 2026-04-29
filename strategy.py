@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian channel breakout with 12h trend filter and volume confirmation
-# Donchian(20) breakout captures momentum bursts; 12h EMA50 trend filter avoids counter-trend trades
-# Volume confirmation (>1.5x 20-period average) ensures institutional participation
-# Works in both bull/bear markets: breakouts occur in all regimes, trend filter adapts to bias
-# Target: 60-120 total trades over 4 years (15-30/year) on 6h timeframe
+# Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period average)
+# Donchian breakouts capture institutional order flow; EMA50 filter ensures alignment with daily trend
+# Volume confirmation (>2x average) filters false breakouts; discrete sizing (0.25) minimizes fee churn
+# Works in both bull/bear markets: breakouts work in trending markets, trend filter avoids counter-trend trades
+# Target: 100-180 total trades over 4 years (25-45/year) on 4h timeframe
 
-name = "6h_Donchian20_12hEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +24,30 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20) on 6h timeframe
+    # Donchian Channel (20-period) on 4h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period average volume for confirmation (on 6h timeframe)
+    # Calculate 20-period average volume for confirmation (on 4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 20)  # 12h EMA50, Donchian, volume MA warmup
+    start_idx = max(50, 20, 20)  # 1d EMA50, Donchian channels, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -55,44 +55,44 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_12h = ema_50_12h_aligned[i]
-        curr_highest = highest_high[i]
-        curr_lowest = lowest_low[i]
+        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_highest_high = highest_high[i]
+        curr_lowest_low = lowest_low[i]
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = curr_volume > 1.5 * curr_vol_ma
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = curr_volume > 2.0 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: price closes below Donchian middle OR trend reverses
-            donchian_middle = (curr_highest + curr_lowest) / 2.0
-            if curr_close < donchian_middle or curr_close < curr_ema_12h:
+            # Exit: price closes below Donchian middle (10-period) OR break of 20-period low
+            donchian_middle = (curr_highest_high + curr_lowest_low) / 2.0
+            if curr_close < donchian_middle or curr_close < curr_lowest_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian middle OR trend reverses
-            donchian_middle = (curr_highest + curr_lowest) / 2.0
-            if curr_close > donchian_middle or curr_close > curr_ema_12h:
+            # Exit: price closes above Donchian middle OR break of 20-period high
+            donchian_middle = (curr_highest_high + curr_lowest_low) / 2.0
+            if curr_close > donchian_middle or curr_close > curr_highest_high:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: breakout above Donchian upper + above 12h EMA50 + volume confirmation
-            if (curr_close > curr_highest and 
-                curr_close > curr_ema_12h and 
+            # Long entry: breakout above 20-period high + above 1d EMA50 + volume confirmation
+            if (curr_high > curr_highest_high and 
+                curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: breakout below Donchian lower + below 12h EMA50 + volume confirmation
-            elif (curr_close < curr_lowest and 
-                  curr_close < curr_ema_12h and 
+            # Short entry: breakout below 20-period low + below 1d EMA50 + volume confirmation
+            elif (curr_low < curr_lowest_low and 
+                  curr_close < curr_ema_1d and 
                   vol_confirm):
                 signals[i] = -0.25
                 position = -1
