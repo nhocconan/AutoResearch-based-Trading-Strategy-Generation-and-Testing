@@ -3,29 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA200 trend filter and volume spike
-# Uses 4h for medium-term trend direction (EMA200), 1h for precise entry timing
-# Volume > 2.0x 20-period average confirms institutional participation
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Discrete sizing (0.20) minimizes fee churn; targets 60-150 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum, volume filter ensures legitimacy, EMA200 avoids counter-trend trades
+# Hypothesis: 6h Williams %R Extreme + 1d EMA34 trend + volume spike
+# Williams %R identifies overbought/oversold conditions; extremes (>80 or <20) signal potential reversals
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
+# Volume spike (>2.0x 30-period average) confirms participation and reduces false signals
+# Discrete sizing (0.25) minimizes fee churn; targets 50-150 total trades over 4 years
+# Works in bull/bear: reversals capture mean reversion moves, trend filter ensures directional bias, volume confirms legitimacy
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA200_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
@@ -36,105 +33,70 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h EMA200 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    ema_200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
-    
-    # Precompute daily data for Camarilla levels
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Volume confirmation: volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_30)
+    
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 20, 14, 200)  # warmup: need 96 4h bars for daily levels
+    start_idx = max(14, 30, 34)  # warmup: need 14 for Williams %R, 30 for volume MA, 34 for EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_200_4h_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(daily_high_aligned[i]) or
-            np.isnan(daily_low_aligned[i]) or
-            np.isnan(daily_close_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
             
-        # Session filter: 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
-            signals[i] = 0.0
-            continue
-            
-        curr_high = high[i]
-        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_200_4h = ema_200_4h_aligned[i]
-        
-        # Use previous day's levels (shift by 1)
-        prev_high = daily_high_aligned[i-1]
-        prev_low = daily_low_aligned[i-1]
-        prev_close = daily_close_aligned[i-1]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_williams_r = williams_r[i]
         
         if position == 0:  # Flat - look for new entries
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                s3 = prev_close - (range_val * 1.1 / 4)
-                
-                # Only trade with volume confirmation and trend filter
-                if curr_volume_confirm:
-                    # Bullish entry: price breaks above R3 + above 4h EMA200
-                    if curr_high > r3 and curr_close > curr_ema_200_4h:
-                        signals[i] = 0.20
-                        position = 1
-                    # Bearish entry: price breaks below S3 + below 4h EMA200
-                    elif curr_low < s3 and curr_close < curr_ema_200_4h:
-                        signals[i] = -0.20
-                        position = -1
+            # Only trade with volume confirmation and trend filter
+            if curr_volume_confirm:
+                # Bullish entry: Williams %R oversold (<20) + price above 1d EMA34
+                if curr_williams_r < -80 and curr_close > curr_ema_34_1d:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish entry: Williams %R overbought (>80) + price below 1d EMA34
+                elif curr_williams_r > -20 and curr_close < curr_ema_34_1d:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                s3 = prev_close - (range_val * 1.1 / 4)
-                if curr_low < s3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
+            # Exit: Williams %R returns to neutral (> -50) or overbought (> -20)
+            if curr_williams_r > -50:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                if curr_high > r3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+            # Exit: Williams %R returns to neutral (< -50) or oversold (< -80)
+            if curr_williams_r < -50:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
