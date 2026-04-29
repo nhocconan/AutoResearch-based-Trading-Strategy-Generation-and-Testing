@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) + 1d EMA34 Trend Filter + Volume Confirmation
-# Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# Long when: Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d EMA34 AND volume > 1.5x avg
-# Short when: Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d EMA34 AND volume > 1.5x avg
+# Hypothesis: 12h Williams Alligator + 1d EMA34 Trend Filter + Volume Confirmation
+# Williams Alligator: Jaw (EMA13, 8-period smoothed), Teeth (EMA8, 5-period smoothed), Lips (EMA5, 3-period smoothed)
+# Long when: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34 AND volume > 1.8x avg
+# Short when: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34 AND volume > 1.8x avg
 # Uses discrete sizing (0.25) to minimize fee churn. Works in bull/bear via 1d trend filter.
-# Timeframe: 6h (primary), HTF: 1d for EMA34 trend.
+# Timeframe: 12h (primary), HTF: 1d for EMA34 trend.
 
-name = "6h_ElderRay_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,21 +33,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (using close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams Alligator components (all using close prices)
+    # Jaw: EMA13 smoothed by 8 periods
+    ema_jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = pd.Series(ema_jaw).ewm(span=8, adjust=False, min_periods=8).mean().values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = ema_13 - low   # EMA13 - Low
+    # Teeth: EMA8 smoothed by 5 periods
+    ema_teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = pd.Series(ema_teeth).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Lips: EMA5 smoothed by 3 periods
+    ema_lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = pd.Series(ema_lips).ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 13, 20)  # warmup for EMA34, EMA13, volume MA
+    start_idx = max(34, 13, 8, 5, 20)  # warmup for EMA34, Jaw, Teeth, Lips, volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
@@ -57,16 +63,18 @@ def generate_signals(prices):
             
         curr_close = close[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_lips = lips[i]
+        curr_teeth = teeth[i]
+        curr_jaw = jaw[i]
         curr_volume_confirm = volume_confirm[i]
         
         # Handle position exits
         if position == 1:  # Long position
             # Exit conditions:
-            # 1. Bull Power turns negative (momentum lost)
+            # 1. Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw)
             # 2. Price falls below 1d EMA34 (trend change)
-            if (curr_bull_power <= 0 or
+            if (curr_lips <= curr_teeth or
+                curr_teeth <= curr_jaw or
                 curr_close < curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
@@ -75,9 +83,10 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions:
-            # 1. Bear Power turns positive (momentum lost)
+            # 1. Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw)
             # 2. Price rises above 1d EMA34 (trend change)
-            if (curr_bear_power <= 0 or
+            if (curr_lips >= curr_teeth or
+                curr_teeth >= curr_jaw or
                 curr_close > curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
@@ -85,16 +94,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Bull Power positive AND Bear Power rising (less negative) AND price > 1d EMA34 AND volume confirm
-            if (curr_bull_power > 0 and
-                i > start_idx and bear_power[i] > bear_power[i-1] and  # Bear Power rising
+            # Long entry: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34 AND volume confirm
+            if (curr_lips > curr_teeth and
+                curr_teeth > curr_jaw and
                 curr_close > curr_ema_34_1d and
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bear Power negative AND Bull Power falling (less positive) AND price < 1d EMA34 AND volume confirm
-            elif (curr_bear_power < 0 and
-                  i > start_idx and bull_power[i] < bull_power[i-1] and  # Bull Power falling
+            # Short entry: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34 AND volume confirm
+            elif (curr_lips < curr_teeth and
+                  curr_teeth < curr_jaw and
                   curr_close < curr_ema_34_1d and
                   curr_volume_confirm):
                 signals[i] = -0.25
