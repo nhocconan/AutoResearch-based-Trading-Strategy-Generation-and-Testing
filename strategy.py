@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Camarilla R3/S3 levels represent stronger intraday support/resistance than R1/S1
-# Long when price breaks above R3 AND price > 1w EMA50 AND volume > 2.0x 24-period average
-# Short when price breaks below S3 AND price < 1w EMA50 AND volume > 2.0x 24-period average
+# Hypothesis: 12h Williams Fractal breakout with 1w EMA50 trend filter and volume confirmation
+# Williams Fractals identify significant swing highs/lows that act as strong support/resistance
+# Long when price breaks above bullish fractal AND price > 1w EMA50 AND volume > 2.0x 24-period average
+# Short when price breaks below bearish fractal AND price < 1w EMA50 AND volume > 2.0x 24-period average
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee churn
-# Target: 12-25 trades/year on 12h timeframe to avoid fee drag while capturing strong breakouts
-# Works in bull markets via long R3 breakouts with 1w uptrend
-# Works in bear markets via short S3 breakdowns with 1w downtrend
-# Volume confirmation with higher threshold ensures breakouts have strong institutional participation
+# Target: 15-35 trades/year on 12h timeframe to avoid fee drag while capturing strong breakouts
+# Works in bull markets via long fractal breakouts with 1w uptrend
+# Works in bear markets via short fractal breakdowns with 1w downtrend
+# Volume confirmation ensures breakouts have strong institutional participation
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeConfirm_v1"
+name = "12h_Williams_Fractal_Breakout_1wEMA50_VolumeConfirm_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -46,6 +46,38 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
+    # Calculate Williams Fractals on 1d timeframe for stronger support/resistance
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Williams Fractals: 5-bar pattern
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i-1] = high_1d[i-1]
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i-1] = low_1d[i-1]
+    
+    # Align fractals to 12h timeframe with extra delay for confirmation
+    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
@@ -59,37 +91,8 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
-        
-        # Calculate Camarilla pivot levels from previous day's range
-        # Need previous day's high, low, close - use 1d data
-        if i >= 2:  # Need at least 2 bars back for previous day in 12h timeframe
-            # Get previous day's OHLC from 1d data aligned to current 12h bar
-            df_1d = get_htf_data(prices, '1d')
-            if len(df_1d) >= 2:
-                # Align 1d data to get previous completed day's OHLC
-                # For 12h timeframe, we need to look back 2 bars for previous day
-                high_1d = df_1d['high'].values
-                low_1d = df_1d['low'].values
-                close_1d = df_1d['close'].values
-                
-                # Get previous day's OHLC (2 bars back in 12h = 1 day back)
-                prev_high_1d = high_1d[-2] if len(high_1d) >= 2 else high_1d[-1]
-                prev_low_1d = low_1d[-2] if len(low_1d) >= 2 else low_1d[-1]
-                prev_close_1d = close_1d[-2] if len(close_1d) >= 2 else close_1d[-1]
-                
-                # Calculate Camarilla levels
-                pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-                range_val = prev_high_1d - prev_low_1d
-                r3 = pivot + (range_val * 1.1 / 4)  # R3 level
-                s3 = pivot - (range_val * 1.1 / 4)  # S3 level
-            else:
-                # Not enough 1d data, use current bar approximations
-                r3 = curr_high
-                s3 = curr_low
-        else:
-            # Not enough data, use current bar approximations
-            r3 = curr_high
-            s3 = curr_low
+        curr_bearish = bearish_fractal_aligned[i]
+        curr_bullish = bullish_fractal_aligned[i]
         
         # Volume spike confirmation: current volume > 2.0x 24-period average
         if i >= 24:
@@ -104,8 +107,8 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             # Trailing stop: 2.0 * ATR below highest high
             stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR price breaks below S3
-            if curr_close < stop_price or curr_close < s3:
+            # Exit conditions: price below trailing stop OR price breaks below bullish fractal
+            if curr_close < stop_price or (not np.isnan(curr_bullish) and curr_close < curr_bullish):
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -117,8 +120,8 @@ def generate_signals(prices):
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             # Trailing stop: 2.0 * ATR above lowest low
             stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR price breaks above R3
-            if curr_close > stop_price or curr_close > r3:
+            # Exit conditions: price above trailing stop OR price breaks above bearish fractal
+            if curr_close > stop_price or (not np.isnan(curr_bearish) and curr_close > curr_bearish):
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -126,13 +129,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: price breaks above R3 AND price > 1w EMA50 AND volume spike
-            if curr_close > r3 and curr_close > curr_ema_1w and vol_spike:
+            # Long entry: price breaks above bullish fractal AND price > 1w EMA50 AND volume spike
+            if (not np.isnan(curr_bullish) and curr_close > curr_bullish and 
+                curr_close > curr_ema_1w and vol_spike):
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: price breaks below S3 AND price < 1w EMA50 AND volume spike
-            elif curr_close < s3 and curr_close < curr_ema_1w and vol_spike:
+            # Short entry: price breaks below bearish fractal AND price < 1w EMA50 AND volume spike
+            elif (not np.isnan(curr_bearish) and curr_close < curr_bearish and 
+                  curr_close < curr_ema_1w and vol_spike):
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
