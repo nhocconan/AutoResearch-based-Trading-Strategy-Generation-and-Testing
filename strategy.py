@@ -3,36 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX(9) crossover with 1d EMA34 trend filter and volume spike confirmation
-# TRIX catches momentum reversals with reduced whipsaw vs MACD
-# 1d EMA34 ensures alignment with primary trend; volume >1.8x confirms institutional participation
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# 12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Camarilla levels from 1d provide institutional support/resistance; breakouts capture momentum
+# 1d EMA34 ensures alignment with daily trend; volume >2.0x confirms participation
+# Discrete sizing (0.25) minimizes fee churn; stoploss via opposite Camarilla level
 
-name = "4h_TRIX9_EMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Calculate TRIX (9-period) - triple smoothed EMA of ROC
-    close_series = pd.Series(close)
-    roc = close_series.pct_change(periods=1)
-    ema1 = roc.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = (ema3 * 100).values  # scale for readability
-    
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_series = pd.Series(trix)
-    trix_signal = trix_series.ewm(span=9, adjust=False, min_periods=9).mean().values
     
     # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
@@ -51,55 +40,91 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    # Volume confirmation: volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_30)
+    
+    # Precompute daily data for Camarilla levels
+    df_1d_cam = get_htf_data(prices, '1d')
+    if len(df_1d_cam) < 2:
+        return np.zeros(n)
+    
+    daily_high = df_1d_cam['high'].values
+    daily_low = df_1d_cam['low'].values
+    daily_close = df_1d_cam['close'].values
+    
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d_cam, daily_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(36, 20, 14, 34)  # warmup: TRIX needs 36 bars (9*4), vol MA needs 20
+    start_idx = max(96, 30, 14, 34)  # warmup: need 96 12h bars (~4 days) for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(daily_high_aligned[i]) or
+            np.isnan(daily_low_aligned[i]) or
+            np.isnan(daily_close_aligned[i])):
             signals[i] = 0.0
             continue
             
-        curr_trix = trix[i]
-        curr_trix_signal = trix_signal[i]
-        prev_trix = trix[i-1]
-        prev_trix_signal = trix_signal[i-1]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        
+        # Use previous day's levels (shift by 1)
+        prev_high = daily_high_aligned[i-1]
+        prev_low = daily_low_aligned[i-1]
+        prev_close = daily_close_aligned[i-1]
         
         if position == 0:  # Flat - look for new entries
-            # Bullish entry: TRIX crosses above signal line + above 1d EMA34 + volume confirmation
-            if (prev_trix <= prev_trix_signal and curr_trix > curr_trix_signal and 
-                close[i] > curr_ema_34_1d and curr_volume_confirm):
-                signals[i] = 0.25
-                position = 1
-            # Bearish entry: TRIX crosses below signal line + below 1d EMA34 + volume confirmation
-            elif (prev_trix >= prev_trix_signal and curr_trix < curr_trix_signal and 
-                  close[i] < curr_ema_34_1d and curr_volume_confirm):
-                signals[i] = -0.25
-                position = -1
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                s3 = prev_close - (range_val * 1.1 / 4)
+                
+                # Only trade with volume confirmation and trend filter
+                if curr_volume_confirm:
+                    # Bullish entry: price breaks above R3 + above 1d EMA34
+                    if curr_high > r3 and curr_close > curr_ema_34_1d:
+                        signals[i] = 0.25
+                        position = 1
+                    # Bearish entry: price breaks below S3 + below 1d EMA34
+                    elif curr_low < s3 and curr_close < curr_ema_34_1d:
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:  # Long position
-            # Exit: TRIX crosses below signal line
-            if prev_trix >= prev_trix_signal and curr_trix < curr_trix_signal:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks below S3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                s3 = prev_close - (range_val * 1.1 / 4)
+                if curr_low < s3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above signal line
-            if prev_trix <= prev_trix_signal and curr_trix > curr_trix_signal:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks above R3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                if curr_high > r3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
