@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Mean Reversion with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when %R < -80 (oversold) and price above 1d EMA34 (uptrend filter)
-# Short when %R > -20 (overbought) and price below 1d EMA34 (downtrend filter)
-# Volume spike confirms momentum exhaustion at extremes
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+# Hypothesis: 6h Williams %R + 1d EMA34 trend + volume spike
+# Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long: %R < -80 (oversold) + price above 1d EMA34 + volume spike
+# Short: %R > -20 (overbought) + price below 1d EMA34 + volume spike
+# Works in ranging markets (mean reversion) and trending markets (pullbacks to EMA)
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
 
-name = "4h_WilliamsR_MeanRev_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +49,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -60,12 +60,12 @@ def generate_signals(prices):
         curr_vol_ma = vol_ma_20[i]
         curr_volume = volume[i]
         
-        # Volume spike confirmation: current volume > 1.8x 20-period average
-        vol_spike = curr_volume > 1.8 * curr_vol_ma
+        # Volume spike confirmation: current volume > 2.0x 20-period average
+        vol_spike = curr_volume > 2.0 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Williams %R rises above -50 (momentum fading) OR price breaks below 1d EMA34
+            # Exit: Williams %R rises above -50 OR price breaks below 1d EMA34
             if curr_williams_r > -50 or curr_close < curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
@@ -73,7 +73,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R falls below -50 (momentum fading) OR price breaks above 1d EMA34
+            # Exit: Williams %R falls below -50 OR price breaks above 1d EMA34
             if curr_williams_r < -50 or curr_close > curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
