@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 12h EMA50 trend filter and volume confirmation
-# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA50 AND volume > 1.5x average
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA50 AND volume > 1.5x average
-# Exit when Williams %R reverses to neutral zone (-50) or trend changes
+# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume confirmation
 # Williams %R identifies exhaustion points effective in both bull and bear markets
-# Uses 6h timeframe to balance trade frequency and signal quality
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume > 1.5x average
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume > 1.5x average
+# Exit when Williams %R reverses to neutral zone (-50) or trend changes
+# Uses 4h timeframe for optimal trade frequency (target: 20-50 trades/year)
+# 1d EMA34 provides robust trend filter that works in both bull and bear regimes
+# Volume confirmation reduces false signals and improves signal quality
 
-name = "6h_WilliamsR_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,19 +26,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 12h calculations
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop for 1d calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA50 to 6h timeframe (completed 12h bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R(14) on 6h timeframe
+    # Calculate Williams %R(14) on 4h timeframe
     period = 14
     highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -53,22 +53,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # warmup for EMA50, EMA13, and Williams %R
+    start_idx = max(34, 20, 14)  # warmup for EMA34, EMA20, and Williams %R
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_aligned[i]):
+        if np.isnan(ema34_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_ema50 = ema50_aligned[i]
+        curr_ema34 = ema34_aligned[i]
         curr_williams_r = williams_r[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Trend regime: bullish if price > 12h EMA50, bearish if price < 12h EMA50
-        is_bullish_regime = curr_close > curr_ema50
-        is_bearish_regime = curr_close < curr_ema50
+        # Trend regime: bullish if price > 1d EMA34, bearish if price < 1d EMA34
+        is_bullish_regime = curr_close > curr_ema34
+        is_bearish_regime = curr_close < curr_ema34
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation
