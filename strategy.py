@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX + volume spike + choppiness regime filter
-# Long when TRIX crosses above zero AND chop > 61.8 (ranging) AND volume > 1.5x 20-period average
-# Short when TRIX crosses below zero AND chop > 61.8 (ranging) AND volume > 1.5x 20-period average
+# Hypothesis: 12h Williams Alligator + Elder Ray volume-weighted trend filter
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND Elder Bull Power > 0 AND price > 1w EMA50
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND Elder Bear Power < 0 AND price < 1w EMA50
 # Uses ATR-based trailing stop (2.0x ATR) for risk management
 # Discrete position sizing (0.25) to minimize fee drag
-# Target: 25-35 trades/year on 4h timeframe (~100-140 total over 4 years)
-# TRIX is effective in ranging markets (chop > 61.8) which suits 2025 bear/range conditions
-# Volume confirmation reduces false signals
-# Works in both bull and bear via mean reversion in ranging regimes
+# Target: 12-25 trades/year on 12h timeframe (~50-100 total over 4 years)
+# Works in bull markets via Alligator uptrend + positive Elder Ray
+# Works in bear markets via Alligator downtrend + negative Elder Ray
+# Williams Alligator: SMAs of median price (HLC/3) with specific periods and shifts
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
 
-name = "4h_TRIX_ZeroCross_ChopRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_ElderRay_1wEMA50_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,17 +26,33 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter (used as regime filter: price > EMA34 = bull, < EMA34 = bear)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    
+    # Calculate Williams Alligator on 12h data
+    # Median price = (high + low + close) / 3
+    median_price = (high + low + close) / 3.0
+    
+    # Alligator Jaw: SMA(13) of median, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Alligator Teeth: SMA(8) of median, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Alligator Lips: SMA(5) of median, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
@@ -45,62 +62,33 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate TRIX (15,9,9) - triple exponential moving average
-    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = np.where(ema3[:-1] != 0, (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100, 0)
-    trix = np.concatenate([[0], trix])  # align length
-    
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Calculate TRIX histogram (TRIX - signal)
-    trix_hist = trix - trix_signal
-    
-    # Calculate Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR(1)) / (nperiod * log(nperiod))) / log10(nperiod)
-    # Simplified: CHOP = 100 * log10(sum(TR(1)) / (ATR(14) * 14)) / log10(14)
-    atr_1 = tr  # true range
-    sum_tr_14 = np.zeros(n)
-    for i in range(14, n):
-        sum_tr_14[i] = np.sum(atr_1[i-13:i+1])
-    sum_tr_14[:14] = np.nan
-    
-    atr_14 = atr  # already calculated
-    chop = np.zeros(n)
-    for i in range(14, n):
-        if atr_14[i] > 0 and sum_tr_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr_14[i] / (atr_14[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
-    chop[:14] = 50
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = max(100, 34, 14)  # warmup
+    start_idx = max(100, 50, 50, 13, 8, 5)  # warmup for all indicators
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_ema_13_1d = ema_13_1d_aligned[i]
         curr_atr = atr[i]
-        curr_trix = trix[i]
-        curr_trix_signal = trix_signal[i]
-        curr_trix_hist = trix_hist[i]
-        curr_chop = chop[i]
-        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
         
-        # Volume spike confirmation: current volume > 1.5x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-        else:
-            vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
+        # Skip if any indicator is not available
+        if (np.isnan(curr_ema_50_1w) or np.isnan(curr_ema_13_1d) or np.isnan(curr_atr) or
+            np.isnan(curr_jaw) or np.isnan(curr_teeth) or np.isnan(curr_lips)):
+            signals[i] = 0.0
+            continue
+        
+        # Calculate Elder Ray components
+        bull_power = curr_high - curr_ema_13_1d
+        bear_power = curr_low - curr_ema_13_1d
         
         # Handle exits and stoploss
         if position == 1:  # Long position
@@ -108,8 +96,8 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             # Trailing stop: 2.0 * ATR below highest high
             stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR TRIX crosses below zero
-            if curr_close < stop_price or curr_trix_hist < 0:
+            # Exit conditions: price below trailing stop OR Alligator alignment breaks
+            if curr_close < stop_price or not (curr_jaw < curr_teeth < curr_lips):
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -121,8 +109,8 @@ def generate_signals(prices):
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             # Trailing stop: 2.0 * ATR above lowest low
             stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR TRIX crosses above zero
-            if curr_close > stop_price or curr_trix_hist > 0:
+            # Exit conditions: price above trailing stop OR Alligator alignment breaks
+            if curr_close > stop_price or not (curr_jaw > curr_teeth > curr_lips):
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -130,15 +118,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: TRIX crosses above zero AND chop > 61.8 (ranging) AND volume spike
-            # In ranging markets, we expect mean reversion - long when TRIX turns up from negative
-            if curr_trix_hist > 0 and curr_trix_hist <= 0.1 and curr_chop > 61.8 and vol_spike:
+            # Long entry: Alligator bullish alignment AND Elder Bull Power > 0 AND price > 1w EMA50
+            if (curr_jaw < curr_teeth < curr_lips and 
+                bull_power > 0 and 
+                curr_close > curr_ema_50_1w):
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: TRIX crosses below zero AND chop > 61.8 (ranging) AND volume spike
-            # In ranging markets, we expect mean reversion - short when TRIX turns down from positive
-            elif curr_trix_hist < 0 and curr_trix_hist >= -0.1 and curr_chop > 61.8 and vol_spike:
+            # Short entry: Alligator bearish alignment AND Elder Bear Power < 0 AND price < 1w EMA50
+            elif (curr_jaw > curr_teeth > curr_lips and 
+                  bear_power < 0 and 
+                  curr_close < curr_ema_50_1w):
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = curr_low
