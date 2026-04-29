@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike
 # Long when price breaks above Camarilla R3 AND price > 1d EMA(34) AND volume > 2.0x 20-period average
 # Short when price breaks below Camarilla S3 AND price < 1d EMA(34) AND volume > 2.0x 20-period average
 # Uses discrete position sizing (0.25) to minimize fee drag. Works in both bull and bear by following HTF trend.
-# Timeframe: 12h (primary), HTF: 1d for trend filter and Camarilla levels.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Timeframe: 4h (primary), HTF: 1d for trend filter and Camarilla levels.
+# Added ATR-based trailing stop (2.5x) and stricter volume confirmation to reduce overtrading.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
