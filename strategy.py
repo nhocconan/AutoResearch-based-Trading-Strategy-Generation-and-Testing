@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and ATR-based trailing stop
-# Uses Donchian(20) on 4h timeframe to capture institutional breakouts in both bull and bear markets
-# Volume confirmation (>2.5x 20-period average) filters false breakouts
-# ATR(14) trailing stop (3x ATR) manages risk without whipsaw
-# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year) minimizing fee drag
-# BTC/ETH focus: requires volume confirmation to avoid SOL-only bias
+# Hypothesis: 1d Donchian channel breakout with volume confirmation and ATR trailing stop
+# Uses Donchian(20) on 1d timeframe to capture institutional breakouts with low trade frequency
+# Volume confirmation (>2.0x 20-period average) filters false breakouts
+# ATR(14) trailing stop (2.5x ATR) manages risk while allowing trends to run
+# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year) minimizing fee drag
+# Works in both bull and bear markets by capturing strong directional moves after consolidation
 
-name = "4h_Donchian20_VolumeConfirmation_ATRTrail"
-timeframe = "4h"
+name = "1d_Donchian20_VolumeConfirmation_ATRTrail"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,21 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate Donchian channels (20-period) on 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate upper and lower Donchian channels
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 4h timeframe (delayed by one 4h bar)
-    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    # Align Donchian levels to 1d timeframe (delayed by one 1d bar)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
     # Calculate ATR(14) for trailing stop
     tr1 = pd.Series(high - low)
@@ -78,8 +78,8 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Trailing stop: price drops 3*ATR from highest since entry
-            if curr_close < highest_since_entry - 3.0 * curr_atr:
+            # Trailing stop: price drops 2.5*ATR from highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             # Exit: price breaks below lower Donchian channel
@@ -87,13 +87,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Trailing stop: price rises 3*ATR from lowest since entry
-            if curr_close > lowest_since_entry + 3.0 * curr_atr:
+            # Trailing stop: price rises 2.5*ATR from lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             # Exit: price breaks above upper Donchian channel
@@ -101,22 +101,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Volume confirmation: current volume > 2.5x 20-period average
-            vol_confirm = curr_volume > 2.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average
+            vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
             # Long entry: price breaks above upper Donchian with volume confirmation
             if vol_confirm and curr_high > curr_upper:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
             # Short entry: price breaks below lower Donchian with volume confirmation
             elif vol_confirm and curr_low < curr_lower:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
                 highest_since_entry = curr_high
