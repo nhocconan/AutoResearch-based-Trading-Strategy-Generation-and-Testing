@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA200 trend filter and volume confirmation
-# Uses tighter H3/L3 levels for stronger support/resistance to reduce false breakouts
-# 4h EMA200 provides robust long-term trend filter (works in both bull/bear markets)
-# Volume confirmation ensures breakout validity
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-# Signal size: 0.20 (discrete level for cost control)
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band with volume spike AND weekly pivot shows bullish bias
+# Short when price breaks below 6h Donchian lower band with volume spike AND weekly pivot shows bearish bias
+# Weekly pivot direction provides higher-timeframe structure to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing strong breakouts
+# Uses discrete position sizing (0.25) to reduce churn and manage drawdown
 
-name = "1h_Camarilla_H3L3_Breakout_4hEMA200_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +23,85 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC) - index-based for performance
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load HTF data ONCE before loop for 4h calculations
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Load HTF data ONCE before loop for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA(200) for trend filter
-    close_4h = df_4h['close'].values
-    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+    # Calculate weekly pivot points and direction
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Bullish bias: weekly_close > weekly_pivot
+    # Bearish bias: weekly_close < weekly_pivot
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from daily data (stronger H3/L3 levels)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    weekly_bullish = close_1w > pivot_1w  # Bullish bias when close above pivot
+    weekly_bearish = close_1w < pivot_1w  # Bearish bias when close below pivot
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align weekly bias to 6h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    # Camarilla levels: H3/L3 are stronger levels (more significant support/resistance)
-    # H3 = close + (high - low) * 1.1/6
-    # L3 = close - (high - low) * 1.1/6
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + (range_1d * 1.1 / 6)
-    camarilla_l3 = close_1d - (range_1d * 1.1 / 6)
+    # Calculate 6h Donchian channels (20-period)
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation: volume > 2.0x 24-period average (more stringent)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 24)  # warmup for EMA200 and volume MA
+    start_idx = 20  # warmup for Donchian channels
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(ema200_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_h3 = h3_aligned[i]
-        curr_l3 = l3_aligned[i]
-        curr_ema200 = ema200_aligned[i]
+        curr_dc_upper = donchian_upper[i]
+        curr_dc_lower = donchian_lower[i]
+        curr_weekly_bullish = weekly_bullish_aligned[i] > 0.5
+        curr_weekly_bearish = weekly_bearish_aligned[i] > 0.5
         curr_volume_confirm = volume_confirm[i]
-        
-        # Trend regime: bullish if price > 4h EMA200, bearish if price < 4h EMA200
-        is_bullish_regime = curr_close > curr_ema200
-        is_bearish_regime = curr_close < curr_ema200
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation to avoid false breakouts
             if curr_volume_confirm:
-                # Bullish entry: price breaks above H3 with volume AND bullish regime
-                if curr_high > curr_h3 and is_bullish_regime:
-                    signals[i] = 0.20
+                # Bullish entry: price breaks above Donchian upper band with volume AND weekly bullish bias
+                if curr_high > curr_dc_upper and curr_weekly_bullish:
+                    signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below L3 with volume AND bearish regime
-                elif curr_low < curr_l3 and is_bearish_regime:
-                    signals[i] = -0.20
+                # Bearish entry: price breaks below Donchian lower band with volume AND weekly bearish bias
+                elif curr_low < curr_dc_lower and curr_weekly_bearish:
+                    signals[i] = -0.25
                     position = -1
         
-        elif position == 1:  # Long position - exit when price falls below L3 or regime changes
-            if curr_low < curr_l3 or not is_bullish_regime:
+        elif position == 1:  # Long position - exit when price falls below Donchian lower band or weekly bias turns bearish
+            if curr_low < curr_dc_lower or not curr_weekly_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
-        elif position == -1:  # Short position - exit when price rises above H3 or regime changes
-            if curr_high > curr_h3 or not is_bearish_regime:
+        elif position == -1:  # Short position - exit when price rises above Donchian upper band or weekly bias turns bullish
+            if curr_high > curr_dc_upper or not curr_weekly_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
