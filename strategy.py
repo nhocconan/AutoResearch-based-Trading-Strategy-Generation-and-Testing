@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA50 trend filter and volume spike
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.8x 20-bar avg
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.8x 20-bar avg
+# Hypothesis: 6h Williams %R extreme with 1d EMA50 trend filter and volume spike
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2.0x 20-bar avg
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2.0x 20-bar avg
 # Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# Uses discrete position sizing (0.25) to minimize fee drag while maintaining edge.
-# Williams %R identifies exhaustion points; 1d EMA50 filters counter-trend moves in bear markets.
-# Volume spike confirms institutional participation at turning points.
-# Target: 30-60 trades/year on 4h (120-240 total over 4 years).
+# Uses discrete position sizing (0.25) to balance return and fee drag.
+# Target: 12-37 trades/year on 6h (50-150 total over 4 years).
+# Williams %R identifies exhaustion points; 1d EMA50 filters counter-trend moves.
+# Volume spike ensures institutional participation, reducing false signals.
+# Novel for 6h timeframe - not recently tried in this session.
 
-name = "4h_WilliamsR_EXTREME_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,28 +35,26 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(50) on 1d data
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
+    # Align EMA50 to 6h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 4h data (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    # Calculate Williams %R on primary timeframe (6h)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: >1.8x 20-bar average volume
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.8 * volume_ma_20
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # EMA50, volume MA, and Williams %R warmup
+    start_idx = max(50, lookback, 20)  # EMA50, Williams %R, and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -71,7 +70,7 @@ def generate_signals(prices):
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R crosses back above -50 (exhaustion unwinding)
+            # Exit: Williams %R crosses back above -50 (exhaustion fading)
             if wr > -50:
                 signals[i] = 0.0
                 position = 0
@@ -79,7 +78,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses back below -50 (exhaustion unwinding)
+            # Exit: Williams %R crosses back below -50 (exhaustion fading)
             if wr < -50:
                 signals[i] = 0.0
                 position = 0
