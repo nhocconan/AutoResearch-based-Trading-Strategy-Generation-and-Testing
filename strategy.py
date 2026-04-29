@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x 20-bar avg
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x 20-bar avg
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-# Uses discrete position sizing (0.25) to reduce fee drag and improve test generalization.
-# Target: 12-30 trades/year on 6h timeframe (48-120 total over 4 years) to avoid overtrading.
-# Williams %R identifies reversal points in bear market rallies and bull market pullbacks.
-# EMA50 trend filter ensures trades align with higher timeframe direction.
-# Volume confirmation adds conviction to signals, reducing false reversals in chop.
+# Hypothesis: 12h TRIX + volume spike + choppiness regime filter
+# Long when TRIX crosses above zero AND choppy market (CHOP > 61.8) AND volume > 1.5x 20-bar avg
+# Short when TRIX crosses below zero AND choppy market (CHOP > 61.8) AND volume > 1.5x 20-bar avg
+# Uses 1d HTF for TRIX calculation and chop regime detection
+# Discrete position sizing (0.25) to minimize fee churn
+# Target: 15-30 trades/year on 12h timeframe (60-120 total over 4 years) to avoid overtrading
+# Works in bull markets by capturing momentum and in bear markets by fading overextended moves
+# during ranging conditions (chop > 61.8 indicates ranging market ideal for mean reversion)
 
-name = "6h_WilliamsRExtreme_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_TRIX_Chop_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,29 +21,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for TRIX and chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate TRIX (1-period ROC of triple EMA) on 1d
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = pd.Series(ema3).pct_change(periods=1) * 100  # 1-period ROC
+    trix = trix_raw.values
     
-    # Calculate Williams %R on 6h data (period=14)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Calculate Choppiness Index on 1d
+    atr_1d = pd.Series(np.maximum(np.maximum(high_1d - low_1d, 
+                                              np.abs(high_1d - np.roll(close_1d, 1))),
+                                  np.abs(low_1d - np.roll(close_1d, 1)))).rolling(
+        window=14, min_periods=14).mean()
+    sum_atr_14 = atr_1d.rolling(window=14, min_periods=14).sum()
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop_raw = 100 * np.log10(sum_atr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop = chop_raw.values
+    
+    # Align chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -54,46 +67,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # volume MA and Williams %R warmup
+    start_idx = max(20, 15, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
-        curr_ema50_1d = ema_50_1d_aligned[i]
-        curr_williams_r = williams_r[i]
-        curr_close = close[i]
+        curr_trix = trix_aligned[i]
+        prev_trix = trix_aligned[i-1]
+        curr_chop = chop_aligned[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (exiting oversold territory)
-            if curr_williams_r > -50:
+            # Exit: TRIX crosses below zero
+            if curr_trix < 0 and prev_trix >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (exiting overbought territory)
-            if curr_williams_r < -50:
+            # Exit: TRIX crosses above zero
+            if curr_trix > 0 and prev_trix <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume confirmation
-            if curr_williams_r < -80 and curr_close > curr_ema50_1d and vol_conf:
-                signals[i] = 0.25
-                position = 1
-            # Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume confirmation
-            elif curr_williams_r > -20 and curr_close < curr_ema50_1d and vol_conf:
-                signals[i] = -0.25
-                position = -1
+            # Only trade in choppy/ranging markets (CHOP > 61.8)
+            if curr_chop > 61.8 and vol_conf:
+                # Long when TRIX crosses above zero
+                if curr_trix > 0 and prev_trix <= 0:
+                    signals[i] = 0.25
+                    position = 1
+                # Short when TRIX crosses below zero
+                elif curr_trix < 0 and prev_trix >= 0:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
     
