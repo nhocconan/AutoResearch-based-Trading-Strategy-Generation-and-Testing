@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Uses weekly EMA50 for major trend filter (avoids counter-trend trades in bear markets)
-# H3/L3 levels provide stronger breakout signals than R3/S3 with fewer false breakouts
-# Volume spike (2.5x 20-period average) confirms institutional participation
-# Designed for 12-25 trades/year to minimize fee drag while capturing major momentum moves
-# Works in bull/bear via weekly trend filter - only trades in direction of major trend
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
+# Camarilla R3/S3 levels act as strong support/resistance; breakouts with volume and daily trend alignment capture momentum moves
+# Designed for ~12-30 trades/year to minimize fee drag while participating in established trends
+# Works in bull/bear via 1d EMA50 trend filter - only trades in direction of daily momentum
 
-name = "6h_Camarilla_H3L3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +21,17 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
+    open_price = prices['open'].values  # needed for Camarilla calculation
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
@@ -54,7 +52,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -64,11 +62,11 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_ema50_1w = ema_50_1w_aligned[i]
+        curr_ema50_1d = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
-        # Calculate Camarilla levels for this 6h bar using previous bar's OHLC
+        # Calculate Camarilla levels for this 12h bar using previous bar's OHLC
         if i == 0:
             signals[i] = 0.0
             continue
@@ -78,38 +76,40 @@ def generate_signals(prices):
         prev_open = open_price[i-1]
         
         # Camarilla levels (based on previous bar's range)
-        H3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-        L3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+        R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+        R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+        S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+        S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or price breaks below L3 (failed breakout)
-            if curr_close < entry_price - 2.0 * atr_at_entry or curr_close < L3:
+            # Exit: stoploss hit or price breaks below S3 (failed breakout)
+            if curr_close < entry_price - 2.0 * atr_at_entry or curr_close < S3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or price breaks above H3 (failed breakout)
-            if curr_close > entry_price + 2.0 * atr_at_entry or curr_close > H3:
+            # Exit: stoploss hit or price breaks above R3 (failed breakout)
+            if curr_close > entry_price + 2.0 * atr_at_entry or curr_close > R3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new breakout entries
-            # Volume confirmation: current volume > 2.5x 20-period average (strict for low frequency)
-            vol_confirm = curr_volume > 2.5 * curr_vol_ma
+            # Volume confirmation: current volume > 2.0x 20-period average (strict for low frequency)
+            vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long breakout when price closes above H3 with 1w EMA50 uptrend and volume confirmation
-            if curr_close > H3 and curr_close > curr_ema50_1w and vol_confirm:
+            # Long breakout when price closes above R3 with 1d EMA50 uptrend and volume confirmation
+            if curr_close > R3 and curr_close > curr_ema50_1d and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 atr_at_entry = curr_atr
-            # Short breakout when price closes below L3 with 1w EMA50 downtrend and volume confirmation
-            elif curr_close < L3 and curr_close < curr_ema50_1w and vol_confirm:
+            # Short breakout when price closes below S3 with 1d EMA50 downtrend and volume confirmation
+            elif curr_close < S3 and curr_close < curr_ema50_1d and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
