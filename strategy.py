@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian breakout captures momentum, weekly EMA50 filters for long-term trend,
-# volume confirmation ensures institutional participation, ATR-based stoploss manages risk
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe to minimize fee drag
-# Works in bull markets via breakouts, in bear markets via short breakdowns with trend filter
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ADX trend filter and volume confirmation
+# Bollinger Band squeeze (BB width < 20th percentile) indicates low volatility, primed for breakout
+# Breakout direction confirmed by 1d ADX > 25 (trending regime) and price outside BB
+# Volume spike (> 2.0x 20-period average) confirms breakout strength
+# Works in both bull and bear markets by following 1d ADX trend while capturing 6h volatility breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_BBSqueeze_1dADX_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,95 +19,114 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for 1w calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop for 1d calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:  # ADX needs at least 14 periods
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to 1d timeframe (completed 1w bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate Donchian channels (20-period) on 1d data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Smoothed values
+    tr_period = 14
+    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align 1d ADX to 6h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Bollinger Bands on 6h data (20, 2.0)
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
+    
+    # Bollinger Band squeeze: width < 20th percentile (low volatility)
+    # Calculate rolling percentile of BB width
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
+    
+    # Volume confirmation: volume > 2.0x 20-period average (20*6h = 5 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
     
-    # ATR(14) for stoploss calculation
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = tr1.iloc[0]  # First bar: no previous close
-    tr3.iloc[0] = tr1.iloc[0]
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_at_entry = 0.0
     
-    start_idx = max(50, 20, 20)  # warmup for EMA50, Donchian, volume MA
+    start_idx = max(34, 20, 20)  # warmup for ADX, BB, and volume MA
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_aligned[i]):
+        if np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_ema50 = ema50_aligned[i]
+        curr_bb_upper = bb_upper[i]
+        curr_bb_lower = bb_lower[i]
+        curr_bb_squeeze = bb_squeeze[i]
+        curr_adx = adx_aligned[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_atr = atr[i]
+        
+        # Trend regime: trending if ADX > 25
+        is_trending = curr_adx > 25
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend alignment
-            if curr_volume_confirm:
-                # Long breakout: price > Donchian high AND price > 1w EMA50 (bullish trend)
-                if curr_close > curr_donchian_high and curr_close > curr_ema50:
+            # Only trade during BB squeeze breakout with volume and trend confirmation
+            if curr_bb_squeeze and curr_volume_confirm and is_trending:
+                # Bullish breakout: price breaks above upper BB
+                if curr_close > curr_bb_upper:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    atr_at_entry = curr_atr
-                # Short breakdown: price < Donchian low AND price < 1w EMA50 (bearish trend)
-                elif curr_close < curr_donchian_low and curr_close < curr_ema50:
+                # Bearish breakout: price breaks below lower BB
+                elif curr_close < curr_bb_lower:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    atr_at_entry = curr_atr
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price < Donchian low (breakdown) OR stoploss hit OR trend changes
-            if (curr_close < curr_donchian_low or 
-                curr_close < entry_price - 2.5 * atr_at_entry or
-                curr_close < curr_ema50):
+            # Exit when: price returns to middle BB OR squeeze ends (volatility expansion)
+            if curr_close < bb_middle[i] or not curr_bb_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price > Donchian high (breakout) OR stoploss hit OR trend changes
-            if (curr_close > curr_donchian_high or 
-                curr_close > entry_price + 2.5 * atr_at_entry or
-                curr_close > curr_ema50):
+            # Exit when: price returns to middle BB OR squeeze ends (volatility expansion)
+            if curr_close > bb_middle[i] or not curr_bb_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
