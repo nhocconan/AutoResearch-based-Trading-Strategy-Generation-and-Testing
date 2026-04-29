@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Camarilla pivot breakouts with 1d EMA34 trend filter and volume spike confirmation.
-# Weekly Camarilla levels provide strong institutional support/resistance; 1d EMA34 filters for intermediate-term trend alignment;
-# Volume spikes confirm institutional participation in breakouts. Designed to work in both bull (breakout continuation) and bear (fade at extreme levels) markets.
-# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag while capturing significant moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA50 trend + volume spike + ATR(14) stoploss
+# Uses 12h primary timeframe to capture medium-term swings with 1d EMA50 for trend filter.
+# Camarilla levels from previous day provide key support/resistance; volume confirms breakout strength;
+# ATR-based trailing stop manages risk. Designed for 12-37 trades/year to minimize fee drag.
 
-name = "6h_WeeklyCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,95 +23,130 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop for 1d calculations
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1w) < 10 or len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels from previous week
-    prev_weekly_close = np.concatenate([[np.nan], df_1w['close'].values[:-1]])
-    prev_weekly_high = np.concatenate([[np.nan], df_1w['high'].values[:-1]])
-    prev_weekly_low = np.concatenate([[np.nan], df_1w['low'].values[:-1]])
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    camarilla_r3_weekly = prev_weekly_close + 1.0 * (prev_weekly_high - prev_weekly_low)
-    camarilla_s3_weekly = prev_weekly_close - 1.0 * (prev_weekly_high - prev_weekly_low)
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    camarilla_r3_weekly_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_weekly)
-    camarilla_s3_weekly_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_weekly)
+    # Calculate Camarilla levels from previous day (1d timeframe)
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + 1.0 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.0 * (prev_high - prev_low)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    atr_at_entry = 0.0
+    max_high_since_entry = 0.0  # For trailing stop
+    min_low_since_entry = 0.0   # For trailing stop
     
-    start_idx = max(34, 20)  # warmup for EMA34 and volume
+    start_idx = max(50, 20, 14)  # warmup for EMA50, volume, ATR
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if (np.isnan(camarilla_r3_weekly_aligned[i]) or 
-            np.isnan(camarilla_s3_weekly_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_r3 = camarilla_r3_weekly_aligned[i]
-        curr_s3 = camarilla_s3_weekly_aligned[i]
+        curr_open = open_price[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_atr = atr[i]
+        curr_r3 = camarilla_r3[i]
+        curr_s3 = camarilla_s3[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Handle position exits
+        # Handle position exits and stops
         if position == 1:  # Long position
+            # Update trailing stop: highest high since entry
+            max_high_since_entry = max(max_high_since_entry, curr_high)
+            # Dynamic stoploss: ATR-based trailing stop
+            trail_stop = max_high_since_entry - 2.5 * curr_atr
+            # Fixed stoploss: 2.0 * ATR below entry
+            fixed_stop = entry_price - 2.0 * atr_at_entry
+            # Use the tighter of the two stops
+            stop_price = max(trail_stop, fixed_stop)
+            
             # Exit conditions:
-            # 1. Price drops below weekly EMA34 (trend change)
-            # 2. Price crosses below weekly Camarilla S3 (breakout failed)
-            if (curr_close < curr_ema_34_1d or 
+            # 1. Stoploss hit (trailing or fixed)
+            # 2. Price crosses below 1d EMA50 (trend change)
+            # 3. Price drops below Camarilla S3 (breakout failed)
+            if (curr_low <= stop_price or
+                curr_close < curr_ema_50_1d or
                 curr_close < curr_s3):
                 signals[i] = 0.0
                 position = 0
+                max_high_since_entry = 0.0
+                min_low_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
+            # Update trailing stop: lowest low since entry
+            min_low_since_entry = min(min_low_since_entry, curr_low)
+            # Dynamic stoploss: ATR-based trailing stop
+            trail_stop = min_low_since_entry + 2.5 * curr_atr
+            # Fixed stoploss: 2.0 * ATR above entry
+            fixed_stop = entry_price + 2.0 * atr_at_entry
+            # Use the tighter of the two stops
+            stop_price = min(trail_stop, fixed_stop)
+            
             # Exit conditions:
-            # 1. Price rises above weekly EMA34 (trend change)
-            # 2. Price crosses above weekly Camarilla R3 (breakout failed)
-            if (curr_close > curr_ema_34_1d or 
+            # 1. Stoploss hit (trailing or fixed)
+            # 2. Price crosses above 1d EMA50 (trend change)
+            # 3. Price rises above Camarilla R3 (breakout failed)
+            if (curr_high >= stop_price or
+                curr_close > curr_ema_50_1d or
                 curr_close > curr_r3):
                 signals[i] = 0.0
                 position = 0
+                max_high_since_entry = 0.0
+                min_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Only enter on volume confirmation to avoid false breakouts
-            if not curr_volume_confirm:
-                signals[i] = 0.0
-                continue
-                
-            # Long entry: price breaks above weekly Camarilla R3 + above weekly EMA34
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_34_1d):
+            # Long entry: price breaks above Camarilla R3 + above 1d EMA50 + volume confirm
+            if (curr_close > curr_r3 and
+                curr_close > curr_ema_50_1d and
+                curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: price breaks below weekly Camarilla S3 + below weekly EMA34
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_34_1d):
+                atr_at_entry = curr_atr
+                max_high_since_entry = curr_high
+                min_low_since_entry = curr_low
+            # Short entry: price breaks below Camarilla S3 + below 1d EMA50 + volume confirm
+            elif (curr_close < curr_s3 and
+                  curr_close < curr_ema_50_1d and
+                  curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                atr_at_entry = curr_atr
+                max_high_since_entry = curr_high
+                min_low_since_entry = curr_low
             else:
                 signals[i] = 0.0
     
