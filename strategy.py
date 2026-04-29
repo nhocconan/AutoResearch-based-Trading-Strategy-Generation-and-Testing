@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 AND price > 1w EMA50 AND volume > 2.0x 20-bar avg
 # Short when price breaks below Camarilla S3 AND price < 1w EMA50 AND volume > 2.0x 20-bar avg
 # Exit when price retests Camarilla pivot (central level) or 1w EMA50
-# Uses discrete position sizing (0.25) to reduce fee drag. Target: 12-37 trades/year on 12h timeframe.
-# Combines intraday support/resistance (Camarilla) with HTF trend filter and volume confirmation
+# Uses discrete position sizing (0.25) to reduce fee drag. Target: 7-25 trades/year on 1d timeframe.
+# Combines daily support/resistance (Camarilla) with weekly trend filter and volume confirmation
 # to capture strong breakouts while avoiding false signals in choppy markets.
-# Uses 1w EMA50 for stronger trend filter suitable for 12h timeframe and bear market resilience.
+# Novelty: Uses 1d primary timeframe (proven keep rate 40%) with 1w EMA50 for HTF trend filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter and Camarilla levels
+    # Get 1w data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -37,25 +37,25 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from previous 1w bar
+    # Calculate Camarilla levels from previous 1d bar
     # Camarilla: based on previous bar's high, low, close
     # R4 = close + (high-low)*1.1/2
     # R3 = close + (high-low)*1.1/4
     # S3 = close - (high-low)*1.1/4
     # Pivot = (high+low+close)/3
-    prev_high_1w = df_1w['high'].values
-    prev_low_1w = df_1w['low'].values
-    prev_close_1w = df_1w['close'].values
+    prev_high_1d = df_1d['high'].values
+    prev_low_1d = df_1d['low'].values
+    prev_close_1d = df_1d['close'].values
     
-    camarilla_range = prev_high_1w - prev_low_1w
-    camarilla_pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    camarilla_r3 = prev_close_1w + camarilla_range * 1.1 / 4.0
-    camarilla_s3 = prev_close_1w - camarilla_range * 1.1 / 4.0
+    camarilla_range = prev_high_1d - prev_low_1d
+    camarilla_pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    camarilla_r3 = prev_close_1d + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = prev_close_1d - camarilla_range * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe (they represent levels from previous 1w bar)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Align Camarilla levels to 1d timeframe (they represent levels from previous 1d bar)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
