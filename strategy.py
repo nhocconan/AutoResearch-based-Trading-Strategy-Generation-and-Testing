@@ -3,18 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation
-# Williams %R measures overbought/oversold levels: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x 20-bar avg
-# Short when %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x 20-bar avg
-# Exit when %R crosses back above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 12h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation
+# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods
+# Extreme oversold: Williams %R < -80 (potential long)
+# Extreme overbought: Williams %R > -20 (potential short)
+# Long when Williams %R crosses above -80 from below AND price > 1d EMA50 AND volume > 1.5x 20-bar avg
+# Short when Williams %R crosses below -20 from above AND price < 1d EMA50 AND volume > 1.5x 20-bar avg
+# Exit when Williams %R reaches opposite extreme (%R > -20 for longs, %R < -80 for shorts)
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
-# Williams %R identifies exhaustion points; EMA50 filters counter-trend moves; volume ensures participation.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Williams %R identifies momentum extremes; reversal from extreme indicates potential trend change.
+# 1d EMA50 filters counter-trend moves, volume confirmation ensures participation.
 # Works in bull markets (buying oversold dips) and bear markets (selling overbought rallies).
 
-name = "4h_WilliamsRExtreme_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsRExtreme_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,17 +38,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     # Calculate EMA(50) on 1d data
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 4h timeframe
+    # Align EMA50 to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R (14-period)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1, hl_range)
-    williams_r = ((highest_high - close) / hl_range) * -100
+    # Calculate Williams %R (14 period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
     # Volume confirmation: >1.5x 20-bar average volume
     volume_series = pd.Series(volume)
@@ -55,43 +54,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20, 50)  # Williams %R, volume MA, and EMA50 alignment
+    start_idx = max(14, 20, 50)  # Williams %R warmup, volume MA warmup, EMA50 alignment
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma_20[i])):
+            np.isnan(williams_r[i-1]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_conf = volume_confirm[i]
         ema_50 = ema_50_1d_aligned[i]
-        curr_wr = williams_r[i]
+        curr_williams = williams_r[i]
+        prev_williams = williams_r[i-1]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (exhaustion ending)
-            if curr_wr > -50:
+            # Exit: Williams %R reaches overbought territory (> -20)
+            if curr_williams >= -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (exhaustion ending)
-            if curr_wr < -50:
+            # Exit: Williams %R reaches oversold territory (< -80)
+            if curr_williams <= -80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume confirmation
-            if curr_wr < -80 and close[i] > ema_50 and vol_conf:
+            # Long when Williams %R crosses above -80 from below AND price > 1d EMA50 AND volume confirmation
+            if curr_williams > -80 and prev_williams <= -80 and close[i] > ema_50 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume confirmation
-            elif curr_wr > -20 and close[i] < ema_50 and vol_conf:
+            # Short when Williams %R crosses below -20 from above AND price < 1d EMA50 AND volume confirmation
+            elif curr_williams < -20 and prev_williams >= -20 and close[i] < ema_50 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
