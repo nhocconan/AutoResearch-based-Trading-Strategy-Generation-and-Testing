@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period average)
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
-# Uses discrete position sizing (0.25) to minimize fee churn
-# Camarilla R3/S3 levels provide institutional support/resistance with proven edge
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
-# Volume confirmation filters weak breakouts
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>2.0x 20-period average)
+# Using 12h timeframe to reduce trade frequency and avoid overtrading (target: 50-150 total trades over 4 years)
+# Camarilla R3/S3 levels from prior 1d provide strong support/resistance for breakouts
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades in bear markets
+# Higher volume threshold (2.0x) filters weak breakouts, reducing false signals
+# Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -54,11 +54,11 @@ def generate_signals(prices):
     camarilla_r3 = prev_close_1d + camarilla_range * 1.1 / 4
     camarilla_s3 = prev_close_1d - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 20-period average volume for confirmation (on 6h timeframe)
+    # Calculate 20-period average volume for confirmation (on 12h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -74,16 +74,14 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        vol_confirm = curr_volume > 1.8 * curr_vol_ma
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = curr_volume > 2.0 * curr_vol_ma
         
         # Handle exits
         if position == 1:  # Long position
