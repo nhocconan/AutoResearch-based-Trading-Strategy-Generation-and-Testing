@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted RSI with 1d trend filter and volatility regime
-# Long when VW-RSI < 30 AND price > 1d EMA50 AND ATR ratio < 0.8 (low volatility)
-# Short when VW-RSI > 70 AND price < 1d EMA50 AND ATR ratio < 0.8 (low volatility)
-# Uses discrete position sizing (0.25) to minimize fee drag.
-# VW-RSI gives more accurate momentum reading by weighting price changes with volume.
-# Works in ranging markets via mean reversion at extremes and avoids choppy periods via volatility filter.
-# Target: 15-25 trades/year on 6h timeframe (60-100 total over 4 years) to avoid overtrading.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 1.8x 20-bar avg
+# Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 1.8x 20-bar avg
+# Exit when price crosses 1d EMA34 (trend change)
+# Uses discrete position sizing (0.25) to reduce fee drag.
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to avoid overtrading.
+# Donchian channels provide clear breakout levels, EMA34 filters trend direction, volume confirms strength.
 
-name = "6h_VolumeWeightedRSI_1dEMA50_ATRFilter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,94 +20,74 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for volatility regime filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR ratio: current ATR / 50-period ATR average (regime filter)
-    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / atr_ma_50  # < 1 = low volatility, > 1 = high volatility
-    
-    # Calculate Volume-Weighted RSI(14)
-    # Weight price changes by volume to get more accurate momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Volume-weighted gain and loss
-    vol_weighted_gain = gain * volume
-    vol_weighted_loss = loss * volume
-    
-    # Smoothed volume-weighted gains/losses using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    avg_vol_gain = pd.Series(vol_weighted_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_vol_loss = pd.Series(vol_weighted_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Avoid division by zero
-    rs = np.where(avg_vol_loss != 0, avg_vol_gain / avg_vol_loss, 0)
-    vw_rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: >1.8x 20-bar average volume
+    volume_series = pd.Series(volume)
+    volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.8 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 50)  # ATR and EMA warmup
+    start_idx = max(20, 34)  # Donchian and EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vw_rsi[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        curr_ema50_1d = ema_50_1d_aligned[i]
-        curr_vw_rsi = vw_rsi[i]
-        curr_atr_ratio = atr_ratio[i]
+        vol_conf = volume_confirm[i]
+        curr_ema34_1d = ema_34_1d_aligned[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         curr_close = close[i]
+        curr_open = prices['open'].iloc[i]  # for breakout confirmation
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: VW-RSI crosses above 50 (momentum fade) OR volatility increases
-            if curr_vw_rsi > 50 or curr_atr_ratio > 1.2:
+            # Exit: price crosses below 1d EMA34 (trend change)
+            if curr_close < curr_ema34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: VW-RSI crosses below 50 (momentum fade) OR volatility increases
-            if curr_vw_rsi < 50 or curr_atr_ratio > 1.2:
+            # Exit: price crosses above 1d EMA34 (trend change)
+            if curr_close > curr_ema34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long when VW-RSI < 30 AND price > 1d EMA50 AND low volatility
-            if curr_vw_rsi < 30 and curr_close > curr_ema50_1d and curr_atr_ratio < 0.8:
+            # Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume confirmation
+            if curr_close > curr_donchian_high and curr_close > curr_ema34_1d and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when VW-RSI > 70 AND price < 1d EMA50 AND low volatility
-            elif curr_vw_rsi > 70 and curr_close < curr_ema50_1d and curr_atr_ratio < 0.8:
+            # Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < curr_donchian_low and curr_close < curr_ema34_1d and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
