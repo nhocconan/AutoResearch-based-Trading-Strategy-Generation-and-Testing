@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R extreme reversal with 1d ADX regime filter and volume confirmation
-# Long when Williams %R < -80 (oversold) in bullish regime (ADX>25) with volume spike
-# Short when Williams %R > -20 (overbought) in bearish regime (ADX>25) with volume spike
+# Hypothesis: 4h Williams %R mean reversion with 1d ADX regime filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold) in bullish regime (ADX>25) with volume spike
+# Short when Williams %R crosses below -20 (overbought) in bearish regime (ADX>25) with volume spike
 # Uses 1d ADX to filter for trending markets only, avoiding whipsaws in ranging conditions
 # Volume confirmation ensures reversals have institutional participation
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
 
-name = "12h_WilliamsR_1dADX25_VolumeSpike_Regime_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dADX25_VolumeSpike_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -70,15 +70,16 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx_1d = wilders_smooth(dx, 14)
     
-    # Align daily ADX to 12h timeframe (completed 1d bar only)
+    # Align daily ADX to 4h timeframe (completed 1d bar only)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Williams %R(14) on 12h
+    # Williams %R(14) on 4h
     williams_window = 14
     highest_high = pd.Series(high).rolling(window=williams_window, min_periods=williams_window).max().values
     lowest_low = pd.Series(low).rolling(window=williams_window, min_periods=williams_window).min().values
     williams_r = np.where((highest_high - lowest_low) != 0, 
-                          -100 * (highest_high - close) / (highest_high - lowest_low), -50)
+                          -100 * (highest_high - close) / (highest_high - lowest_low), 
+                          -50)
     
     # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,7 +88,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(35, 20)  # warmup for ADX and Williams %R
+    start_idx = max(35, williams_window)  # warmup for ADX and Williams %R
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
@@ -106,26 +107,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and in trending regime
             if is_trending and curr_volume_confirm:
-                # Bullish reversal: Williams %R oversold (< -80)
-                if curr_williams < -80:
+                # Bullish reversal: Williams %R crosses above -80 from below
+                if curr_williams > -80 and (i == start_idx or williams_r[i-1] <= -80):
                     signals[i] = 0.25
                     position = 1
-                # Bearish reversal: Williams %R overbought (> -20)
-                elif curr_williams > -20:
+                # Bearish reversal: Williams %R crosses below -20 from above
+                elif curr_williams < -20 and (i == start_idx or williams_r[i-1] >= -20):
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: Williams %R returns to neutral zone (-50) or becomes overbought
-            if curr_williams >= -50:
+            # Exit when: Williams %R crosses above -20 (overbought) OR crosses below -80 with volume
+            if curr_williams > -20 or (curr_williams < -80 and curr_volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: Williams %R returns to neutral zone (-50) or becomes oversold
-            if curr_williams <= -50:
+            # Exit when: Williams %R crosses below -80 (oversold) OR crosses above -20 with volume
+            if curr_williams < -80 or (curr_williams > -20 and curr_volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
