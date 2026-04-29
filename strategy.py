@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# EMA50 on 1d ensures we only trade counter-trend to higher timeframe trend (fade the 1d trend).
-# Volume spike (>2.0x 20-period average) confirms reversal validity and reduces false signals.
-# Designed to work in both bull and bear markets: longs when %R < -80 in 1d uptrend, shorts when %R > -20 in 1d downtrend.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA50 trend filter and volume spike confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# In strong uptrends, Bull Power stays positive; in strong downtrends, Bear Power stays negative
+# Combined with 1d EMA50 for higher timeframe trend alignment and volume confirmation (>2.0x 20-period average)
+# Designed to capture sustained moves in both bull and bear markets while avoiding choppy conditions
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
 
-name = "4h_WilliamsR_MeanRev_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,30 +35,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 4h timeframe (lookback 14 periods)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate EMA13 for Elder Ray (on 6h timeframe)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 20-period average volume for confirmation (on 4h timeframe)
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: High - EMA13
+    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    
+    # Calculate 20-period average volume for confirmation (on 6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14, 20)  # 1d EMA50, Williams %R, volume MA warmup
+    start_idx = max(50, 13, 20)  # 1d EMA50, EMA13, volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_volume = volume[i]
         curr_vol_ma = vol_ma_20[i]
         curr_ema_1d = ema_50_1d_aligned[i]
         
@@ -67,30 +69,30 @@ def generate_signals(prices):
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (mean reversion complete)
-            if curr_williams_r > -50:
+            # Exit: Bull Power turns negative OR price closes below 1d EMA50
+            if curr_bull_power < 0 or curr_close < curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (mean reversion complete)
-            if curr_williams_r < -50:
+            # Exit: Bear Power turns positive OR price closes above 1d EMA50
+            if curr_bear_power > 0 or curr_close > curr_ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) + 1d uptrend + volume confirmation
-            if (curr_williams_r < -80 and 
+            # Long entry: Bull Power positive + price above 1d EMA50 + volume confirmation
+            if (curr_bull_power > 0 and 
                 curr_close > curr_ema_1d and 
                 vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R > -20 (overbought) + 1d downtrend + volume confirmation
-            elif (curr_williams_r > -20 and 
+            # Short entry: Bear Power negative + price below 1d EMA50 + volume confirmation
+            elif (curr_bear_power < 0 and 
                   curr_close < curr_ema_1d and 
                   vol_confirm):
                 signals[i] = -0.25
