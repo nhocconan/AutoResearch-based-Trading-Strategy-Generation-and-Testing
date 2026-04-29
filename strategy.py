@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions: long when %R crosses above -80 from below,
-# short when %R crosses below -20 from above. Uses 1d EMA34 for stronger trend filter to avoid
-# counter-trend trades in ranging markets. Volume spike (>2x 20-period average) confirms momentum.
-# ATR-based stoploss (2x ATR) manages risk. Designed for moderate trade frequency (target: 75-150 total over 4 years)
-# to balance opportunity and fee drag. Works in bull markets via oversold bounces and in bear markets
-# via overbought reversals, with trend filter ensuring alignment with higher timeframe direction.
+# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries
+# 1d EMA34 provides stronger trend filter to avoid counter-trend trades in ranging/bear markets
+# Volume spike (2.0x 20-period average) confirms reversal validity
+# Designed for low-moderate trade frequency (target: 50-150 total over 4 years) to minimize fee drag
+# Works in bull markets via buying oversold dips in uptrend and in bear markets via selling rallies in downtrend
 
-name = "4h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +26,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -47,26 +46,20 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
+    # Handle division by zero when high == low
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 14  # warmup for Williams %R
+    start_idx = max(50, 34)  # warmup for EMA and Williams %R
     
     for i in range(start_idx, n):
-        # Need at least 1 previous bar for crossover detection
-        if i < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_williams_r = williams_r[i-1]
-        curr_williams_r = williams_r[i]
         curr_close = close[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
         
         # Volume spike confirmation: current volume > 2.0x 20-period average
         if i >= 20:
@@ -79,8 +72,8 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_price = entry_price - 2.0 * curr_atr
-            # Exit conditions: Williams %R crosses below -50 OR price below 1d EMA34 OR stoploss hit
-            if prev_williams_r > -50 and curr_williams_r <= -50 or curr_close < curr_ema_1d or curr_close < stop_price:
+            # Exit conditions: Williams %R > -20 (overbought) OR price < 1d EMA34 OR stoploss hit
+            if curr_williams_r > -20 or curr_close < curr_ema_1d or curr_close < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,21 +82,21 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_price = entry_price + 2.0 * curr_atr
-            # Exit conditions: Williams %R crosses above -50 OR price above 1d EMA34 OR stoploss hit
-            if prev_williams_r < -50 and curr_williams_r >= -50 or curr_close > curr_ema_1d or curr_close > stop_price:
+            # Exit conditions: Williams %R < -80 (oversold) OR price > 1d EMA34 OR stoploss hit
+            if curr_williams_r < -80 or curr_close > curr_ema_1d or curr_close > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Williams %R crosses above -80 from below AND price > 1d EMA34 AND volume spike
-            if prev_williams_r < -80 and curr_williams_r >= -80 and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume spike
+            if curr_williams_r < -80 and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short entry: Williams %R crosses below -20 from above AND price < 1d EMA34 AND volume spike
-            elif prev_williams_r > -20 and curr_williams_r <= -20 and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume spike
+            elif curr_williams_r > -20 and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
