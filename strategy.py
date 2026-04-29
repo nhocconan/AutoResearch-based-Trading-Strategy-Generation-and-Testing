@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above R3, 1d EMA34 up-trend, volume > 2.0x average
 # Short when price breaks below S3, 1d EMA34 down-trend, volume > 2.0x average
 # Exit when price crosses the 50% level (midpoint between R3 and S3)
-# Uses discrete position sizing (0.25) and strong volume filter to target 19-50 trades/year.
+# Uses discrete position sizing (0.25) and strong volume filter to target 20-50 trades/year.
 # Uses 1d for signal direction/trend, 4h only for entry timing and Camarilla levels.
 # Designed to work in both bull and bear markets by following the higher timeframe trend.
 
