@@ -11,6 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Target: 20-50 trades/year on 4h (80-200 total over 4 years).
 # Camarilla levels provide high-probability reversal points; 1d EMA34 filters counter-trend moves.
 # Volume spike ensures institutional participation, reducing false breakouts.
+# This version fixes the volume calculation bug from previous experiments.
 
 name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
