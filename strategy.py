@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume confirmation
-# Uses Williams %R(14) to identify overbought/oversold conditions for mean reversion entries
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels (R3/S3) from daily candles for institutional breakout levels
 # 1d EMA34 provides strong HTF trend filter to align with primary trend direction
-# Volume spike (2.0x 20-period average) confirms reversal validity with institutional participation
-# ATR-based trailing stop (2.0x ATR) manages risk while allowing trends to develop
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag on 6h timeframe
-# Works in bull markets via long signals when Williams %R < -80 (oversold) with HTF uptrend
-# Works in bear markets via short signals when Williams %R > -20 (overbought) with HTF downtrend
-# Williams %R is effective in ranging markets and captures reversals at extremes
+# Volume spike (2.0x 20-period average) confirms breakout validity with institutional participation
+# ATR-based trailing stop (2.5x ATR) manages risk while allowing trends to develop
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag on 12h timeframe
+# Works in bull markets via long signals when price breaks above R3 with HTF uptrend
+# Works in bear markets via short signals when price breaks below S3 with HTF downtrend
+# Camarilla levels work well in ranging markets by providing clear breakout thresholds
 
-name = "6h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,17 +37,6 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R(14) - momentum oscillator
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Range: 0 to -100, where > -20 is overbought, < -80 is oversold
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50.0  # neutral when no range
-    )
-    
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -62,15 +51,23 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    start_idx = 34  # warmup for EMA and Williams %R
+    start_idx = 34  # warmup for EMA
     
     for i in range(start_idx, n):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_williams_r = williams_r[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
+        
+        # Calculate Camarilla pivot levels from previous day
+        prev_high = high[i-1] if i > 0 else high[0]
+        prev_low = low[i-1] if i > 0 else low[0]
+        prev_close = close[i-1] if i > 0 else close[0]
+        
+        camarilla_range = prev_high - prev_low
+        r3 = prev_close + (camarilla_range * 1.1 / 4.0)
+        s3 = prev_close - (camarilla_range * 1.1 / 4.0)
         
         # Volume spike confirmation: current volume > 2.0x 20-period average
         if i >= 20:
@@ -83,10 +80,10 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
-            # Trailing stop: 2.0 * ATR below highest high
-            stop_price = highest_high_since_entry - 2.0 * curr_atr
-            # Exit conditions: price below trailing stop OR Williams %R > -50 (exiting oversold)
-            if curr_close < stop_price or curr_williams_r > -50:
+            # Trailing stop: 2.5 * ATR below highest high
+            stop_price = highest_high_since_entry - 2.5 * curr_atr
+            # Exit conditions: price below trailing stop OR price breaks below R3 (failed breakout)
+            if curr_close < stop_price or curr_close < r3:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -96,10 +93,10 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
-            # Trailing stop: 2.0 * ATR above lowest low
-            stop_price = lowest_low_since_entry + 2.0 * curr_atr
-            # Exit conditions: price above trailing stop OR Williams %R < -50 (exiting overbought)
-            if curr_close > stop_price or curr_williams_r < -50:
+            # Trailing stop: 2.5 * ATR above lowest low
+            stop_price = lowest_low_since_entry + 2.5 * curr_atr
+            # Exit conditions: price above trailing stop OR price breaks above S3 (failed breakout)
+            if curr_close > stop_price or curr_close > s3:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -107,14 +104,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume spike
-            if curr_williams_r < -80 and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: Price breaks above R3 AND price > 1d EMA34 AND volume spike
+            if curr_close > r3 and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_high_since_entry = curr_high
-            # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume spike
-            elif curr_williams_r > -20 and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: Price breaks below S3 AND price < 1d EMA34 AND volume spike
+            elif curr_close < s3 and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
