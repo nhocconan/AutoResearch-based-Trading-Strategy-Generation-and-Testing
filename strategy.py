@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d EMA50 trend filter + ATR-based volume confirmation
-# Long when close > upper Donchian(20) AND price > 1d EMA50 AND volume > 1.5x ATR(14)-scaled MA
-# Short when close < lower Donchian(20) AND price < 1d EMA50 AND volume > 1.5x ATR(14)-scaled MA
-# Exit on opposite Donchian level touch (long exit at lower, short exit at upper)
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 15-30 trades/year on 6h.
-# Donchian channels provide clear breakout levels. EMA50 filters counter-trend moves on 1d.
-# Volume confirmation uses ATR scaling to adapt to volatility regimes. Works in both bull and bear markets.
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike
+# Long when close > R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar avg
+# Short when close < S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar avg
+# Exit on opposite Camarilla level touch (long exit at S3, short exit at R3)
+# Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year on 12h.
+# Camarilla levels provide institutional support/resistance. EMA34 filters counter-trend moves.
+# Volume spike confirms institutional participation. Works in both bull and bear markets.
 
-name = "6h_Donchian20_1dEMA50_ATRVolume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,47 +25,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate EMA(50) on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align EMA34 to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for volume normalization
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Use previous day's typical price for Camarilla calculation
+    prev_typical = pd.Series(typical_price).shift(1).values
+    # Calculate range
+    daily_range = high - low
+    prev_range = pd.Series(daily_range).shift(1).values
     
-    # Calculate Donchian channels (20-period)
-    upper_donchian = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_donchian = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels
+    R3 = prev_typical + (prev_range * 1.1 / 4)
+    S3 = prev_typical - (prev_range * 1.1 / 4)
+    R4 = prev_typical + (prev_range * 1.1 / 2)
+    S4 = prev_typical - (prev_range * 1.1 / 2)
     
-    # Volume confirmation: >1.5x ATR-scaled 20-bar volume average
+    # Volume confirmation: >2.0x 20-bar average volume
     volume_series = pd.Series(volume)
     volume_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    atr_scaled_volume_ma = volume_ma_20 * (atr / np.mean(atr[~np.isnan(atr)]))  # Normalize ATR
-    volume_confirm = volume > 1.5 * atr_scaled_volume_ma
+    volume_confirm = volume > 2.0 * volume_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 14)  # EMA50, Donchian20, ATR14
+    start_idx = 34  # EMA34 needs 34 bars
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_donchian[i]) or 
-            np.isnan(lower_donchian[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -73,30 +72,32 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_50 = ema_50_1d_aligned[i]
-        upper_don = upper_donchian[i]
-        lower_don = lower_donchian[i]
+        ema_34 = ema_34_1d_aligned[i]
+        r3_level = R3[i]
+        s3_level = S3[i]
+        r4_level = R4[i]
+        s4_level = S4[i]
         
         # Handle entries and exits
         if position == 0:  # Flat - look for new entries
-            # Long when close > upper Donchian AND price > 1d EMA50 AND volume confirmation
-            if curr_close > upper_don and curr_close > ema_50 and vol_conf:
+            # Long when close > R3 AND price > 1d EMA34 AND volume confirmation
+            if curr_close > r3_level and curr_close > ema_34 and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # Short when close < lower Donchian AND price < 1d EMA50 AND volume confirmation
-            elif curr_close < lower_don and curr_close < ema_50 and vol_conf:
+            # Short when close < S3 AND price < 1d EMA34 AND volume confirmation
+            elif curr_close < s3_level and curr_close < ema_34 and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long - exit when close < lower Donchian (opposite level)
-            if curr_close < lower_don:
+        elif position == 1:  # Long - exit when close < S3 (opposite level)
+            if curr_close < s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:  # Short - exit when close > upper Donchian (opposite level)
-            if curr_close > upper_don:
+        elif position == -1:  # Short - exit when close > R3 (opposite level)
+            if curr_close > r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
