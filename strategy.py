@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 12h EMA50 trend filter and volume spike confirmation
-# Williams %R measures overbought/oversold conditions; long when %R < -80 (oversold) in uptrend,
-# short when %R > -20 (overbought) in downtrend. Uses 12h EMA50 for trend filter to ensure
-# trading with higher timeframe momentum. Volume confirmation (>2.0x 20-period average) reduces
-# false signals. Designed for ~19-50 trades/year on 4h timeframe to minimize fee drag while
-# capturing mean reversion within the trend. Works in both bull and bear via 12h EMA50 trend filter.
+# Hypothesis: 1h RSI(14) mean reversion with 4h/1d trend filter and volume spike confirmation
+# In 4h uptrend (price > 4h EMA50), look for RSI < 30 (oversold) with volume > 2x average for longs
+# In 4h downtrend (price < 4h EMA50), look for RSI > 70 (overbought) with volume > 2x average for shorts
+# 1d EMA200 acts as higher timeframe regime filter: only trade long when price > 1d EMA200, short when price < 1d EMA200
+# Uses strict volume confirmation (>2.0x 20-period average) and session filter (08-20 UTC) to reduce noise
+# Target: 15-37 trades/year on 1h timeframe to minimize fee drag while capturing mean reversion in trends
 
-name = "4h_WilliamsR_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA50_1dEMA200_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,88 +23,115 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for EMA50 trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 1d data for EMA200 regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate Williams %R (14-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR (14-period) for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d EMA200 for regime filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate RSI(14) on 1h data
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # Calculate 20-period average volume for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_at_entry = 0.0
     
-    start_idx = 20  # volume MA and Williams %R warmup
+    start_idx = 20  # volume MA and RSI warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_values[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_rsi = rsi_values[i]
+        curr_ema50_4h = ema_50_4h_aligned[i]
+        curr_ema200_1d = ema_200_1d_aligned[i]
         curr_volume = volume[i]
-        curr_ema50_12h = ema_50_12h_aligned[i]
-        curr_williams_r = williams_r[i]
-        curr_atr = atr[i]
         curr_vol_ma = vol_ma_20[i]
         
         # Handle exits and position management
         if position == 1:  # Long position
-            # Exit: stoploss hit or Williams %R > -20 (overbought)
-            if curr_close < entry_price - 1.5 * curr_atr or curr_williams_r > -20:
+            # Exit: RSI > 50 (mean reversion complete) or stoploss via opposite signal
+            if curr_rsi > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: stoploss hit or Williams %R < -80 (oversold)
-            if curr_close > entry_price + 1.5 * curr_atr or curr_williams_r < -80:
+            # Exit: RSI < 50 (mean reversion complete) or stoploss via opposite signal
+            if curr_rsi < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 
         else:  # Flat - look for new entries
             # Volume confirmation: current volume > 2.0x 20-period average
             vol_confirm = curr_volume > 2.0 * curr_vol_ma
             
-            # Long entry when price > 12h EMA50 (bullish regime) AND Williams %R < -80 (oversold) with volume confirmation
-            if curr_close > curr_ema50_12h and curr_williams_r < -80 and vol_confirm:
-                signals[i] = 0.25
+            # Long entry when:
+            # 1. 4h uptrend (price > 4h EMA50)
+            # 2. 1d regime allows long (price > 1d EMA200)
+            # 3. RSI < 30 (oversold)
+            # 4. Volume confirmation
+            if (curr_close > curr_ema50_4h and 
+                curr_close > curr_ema200_1d and 
+                curr_rsi < 30 and 
+                vol_confirm):
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
-            # Short entry when price < 12h EMA50 (bearish regime) AND Williams %R > -20 (overbought) with volume confirmation
-            elif curr_close < curr_ema50_12h and curr_williams_r > -20 and vol_confirm:
-                signals[i] = -0.25
+            # Short entry when:
+            # 1. 4h downtrend (price < 4h EMA50)
+            # 2. 1d regime allows short (price < 1d EMA200)
+            # 3. RSI > 70 (overbought)
+            # 4. Volume confirmation
+            elif (curr_close < curr_ema50_4h and 
+                  curr_close < curr_ema200_1d and 
+                  curr_rsi > 70 and 
+                  vol_confirm):
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
-                atr_at_entry = curr_atr
             else:
                 signals[i] = 0.0
     
