@@ -4,13 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout captures strong momentum moves; EMA34 on 1d filters for higher-timeframe trend alignment
-# Volume confirmation ensures breakouts have participation; ATR-based trailing stop manages risk
-# Discrete position sizing (0.30) limits fee churn and controls drawdown
-# Target: 20-50 trades/year on 4h timeframe to avoid fee drag while capturing structural breaks
-# Works in bull markets via long breakouts above 1d EMA34 uptrend
-# Works in bear markets via short breakouts below 1d EMA34 downtrend
-# Donchian channels adapt to volatility, making them effective across regimes
+# Donchian breakout captures strong momentum moves in both bull and bear markets
+# Long when price breaks above 20-period high AND price > 1d EMA34 AND volume > 2x 20-period average
+# Short when price breaks below 20-period low AND price < 1d EMA34 AND volume > 2x 20-period average
+# Uses ATR-based trailing stop (2.5x ATR) for risk management
+# Discrete position sizing (0.30) to minimize fee churn while maintaining sufficient exposure
+# Target: 20-50 trades/year on 4h timeframe to avoid fee drag while capturing breakout moves
+# Works in bull markets via long breakouts with HTF uptrend
+# Works in bear markets via short breakdowns with HTF downtrend
+# Volume confirmation ensures breakouts have conviction, reducing false signals
 
 name = "4h_Donchian_Breakout_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
@@ -36,10 +38,6 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     # Calculate ATR for stoploss (using 14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -61,15 +59,21 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Donchian channels: 20-period high/low
+        if i >= 20:
+            donch_high = np.max(high[i-20:i])
+            donch_low = np.min(low[i-20:i])
+        else:
+            donch_high = curr_high
+            donch_low = curr_low
+        
+        # Volume spike confirmation: current volume > 2x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         else:
             vol_ma_20 = 0.0
-        vol_spike = volume[i] > 1.5 * vol_ma_20 if vol_ma_20 > 0 else False
+        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
         
         # Handle exits and stoploss
         if position == 1:  # Long position
@@ -77,8 +81,8 @@ def generate_signals(prices):
             highest_high_since_entry = max(highest_high_since_entry, curr_high)
             # Trailing stop: 2.5 * ATR below highest high
             stop_price = highest_high_since_entry - 2.5 * curr_atr
-            # Exit conditions: price below trailing stop OR break below Donchian low
-            if curr_close < stop_price or curr_close < curr_lowest_low:
+            # Exit conditions: price below trailing stop OR price breaks below Donchian low
+            if curr_close < stop_price or curr_close < donch_low:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
@@ -90,8 +94,8 @@ def generate_signals(prices):
             lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
             # Trailing stop: 2.5 * ATR above lowest low
             stop_price = lowest_low_since_entry + 2.5 * curr_atr
-            # Exit conditions: price above trailing stop OR break above Donchian high
-            if curr_close > stop_price or curr_close > curr_highest_high:
+            # Exit conditions: price above trailing stop OR price breaks above Donchian high
+            if curr_close > stop_price or curr_close > donch_high:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
@@ -99,13 +103,13 @@ def generate_signals(prices):
                 signals[i] = -0.30
                 
         else:  # Flat - look for new entries
-            # Long entry: break above Donchian high AND price > 1d EMA34 AND volume spike
-            if curr_close > curr_highest_high and curr_close > curr_ema_1d and vol_spike:
+            # Long entry: price breaks above Donchian high AND price > 1d EMA34 AND volume spike
+            if curr_close > donch_high and curr_close > curr_ema_1d and vol_spike:
                 signals[i] = 0.30
                 position = 1
                 highest_high_since_entry = curr_high
-            # Short entry: break below Donchian low AND price < 1d EMA34 AND volume spike
-            elif curr_close < curr_lowest_low and curr_close < curr_ema_1d and vol_spike:
+            # Short entry: price breaks below Donchian low AND price < 1d EMA34 AND volume spike
+            elif curr_close < donch_low and curr_close < curr_ema_1d and vol_spike:
                 signals[i] = -0.30
                 position = -1
                 lowest_low_since_entry = curr_low
