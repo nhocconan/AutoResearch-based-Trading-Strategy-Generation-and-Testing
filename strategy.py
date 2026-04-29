@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud + TK Cross with 1d Weekly Pivot Direction Filter
-# Long when: price > Kumo (cloud), Tenkan > Kijun (TK cross bullish), AND price > 1d weekly pivot R1
-# Short when: price < Kumo (cloud), Tenkan < Kijun (TK cross bearish), AND price < 1d weekly pivot S1
-# Uses Ichimoku for trend/momentum, weekly pivots for institutional levels, discrete sizing (0.25) to minimize fee churn.
-# Works in bull/bear via cloud filter (trend) + pivot levels (mean reversion at extremes).
-# Timeframe: 6h (primary), HTF: 1d for weekly pivot calculation.
+# Hypothesis: 12h Williams %R Mean Reversion with 1w EMA Trend Filter and Volume Spike Confirmation
+# Long when: Williams %R < -80 (oversold) AND price > 1w EMA34 (uptrend) AND volume > 1.5 * 20-period average volume
+# Short when: Williams %R > -20 (overbought) AND price < 1w EMA34 (downtrend) AND volume > 1.5 * 20-period average volume
+# Uses Williams %R for mean reversion extremes, 1w EMA for trend alignment, volume spike for confirmation.
+# Works in bull/bear via trend filter (only trade in direction of 1w EMA) + mean reversion at extremes.
+# Timeframe: 12h (primary), HTF: 1w for EMA calculation.
 
-name = "6h_Ichimoku_TK_Cross_1dWeeklyPivot_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_1wEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,129 +22,67 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Load HTF data ONCE before loop for 1w EMA calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d weekly pivot points (using prior week's high/low/close)
-    # We need to resample 1d to weekly - but since we can't resample, we approximate:
-    # Use rolling 5-day window for weekly high/low/close (standard 5 trading days)
-    if len(df_1d) >= 5:
-        # Weekly high = max of last 5 daily highs
-        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
-        # Weekly low = min of last 5 daily lows
-        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
-        # Weekly close = last daily close in the 5-day window
-        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).values
-        
-        # Calculate weekly pivot points: P = (H+L+C)/3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        # R1 = 2*P - L
-        weekly_r1 = 2 * weekly_pivot - weekly_low
-        # S1 = 2*P - H
-        weekly_s1 = 2 * weekly_pivot - weekly_high
-        
-        # Align to 6h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    else:
-        # Not enough data for weekly calculation
-        weekly_pivot_aligned = np.full(n, np.nan)
-        weekly_r1_aligned = np.full(n, np.nan)
-        weekly_s1_aligned = np.full(n, np.nan)
+    # Calculate 1w EMA34
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
+    # Calculate Williams %R on 12h data (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2.0)
-    
-    # Current Kumo (cloud) boundaries: we need Senkou A and B from 26 periods ago
-    # So current cloud is senkou_a[ i-26 ] and senkou_b[ i-26 ]
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to lag
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    # Kumo top = max(senkou_a, senkou_b), Kumo bottom = min(senkou_a, senkou_b)
-    kumo_top = np.where(senkou_a_lagged > senkou_b_lagged, senkou_a_lagged, senkou_b_lagged)
-    kumo_bottom = np.where(senkou_a_lagged < senkou_b_lagged, senkou_a_lagged, senkou_b_lagged)
+    # Calculate volume spike: volume > 1.5 * 20-period average volume
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 26)  # warmup for Ichimoku (need 52 for Senkou B)
+    start_idx = max(34, 14, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if weekly pivot data not available
-        if np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]):
+        # Skip if 1w EMA data not available
+        if np.isnan(ema_34_1w_aligned[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_tenkan = tenkan[i]
-        curr_kijun = kijun[i]
-        curr_kumo_top = kumo_top[i]
-        curr_kumo_bottom = kumo_bottom[i]
-        curr_weekly_r1 = weekly_r1_aligned[i]
-        curr_weekly_s1 = weekly_s1_aligned[i]
+        curr_williams_r = williams_r[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
+        curr_volume_spike = volume_spike[i]
         
         # Handle exits
         if position == 1:  # Long position
-            # Exit conditions:
-            # 1. Price falls below Kumo (cloud)
-            # 2. Tenkan crosses below Kijun (TK cross bearish)
-            # 3. Price falls below weekly S1 (mean reversion)
-            if (curr_close < curr_kumo_bottom or
-                curr_tenkan < curr_kijun or
-                curr_close < curr_weekly_s1):
+            # Exit when Williams %R rises above -50 (exiting oversold) OR volume spike ends
+            if (curr_williams_r > -50) or (not curr_volume_spike):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions:
-            # 1. Price rises above Kumo (cloud)
-            # 2. Tenkan crosses above Kijun (TK cross bullish)
-            # 3. Price rises above weekly R1 (mean reversion)
-            if (curr_close > curr_kumo_top or
-                curr_tenkan > curr_kijun or
-                curr_close > curr_weekly_r1):
+            # Exit when Williams %R falls below -50 (exiting overbought) OR volume spike ends
+            if (curr_williams_r < -50) or (not curr_volume_spike):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
                 
         else:  # Flat - look for new entries
-            # Bullish Ichimoku: price > Kumo AND Tenkan > Kijun
-            bullish_ichimoku = (curr_close > curr_kumo_top) and (curr_tenkan > curr_kijun)
-            # Bearish Ichimoku: price < Kumo AND Tenkan < Kijun
-            bearish_ichimoku = (curr_close < curr_kumo_bottom) and (curr_tenkan < curr_kijun)
-            
-            # Long entry: bullish Ichimoku AND price > weekly R1 (break above resistance)
-            if bullish_ichimoku and (curr_close > curr_weekly_r1):
+            # Long entry: Williams %R < -80 (oversold) AND price > 1w EMA34 (uptrend) AND volume spike
+            if (curr_williams_r < -80) and (curr_close > curr_ema_34_1w) and curr_volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish Ichimoku AND price < weekly S1 (break below support)
-            elif bearish_ichimoku and (curr_close < curr_weekly_s1):
+            # Short entry: Williams %R > -20 (overbought) AND price < 1w EMA34 (downtrend) AND volume spike
+            elif (curr_williams_r > -20) and (curr_close < curr_ema_34_1w) and curr_volume_spike:
                 signals[i] = -0.25
                 position = -1
             else:
