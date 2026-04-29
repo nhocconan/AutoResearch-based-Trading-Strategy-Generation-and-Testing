@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA50 trend + volume spike + ATR(14) stoploss
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA50 trend + volume spike + ATR(14) stoploss
 # Camarilla levels from daily provide key support/resistance; daily EMA50 filters for higher timeframe trend;
 # volume confirms breakout strength; ATR-based trailing stop manages risk in both bull and bear markets.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing significant moves.
+# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag while capturing significant moves.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
