@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian Channel Breakout with Daily Trend and Volume Confirmation
-# Donchian(20) breakouts capture volatility expansion after consolidation
-# Daily EMA50 trend filter ensures we trade in direction of higher timeframe trend
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Donchian breakouts capture volatility expansion after consolidation
+# 12h EMA50 trend filter ensures we trade in direction of higher timeframe trend
 # Volume confirmation validates breakout strength
-# Works in both bull and bear markets: breakouts occur in all regimes
-# Target: 12-37 trades/year (50-150 total over 4 years) for 12h timeframe
+# Works in bull markets (breakouts continue trend) and bear markets (breakouts reverse trend)
+# Target: 20-50 trades/year (80-200 total over 4 years)
 
-name = "12h_Donchian20_DailyTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop for daily calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load HTF data ONCE before loop for 12h calculations
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = pd.Series(df_12h['close'].values)
+    ema50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate Donchian Channel (20) on 12h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian Channel (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,48 +51,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if HTF data not available
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_donchian_upper = donchian_upper[i]
+        curr_donchian_lower = donchian_lower[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema50_1d = ema50_1d_aligned[i]
+        curr_ema50_12h = ema50_12h_aligned[i]
         
-        # Determine trend regime from daily EMA50
-        bullish_regime = curr_close > curr_ema50_1d
-        bearish_regime = curr_close < curr_ema50_1d
+        # Determine trend regime from 12h EMA50
+        bullish_regime = curr_close > curr_ema50_12h
+        bearish_regime = curr_close < curr_ema50_12h
         
         if position == 0:  # Flat - look for new entries
             # Look for Donchian breakout with volume confirmation
             if curr_volume_confirm:
                 # Bullish breakout: price breaks above upper Donchian in bullish regime
-                if bullish_regime and curr_close > highest_20[i]:
-                    signals[i] = 0.25
+                if bullish_regime and curr_close > curr_donchian_upper:
+                    signals[i] = 0.30
                     position = 1
                 # Bearish breakout: price breaks below lower Donchian in bearish regime
-                elif bearish_regime and curr_close < lowest_20[i]:
-                    signals[i] = -0.25
+                elif bearish_regime and curr_close < curr_donchian_lower:
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:  # Long position - exit conditions
-            # Exit when: price crosses below midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
-            if curr_close < midpoint:
+            # Exit when: price crosses below Donchian middle OR trend changes
+            donchian_middle = (curr_donchian_upper + curr_donchian_lower) / 2
+            if curr_close < donchian_middle or not bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position - exit conditions
-            # Exit when: price crosses above midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
-            if curr_close > midpoint:
+            # Exit when: price crosses above Donchian middle OR trend changes
+            donchian_middle = (curr_donchian_upper + curr_donchian_lower) / 2
+            if curr_close > donchian_middle or not bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
