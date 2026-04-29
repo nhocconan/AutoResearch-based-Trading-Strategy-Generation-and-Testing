@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend + volume spike + ATR(14) stoploss
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend + volume spike + ATR(14) stoploss
 # Camarilla levels provide precise intraday support/resistance; 1d EMA34 filters for higher timeframe trend;
 # volume confirms breakout strength; ATR stoploss manages risk. Works in bull/bear via trend filter.
-# Target: 12-37 trades/year (50-150 total over 4 years) to avoid fee drag.
+# Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag.
 # Improvements: Added ATR-based trailing stop and dynamic position sizing based on volatility regime.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,7 +52,7 @@ def generate_signals(prices):
     prev_high = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
     prev_low = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
     
-    # Align previous day's data to 12h timeframe
+    # Align previous day's data to 4h timeframe
     prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
