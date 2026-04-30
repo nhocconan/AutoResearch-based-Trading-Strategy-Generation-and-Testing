@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
-# Donchian breakout captures momentum; EMA50 provides bullish/bearish bias; volume spike confirms institutional interest.
-# Long: price > Donchian Upper(20) AND price > EMA50(1d) AND volume > 2.0x 20-bar avg
-# Short: price < Donchian Lower(20) AND price < EMA50(1d) AND volume > 2.0x 20-bar avg
-# ATR-based stoploss: exit when price moves against position by 2.0 * ATR(14)
-# Discrete sizing 0.25 to control risk and minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull via breakout longs, in bear via breakout shorts during rallies.
+# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13; EMA50 provides 1d trend bias; volume confirms conviction.
+# Long: Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50 AND volume spike
+# Short: Bear Power < 0 AND Bull Power < 0 AND price < 1d EMA50 AND volume spike
+# ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14)
+# Discrete sizing 0.25 to control risk and minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull via longs on strength, in bear via shorts on weakness during rallies.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA50_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,11 +30,13 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Donchian Channel(20)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
+    # Calculate EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
     # Calculate 1d EMA(50) for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -43,9 +45,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     # ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -58,11 +60,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50, 20, 14)  # warmup
+    start_idx = max(13, 20, 50, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -74,10 +76,8 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_atr = atr[i]
@@ -85,30 +85,32 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: price > Donchian Upper AND price > EMA50(1d) (bullish bias)
-                if (curr_close > curr_donchian_upper and 
+                # Bullish entry: Bull Power > 0 AND Bear Power < 0 AND price above 1d EMA50 (bullish bias)
+                if (curr_bull_power > 0 and 
+                    curr_bear_power < 0 and
                     curr_close > curr_ema_50_1d):
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price < Donchian Lower AND price < EMA50(1d) (bearish bias)
-                elif (curr_close < curr_donchian_lower and 
+                # Bearish entry: Bear Power < 0 AND Bull Power < 0 AND price below 1d EMA50 (bearish bias)
+                elif (curr_bear_power < 0 and 
+                      curr_bull_power < 0 and
                       curr_close < curr_ema_50_1d):
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # ATR-based stoploss: exit when price drops below entry - 2.0 * ATR
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price drops below entry - 2.5 * ATR
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # ATR-based stoploss: exit when price rises above entry + 2.0 * ATR
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price rises above entry + 2.5 * ATR
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
