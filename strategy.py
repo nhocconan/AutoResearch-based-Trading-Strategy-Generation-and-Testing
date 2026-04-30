@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses tighter Camarilla levels (R3/S3) from prior 1d for higher-probability breakouts.
 # 1d EMA34 for higher timeframe trend filter (more responsive than EMA50).
 # Volume confirmation (>2.0x 20-bar avg) to reduce false breakouts.
-# ATR-based trailing stoploss (exit when price moves against position by 2.0*ATR).
+# ATR-based trailing stoploss (exit when price moves against position by 2.5*ATR).
 # Discrete position sizing at ±0.25 to reduce fee drag while maintaining capture.
-# Target: 75-150 total trades over 4 years (19-38/year) to avoid overtrading.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 # Works in bull markets via breakout continuation and in bear markets via volatility expansion capture.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +47,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
     camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -113,8 +113,8 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.0*ATR from highest point
-            if curr_close < highest_since_entry - (2.0 * curr_atr):
+            # ATR trailing stop: exit if price drops 2.5*ATR from highest point
+            if curr_close < highest_since_entry - (2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,8 +123,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.0*ATR from lowest point
-            if curr_close > lowest_since_entry + (2.0 * curr_atr):
+            # ATR trailing stop: exit if price rises 2.5*ATR from lowest point
+            if curr_close > lowest_since_entry + (2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
