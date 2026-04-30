@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Uses discrete sizing 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year).
 # Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume spike.
 # Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume spike.
-# ATR-based stoploss: exit when price moves against position by 2.0 * ATR(14).
+# ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14).
 # Works in bull via breakout longs, in bear via breakdown shorts.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v2"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -95,16 +95,16 @@ def generate_signals(prices):
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # ATR-based stoploss: exit when price drops below entry - 2.0 * ATR
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price drops below entry - 2.5 * ATR
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # ATR-based stoploss: exit when price rises above entry + 2.0 * ATR
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price rises above entry + 2.5 * ATR
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
