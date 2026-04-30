@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses discrete sizing 0.25 to balance profit and fee drag. Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla provides key support/resistance levels from prior day; 1d EMA34 filters counter-trend moves.
-# Volume spike ensures institutional participation. Works in both bull and bear via 1d trend filter - only trade with higher timeframe trend.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses discrete sizing 0.30 to balance profit and fee drag. Target: 75-200 total trades over 4 years (19-50/year).
+# Camarilla provides key support/resistance levels from prior day's range; 1d EMA34 filters counter-trend moves.
+# Volume spike ensures institutional participation. Works in both bull and bear via 1d trend filter.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +27,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h Camarilla levels (based on prior day's range)
+    # Calculate 4h Camarilla levels (based on prior day's range)
     df = prices.copy()
     df['date'] = pd.DatetimeIndex(open_time).date
     daily_agg = df.groupby('date').agg({
@@ -97,12 +97,12 @@ def generate_signals(prices):
             if curr_volume_spike:
                 # Bullish: Close breaks above R3 + close above 1d EMA34
                 if curr_close > curr_r3 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
                 # Bearish: Close breaks below S3 + close below 1d EMA34
                 elif curr_close < curr_s3 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
         
@@ -114,7 +114,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
@@ -124,6 +124,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
