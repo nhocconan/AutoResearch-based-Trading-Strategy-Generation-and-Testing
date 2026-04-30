@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR trailing stop.
-# Long when price breaks above 20-period Donchian high + 1d EMA50 uptrend + volume > 1.5x 20-bar average.
-# Short when price breaks below 20-period Donchian low + 1d EMA50 downtrend + volume > 1.5x 20-bar average.
-# ATR trailing stop (2.0x) for risk management. Discrete position sizing (0.25).
-# Donchian channels provide clear structure; breakouts with volume and HTF trend filter reduce false signals.
-# Targets ~100-150 total trades over 4 years (25-38/year) to balance opportunity and fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 + 1d EMA34 uptrend + volume > 1.8x 20-bar average.
+# Short when price breaks below S3 + 1d EMA34 downtrend + volume > 1.8x 20-bar average.
+# ATR trailing stop (2.0x) for risk management.
+# Targets 100-180 total trades over 4 years (25-45/year) with discrete position sizing (0.25).
+# Camarilla levels provide institutional support/resistance; breakouts with volume confirm conviction.
+# 1d EMA34 ensures alignment with daily trend, improving performance in both bull/bear markets.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,27 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels (20-period) - using previous bar to avoid look-ahead
-    # Highest high of last 20 bars (excluding current)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=1).max().shift(1).values
-    # Lowest low of last 20 bars (excluding current)
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=1).min().shift(1).values
+    # Calculate Camarilla levels from previous 4h bar
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # Using previous bar's high/low/close to avoid look-ahead
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + (camarilla_range * 1.1 / 4)
+    s3 = prev_close - (camarilla_range * 1.1 / 4)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # ATR for trailing stop (14-period)
+    # ATR for trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,20 +62,20 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian (20) + volume MA (20)
+    start_idx = 34  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Regime filter: price above/below 1d EMA50 determines trend direction
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
+        # Regime filter: price above/below 1d EMA34 determines trend direction
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
@@ -78,13 +84,13 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high + uptrend + volume confirmation
-            if curr_high > highest_20[i] and is_uptrend and curr_volume_confirm:
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if curr_high > r3[i] and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below Donchian low + downtrend + volume confirmation
-            elif curr_low < lowest_20[i] and is_downtrend and curr_volume_confirm:
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif curr_low < s3[i] and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
