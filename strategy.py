@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3, 4h EMA50 uptrend, volume > 2.0x 20-bar avg, and UTC hour 8-20.
-# Short when price breaks below S3, 4h EMA50 downtrend, volume > 2.0x 20-bar avg, and UTC hour 8-20.
-# Exit on touch of S3 (for longs) or R3 (for shorts).
-# Uses 4h/1d for signal direction (trend, pivots) and 1h only for entry timing and session filter.
-# Discrete position size 0.20 to minimize fee churn. Target 15-37 trades/year.
+# Hypothesis: 6h Williams %R mean reversal with 1d Supertrend trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold), price > 1d Supertrend (uptrend), and volume > 1.5x 20-bar avg.
+# Short when Williams %R > -20 (overbought), price < 1d Supertrend (downtrend), and volume > 1.5x 20-bar avg.
+# Exit when Williams %R crosses -50 (mean reversion to midpoint).
+# Williams %R identifies overextended moves, Supertrend filters for trend alignment, volume confirms momentum.
+# Timeframe: 6h as per experiment guidelines.
 
-name = "1h_Camarilla_R3S3_4hEMA50_Trend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanRev_1dSupertrend_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,91 +24,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (UTC 8-20) using DatetimeIndex
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for trend filter and Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for Supertrend trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d Supertrend for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from prior 4h bar (use previous completed 4h period)
-    high_shift = df_4h['high'].shift(1).values
-    low_shift = df_4h['low'].shift(1).values
-    close_shift = df_4h['close'].shift(1).values
+    # True Range and ATR for Supertrend
+    tr1 = pd.Series(high_1d).rolling(2).max() - pd.Series(low_1d).rolling(2).min()
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/10, adjust=False).mean()  # ATR(10)
     
-    # Align the prior 4h bar's OHLC to 1h timeframe
-    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_shift)
-    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_shift)
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_shift)
+    # Supertrend calculation
+    upper_band = (pd.Series(high_1d) + pd.Series(low_1d)) / 2 + 3 * atr
+    lower_band = (pd.Series(high_1d) + pd.Series(low_1d)) / 2 - 3 * atr
     
-    # Calculate Camarilla R3 and S3 levels
-    camarilla_range = high_4h_aligned - low_4h_aligned
-    r3 = close_4h_aligned + camarilla_range * 1.1 / 4
-    s3 = close_4h_aligned - camarilla_range * 1.1 / 4
+    supertrend = np.zeros(len(close_1d))
+    direction = np.ones(len(close_1d))  # 1 for uptrend, -1 for downtrend
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    supertrend[0] = upper_band.iloc[0] if len(upper_band) > 0 else 0
+    direction[0] = 1
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > upper_band.iloc[i-1]:
+            direction[i] = 1
+        elif close_1d[i] < lower_band.iloc[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band.iloc[i] < lower_band.iloc[i-1]:
+                lower_band.iloc[i] = lower_band.iloc[i-1]
+            if direction[i] == -1 and upper_band.iloc[i] > upper_band.iloc[i-1]:
+                upper_band.iloc[i] = upper_band.iloc[i-1]
+        
+        supertrend[i] = lower_band.iloc[i] if direction[i] == 1 else upper_band.iloc[i]
+    
+    # Align Supertrend to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    
+    # Calculate Williams %R on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for EMA50 and Camarilla
+    start_idx = 60  # warmup for Williams %R and Supertrend
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if indicators not available
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(r3[i]) or np.isnan(s3[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_50_4h = ema_50_4h_aligned[i]
-        curr_r3 = r3[i]
-        curr_s3 = s3[i]
+        curr_williams_r = williams_r[i]
+        curr_supertrend = supertrend_aligned[i]
+        curr_direction = direction_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, uptrend (close > 4h EMA50), volume spike
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_50_4h and 
+            # Long: Williams %R oversold (< -80), uptrend (direction=1), volume confirmation
+            if (curr_williams_r < -80 and 
+                curr_direction == 1 and 
                 curr_volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, downtrend (close < 4h EMA50), volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_50_4h and 
+            # Short: Williams %R overbought (> -20), downtrend (direction=-1), volume confirmation
+            elif (curr_williams_r > -20 and 
+                  curr_direction == -1 and 
                   curr_volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price touches or goes below S3 (mean reversion)
-            if curr_close <= curr_s3:
+            # Exit condition: Williams %R crosses above -50 (mean reversion)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price touches or goes above R3 (mean reversion)
-            if curr_close >= curr_r3:
+            # Exit condition: Williams %R crosses below -50 (mean reversion)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
