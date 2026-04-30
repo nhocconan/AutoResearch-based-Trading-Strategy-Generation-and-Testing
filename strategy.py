@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 12h trend filter and volume confirmation
-# Bollinger Band squeeze (BB width < 20th percentile) indicates low volatility, primed for breakout
-# Breakout direction determined by 12h EMA50 trend (above/below)
-# Volume spike (2.0x 20-period average) confirms breakout validity
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in both bull/bear markets: squeeze breakouts capture volatility expansion regardless of direction.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume spike confirmation
+# Donchian breakout provides clear structure-based entries, 1d EMA50 ensures alignment with higher timeframe trend,
+# volume spike (2.0x 20-period average) confirms momentum strength. Discrete sizing 0.25 minimizes fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag while capturing strong moves.
 
-name = "6h_BBandSqueeze_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,25 +27,16 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + (bb_std * std_20)
-    lower_band = sma_20 - (bb_std * std_20)
-    bb_width = upper_band - lower_band
-    
-    # Calculate BB width percentile (20-period lookback for squeeze detection)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
-    squeeze_condition = bb_width_percentile < 0.20  # BB width < 20th percentile = squeeze
+    # Calculate Donchian(20) channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,13 +44,14 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(bb_period, 50)  # warmup for BBands and 12h EMA50
+    start_idx = max(20, 50)  # warmup for Donchian and 1d EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(bb_width_percentile[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -71,36 +61,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_sma_20 = sma_20[i]
-        curr_upper = upper_band[i]
-        curr_lower = lower_band[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
-        curr_squeeze = squeeze_condition[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_highest_high = highest_high_20[i]
+        curr_lowest_low = lowest_low_20[i]
+        curr_ema_50 = ema_50_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require squeeze breakout with volume spike
+            # Require volume spike
             if curr_volume_spike:
-                # Bullish breakout: price breaks above upper band AND 12h trend is up (price > EMA50)
-                if curr_close > curr_upper and curr_close > curr_ema_50_12h:
+                # Bullish breakout: price closes above 20-period high AND above 1d EMA50 (uptrend)
+                if curr_close > curr_highest_high and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below lower band AND 12h trend is down (price < EMA50)
-                elif curr_close < curr_lower and curr_close < curr_ema_50_12h:
+                    entry_price = curr_close
+                # Bearish breakout: price closes below 20-period low AND below 1d EMA50 (downtrend)
+                elif curr_close < curr_lowest_low and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price returns to middle band (mean reversion) or squeeze breaks down
-            if curr_close <= curr_sma_20 or not curr_squeeze:
+            # Exit when price closes below 20-period low OR below 1d EMA50
+            if curr_close < curr_lowest_low or curr_close < curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price returns to middle band or squeeze breaks down
-            if curr_close >= curr_sma_20 or not curr_squeeze:
+            # Exit when price closes above 20-period high OR above 1d EMA50
+            if curr_close > curr_highest_high or curr_close > curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
