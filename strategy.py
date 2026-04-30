@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla pivot levels identify key intraday support/resistance. Break of R3/S3 levels
-# with 1d EMA34 trend alignment and volume spike captures strong momentum moves in both
-# bull and bear markets. Uses discrete sizing 0.25 to minimize fee churn.
-# Target: 75-200 trades over 4 years (19-50/year). HARD MAX: 400 total.
+# Hypothesis: 1d Williams Alligator + 1w EMA34 trend filter + volume confirmation
+# Williams Alligator identifies trend absence/presence via smoothed medians (Jaw/Teeth/Lips).
+# In chop (Alligator sleeping): fade extremes. In trend (Alligator awakening): follow breakouts.
+# 1w EMA34 ensures alignment with weekly trend. Volume confirms participation.
+# Discrete sizing 0.25 minimizes fee churn. Target: 30-100 trades over 4 years.
+# Works in bull markets (follow weekly trend breakouts) and bear markets (fade daily extremes in chop).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA34_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +24,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d OHLC for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Williams Alligator on 1d timeframe
+    # Jaw (Blue): 13-period SMMA shifted 8 bars
+    # Teeth (Red): 8-period SMMA shifted 5 bars
+    # Lips (Green): 5-period SMMA shifted 3 bars
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full(len(arr), np.nan)
+        result = np.full(len(arr), np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(high, 13)  # Using high for Jaw (typical Alligator uses median price)
+    teeth = smma(high, 8)  # Using high for Teeth
+    lips = smma(high, 5)   # Using high for Lips
+    
+    # Shift to avoid look-ahead (Alligator uses future data in calculation)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # First shifted values become NaN
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Alligator state: 
+    # Sleeping (chop): Jaw > Teeth > Lips OR Lips > Teeth > Jaw (all intertwined)
+    # Awakening (trend): Lips > Teeth > Jaw (bullish) OR Jaw > Teeth > Lips (bearish)
+    # We'll use the cross of Lips and Jaw as trigger
+    lips_above_jaw = lips > jaw
+    lips_below_jaw = lips < jaw
+    
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Prior 1d OHLC for Camarilla calculation (shift to avoid look-ahead)
-    prior_close = df_1d['close'].shift(1).values
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    camarilla_range = prior_high - prior_low
-    camarilla_r3 = prior_close + (camarilla_range * 1.1 / 4)
-    camarilla_s3 = prior_close - (camarilla_range * 1.1 / 4)
-    
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)  # warmup
+    start_idx = max(100, 34, 20)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(lips[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_lips = lips[i]
+        curr_jaw = jaw[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on volume spike with Camarilla break and 1d trend filter
+            # Only trade on volume spike
             if curr_volume_spike:
-                # Bullish: Close breaks above R3 + price above 1d EMA34
-                if curr_close > curr_r3 and curr_close > curr_ema_34_1d:
+                # Bullish: Lips crosses above Jaw AND price above weekly EMA34
+                if curr_lips > curr_jaw and lips_above_jaw[i] and not lips_above_jaw[i-1] and curr_close > curr_ema_34_1w:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: Close breaks below S3 + price below 1d EMA34
-                elif curr_close < curr_s3 and curr_close < curr_ema_34_1d:
+                # Bearish: Lips crosses below Jaw AND price below weekly EMA34
+                elif curr_lips < curr_jaw and lips_below_jaw[i] and not lips_below_jaw[i-1] and curr_close < curr_ema_34_1w:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: Close drops below S3 or loses 1d trend
-            if curr_close < curr_s3 or curr_close < curr_ema_34_1d:
+            # Exit: Lips crosses below Jaw OR loses weekly trend
+            if curr_lips < curr_jaw or curr_close < curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close rises above R3 or loses 1d trend
-            if curr_close > curr_r3 or curr_close > curr_ema_34_1d:
+            # Exit: Lips crosses above Jaw OR loses weekly trend
+            if curr_lips > curr_jaw or curr_close > curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
