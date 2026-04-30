@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels provide statistically significant support/resistance from prior day's range.
-# Breakouts at R3/S3 with volume and 1d EMA34 trend filter work in both bull and bear markets
-# by only taking breakouts aligned with the higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike confirmation
+# Uses discrete sizing 0.25 to balance return and risk. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out by 1d EMA34).
+# Focus on BTC/ETH as primary symbols with proven edge from Camarilla + volume + trend confluence.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,15 +22,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate prior 6h bar's high/low for Camarilla levels
+    # Calculate 12h Camarilla levels (based on prior 12h bar)
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    prior_close = pd.Series(close).shift(1).values
     prior_high = pd.Series(high).shift(1).values
     prior_low = pd.Series(low).shift(1).values
-    prior_close = pd.Series(close).shift(1).values
-    prior_range = prior_high - prior_low
-    
-    # Camarilla R3 and S3 levels from prior 6h bar
-    camarilla_r3 = prior_close + (prior_range * 1.1 / 4)
-    camarilla_s3 = prior_close - (prior_range * 1.1 / 4)
+    camarilla_r3 = prior_close + (prior_high - prior_low) * 1.1 / 2
+    camarilla_s3 = prior_close - (prior_high - prior_low) * 1.1 / 2
     
     # Calculate 1d EMA(34) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -52,8 +49,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or np.isnan(prior_close[i]) or
-            np.isnan(prior_range[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
+        if (np.isnan(prior_close[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or
+            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -81,7 +78,7 @@ def generate_signals(prices):
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: close drops below S3 OR loses 1d trend
+            # Exit: Close drops below S3 OR loses 1d trend
             if curr_close < curr_s3 or curr_close < curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
@@ -89,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: close rises above R3 OR loses 1d trend
+            # Exit: Close rises above R3 OR loses 1d trend
             if curr_close > curr_r3 or curr_close > curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
