@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with volume confirmation and 1d EMA34 trend filter
-# Goes long when price breaks above R3 in uptrend (close > EMA34) with volume spike
-# Goes short when price breaks below S3 in downtrend (close < EMA34) with volume spike
-# Uses discrete position sizing (0.25) to minimize fee drag and ATR-based stoploss for risk control
-# Designed for low trade frequency (target: 12-37 trades/year) to avoid fee drag while capturing strong moves
-# Works in bull markets via breakout continuation and in bear markets via mean-reversion at extreme levels
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
+# Uses 1d HTF for Camarilla pivot calculation (key intraday support/resistance) and EMA trend to avoid whipsaws.
+# Long when price breaks above R3 in uptrend (close > EMA34) with volume spike.
+# Short when price breaks below S3 in downtrend (close < EMA34) with volume spike.
+# Designed for low trade frequency (~25-40/year on 4h) to minimize fee drag while capturing strong directional moves.
+# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at extreme levels.
+# Focus on BTC/ETH as primary targets.
 
-name = "12h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,24 +30,28 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3) from previous day
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Calculate 1d Camarilla levels (R3, S3) using typical price
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tp_1d = typical_price.values
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic stoploss on 12h
+    # Calculate ATR(14) for dynamic stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,12 +62,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34)
+    start_idx = 100  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 24-period average (stricter to reduce trades)
-        vol_ma_24 = np.mean(volume[max(0, i-24):i]) if i >= 24 else np.mean(volume[:i]) if i > 0 else 0
-        volume_spike = volume[i] > (2.0 * vol_ma_24) if i > 0 else False
+        # Volume confirmation: volume > 2.0x 50-period average (strict to reduce trades)
+        if i >= 50:
+            vol_ma_50 = np.mean(volume[i-50:i])
+        elif i > 0:
+            vol_ma_50 = np.mean(volume[:i])
+        else:
+            vol_ma_50 = 0
+        volume_spike = volume[i] > (2.0 * vol_ma_50) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
