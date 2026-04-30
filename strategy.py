@@ -4,11 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian(20) high in uptrend with volume confirmation.
-# Short when price breaks below Donchian(20) low in downtrend with volume confirmation.
-# ATR trailing stop (2.5x) for risk management. Designed for ~25-40 trades/year on 4h to minimize fee drag.
-# Works in both bull and bear markets by combining price structure (Donchian) with trend filter (1d EMA50)
-# and momentum confirmation (volume spike). Avoids fakeouts by requiring confluence of structure, trend, and volume.
+# Long when price breaks above Donchian(20) high + uptrend (price > 1d EMA50) + volume > 2.0x 20-period average.
+# Short when price breaks below Donchian(20) low + downtrend (price < 1d EMA50) + volume spike.
+# Uses ATR trailing stop (2.0x) for risk management. Designed for low trade frequency (~20-40/year) to minimize fee drag.
+# Donchian channels provide objective price levels that work in both bull and bear markets by capturing volatility-based breakouts.
 
 name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
 timeframe = "4h"
@@ -34,13 +33,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian(20) channels on 4h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.8x 20-period average (balanced to avoid overtrading)
+    # Volume confirmation: volume > 2.0x 20-period average (tight to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -55,7 +54,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = 50  # warmup for Donchian and EMA50
     
     for i in range(start_idx, n):
         # Regime filter: price above/below 1d EMA50 determines trend direction
@@ -66,19 +65,21 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
                 # In uptrend: look for long when price breaks above Donchian high with volume
-                if curr_high > highest_20[i] and curr_volume_spike:
+                if curr_close > curr_donchian_high and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
                 # In downtrend: look for short when price breaks below Donchian low with volume
-                if curr_low < lowest_20[i] and curr_volume_spike:
+                if curr_close < curr_donchian_low and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -89,8 +90,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,8 +102,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
