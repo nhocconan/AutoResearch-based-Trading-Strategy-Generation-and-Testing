@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
-# Camarilla R3/S3 levels provide strong intraday support/resistance for breakouts
-# 1d ADX > 25 ensures we only trade in trending markets, reducing false signals
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Donchian(20) on 4h captures intermediate-term momentum with clear breakout levels
+# 12h EMA50 provides trend filter to avoid counter-trend trades in choppy markets
 # Volume spike (2.0x 50-period average) confirms institutional participation
-# Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via breakouts above Donchian high and in bear markets via breakdowns below Donchian low
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +23,25 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     # Pre-compute session hours (08-20 UTC) to avoid datetime errors
+    open_time = prices['open_time'].values
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load daily data ONCE before loop (MTF Rule #1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop (MTF Rule #1)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 12h timeframe
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Align 12h EMA50 to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d ADX for trend filter
-    plus_dm = pd.Series(high_1d).diff()
-    minus_dm = pd.Series(low_1d).diff().mul(-1)
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    tr1 = pd.Series(high_1d).sub(pd.Series(low_1d))
-    tr2 = pd.Series(high_1d).sub(pd.Series(close_1d.shift(1))).abs()
-    tr3 = pd.Series(low_1d).sub(pd.Series(close_1d.shift(1))).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    atr_14 = tr.ewm(alpha=1/14, adjust=False).mean()
-    plus_di_14 = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_14)
-    minus_di_14 = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_14)
-    dx = (abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)) * 100
-    adx_14 = dx.ewm(alpha=1/14, adjust=False).mean()
-    
-    adx_14_values = adx_14.values
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14_values)
-    
-    # Calculate Donchian(20) on 12h timeframe for breakout confirmation
+    # Calculate Donchian(20) on 4h timeframe
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -83,8 +58,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(adx_14_aligned[i]) or np.isnan(vol_ma_50[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
             
@@ -98,21 +72,19 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_donchian_high = donchian_high[i]
         curr_donchian_low = donchian_low[i]
-        curr_camarilla_r3 = camarilla_r3_aligned[i]
-        curr_camarilla_s3 = camarilla_s3_aligned[i]
-        curr_adx = adx_14_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and ADX > 25 (trending market)
-            if curr_volume_spike and curr_adx > 25:
-                # Bullish entry: break above Donchian high AND above Camarilla R3
-                if curr_high > curr_donchian_high and curr_close > curr_camarilla_r3:
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish entry: break above Donchian high AND above 12h EMA50 (uptrend)
+                if curr_high > curr_donchian_high and curr_close > curr_ema_50_12h:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below Donchian low AND below Camarilla S3
-                elif curr_low < curr_donchian_low and curr_close < curr_camarilla_s3:
+                # Bearish entry: break below Donchian low AND below 12h EMA50 (downtrend)
+                elif curr_low < curr_donchian_low and curr_close < curr_ema_50_12h:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
