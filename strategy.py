@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and volume spike confirmation.
-# Long when price is above Alligator lips (SMMA3) with 1w EMA50 uptrend and volume > 1.8x 20-bar average.
-# Short when price is below Alligator lips (SMMA3) with 1w EMA50 downtrend and volume spike.
+# Hypothesis: 4h Williams %R mean reversal with 1d EMA50 trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) with 1d EMA50 uptrend and volume > 1.8x 20-bar average.
+# Short when Williams %R > -20 (overbought) with 1d EMA50 downtrend and volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Williams Alligator identifies trend absence/presence; strong in both bull and bear markets when combined with HTF trend and volume confirmation.
-# 1w EMA50 filter ensures alignment with higher-timeframe trend, reducing false signals in ranging markets.
+# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
+# Williams %R identifies extreme momentum exhaustion points that often precede reversals.
+# 1d EMA50 filter ensures alignment with higher-timeframe trend, improving performance in both bull and bear markets.
+# Volume confirmation ensures reversals have conviction, reducing false signals.
 
-name = "12h_WilliamsAlligator_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanRev_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,25 +26,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator: SMMA(3) of median price, shifted
-    median_price = (high + low) / 2
-    smma3 = pd.Series(median_price).ewm(alpha=1/3, adjust=False).mean().values  # SMMA(3) ≈ EMA with alpha=1/3
-    smma3_5 = pd.Series(smma3).shift(5).values  # lips: SMMA3 shifted 5 bars
-    smma3_8 = pd.Series(smma3).shift(8).values  # teeth: SMMA3 shifted 8 bars
-    smma3_13 = pd.Series(smma3).shift(13).values  # jaw: SMMA3 shifted 13 bars
+    # Calculate Williams %R (14-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: volume > 1.8x 20-period average (balanced to avoid overtrading)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.8 * vol_ma_20)
     
     # ATR for trailing stop
@@ -58,36 +59,36 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 20, 13)  # warmup for EMA50, Alligator, and volume MA
+    start_idx = max(50, 20)  # warmup for EMA50 and Williams %R
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(smma3_5[i]) or np.isnan(smma3_8[i]) or np.isnan(smma3_13[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Regime filter: Alligator alignment indicates trend strength
-        # Lips above teeth > jaw = uptrend; lips below teeth < jaw = downtrend
-        is_uptrend = smma3_5[i] > smma3_8[i] and smma3_8[i] > smma3_13[i]
-        is_downtrend = smma3_5[i] < smma3_8[i] and smma3_8[i] < smma3_13[i]
+        # Regime filter: price above/below 1d EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
+        curr_williams_r = williams_r[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price above Alligator lips + uptrend + 1w EMA50 uptrend + volume confirmation
-            if curr_close > smma3_5[i] and is_uptrend and close[i] > ema_50_1w_aligned[i] and curr_volume_confirm:
+            # Long: Williams %R < -80 (oversold) + uptrend + volume confirmation
+            if curr_williams_r < -80 and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: price below Alligator lips + downtrend + 1w EMA50 downtrend + volume confirmation
-            elif curr_close < smma3_5[i] and is_downtrend and close[i] < ema_50_1w_aligned[i] and curr_volume_confirm:
+            # Short: Williams %R > -20 (overbought) + downtrend + volume confirmation
+            elif curr_williams_r > -20 and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
