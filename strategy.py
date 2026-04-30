@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend filter (EMA34) and volume confirmation.
-# Uses Camarilla pivot levels from 12h data (R3, S3, R4, S4). Enter long when price breaks above
-# R3 in bullish 12h trend (price > EMA34), short when breaks below S3 in bearish trend (price < EMA34).
-# Volume must be > 2.0x 20-bar average for confirmation. ATR(14) trailing stop at 2.0x.
-# Discrete position sizing at ±0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets by requiring 12h trend alignment to avoid counter-trend whipsaws.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+# Uses Camarilla pivot levels (R3, S3) from prior 1d session for structure,
+# aligned with 1d EMA34 for trend filter, and volume > 2.0x 20-bar average for confirmation.
+# ATR(14) trailing stop at 2.0x for risk management. Discrete position sizing at ±0.25.
+# Target: 75-200 total trades over 4 years (19-50/year). Works in both bull and bear markets
+# by requiring HTF trend alignment to avoid counter-trend whipsaws and volume spike to
+# ensure institutional participation. Camarilla levels provide high-probability reversal/breakout points.
 
-name = "6h_Camarilla_R3_S3_Breakout_12hEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +29,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 6h data ONCE before loop for Camarilla pivot calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
+    # Load 1d data ONCE before loop for Camarilla pivots and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 6h data
-    # Using previous 6h bar's OHLC for pivot calculation (standard Camarilla)
-    prev_close = df_6h['close'].shift(1).values
-    prev_high = df_6h['high'].shift(1).values
-    prev_low = df_6h['low'].shift(1).values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 4.0)
-    s3 = pivot - (range_hl * 1.1 / 4.0)
-    r4 = pivot + (range_hl * 1.1 / 2.0)
-    s4 = pivot - (range_hl * 1.1 / 2.0)
-    
-    # Align Camarilla levels to primary timeframe (6h -> 6h: identity but using helper for consistency)
-    r3_aligned = align_htf_to_ltf(prices, df_6h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_6h, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_6h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_6h, s4)
-    
-    # Load 12h data ONCE before loop for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate Camarilla levels from prior 1d session (R3, S3)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    camarilla_s3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -81,15 +63,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(2, 34, atr_period, 20) + 1  # warmup
+    start_idx = max(34, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -99,26 +79,24 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
-        curr_ema_34_12h = ema_34_12h_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, 12h EMA34 uptrend (price > EMA), volume confirmation
+            # Long: price breaks above R3, 1d EMA34 uptrend, volume spike
             if (curr_close > curr_r3 and 
-                curr_close > curr_ema_34_12h and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below S3, 12h EMA34 downtrend (price < EMA), volume confirmation
+            # Short: price breaks below S3, 1d EMA34 downtrend, volume spike
             elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_34_12h and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
