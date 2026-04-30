@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses 1d EMA34 for long-term trend to avoid whipsaws in ranging markets.
-# Volume > 2.0x 20-period average confirms strong momentum (strict threshold to reduce trade frequency).
-# ATR-based stoploss (2.0x) limits drawdown. Session filter (08-20 UTC) reduces noise.
-# Designed for low trade frequency (~15-30 trades/year) to minimize fee drag on 4h timeframe.
+# Volume > 2.0x 20-period average confirms momentum (strict threshold to reduce trade frequency).
+# ATR-based stoploss (2.5x) limits drawdown. Session filter (08-20 UTC) reduces noise.
+# Designed for low trade frequency (~12-30 trades/year) to minimize fee drag on 12h timeframe.
 # Works in bull/bear via 1d EMA34 trend filter + volume confirmation + session filter.
 # Entry requires 1d EMA34 alignment + volume spike + Camarilla breakout.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 4h timeframe stoploss
+    # Calculate ATR(14) for 12h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -129,7 +129,7 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
             if (curr_close < camarilla_s3 or 
-                curr_close < entry_price - 2.0 * curr_atr):
+                curr_close < entry_price - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,7 +138,7 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
             if (curr_close > camarilla_r3 or 
-                curr_close > entry_price + 2.0 * curr_atr):
+                curr_close > entry_price + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
