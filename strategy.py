@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
-# Long when price breaks above R3 with volume > 2.0x 20-bar average AND close > 1d EMA34.
-# Short when price breaks below S3 with volume > 2.0x 20-bar average AND close < 1d EMA34.
-# Exit when price reverts to the Camarilla pivot point (PP) or opposite S1/R1 level.
-# Camarilla levels provide precise intraday support/resistance derived from prior day's range.
-# 1d EMA34 filters for dominant daily trend to avoid counter-trend breakouts.
-# Volume confirmation ensures institutional participation in the breakout.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
+# Williams Alligator consists of three SMAs (Jaw:13, Teeth:8, Lips:5) smoothed.
+# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume > 2.0x 20-bar average.
+# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume > 2.0x 20-bar average.
+# Exit when Alligator alignment breaks (Lips crosses Teeth or Jaw).
+# Alligator identifies trend absence (sleeping) vs trend presence (awakening with alignment).
+# 1d EMA50 filters for dominant intermediate-term trend to avoid counter-trend entries.
+# Volume confirmation ensures institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeConfirmation_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,41 +27,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla calculation
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (H1, L1, C1)
-    # Camarilla: PP = (H1 + L1 + C1) / 3
-    # R4 = C1 + (H1-L1)*1.5/2, R3 = C1 + (H1-L1)*1.25/2, R2 = C1 + (H1-L1)*1.1/2, R1 = C1 + (H1-L1)*1.05/2
-    # S1 = C1 - (H1-L1)*1.05/2, S2 = C1 - (H1-L1)*1.1/2, S3 = C1 - (H1-L1)*1.25/2, S4 = C1 - (H1-L1)*1.5/2
-    # We use R3/S3 for breakout and PP for exit
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Prior day's OHLC (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First bar will have invalid prior day data (will be handled by min_periods later)
-    
-    # Calculate Camarilla levels
-    PP = (prev_high + prev_low + prev_close) / 3.0
-    R3 = prev_close + (prev_high - prev_low) * 1.25 / 2.0
-    S3 = prev_close - (prev_high - prev_low) * 1.25 / 2.0
-    # Also calculate PP for exit
-    
-    # Align Camarilla levels to 4h timeframe
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Williams Alligator components (SMAs with smoothing)
+    # Jaw: 13-period SMA, smoothed by 8 periods
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.rolling(window=8, min_periods=8).mean().values
+    # Teeth: 8-period SMA, smoothed by 5 periods
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.rolling(window=5, min_periods=5).mean().values
+    # Lips: 5-period SMA, smoothed by 3 periods
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.rolling(window=3, min_periods=3).mean().values
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,45 +55,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for EMA34 and volume MA
+    start_idx = max(20, 13, 8, 5)  # warmup for Alligator components and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(PP_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_lips = lips[i]
+        curr_teeth = teeth[i]
+        curr_jaw = jaw[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Break above R3, uptrend (close > 1d EMA34), volume confirmation
-            if (curr_close > R3_aligned[i] and 
-                curr_close > ema_34_1d_aligned[i] and 
+            # Long: Bullish alignment (Lips > Teeth > Jaw), uptrend (price > 1d EMA50), volume confirmation
+            if (curr_lips > curr_teeth and curr_teeth > curr_jaw and 
+                curr_close > ema_50_1d_aligned[i] and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3, downtrend (close < 1d EMA34), volume confirmation
-            elif (curr_close < S3_aligned[i] and 
-                  curr_close < ema_34_1d_aligned[i] and 
+            # Short: Bearish alignment (Lips < Teeth < Jaw), downtrend (price < 1d EMA50), volume confirmation
+            elif (curr_lips < curr_teeth and curr_teeth < curr_jaw and 
+                  curr_close < ema_50_1d_aligned[i] and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: Price reverts to pivot point (PP) or below S1
-            # S1 = C - (H-L)*1.05/2, but we use PP as simpler exit
-            if curr_close <= PP_aligned[i]:
+            # Exit condition: Bullish alignment breaks (Lips <= Teeth or Teeth <= Jaw)
+            if curr_lips <= curr_teeth or curr_teeth <= curr_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: Price reverts to pivot point (PP) or above R1
-            if curr_close >= PP_aligned[i]:
+            # Exit condition: Bearish alignment breaks (Lips >= Teeth or Teeth >= Jaw)
+            if curr_lips >= curr_teeth or curr_teeth >= curr_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
