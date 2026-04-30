@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter
-# Camarilla levels from 1d provide precise intraday support/resistance
-# Breakout above R3 or below S3 with volume confirmation (2.0x 24-period average on 1d) indicates strong momentum
-# 1w ADX > 25 ensures alignment with strong weekly trend to avoid whipsaw in ranging markets
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance based on prior day's range
+# Breakout above R1 or below S1 with volume confirmation indicates strong momentum
+# 12h EMA > EMA50 ensures alignment with medium-term trend to avoid whipsaw
+# Volume spike (2.0x 24-period average) confirms institutional participation
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Works in bull markets via breakouts and bear markets via breakdowns with trend filter.
 
-name = "12h_Camarilla_R3S3_1dVolumeSpike_1wADX25_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,65 +30,18 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d volume spike confirmation
+    # Load 12h data ONCE before loop (MTF Rule #1)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 1d Camarilla pivot levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    volume_1d = df_1d['volume'].values
-    vol_ma_24 = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_24)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    
-    # Calculate 1w ADX for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan, dtype=float)
-        if len(x) < period:
-            return result
-        result[period-1] = np.nansum(x[:period])
-        for i in range(period, len(x)):
-            result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, (dm_plus_smooth / atr) * 100, 0)
-    di_minus = np.where(atr != 0, (dm_minus_smooth / atr) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0,
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate 1d Camarilla pivot levels (R3, S3)
     if len(df_1d) < 2:
         return np.zeros(n)
     high_1d = df_1d['high'].values
@@ -94,24 +49,28 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla levels based on prior day's OHLC
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.125 / 4)
+    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.125 / 4)
     
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*4h = 96h = 4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 24)  # warmup for ADX and volume MA
+    start_idx = max(50, 24)  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
             
@@ -123,36 +82,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_adx = adx_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_volume_spike = volume_spike_1d_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_r1 = camarilla_r1_aligned[i]
+        curr_s1 = camarilla_s1_aligned[i]
+        curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and strong trend (ADX > 25)
-            if curr_volume_spike and curr_adx > 25:
-                # Bullish entry: break above R3 with close > R3
-                if curr_close > curr_r3:
+            # Require volume spike and price above/below EMA50 for trend alignment
+            if curr_volume_spike:
+                # Bullish entry: break above R1 with price > EMA50_12h
+                if curr_close > curr_r1 and curr_close > curr_ema_50_12h:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below S3 with close < S3
-                elif curr_close < curr_s3:
+                # Bearish entry: break below S1 with price < EMA50_12h
+                elif curr_close < curr_s1 and curr_close < curr_ema_50_12h:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R3 (breakout fails) OR ADX weakens (< 20)
-            if curr_close < curr_r3 or curr_adx < 20:
+            # Exit when price drops below R1 (breakout fails) OR price crosses below EMA50_12h
+            if curr_close < curr_r1 or curr_close < curr_ema_50_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above S3 (breakdown fails) OR ADX weakens (< 20)
-            if curr_close > curr_s3 or curr_adx < 20:
+            # Exit when price rises above S1 (breakdown fails) OR price crosses above EMA50_12h
+            if curr_close > curr_s1 or curr_close > curr_ema_50_12h:
                 signals[i] = 0.0
                 position = 0
             else:
