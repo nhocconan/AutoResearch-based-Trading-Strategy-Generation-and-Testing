@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~100 total over 4 years.
-# Only enters when price breaks 4h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
-# Designed for low trade frequency (<150 total 4h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
+# Hypothesis: 1d KAMA trend with RSI(14) mean reversion entries and volume confirmation.
+# Uses KAMA(ER=10) for adaptive trend filtering, RSI(14)<30 for long and >70 for short,
+# with volume > 1.5x 20-period average for confirmation. Designed for low trade frequency
+# (~50 total trades over 4 years) to avoid fee drag. Works in bull/bear via KAMA trend filter
+# and RSI mean reversion for precise entries during pullbacks.
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "1d_KAMA10_RSI14_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,92 +27,77 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate KAMA(ER=10) for trend filter
+    close_series = pd.Series(close)
+    change = np.abs(close_series.diff(10).values)
+    volatility = np.abs(close_series.diff(1).rolling(window=10).sum().values)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate RSI(14) for mean reversion entries
+    delta = pd.Series(close).diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # ATR(14) for volatility and stoploss
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Volume confirmation: volume > 2.0x 20-period average (tight threshold to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
-    
-    # Calculate 4h Donchian channels (20-period) - since we're on 4h timeframe, use 20-bar lookback
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(34, atr_period, 20) + 1  # warmup
+    start_idx = max(10, 14, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(kama[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(volume_confirm[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_atr = atr[i]
+        curr_kama = kama[i]
+        curr_rsi = rsi[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper channel, 1d EMA34 uptrend, volume spike confirmation
-            if (curr_close > curr_donchian_high and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price > KAMA (uptrend), RSI < 30 (oversold), volume confirmation
+            if (curr_close > curr_kama and 
+                curr_rsi < 30 and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                highest_since_entry = curr_close
-            # Short: price breaks below Donchian lower channel, 1d EMA34 downtrend, volume spike confirmation
-            elif (curr_close < curr_donchian_low and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price < KAMA (downtrend), RSI > 70 (overbought), volume confirmation
+            elif (curr_close < curr_kama and 
+                  curr_rsi > 70 and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.0*ATR from highest point
-            if curr_close < highest_since_entry - (2.0 * curr_atr):
+            # Exit: price < KAMA (trend change) or RSI > 50 (mean reversion complete)
+            if curr_close < curr_kama or curr_rsi > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.0*ATR from lowest point
-            if curr_close > lowest_since_entry + (2.0 * curr_atr):
+            # Exit: price > KAMA (trend change) or RSI < 50 (mean reversion complete)
+            if curr_close > curr_kama or curr_rsi < 50:
                 signals[i] = 0.0
                 position = 0
             else:
