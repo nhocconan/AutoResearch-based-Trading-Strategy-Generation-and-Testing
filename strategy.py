@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR-based stoploss
-# Donchian channels provide clear trend-following structure with defined breakout levels
-# Volume confirmation (>1.4x average) filters weak breakouts to reduce false signals
-# ATR stoploss (2.5x ATR) manages risk and allows trends to run
-# Works in bull/bear: captures strong moves in trending markets, volume confirms legitimacy
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume confirmation
+# Camarilla R4/S4 levels act as strong intraday support/resistance - breakouts indicate significant momentum shifts
+# 1w EMA50 provides long-term trend filter to avoid counter-trend trades in bear markets like 2025
+# Volume confirmation (>1.4x average) ensures breakout legitimacy with controlled frequency
+# Works in bull/bear: breakouts occur in all regimes, volume confirms legitimacy, weekly trend filter reduces false signals
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
-name = "12h_Donchian20_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,48 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period) from previous bar
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Camarilla levels (R4, S4) from previous bar
+    # R4 = Close + 1.1*(High-Low)
+    # S4 = Close - 1.1*(High-Low)
+    hl_range = high - low
+    camarilla_r4 = close + 1.1 * hl_range
+    camarilla_s4 = close - 1.1 * hl_range
     
     # Need previous bar's levels to avoid look-ahead
-    donchian_upper_prev = np.roll(donchian_upper, 1)
-    donchian_lower_prev = np.roll(donchian_lower, 1)
-    donchian_upper_prev[0] = np.nan
-    donchian_lower_prev[0] = np.nan
+    camarilla_r4_prev = np.roll(camarilla_r4, 1)
+    camarilla_s4_prev = np.roll(camarilla_s4, 1)
+    camarilla_r4_prev[0] = np.nan
+    camarilla_s4_prev[0] = np.nan
     
     # Breakout conditions
-    breakout_up = close > donchian_upper_prev
-    breakout_down = close < donchian_lower_prev
+    breakout_up = close > camarilla_r4_prev
+    breakout_down = close < camarilla_s4_prev
     
-    # Volume confirmation: volume > 1.4x 20-period average
+    # Volume confirmation: volume > 1.4x 20-period average (balanced frequency)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.4 * vol_ma_20)
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan  # First bar has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_at_entry = 0.0
     
-    start_idx = max(100, 20, 14)  # warmup
+    start_idx = max(100, 20)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_upper_prev[i]) or 
-            np.isnan(donchian_lower_prev[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(camarilla_r4_prev[i]) or 
+            np.isnan(camarilla_s4_prev[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -73,39 +71,31 @@ def generate_signals(prices):
         curr_breakout_up = breakout_up[i]
         curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_atr = atr[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on breakout with volume confirmation
+            # Only trade on breakout with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish breakout: price above Donchian upper
-                if curr_breakout_up:
+                # Bullish breakout: price above Camarilla R4 + above 1w EMA50
+                if curr_breakout_up and curr_close > curr_ema_50_1w:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    atr_at_entry = curr_atr
-                # Bearish breakout: price below Donchian lower
-                elif curr_breakout_down:
+                # Bearish breakout: price below Camarilla S4 + below 1w EMA50
+                elif curr_breakout_down and curr_close < curr_ema_50_1w:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    atr_at_entry = curr_atr
         
         elif position == 1:  # Long position
-            # Stoploss: price closes below entry - 2.5 * ATR_at_entry
-            # Take profit: price closes above Donchian upper (trailing)
-            stop_loss = entry_price - 2.5 * atr_at_entry
-            if curr_close < stop_loss:
+            # Exit: price closes below Camarilla S4 (reversal) or above Camarilla R4 (take profit)
+            if curr_close < camarilla_s4_prev[i] or curr_close > camarilla_r4_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price closes above entry + 2.5 * ATR_at_entry
-            # Take profit: price closes below Donchian lower (trailing)
-            stop_loss = entry_price + 2.5 * atr_at_entry
-            if curr_close > stop_loss:
+            # Exit: price closes above Camarilla R4 (reversal) or below Camarilla S4 (take profit)
+            if curr_close > camarilla_r4_prev[i] or curr_close < camarilla_s4_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
