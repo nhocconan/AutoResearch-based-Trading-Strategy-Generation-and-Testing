@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop
-# Donchian channels provide clear breakout levels that work in both bull and bear markets
-# Volume confirmation (>1.5x average) ensures breakout legitimacy and reduces false signals
-# ATR trailing stop (3*ATR) manages risk and allows trends to run
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
+# Hypothesis: 6h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
+# Donchian breakouts capture momentum shifts in both bull and bear markets
+# 1d ATR regime filter: only trade when ATR(14) > 20-period ATR median (high volatility regimes)
+# Volume confirmation (>1.5x average) ensures breakout legitimacy
+# This combination reduces false breakouts during low volatility sideways markets
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "4h_Donchian20_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Donchian20_ATRRegime_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,46 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h Donchian channels (20-period)
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Need previous bar's channels to avoid look-ahead
-    highest_20_prev = np.roll(highest_20, 1)
-    lowest_20_prev = np.roll(lowest_20, 1)
-    highest_20_prev[0] = np.nan
-    lowest_20_prev[0] = np.nan
+    # Need previous bar's bands to avoid look-ahead
+    donchian_upper_prev = np.roll(donchian_upper, 1)
+    donchian_lower_prev = np.roll(donchian_lower, 1)
+    donchian_upper_prev[0] = np.nan
+    donchian_lower_prev[0] = np.nan
     
     # Breakout conditions
-    breakout_up = close > highest_20_prev
-    breakout_down = close < lowest_20_prev
+    breakout_up = close > donchian_upper_prev
+    breakout_down = close < donchian_lower_prev
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # Calculate ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr3[0] = 0.0  # first bar has no previous close
+    # Calculate 1d ATR(14) for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # True Range calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[-1]) if len(close_1d) > 1 else high_1d[0] - low_1d[0]
+    tr3[0] = np.abs(low_1d[0] - close_1d[-1]) if len(close_1d) > 1 else high_1d[0] - low_1d[0]
+    
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR regime: only trade when current ATR > 20-period median ATR (high vol regime)
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    atr_median_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).median().values
+    atr_regime = atr_14 > atr_median_20
+    
+    # Align 1d indicators to 6h timeframe
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
+    atr_median_20_aligned = align_htf_to_ltf(prices, df_1d, atr_median_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(100, 20, 14)  # warmup
+    start_idx = max(100, 20)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_20_prev[i]) or 
-            np.isnan(lowest_20_prev[i]) or
+        if (np.isnan(donchian_upper_prev[i]) or 
+            np.isnan(donchian_lower_prev[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr_regime_aligned[i])):
             signals[i] = 0.0
             continue
             
@@ -70,39 +93,31 @@ def generate_signals(prices):
         curr_breakout_up = breakout_up[i]
         curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_atr = atr[i]
+        curr_atr_regime = atr_regime_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on breakout with volume confirmation
-            if curr_volume_confirm:
-                # Bullish breakout: price above Donchian high
+            # Only trade on breakout with volume confirmation and high volatility regime
+            if curr_volume_confirm and curr_atr_regime:
+                # Bullish breakout: price above Donchian upper band
                 if curr_breakout_up:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                # Bearish breakout: price below Donchian low
+                # Bearish breakout: price below Donchian lower band
                 elif curr_breakout_down:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_close)
-            # ATR trailing stop: exit if price drops 3*ATR from highest since entry
-            if curr_close < highest_since_entry - 3.0 * curr_atr:
+            # Exit: price closes below Donchian lower band (reversal) or above upper band (take profit)
+            if curr_close < donchian_lower_prev[i] or curr_close > donchian_upper_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_close)
-            # ATR trailing stop: exit if price rises 3*ATR from lowest since entry
-            if curr_close > lowest_since_entry + 3.0 * curr_atr:
+            # Exit: price closes above Donchian upper band (reversal) or below lower band (take profit)
+            if curr_close > donchian_upper_prev[i] or curr_close < donchian_lower_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
