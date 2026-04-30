@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~7-25/year) to minimize fee drag.
-# Donchian channels from 1d provide strong support/resistance levels that work in both trending and ranging markets.
-# Volume confirmation ensures breakouts have institutional participation. Works in bull/bear via trend following.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
+# Elder Ray measures bull/bear power relative to EMA13. In bull markets: buy when bear power improves (less negative) + price > EMA13.
+# In bear markets: sell when bull power deteriorates (less positive) + price < EMA13.
+# Uses 1d EMA50 for higher timeframe trend filter to avoid counter-trend trades.
+# Volume confirmation ensures institutional participation. Designed for low trade frequency (~15-30/year) to minimize fee drag.
+# Works in both bull and bear by adapting to the prevailing trend via EMA50 filter.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,89 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Donchian(20) channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=1).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=1).min().values
-    upper_channel = high_roll
-    lower_channel = low_roll
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Calculate 1d ATR(14) for dynamic trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1w EMA50 determines trend direction
+        # Trend filter from 1d EMA50
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_atr = atr[i]
-        curr_upper = upper_channel[i]
-        curr_lower = lower_channel[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above upper channel with volume
-                if curr_close > curr_upper and curr_volume_spike:
+                # In uptrend: look for long when bear power improves (increases) and volume confirms
+                # Bear power improving means it's becoming less negative (increasing)
+                if i > start_idx and curr_bear_power > bear_power[i-1] and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below lower channel with volume
-                if curr_close < curr_lower and curr_volume_spike:
+                # In downtrend: look for short when bull power deteriorates (decreases) and volume confirms
+                # Bull power deteriorating means it's becoming less positive (decreasing)
+                if i > start_idx and curr_bull_power < bull_power[i-1] and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
         
-        elif position == 1:  # Long position
-            # Update highest high since entry
-            if curr_high > highest_since_entry:
-                highest_since_entry = curr_high
-            
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+        elif position == 1:  # Long position - exit when bear power deteriorates or trend changes
+            # Exit long if bear power deteriorates (decreases) or price breaks below 1d EMA50
+            if curr_bear_power < bear_power[i-1] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
-        elif position == -1:  # Short position
-            # Update lowest low since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+        elif position == -1:  # Short position - exit when bull power improves or trend changes
+            # Exit short if bull power improves (increases) or price breaks above 1d EMA50
+            if curr_bull_power > bull_power[i-1] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
