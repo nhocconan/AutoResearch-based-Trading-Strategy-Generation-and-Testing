@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Donchian channels identify breakouts from price consolidation
-# Weekly pivot (based on prior week's range) provides institutional bias: long above weekly pivot, short below
-# Volume confirmation (>1.5x average) ensures breakout legitimacy with strict filtering
-# Works in bull/bear: breakouts occur in all regimes, weekly pivot filters counter-trend trades, volume reduces false signals
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR-based stoploss
+# Donchian channels provide clear trend-following structure with defined breakout levels
+# Volume confirmation (>1.4x average) filters weak breakouts to reduce false signals
+# ATR stoploss (2.5x ATR) manages risk and allows trends to run
+# Works in bull/bear: captures strong moves in trending markets, volume confirms legitimacy
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "6h_Donchian20_WeeklyPivot_Direction_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,49 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period) from previous bar
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Need previous bar's levels to avoid look-ahead
-    high_20_prev = np.roll(high_20, 1)
-    low_20_prev = np.roll(low_20, 1)
-    high_20_prev[0] = np.nan
-    low_20_prev[0] = np.nan
+    donchian_upper_prev = np.roll(donchian_upper, 1)
+    donchian_lower_prev = np.roll(donchian_lower, 1)
+    donchian_upper_prev[0] = np.nan
+    donchian_lower_prev[0] = np.nan
     
     # Breakout conditions
-    breakout_up = close > high_20_prev
-    breakout_down = close < low_20_prev
+    breakout_up = close > donchian_upper_prev
+    breakout_down = close < donchian_lower_prev
     
-    # Volume confirmation: volume > 1.5x 20-period average (strict to reduce trades)
+    # Volume confirmation: volume > 1.4x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.4 * vol_ma_20)
     
-    # Calculate weekly pivot points from prior week (using 1w HTF data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly pivot: (Prior week High + Low + Close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Align weekly pivot to 6h timeframe (completed weekly bar only)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan  # First bar has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = max(100, 20)  # warmup
+    start_idx = max(100, 20, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(high_20_prev[i]) or 
-            np.isnan(low_20_prev[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper_prev[i]) or 
+            np.isnan(donchian_lower_prev[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
             
@@ -74,31 +73,39 @@ def generate_signals(prices):
         curr_breakout_up = breakout_up[i]
         curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_weekly_pivot = weekly_pivot_aligned[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on breakout with volume confirmation and weekly pivot filter
+            # Only trade on breakout with volume confirmation
             if curr_volume_confirm:
-                # Bullish breakout: price above 6h Donchian high + above weekly pivot
-                if curr_breakout_up and curr_close > curr_weekly_pivot:
+                # Bullish breakout: price above Donchian upper
+                if curr_breakout_up:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below 6h Donchian low + below weekly pivot
-                elif curr_breakout_down and curr_close < curr_weekly_pivot:
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
+                # Bearish breakout: price below Donchian lower
+                elif curr_breakout_down:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
         
         elif position == 1:  # Long position
-            # Exit: price closes below 6h Donchian low (reversal) or above Donchian high (take profit)
-            if curr_close < low_20_prev[i] or curr_close > high_20_prev[i]:
+            # Stoploss: price closes below entry - 2.5 * ATR_at_entry
+            # Take profit: price closes above Donchian upper (trailing)
+            stop_loss = entry_price - 2.5 * atr_at_entry
+            if curr_close < stop_loss:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above 6h Donchian high (reversal) or below Donchian low (take profit)
-            if curr_close > high_20_prev[i] or curr_close < low_20_prev[i]:
+            # Stoploss: price closes above entry + 2.5 * ATR_at_entry
+            # Take profit: price closes below Donchian lower (trailing)
+            stop_loss = entry_price + 2.5 * atr_at_entry
+            if curr_close > stop_loss:
                 signals[i] = 0.0
                 position = 0
             else:
