@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA50), break above weekly Donchian high or below weekly Donchian low with volume triggers continuation entries.
-# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~12-37/year) to minimize fee drag.
-# Works in bull/bear via trend filter: only trade in direction of 1d EMA50, avoiding counter-trend whipsaws.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1w EMA50), break above 1d Donchian upper or below lower with volume triggers continuation entries.
+# In ranging markets (price near 1w EMA50), fade at 1d Donchian extremes for mean reversion.
+# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~20-40/year) to minimize fee drag.
+# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
 
-name = "12h_1wDonchian20_1dEMA50_VolumeSpike_ATRTrail_v1"
-timeframe = "12h"
+name = "4h_1dDonchian20_1wEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,36 +23,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1d data ONCE before loop for Donchian(20) channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Donchian(20) channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Rolling max/min for 20 periods
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Donchian(20) channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_hi = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lo = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1w Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Align 1d Donchian levels to 4h timeframe
+    donchian_hi_aligned = align_htf_to_ltf(prices, df_1d, donchian_hi)
+    donchian_lo_aligned = align_htf_to_ltf(prices, df_1d, donchian_lo)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1w EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 12h ATR(14) for dynamic trailing stop
+    # Calculate 4h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,7 +70,7 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA50 determines trend direction
+        # Regime filter: price above/below 1w EMA50 determines trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
@@ -79,21 +78,35 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_donchian_high = donchian_high_aligned[i]
-        curr_donchian_low = donchian_low_aligned[i]
+        curr_donchian_hi = donchian_hi_aligned[i]
+        curr_donchian_lo = donchian_lo_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above weekly Donchian high with volume
-                if curr_close > curr_donchian_high and curr_volume_spike:
+                # In uptrend: look for long breakouts above Donchian high with volume
+                if curr_close > curr_donchian_hi and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below weekly Donchian low with volume
-                if curr_close < curr_donchian_low and curr_volume_spike:
+                # In downtrend: look for short breakdowns below Donchian low with volume
+                if curr_close < curr_donchian_lo and curr_volume_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
+            else:
+                # In ranging market (near EMA): mean reversion at Donchian extremes
+                if curr_close <= curr_donchian_lo:
+                    # At or below Donchian low: look for long
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                elif curr_close >= curr_donchian_hi:
+                    # At or above Donchian high: look for short
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -104,8 +117,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,8 +129,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
