@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla R1/S1 breakouts with 1d trend filter (EMA34) and volume confirmation.
-# Camarilla R1/S1 are strong intraday support/resistance levels. Breakouts with volume and 1d trend alignment
-# capture high-probability moves. Designed to work in both bull and bear markets by requiring volume confirmation
-# and trend alignment to avoid false breakouts. Uses 1h only for entry timing, 4h for signal direction, 1d for trend filter.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Hypothesis: 6h strategy using weekly Donchian breakout with 1d EMA trend filter and volume confirmation
+# Weekly Donchian(20) captures major trend structure; breakouts with volume and 1d EMA alignment
+# capture institutional moves in both bull and bear markets. Target: 50-150 total trades over 4 years.
 
-name = "1h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WeeklyDonchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,45 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load weekly data ONCE before loop for Donchian calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels using prior 4h bar (HLC of previous 4h bar)
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Camarilla levels based on prior 4h bar (exclude current)
-    prev_close = np.roll(close_4h, 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close[0] = np.nan  # first bar has no prior
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Weekly Donchian upper/lower (20-period lookback)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels (R1, S1, R2, S2)
-    camarilla_h1 = prev_close + 1.1 * (prev_high - prev_low) / 4  # R1
-    camarilla_l1 = prev_close - 1.1 * (prev_high - prev_low) / 4  # S1
-    camarilla_h2 = prev_close + 1.1 * (prev_high - prev_low) / 2  # R2
-    camarilla_l2 = prev_close - 1.1 * (prev_high - prev_low) / 2  # S2
+    # Align weekly Donchian levels to 6h timeframe (wait for completed weekly bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
-    camarilla_h1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h1)
-    camarilla_l1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l1)
-    camarilla_h2_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h2)
-    camarilla_l2_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l2)
-    
-    # Load 1d data ONCE before loop for trend filter (EMA34)
+    # Load daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -74,65 +59,57 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34) and ATR(14)
+    start_idx = 100  # warmup for weekly Donchian(20) and 1d EMA(50)
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume confirmation: volume > 2.0x 20-period average (strict to reduce trades)
-        vol_ma_20 = np.mean(volume[max(0, i-20):i]) if i >= 20 else np.mean(volume[:i]) if i > 0 else 0
-        volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
+        # Volume confirmation: volume > 2.0x 50-period average (stricter for 6h)
+        vol_ma_50 = np.mean(volume[max(0, i-50):i])
+        volume_spike = volume[i] > (2.0 * vol_ma_50)
         
         curr_close = close[i]
-        curr_ema = ema_34_aligned[i]
+        curr_ema = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above Camarilla R1 with 1d uptrend
-                if curr_close > camarilla_h1_aligned[i] and curr_close > curr_ema:
-                    signals[i] = 0.20
+                # Bullish entry: price breaks above weekly Donchian high with 1d uptrend
+                if curr_close > donchian_high_aligned[i] and curr_close > curr_ema:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below Camarilla S1 with 1d downtrend
-                elif curr_close < camarilla_l1_aligned[i] and curr_close < curr_ema:
-                    signals[i] = -0.20
+                # Bearish entry: price breaks below weekly Donchian low with 1d downtrend
+                elif curr_close < donchian_low_aligned[i] and curr_close < curr_ema:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks Camarilla S1
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks weekly Donchian low
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < camarilla_l1_aligned[i]:
+            elif curr_close < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Camarilla R2
-            elif curr_close >= camarilla_h2_aligned[i]:
+            # Take profit: price reaches midpoint of weekly Donchian channel
+            elif curr_close >= (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2:
                 signals[i] = 0.10  # reduce position
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks Camarilla R1
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks weekly Donchian high
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > camarilla_h1_aligned[i]:
+            elif curr_close > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Camarilla S2
-            elif curr_close <= camarilla_l2_aligned[i]:
+            # Take profit: price reaches midpoint of weekly Donchian channel
+            elif curr_close <= (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2:
                 signals[i] = -0.10  # reduce position
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
