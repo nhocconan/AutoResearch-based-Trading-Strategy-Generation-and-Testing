@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
-# Uses 12h primary timeframe to target 50-150 trades over 4 years (12-37/year).
-# Camarilla pivots from 1d provide strong support/resistance. Breakouts beyond R3/S3
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h volume spike and 12h ADX trend filter
+# Uses 4h primary timeframe to target 75-200 trades over 4 years (19-50/year).
+# Camarilla pivots from 12h provide strong support/resistance. Breakouts beyond R3/S3
 # indicate momentum moves. Volume spike (2.0x 20-period average) confirms validity.
-# 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
+# 12h ADX > 25 filters for trending markets only, avoiding choppy conditions.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
 # in bear via breakout shorts with trend filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1dADX25_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hVolumeSpike_12hADX25_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,31 +30,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate 12h Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
-    # Use previous day's OHLC for today's Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Use previous 12h bar's OHLC for current Camarilla levels
+    prev_close = df_12h['close'].shift(1).values
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
     pivot = (prev_high + prev_low + prev_close) / 3.0
     r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
     r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
     s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
     s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align 12h Camarilla levels to 4h timeframe (wait for completed 12h bar)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average (on 4h data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Calculate 1d ADX(14) for trend filter
+    # Calculate 12h ADX(14) for trend filter
     # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
