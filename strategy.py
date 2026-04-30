@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Camarilla pivot breakouts with volume confirmation and 1d trend filter
-# Weekly Camarilla levels (R3/S3) identify key weekly support/resistance where institutional order flow clusters.
+# Hypothesis: 6h strategy using weekly Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Weekly Camarilla levels identify key weekly support/resistance where institutional order flow clusters.
 # Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
-# 1d EMA(34) ensures alignment with intermediate-term trend to avoid counter-trend trades.
-# Designed for low trade frequency (<25/year) to minimize fee drag in both bull and bear markets.
-# Uses 6h timeframe with 1d HTF for trend filter and weekly HTF for Camarilla levels.
+# 1d EMA(50) ensures alignment with medium-term trend to avoid counter-trend trades.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in both bull and bear markets.
+# Uses 6h timeframe with 1w HTF for Camarilla levels and 1d HTF for trend filter.
 
 name = "6h_WeeklyCamarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "6h"
@@ -16,7 +16,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,20 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
     # Load weekly data ONCE before loop for Camarilla calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d_s = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
     # Calculate weekly Camarilla levels (R3, S3, R4, S4)
     # Based on previous week's high, low, close
@@ -59,6 +54,11 @@ def generate_signals(prices):
     r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
+    # Calculate 1d EMA(50) for trend filter
+    close_1d_s = pd.Series(close_1d)
+    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -70,15 +70,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 34  # warmup for EMA(34)
+    start_idx = 50  # warmup for EMA(50)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 20-period average
-        vol_ma_20 = np.mean(volume[max(0, i-20):i])
-        volume_spike = volume[i] > (2.0 * vol_ma_20)
+        # Volume confirmation: volume > 2.0x 30-period average
+        vol_ma_30 = np.mean(volume[max(0, i-30):i])
+        volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
-        curr_ema = ema_34_1d_aligned[i]
+        curr_ema = ema_50_1d_aligned[i]
         curr_atr = atr[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
