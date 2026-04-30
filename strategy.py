@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation.
 # Uses 1d EMA34 for trend alignment to reduce whipsaws in both bull and bear markets.
-# Volume > 1.6x 20-period average confirms strong momentum (tight threshold to control trade frequency).
-# ATR-based stoploss (2.5x) manages risk. Session filter (00-24 UTC) always active for 12h timeframe.
-# Designed for low trade frequency (~12-25 trades/year) to minimize fee drag on 12h timeframe.
+# Volume > 1.8x 20-period average (tighter than before) confirms strong momentum.
+# ATR-based stoploss (2.5x) manages risk. Designed for low trade frequency (~12-25 trades/year).
 # Entry requires 1d EMA34 alignment + volume spike + Camarilla breakout.
+# Strategy avoids overtrading by tightening volume confirmation and using discrete position sizing.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -53,10 +53,10 @@ def generate_signals(prices):
         curr_ema = ema_34_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 1.6x 20-period average (tight threshold to control trades)
+        # Volume confirmation: volume > 1.8x 20-period average (tight threshold to control trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > (1.6 * vol_ma_20)
+            volume_confirm = volume[i] > (1.8 * vol_ma_20)
         else:
             volume_confirm = False
         
