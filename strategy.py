@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 + 1d EMA34 uptrend + volume > 1.8x 20-bar average.
-# Short when price breaks below S3 + 1d EMA34 downtrend + volume > 1.8x 20-bar average.
-# ATR trailing stop (2.0x) for risk management.
-# Targets 100-180 total trades over 4 years (25-45/year) with discrete position sizing (0.25).
-# Camarilla levels provide institutional support/resistance; breakouts with volume confirm conviction.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 + 1d EMA34 uptrend + volume > 2.0x 24-bar average.
+# Short when price breaks below S3 + 1d EMA34 downtrend + volume > 2.0x 24-bar average.
+# ATR trailing stop (2.5x) for risk management.
+# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
+# 12h timeframe reduces trade frequency vs lower timeframes; Camarilla levels provide institutional support/resistance.
 # 1d EMA34 ensures alignment with daily trend, improving performance in both bull/bear markets.
+# Volume confirmation filter of 2.0x reduces false breakouts.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +36,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 4h bar
+    # Calculate Camarilla levels from previous 12h bar
     # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     # Using previous bar's high/low/close to avoid look-ahead
     prev_close = np.concatenate([[close[0]], close[:-1]])
@@ -46,9 +47,9 @@ def generate_signals(prices):
     r3 = prev_close + (camarilla_range * 1.1 / 4)
     s3 = prev_close - (camarilla_range * 1.1 / 4)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=1).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_24)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -100,8 +101,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,8 +113,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
