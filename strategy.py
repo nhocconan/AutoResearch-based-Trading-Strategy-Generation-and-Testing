@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla R3/S3 are strong intraday support/resistance levels derived from prior 1d price action.
-# Breakouts with volume confirmation and alignment with the 1d EMA34 trend capture institutional
-# moves while avoiding false breakouts in choppy markets. Designed to work in both bull and bear
-# markets by requiring volume and trend alignment. Target: 75-200 total trades over 4 years.
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with 1d trend filter and volume confirmation
+# Camarilla R3/S3 act as strong daily support/resistance; breakouts with volume and 1d trend alignment
+# capture institutional moves. Designed to work in both bull and bear markets by requiring
+# volume confirmation and trend alignment to avoid false breakouts. Target: 12-37 trades/year.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla and EMA
+    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -47,17 +46,18 @@ def generate_signals(prices):
     camarilla_h5 = prev_close + 1.1 * (prev_high - prev_low)      # R4
     camarilla_l5 = prev_close - 1.1 * (prev_high - prev_low)      # S4
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
     camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
     
     # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1d_s = pd.Series(close_1d)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic stoploss
+    # Calculate ATR(14) for dynamic stoploss on 12h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,12 +71,12 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 20-period average
-        vol_ma_20 = np.mean(volume[max(0, i-20):i])
-        volume_spike = volume[i] > (2.0 * vol_ma_20)
+        # Volume confirmation: volume > 2.0x 30-period average (stricter for lower frequency)
+        vol_ma_30 = np.mean(volume[max(0, i-30):i])
+        volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
-        curr_ema = ema_34_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
