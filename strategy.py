@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-# Uses 1w Camarilla pivot levels (R4/S4) for regime: above weekly R4 = bull, below weekly S4 = bear, between = range.
-# In bull regime: long on Donchian(20) breakout with volume confirmation.
-# In bear regime: short on Donchian(20) breakdown with volume confirmation.
-# In range regime: fade at weekly R3/S3 levels with volume confirmation.
-# Uses ATR-based trailing stop (2.0x) for risk management.
-# Designed for low trade frequency (~12-37/year) to minimize fee drag on 6h timeframe.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1d EMA50), break above/below 20-period Donchian channel triggers continuation entries.
+# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~15-35/year) to minimize fee drag.
+# Works in bull/bear via trend filter: only takes longs in uptrend, shorts in downtrend, avoids counter-trend whipsaws.
 
-name = "6h_1wCamarilla_Donchian20_VolumeSpike_ATRTrail_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for weekly Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 2
-    camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 2
-    camarilla_r4 = close_1w + 1.1 * (high_1w - low_1w)
-    camarilla_s4 = close_1w - 1.1 * (high_1w - low_1w)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1w Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    
-    # Calculate 6h Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 6h ATR(14) for dynamic trailing stop
+    # Calculate 12h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
+    
+    # Calculate 12h Donchian channel (20-period)
+    # We need to calculate this on 12h data, then align to 12h prices
+    # Since we're already on 12h timeframe, we can calculate directly
+    # But to be safe and follow MTF rules, we'll treat the current prices as 12h data
+    # For Donchian, we need the highest high and lowest low over 20 periods
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,49 +62,29 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter based on weekly Camarilla levels
+        # Regime filter: price above/below 1d EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
         curr_volume_spike = volume_spike[i]
-        curr_upper = highest_20[i]
-        curr_lower = lowest_20[i]
         
         if position == 0:  # Flat - look for new entries
-            # Bull regime: price above weekly R4
-            if curr_close > curr_r4:
-                # Look for long on Donchian breakout with volume
-                if curr_close > curr_upper and curr_volume_spike:
+            if is_uptrend:
+                # In uptrend: look for long breakouts above 20-period high with volume
+                if curr_close > curr_highest_20 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
-            
-            # Bear regime: price below weekly S4
-            elif curr_close < curr_s4:
-                # Look for short on Donchian breakdown with volume
-                if curr_close < curr_lower and curr_volume_spike:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
-            
-            # Range regime: price between weekly S4 and R4
-            else:
-                # Look for mean reversion at weekly R3/S3 with volume
-                if curr_close < curr_s3 and curr_volume_spike:
-                    # Oversold: long
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                elif curr_close > curr_r3 and curr_volume_spike:
-                    # Overbought: short
+            elif is_downtrend:
+                # In downtrend: look for short breakdowns below 20-period low with volume
+                if curr_close < curr_lowest_20 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -123,8 +95,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,8 +107,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
