@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w volume spike and 1w ADX > 25 trend filter
-# Camarilla pivots from 1d provide key support/resistance levels. Breakouts beyond R3/S3 with
-# volume confirmation indicate strong momentum. 1w ADX > 25 filters for strong trending markets
-# only, avoiding choppy/range-bound conditions. Works in bull markets via breakout longs and
-# bear markets via breakout shorts. Discrete sizing 0.30 balances risk and minimizes fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# In strong uptrends: Bull Power > 0 and rising; in downtrends: Bear Power < 0 and falling
+# 12h EMA34 provides HTF trend direction (long only above EMA34, short only below)
+# Volume confirmation (1.5x 20-period average) filters low-conviction moves
+# Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_Camarilla_R3S3_Breakout_1wVolumeSpike_1wADX25_v1"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,107 +23,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Calculate 1d Camarilla pivot levels using previous day's OHLC
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    # First value will be invalid (rolled), but we'll handle with min_periods later
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
-    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
-    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
-    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
+    # Pre-compute session hours (08-20 UTC) to avoid datetime errors
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Calculate 1w ADX(14) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
-    # True Range
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Directional Movement
-    dm_plus = np.where(
-        (df_1w['high'] - df_1w['high'].shift(1)) > (df_1w['low'].shift(1) - df_1w['low']),
-        np.maximum(df_1w['high'] - df_1w['high'].shift(1), 0),
-        0
-    )
-    dm_minus = np.where(
-        (df_1w['low'].shift(1) - df_1w['low']) > (df_1w['high'] - df_1w['high'].shift(1)),
-        np.maximum(df_1w['low'].shift(1) - df_1w['low'], 0),
-        0
-    )
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Smoothed DM
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: High - EMA13
+    bear_power = low - ema_13   # Bear Power: Low - EMA13
     
-    # DI and DX
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1w ADX to 1d timeframe (wait for completed 1w bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for volume MA and ADX
+    start_idx = max(34, 20, 13)  # warmup for EMA34, volume MA, EMA13
     
     for i in range(start_idx, n):
-        # Skip if indicators not ready (first roll value is invalid, others need warmup)
-        if i < 1:  # skip first bar due to roll
+        # Skip if indicators not ready
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(ema_13[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0
             continue
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+            
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_r3 = r3[i]
-        curr_s3 = s3[i]
-        curr_adx = adx_aligned[i]
+        curr_ema_12h = ema_34_12h_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and strongly trending market (ADX > 25)
-            if curr_volume_spike and curr_adx > 25:
-                # Bullish breakout: price breaks above R3
-                if curr_close > curr_r3:
-                    signals[i] = 0.30
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish: price above 12h EMA34 AND Bull Power positive AND rising
+                if (curr_close > curr_ema_12h and 
+                    curr_bull_power > 0 and 
+                    curr_bull_power > bull_power[i-1]):
+                    signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish breakout: price breaks below S3
-                elif curr_close < curr_s3:
-                    signals[i] = -0.30
+                # Bearish: price below 12h EMA34 AND Bear Power negative AND falling
+                elif (curr_close < curr_ema_12h and 
+                      curr_bear_power < 0 and 
+                      curr_bear_power < bear_power[i-1]):
+                    signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below S3 (mean reversion to pivot area)
-            if curr_close < curr_s3:
+            # Exit when Bull Power turns negative (loss of bullish momentum)
+            if curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above R3 (mean reversion to pivot area)
-            if curr_close > curr_r3:
+            # Exit when Bear Power turns positive (loss of bearish momentum)
+            if curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
