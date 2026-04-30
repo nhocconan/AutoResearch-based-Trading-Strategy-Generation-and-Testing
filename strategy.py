@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with RSI(14) mean reversion entries and volume confirmation.
-# Uses KAMA(ER=10) for adaptive trend filtering, RSI(14)<30 for long and >70 for short,
-# with volume > 1.5x 20-period average for confirmation. Designed for low trade frequency
-# (~50 total trades over 4 years) to avoid fee drag. Works in bull/bear via KAMA trend filter
-# and RSI mean reversion for precise entries during pullbacks.
+# Hypothesis: 6h Williams %R extreme + 1d EMA50 trend filter + volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In strong trends (1d EMA50),
+# extreme readings can signal continuation rather than reversal. Volume confirms momentum.
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to avoid fee drag.
+# Works in bull/bear via 1d EMA50 trend filter - only takes trades in direction of higher timeframe trend.
 
-name = "1d_KAMA10_RSI14_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,25 +27,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate KAMA(ER=10) for trend filter
-    close_series = pd.Series(close)
-    change = np.abs(close_series.diff(10).values)
-    volatility = np.abs(close_series.diff(1).rolling(window=10).sum().values)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate RSI(14) for mean reversion entries
-    delta = pd.Series(close).diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Williams %R (14-period) on 6h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,51 +50,48 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(10, 14, 20) + 1  # warmup
+    start_idx = max(14, 50, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or
+        if (np.isnan(williams_r[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_kama = kama[i]
-        curr_rsi = rsi[i]
+        curr_williams_r = williams_r[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price > KAMA (uptrend), RSI < 30 (oversold), volume confirmation
-            if (curr_close > curr_kama and 
-                curr_rsi < 30 and 
+            # Long: Williams %R oversold (< -80) + price above 1d EMA50 (uptrend) + volume confirmation
+            if (curr_williams_r < -80 and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-            # Short: price < KAMA (downtrend), RSI > 70 (overbought), volume confirmation
-            elif (curr_close < curr_kama and 
-                  curr_rsi > 70 and 
+            # Short: Williams %R overbought (> -20) + price below 1d EMA50 (downtrend) + volume confirmation
+            elif (curr_williams_r > -20 and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: price < KAMA (trend change) or RSI > 50 (mean reversion complete)
-            if curr_close < curr_kama or curr_rsi > 50:
+            # Exit when Williams %R returns to neutral territory (> -50) or trend changes
+            if curr_williams_r > -50 or curr_close < curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price > KAMA (trend change) or RSI < 50 (mean reversion complete)
-            if curr_close > curr_kama or curr_rsi < 50:
+            # Exit when Williams %R returns to neutral territory (< -50) or trend changes
+            if curr_williams_r < -50 or curr_close > curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
