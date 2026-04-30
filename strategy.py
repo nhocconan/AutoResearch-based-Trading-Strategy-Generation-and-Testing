@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h strategy using 1w Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1w HTF for Camarilla pivot calculation to avoid intraday noise and 1d EMA34 for trend to filter false breakouts.
 # Long when price breaks above 1w R3 in uptrend (1d close > 1d EMA34) with volume spike (>2.0x average).
 # Short when price breaks below 1w S3 in downtrend (1d close < 1d EMA34) with volume spike.
-# Designed for low trade frequency (~12-37/year on 6h) to minimize fee drag while capturing strong directional moves.
+# Designed for low trade frequency (~25-40/year on 4h) to minimize fee drag while capturing strong directional moves.
 # Uses volume confirmation with moderate threshold (>2.0x average) to balance signal quality and trade count.
-# Stoploss at 2.5 * ATR and take profit at 2.0 * ATR to allow for larger swings on 6h timeframe.
+# Stoploss at 2.5 * ATR and take profit at 2.0 * ATR to allow for larger swings on 4h timeframe.
 # Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at weekly pivot levels.
 # Focus on BTC/ETH as primary targets.
 
-name = "6h_1wCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_1wCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,18 +41,18 @@ def generate_signals(prices):
     camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 2
     camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 2
     
-    # Align 1w Camarilla levels to 6h timeframe (wait for 1w bar to close)
+    # Align 1w Camarilla levels to 4h timeframe (wait for 1w bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d EMA(34) for trend filter (loaded once, aligned to 4h)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic stoploss on 6h
+    # Calculate ATR(14) for dynamic stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
