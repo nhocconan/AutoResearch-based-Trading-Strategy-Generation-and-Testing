@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + RSI mean reversion + volume spike. 
-# Long when KAMA upward (bullish trend) + RSI < 30 (oversold) + volume > 1.5x 20-bar average.
-# Short when KAMA downward (bearish trend) + RSI > 70 (overbought) + volume spike.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above R3 with 12h EMA50 uptrend and volume > 1.5x 20-bar average.
+# Short when price breaks below S3 with 12h EMA50 downtrend and volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
-# Targets 30-100 total trades over 4 years (7-25/year) with discrete position sizing (0.25).
-# KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-# RSI extremes provide mean reversion entries aligned with higher-timeframe trend.
+# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
+# Camarilla levels provide intraday support/resistance; breakouts with trend/volume filter avoid false signals.
+# Works in bull/bear markets by aligning with higher-timeframe trend.
 
-name = "1d_KAMA_Trend_RSI_MeanRev_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA ( Kaufman Adaptive Moving Average ) - 10-period ER, 2/30 SC
-    def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close)).rolling(window=er_period, min_periods=1).sum().values
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    # Load 1w data ONCE before loop for EMA50 trend filter (additional confirmation)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for Camarilla levels and EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # KAMA for trend
-    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    # Calculate 12h Camarilla levels (based on previous 12h bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_prev = df_12h['close'].shift(1).values  # Previous 12h close
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla formulas: R3/S3 = C ± (H-L)*1.1/4
+    cam_r3 = close_12h_prev + (high_12h - low_12h) * 1.1 / 4
+    cam_s3 = close_12h_prev - (high_12h - low_12h) * 1.1 / 4
+    
+    # Align Camarilla levels to 6h timeframe
+    cam_r3_aligned = align_htf_to_ltf(prices, df_12h, cam_r3)
+    cam_s3_aligned = align_htf_to_ltf(prices, df_12h, cam_s3)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -74,38 +64,35 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 14, 20)  # warmup for EMA50, KAMA, RSI, and volume MA
+    start_idx = max(50, 20)  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Trend filters: KAMA direction + 1w EMA50 alignment
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
-        price_above_1w_ema = close[i] > ema_50_aligned[i]
-        price_below_1w_ema = close[i] < ema_50_aligned[i]
+        # Regime filter: price above/below 12h EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_rsi = rsi[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: KAMA rising + price above 1w EMA50 + RSI < 30 (oversold) + volume confirmation
-            if kama_rising and price_above_1w_ema and curr_rsi < 30 and curr_volume_confirm:
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if curr_high > cam_r3_aligned[i] and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: KAMA falling + price below 1w EMA50 + RSI > 70 (overbought) + volume confirmation
-            elif kama_falling and price_below_1w_ema and curr_rsi > 70 and curr_volume_confirm:
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif curr_low < cam_s3_aligned[i] and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
