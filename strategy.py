@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation + ATR trailing stop.
-# Long when price breaks above Donchian(20) high + price > 1d EMA50 + volume spike.
-# Short when price breaks below Donchian(20) low + price < 1d EMA50 + volume spike.
-# Uses discrete sizing (0.25) to minimize fee churn. Works in bull/bear markets via 1d EMA50 trend filter.
-# Target: 20-50 trades/year per symbol (<200 total over 4 years) to avoid fee drag.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation.
+# Donchian breakout captures momentum, 1w EMA50 ensures alignment with weekly trend,
+# volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee drag.
+# Works in bull/bear markets by requiring trend alignment via 1w EMA50 and momentum via price channel breakout.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +22,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1d data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d Donchian(20) channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
-    # Calculate Donchian(20) channels on 4h
-    donchian_window = 20
-    dc_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    dc_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
-    
-    # ATR for trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = max(50, donchian_window)  # warmup for EMA50 and Donchian
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i]):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(ema_50_aligned[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Trend filter: price relative to 1d EMA50
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
-        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_atr = atr[i]
+        curr_upper = upper_aligned[i]
+        curr_lower = lower_aligned[i]
+        curr_ema = ema_50_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high + uptrend + volume confirmation
-            if curr_high > dc_high[i] and is_uptrend and curr_volume_confirm:
+            # Long: price breaks above upper channel AND above weekly EMA50 + volume confirmation
+            if curr_high > curr_upper and curr_close > curr_ema and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_high
-            # Short: price breaks below Donchian low + downtrend + volume confirmation
-            elif curr_low < dc_low[i] and is_downtrend and curr_volume_confirm:
+            # Short: price breaks below lower channel AND below weekly EMA50 + volume confirmation
+            elif curr_low < curr_lower and curr_close < curr_ema and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            if curr_high > highest_since_entry:
-                highest_since_entry = curr_high
-            
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Exit: price crosses below weekly EMA50
+            if curr_close < curr_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Exit: price crosses above weekly EMA50
+            if curr_close > curr_ema:
                 signals[i] = 0.0
                 position = 0
             else:
