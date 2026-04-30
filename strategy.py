@@ -3,20 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-# Elder Ray measures bull/bear power as price relative to EMA13. Long when bull power > 0 and rising,
-# short when bear power < 0 and falling. Uses 12h EMA50 for trend alignment and volume > 2x 20-bar average
-# for confirmation. ATR(14) trailing stop at 2.0x for risk management. Discrete position sizing at ±0.25.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in both bull and bear markets by requiring
-# 12h trend alignment to avoid counter-trend whipsaws and volume confirmation to filter weak breakouts.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation.
+# Uses Camarilla pivot levels (R3, S3) from 1d data, with trend alignment from 1d EMA34
+# and volume > 2.0x 20-bar average for confirmation. Enter long when price breaks above
+# R3 in bullish trend, short when breaks below S3 in bearish trend.
+# ATR(14) trailing stop at 2.0x for risk management. Discrete position sizing at ±0.25.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in both bull and bear markets
+# by requiring HTF trend alignment to avoid counter-trend whipsaws and volume confirmation
+# to filter weak breakouts.
 
-name = "6h_ElderRay_BullBearPower_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,21 +30,30 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate EMA13 for Elder Ray (primary timeframe)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 1d data ONCE before loop for Camarilla calculation and EMA34 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla pivot levels (R3, S3) from previous 1d bar
+    # Typical Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # But standard is: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)/2
+    # We'll use R3 and S3 as breakout levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to primary timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -62,14 +73,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(13, 50, atr_period, 20) + 1  # warmup
+    start_idx = max(34, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema13[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -79,26 +89,24 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: bull power > 0 and rising, 12h EMA50 uptrend, volume confirmation
-            if (curr_bull_power > 0 and 
-                curr_bull_power > bull_power[i-1] and 
-                curr_close > curr_ema_50_12h and 
+            # Long: price breaks above R3, 1d EMA34 uptrend, volume confirmation
+            if (curr_close > curr_r3 and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: bear power < 0 and falling, 12h EMA50 downtrend, volume confirmation
-            elif (curr_bear_power < 0 and 
-                  curr_bear_power < bear_power[i-1] and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: price breaks below S3, 1d EMA34 downtrend, volume confirmation
+            elif (curr_close < curr_s3 and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
