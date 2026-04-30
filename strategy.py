@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for very low trade frequency (~10-20 trades/year) to minimize fee drag on 1h timeframe.
 # Works in bull/bear via dual timeframe trend filters + volume confirmation.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dEMA34_VolumeConfirm_ATRStop_v1"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dEMA34_VolumeConfirm_ATRStop_v2"
 timeframe = "1h"
 leverage = 1.0
 
