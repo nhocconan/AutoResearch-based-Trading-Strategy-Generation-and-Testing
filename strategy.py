@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation
-# Donchian channels provide clear breakout levels. 1d ATR > 20-period median filters for sufficient volatility.
-# Volume spike confirms breakout validity. Works in bull via breakout longs, in bear via breakout shorts.
+# Hypothesis: 6h Donchian(20) breakout with 1d Williams %R extreme filter and volume confirmation
+# Donchian breakouts capture momentum bursts. Williams %R(14) < -80 or > -20 identifies
+# oversold/overbought conditions on the 1d timeframe for mean-reversion entries after
+# extreme moves. Volume spike confirms breakout validity. Works in bull via breakout longs
+# after oversold dips, and in bear via breakout shorts after overbought rallies.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "12h_Donchian20_1dATRfilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_Donchian20_1dWilliamsR_Extreme_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,28 +29,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 1d Williams %R(14)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1d ATR 20-period median for dynamic threshold
-    atr_median_20 = pd.Series(atr).rolling(window=20, min_periods=20).median().values
-    atr_filter = atr > (1.0 * atr_median_20)  # Require ATR above median
-    
-    # Align 1d ATR filter to 12h timeframe (wait for completed 1d bar)
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter)
+    # Align 1d Williams %R to 6h timeframe (wait for completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,14 +51,13 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, 20)  # warmup for Donchian and volume MA
+    start_idx = max(20, 14)  # warmup for Donchian and Williams %R
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(atr_filter_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -73,36 +67,36 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high_20 = high_20[i]
-        curr_low_20 = low_20[i]
-        curr_atr_filter = atr_filter_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_williams_r = williams_r_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volatility filter and volume spike
-            if curr_atr_filter and curr_volume_spike:
-                # Bullish breakout: price breaks above upper Donchian
-                if curr_close > curr_high_20:
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish breakout: price breaks above Donchian high after 1d oversold
+                if curr_close > curr_donchian_high and curr_williams_r < -80:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish breakout: price breaks below lower Donchian
-                elif curr_close < curr_low_20:
+                # Bearish breakout: price breaks below Donchian low after 1d overbought
+                elif curr_close < curr_donchian_low and curr_williams_r > -20:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower Donchian (mean reversion)
-            if curr_close < curr_low_20:
+            # Exit when price drops below Donchian low (mean reversion)
+            if curr_close < curr_donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper Donchian (mean reversion)
-            if curr_close > curr_high_20:
+            # Exit when price rises above Donchian high (mean reversion)
+            if curr_close > curr_donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
