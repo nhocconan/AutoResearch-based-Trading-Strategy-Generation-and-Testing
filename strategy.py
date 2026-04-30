@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA200 trend filter and volume spike confirmation.
-# Uses Camarilla pivot levels (R3/S3) from prior 4h for structure-based breakout entries.
-# 4h EMA200 for higher timeframe trend direction filter to avoid counter-trend trades.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure-based breakout entries.
+# 1d EMA34 for higher timeframe trend direction filter.
 # Volume confirmation (>2.0x 20-bar avg) to reduce false breakouts.
 # ATR-based trailing stoploss (exit when price moves against position by 2.5*ATR).
-# Discrete position sizing at ±0.20 to minimize fee drag and manage drawdown.
-# Session filter (08-20 UTC) to focus on liquid hours and reduce noise.
-# Target: 60-150 total trades over 4 years (15-37/year) within 1h limits.
-# Works in bull markets via breakout continuation with trend filter and in bear markets via volatility expansion capture.
+# Discrete position sizing at ±0.30 to balance capture and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) within 6h limits.
+# Works in bull markets via breakout continuation and in bear markets via volatility expansion capture.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA200_VolumeSpike_ATRStop_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,27 +30,27 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 4h data ONCE before loop for EMA200 trend filter and Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 4h EMA200 for trend filter
-    close_4h_vals = df_4h['close'].values
-    ema_200_4h = pd.Series(close_4h_vals).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA34 for trend filter
+    close_1d_vals = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla pivot levels (R3, S3) from prior 4h
+    # Calculate Camarilla pivot levels (R3, S3) from prior 1d
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    camarilla_r3 = close_4h + (1.1 * (high_4h - low_4h) / 2)
-    camarilla_s3 = close_4h - (1.1 * (high_4h - low_4h) / 2)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
+    camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
     
-    # Align 4h indicators to 1h timeframe
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Align 1d indicators to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -71,11 +70,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 200  # warmup for EMA200 and ATR
+    start_idx = 40  # warmup for EMA34 and ATR
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_200_4h_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(atr[i]) or
@@ -87,26 +86,26 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_200_4h = ema_200_4h_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, above 4h EMA200, volume spike
+            # Long: price breaks above Camarilla R3, above 1d EMA34, volume spike
             if (curr_close > curr_r3 and 
-                curr_close > curr_ema_200_4h and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Camarilla S3, below 4h EMA200, volume spike
+            # Short: price breaks below Camarilla S3, below 1d EMA34, volume spike
             elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_200_4h and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
                 lowest_since_entry = curr_close
@@ -119,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Update lowest price since entry
@@ -129,6 +128,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.30
     
     return signals
