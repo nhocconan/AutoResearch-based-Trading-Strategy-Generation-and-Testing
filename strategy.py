@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
-# Long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA),
-# close > 1d EMA50, and volume > 2.0x 20-bar avg.
-# Short when jaws < teeth < lips, close < 1d EMA50, and volume > 2.0x 20-bar avg.
-# Exit when Alligator lines cross (jaws < teeth for long, jaws > teeth for short).
-# Uses 12h timeframe for low trade frequency (target: 12-37/year) to minimize fee drag.
-# Williams Alligator identifies trending markets via SMMA alignment.
-# 1d EMA50 filters for higher timeframe trend alignment.
-# Volume confirmation reduces false signals.
-# Works in bull markets via aligned Alligator + uptrend and in bear markets via aligned Alligator + downtrend.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel, close > 1d EMA50, volume > 1.8x 20-bar avg.
+# Short when price breaks below lower Donchian channel, close < 1d EMA50, volume > 1.8x 20-bar avg.
+# Exit when price crosses the 10-period EMA (mean reversion to reduce whipsaw).
+# Uses 4h timeframe for optimal trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Donchian channels provide clear breakout levels based on price extremes.
+# 1d EMA50 filters for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume confirmation with moderate threshold reduces false breakouts while keeping trades sufficient.
+# Works in bull markets via breakouts with trend and in bear markets via breakdowns with trend.
+# Target: 75-200 total trades over 4 years.
 
-name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,69 +38,68 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator (SMMA = smoothed moving average)
-    # SMMA today = (SMMA yesterday * (period-1) + close today) / period
-    def smma(data, period):
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper channel = highest high of last 20 periods
+    # Lower channel = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    jaws = smma(close, 13)  # 13-period SMMA (blue line)
-    teeth = smma(close, 8)   # 8-period SMMA (red line)
-    lips = smma(close, 5)    # 5-period SMMA (green line)
+    # Calculate 10-period EMA for exit signal (mean reversion)
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average (higher threshold for fewer trades)
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for SMMA and EMA50
+    start_idx = 60  # warmup for Donchian (20), EMA50 (50), and volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(ema_10[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_jaws = jaws[i]
-        curr_teeth = teeth[i]
-        curr_lips = lips[i]
+        curr_upper = upper_channel[i]
+        curr_lower = lower_channel[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_ema_10 = ema_10[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: jaws > teeth > lips (Alligator aligned up), close > 1d EMA50, volume spike
-            if (curr_jaws > curr_teeth and curr_teeth > curr_lips and
-                curr_close > curr_ema_50_1d and curr_volume_confirm):
+            # Long: price breaks above upper Donchian, close > 1d EMA50, volume spike
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema_50_1d and 
+                curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: jaws < teeth < lips (Alligator aligned down), close < 1d EMA50, volume spike
-            elif (curr_jaws < curr_teeth and curr_teeth < curr_lips and
-                  curr_close < curr_ema_50_1d and curr_volume_confirm):
+            # Short: price breaks below lower Donchian, close < 1d EMA50, volume spike
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema_50_1d and 
+                  curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: Alligator lines cross (jaws < teeth)
-            if curr_jaws < curr_teeth:
+            # Exit condition: price crosses below 10-period EMA (mean reversion)
+            if curr_close < curr_ema_10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: Alligator lines cross (jaws > teeth)
-            if curr_jaws > curr_teeth:
+            # Exit condition: price crosses above 10-period EMA (mean reversion)
+            if curr_close > curr_ema_10:
                 signals[i] = 0.0
                 position = 0
             else:
