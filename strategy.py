@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter
-# Donchian channels identify key support/resistance levels where institutional order flow clusters.
-# Breakouts above/below 20-period Donchian with volume spike indicate strong participation.
-# 1d EMA(50) ensures alignment with longer-term trend to avoid counter-trend trades.
-# ATR-based stoploss and profit target at opposite Donchian band for symmetric risk/reward.
-# Designed for low trade frequency (<50/year) to minimize fee drag in both bull and bear markets.
+# Hypothesis: 4h strategy using 1w EMA(34) trend filter + Donchian(20) breakout + volume confirmation
+# 1w EMA(34) provides robust long-term trend to avoid counter-trend trades in both bull and bear markets
+# Donchian(20) breakout captures momentum with clear entry/exit levels
+# Volume confirmation ensures institutional participation
+# Designed for low trade frequency (20-50/year) to minimize fee drag
+# Uses 4h timeframe as requested, with 1w HTF for trend filter
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_Donchian20_Breakout_1wEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,15 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d_s = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA(34) for trend filter
+    close_1w_s = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -45,60 +45,63 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # warmup for Donchian(20)
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 30-period average
         vol_ma_30 = np.mean(volume[max(0, i-30):i])
         volume_spike = volume[i] > (2.0 * vol_ma_30)
         
-        # Calculate Donchian(20) for current bar
-        donch_high = np.max(high[i-20:i])
-        donch_low = np.min(low[i-20:i])
-        
         curr_close = close[i]
-        curr_ema = ema_50_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema = ema_34_1w_aligned[i]
         curr_atr = atr[i]
+        
+        # Calculate Donchian(20) channels using only past data
+        lookback_start = max(0, i-20)
+        donchian_high = np.max(high[lookback_start:i]) if lookback_start < i else curr_high
+        donchian_low = np.min(low[lookback_start:i]) if lookback_start < i else curr_low
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above Donchian(20) high with 1d uptrend
-                if curr_close > donch_high and curr_close > curr_ema:
+                # Bullish entry: price breaks above Donchian(20) high with 1w uptrend
+                if curr_close > donchian_high and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below Donchian(20) low with 1d downtrend
-                elif curr_close < donch_low and curr_close < curr_ema:
+                # Bearish entry: price breaks below Donchian(20) low with 1w downtrend
+                elif curr_close < donchian_low and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks Donchian low
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks Donchian(20) low
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < donch_low:
+            elif curr_close < donchian_low:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Donchian high
-            elif curr_close >= donch_high:
-                signals[i] = 0.0  # full exit
+            # Take profit: price reaches 1.5x ATR profit target
+            elif curr_close >= entry_price + 3.75 * curr_atr:  # 1.5:1 RR
+                signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks Donchian high
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks Donchian(20) high
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > donch_high:
+            elif curr_close > donchian_high:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Donchian low
-            elif curr_close <= donch_low:
-                signals[i] = 0.0  # full exit
+            # Take profit: price reaches 1.5x ATR profit target
+            elif curr_close <= entry_price - 3.75 * curr_atr:  # 1.5:1 RR
+                signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
     
