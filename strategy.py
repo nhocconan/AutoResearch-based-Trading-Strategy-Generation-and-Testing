@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Uses discrete sizing 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50 AND volume spike.
-# Short when Bull Power < 0 AND Bear Power > 0 AND price < 1d EMA50 AND volume spike.
-# ATR-based stoploss: exit when price moves against position by 2.0 * ATR(14).
-# Works in bull via Elder Ray longs, in bear via Elder Ray shorts.
+# Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume spike.
+# Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume spike.
+# ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14).
+# Camarilla levels provide institutional structure; EMA34 filters trend; volume confirms momentum.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,24 +29,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate EMA13 for Elder Ray (using close)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels (R3, S3) from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Daily range
+    daily_range = high - low
+    # Camarilla R3 = close + (range * 1.1/4)
+    camarilla_r3 = close + (daily_range * 1.1 / 4.0)
+    # Camarilla S3 = close - (range * 1.1/4)
+    camarilla_s3 = close - (daily_range * 1.1 / 4.0)
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
-    
-    # Calculate 1d EMA(50) for trend filter (HTF)
+    # Calculate 1d EMA(34) for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    # Volume confirmation: volume > 2.0x 24-period average (2 days of 12h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     # ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -59,12 +66,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(13, 20, 50, 14)  # warmup
+    start_idx = max(1, 24, 34, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
             
@@ -74,41 +81,41 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_r3 = camarilla_r3[i]
+        curr_s3 = camarilla_s3[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50
-                if (curr_bull_power > 0 and 
-                    curr_bear_power < 0 and 
-                    curr_close > curr_ema_50_1d):
+                # Bullish entry: price breaks above Camarilla R3 AND above 1d EMA34
+                if (curr_close > curr_r3 and 
+                    curr_close > curr_ema_34_1d):
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Bull Power < 0 AND Bear Power > 0 AND price < 1d EMA50
-                elif (curr_bull_power < 0 and 
-                      curr_bear_power > 0 and 
-                      curr_close < curr_ema_50_1d):
+                # Bearish entry: price breaks below Camarilla S3 AND below 1d EMA34
+                elif (curr_close < curr_s3 and 
+                      curr_close < curr_ema_34_1d):
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # ATR-based stoploss: exit when price drops below entry - 2.0 * ATR
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price drops below entry - 2.5 * ATR
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # ATR-based stoploss: exit when price rises above entry + 2.0 * ATR
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # ATR-based stoploss: exit when price rises above entry + 2.5 * ATR
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
