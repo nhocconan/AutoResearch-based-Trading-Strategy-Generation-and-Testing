@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extremes with 1d EMA(34) trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (>80 or <20) signal potential reversals.
-# In strong trends (price > EMA34 for longs, price < EMA34 for shorts), we fade extremes only when aligned with trend.
-# Volume confirmation ensures institutional participation. Designed for low trade frequency (~12-37/year) to minimize fee drag.
-# Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with 1d EMA(34) trend filter, volume confirmation, and chop regime filter
+# Uses 1d HTF for institutional Camarilla pivot levels and EMA trend, with choppiness index to avoid whipsaws in ranging markets.
+# Designed for low trade frequency (~12-37/year on 12h) to minimize fee drag while capturing strong directional moves.
+# Works in bull markets via breakout continuation and in bear markets via mean-reversion at extreme levels.
+# Focus on BTC/ETH as primary targets.
 
-name = "6h_1dWilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,19 +23,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Williams %R and EMA trend filter
+    # Load 1d data ONCE before loop for Camarilla pivot calculation and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.values  # convert to numpy array
+    # Calculate 1d Camarilla levels (based on prior 1d bar's OHLC)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    hl_range = df_1d['high'] - df_1d['low']
+    camarilla_r3 = typical_price + hl_range * 1.1 / 4
+    camarilla_s3 = typical_price - hl_range * 1.1 / 4
     
-    # Align 1d Williams %R to 6h timeframe (wait for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
     # Calculate 1d EMA(34) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
@@ -49,11 +50,41 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(atr14) / (max(high,n) - min(low,n))) / log10(n)
+    # We use 14-period CHOP on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range for 1d
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([tr1_1d[0], tr2_1d[0], tr3_1d[0]])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    
+    # Max high and min low over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation: avoid division by zero
+    range_14 = max_high_14 - min_low_14
+    chop_raw = np.where(range_14 > 0, sum_atr_14 / range_14, 1.0)
+    chop = 100 * np.log10(chop_raw) / np.log10(14)
+    chop = np.where(np.isnan(chop), 50.0, chop)  # neutral if undefined
+    
+    # Align chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34)
+    start_idx = 50  # warmup for EMA(34) and CHOP
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 1.5x 20-period average
@@ -65,43 +96,62 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_williams_r = williams_r_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
+        curr_chop = chop_aligned[i]
+        
+        # Regime filter: only trade when CHOP < 61.8 (trending market)
+        in_trending_regime = curr_chop < 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and extreme Williams %R
-            if volume_spike:
-                # Bullish entry: Williams %R < -80 (oversold) with 1d uptrend (price > EMA)
-                if curr_williams_r < -80 and curr_close > curr_ema:
+            # Require volume spike, trend alignment, and trending regime
+            if volume_spike and in_trending_regime:
+                # Bullish entry: price breaks above 1d R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Williams %R > -20 (overbought) with 1d downtrend (price < EMA)
-                elif curr_williams_r > -20 and curr_close < curr_ema:
+                # Bearish entry: price breaks below 1d S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR Williams %R > -20 (exiting overbought)
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d S3 (reversal signal)
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_williams_r > -20:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: Williams %R > -50 (exiting oversold territory)
+            # Take profit: price reaches 1d R4 (mean reversion tendency)
+            # R4 = C + (H-L)*1.1/2 = R3 + (H-L)*1.1/4
+            hl_range_1d = (df_1d['high'].iloc[-1] - df_1d['low'].iloc[-1]) if len(df_1d) > 0 else 0
+            typical_price_1d = (df_1d['high'].iloc[-1] + df_1d['low'].iloc[-1] + df_1d['close'].iloc[-1]) / 3 if len(df_1d) > 0 else 0
+            camarilla_r4 = typical_price_1d + hl_range_1d * 1.1 / 2
+            camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(df_1d['close'].values, camarilla_r4))[i] if len(df_1d) > 0 else curr_r3
+            if curr_close >= camarilla_r4_aligned:
+                signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR Williams %R < -80 (exiting oversold)
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d R3 (reversal signal)
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_williams_r < -80:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: Williams %R < -50 (exiting overbought territory)
+            # Take profit: price reaches 1d S4 (mean reversion tendency)
+            # S4 = C - (H-L)*1.1/2 = S3 - (H-L)*1.1/4
+            hl_range_1d = (df_1d['high'].iloc[-1] - df_1d['low'].iloc[-1]) if len(df_1d) > 0 else 0
+            typical_price_1d = (df_1d['high'].iloc[-1] + df_1d['low'].iloc[-1] + df_1d['close'].iloc[-1]) / 3 if len(df_1d) > 0 else 0
+            camarilla_s4 = typical_price_1d - hl_range_1d * 1.1 / 2
+            camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(df_1d['close'].values, camarilla_s4))[i] if len(df_1d) > 0 else curr_s3
+            if curr_close <= camarilla_s4_aligned:
+                signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
     
