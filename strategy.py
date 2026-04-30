@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter
-# Camarilla pivots from 1d provide strong reversal zones; breakouts beyond R3/S3 indicate continuation.
-# Volume spike (2.0x 20-period average) confirms breakout validity. 1w ADX > 25 filters for trending markets.
-# Works in bull via breakout longs, in bear via breakout shorts. Discrete sizing 0.25 minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter
+# Camarilla pivots from 1d provide intraday support/resistance levels. R3/S3 are strong reversal zones;
+# breakouts beyond R4/S4 indicate continuation with momentum. 1w ADX > 20 filters for trending markets only on weekly timeframe.
+# Volume spike (2.0x 20-period average) confirms breakout validity. Works in bull via breakout longs, in bear via breakout shorts.
+# Discrete sizing 0.20 balances risk and minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wADX25_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wADX20_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,7 +42,7 @@ def generate_signals(prices):
     s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
     s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -88,7 +88,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1w ADX to 12h timeframe (wait for completed 1w bar)
+    # Align 1w ADX to 4h timeframe (wait for completed 1w bar)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
@@ -119,16 +119,16 @@ def generate_signals(prices):
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trending market (ADX > 25)
-            if curr_volume_spike and curr_adx > 25:
+            # Require volume spike and trending market (ADX > 20)
+            if curr_volume_spike and curr_adx > 20:
                 # Bullish breakout: price breaks above R4
                 if curr_close > curr_r4:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
                     entry_price = curr_close
                 # Bearish breakout: price breaks below S4
                 elif curr_close < curr_s4:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
                     position = -1
                     entry_price = curr_close
         
@@ -138,7 +138,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Exit when price rises above S3 (mean reversion)
@@ -146,6 +146,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
