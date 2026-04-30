@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses discrete sizing 0.25 to balance profit and fee drag. Target: 30-100 total trades over 4 years (7-25/year).
-# Donchian provides robust price channels from prior 20 days; 1w EMA50 filters counter-trend moves on weekly timeframe.
-# Volume spike ensures institutional participation. Strategy works in both bull and bear via 1w trend filter.
-# Daily timeframe reduces trade frequency to avoid fee drag while capturing medium-term trends.
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# Uses Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure bull/bear strength.
+# 1d ADX regime filter: ADX > 25 = trending (trade Elder Ray extremes), ADX < 20 = range (fade Elder Ray extremes).
+# Discrete sizing 0.25 to balance profit and fee drag. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear via regime adaptation: trend following in trending markets, mean reversion in ranging markets.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,85 +28,128 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper band: highest high of past 20 days (excluding current)
-    roll_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    # Lower band: lowest low of past 20 days (excluding current)
-    roll_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # Bull Power = High - EMA
+    bear_power = low - ema_13   # Bear Power = Low - EMA
     
-    # Calculate 1w EMA(50) for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d ADX(14) for regime filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: volume > 2.0x 20-period average (strict to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # True Range
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs()
+    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean()
     
-    # ATR for stoploss (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    up_move = pd.Series(df_1d['high']).diff()
+    down_move = -pd.Series(df_1d['low']).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth DM and TR
+    plus_di = 100 * (pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx_1d = dx.ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 6h ATR(14) for stoploss
+    tr1_6h = high[1:] - low[1:]
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    atr_14_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 20, 50, 20, 14)  # warmup
+    start_idx = max(100, 13, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready or outside session
-        if (np.isnan(roll_high[i]) or np.isnan(roll_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_14[i]) or not in_session[i]):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14_6h[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_donchian_high = roll_high[i]
-        curr_donchian_low = roll_low[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
-        curr_volume_spike = volume_spike[i]
-        curr_atr = atr_14[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
+        curr_adx = adx_1d_aligned[i]
+        curr_atr = atr_14_6h[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on volume spike with Donchian break and 1w EMA50 trend filter
-            if curr_volume_spike:
-                # Bullish: Close breaks above upper Donchian + close above 1w EMA50
-                if curr_close > curr_donchian_high and curr_close > curr_ema_50_1w:
+            # Regime-based logic
+            if curr_adx > 25:  # Trending regime - trend follow
+                # Strong bull power = long
+                if curr_bull > 0 and curr_bull > np.nanpercentile(bull_power[max(0,i-50):i], 70):
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish: Close breaks below lower Donchian + close below 1w EMA50
-                elif curr_close < curr_donchian_low and curr_close < curr_ema_50_1w:
+                # Strong bear power = short
+                elif curr_bear < 0 and curr_bear < np.nanpercentile(bear_power[max(0,i-50):i], 30):
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+            elif curr_adx < 20:  # Range regime - mean revert
+                # Fade extreme bull power (overbought)
+                if curr_bull > np.nanpercentile(bull_power[max(0,i-50):i], 85):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                # Fade extreme bear power (oversold)
+                elif curr_bear < np.nanpercentile(bear_power[max(0,i-50):i], 15):
+                    signals[i] = 0.25
+                    position = 1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_loss = entry_price - 2.0 * curr_atr
-            # Exit: Stoploss hit OR close drops below lower Donchian OR loses 1w trend
-            if curr_low <= stop_loss or curr_close < curr_donchian_low or curr_close < curr_ema_50_1w:
+            # Exit conditions
+            if curr_low <= stop_loss:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
+            elif curr_adx > 25:  # Trending: exit on bear power divergence
+                if curr_bear < 0 and curr_bear < np.nanpercentile(bear_power[max(0,i-20):i], 30):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Range: exit on mean reversion
+                if curr_bull < np.nanpercentile(bull_power[max(0,i-20):i], 50):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_loss = entry_price + 2.0 * curr_atr
-            # Exit: Stoploss hit OR close rises above upper Donchian OR loses 1w trend
-            if curr_high >= stop_loss or curr_close > curr_donchian_high or curr_close > curr_ema_50_1w:
+            # Exit conditions
+            if curr_high >= stop_loss:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
+            elif curr_adx > 25:  # Trending: exit on bull power divergence
+                if curr_bull > 0 and curr_bull > np.nanpercentile(bull_power[max(0,i-20):i], 70):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # Range: exit on mean reversion
+                if curr_bear > np.nanpercentile(bear_power[max(0,i-20):i], 50):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
