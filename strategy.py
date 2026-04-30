@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d EMA34 for long-term trend to avoid whipsaws in ranging markets.
-# Volume > 2.0x 20-period average confirms strong momentum (strict threshold to reduce trade frequency).
-# ATR-based stoploss (2.0x) limits drawdown. Session filter (08-20 UTC) reduces noise.
-# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag on 12h timeframe.
-# Works in bull/bear via 1d EMA34 trend filter + volume confirmation + session filter.
-# Entry requires 1d EMA34 alignment + volume spike + Camarilla breakout.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and strict volume confirmation.
+# Uses 1d EMA34 for long-term trend (more responsive than EMA50) to capture medium-term direction.
+# Volume > 2.0x 20-period average (strict threshold) ensures strong momentum and reduces trade frequency.
+# ATR-based stoploss (2.0x) provides tight risk control. Session filter (08-20 UTC) reduces noise.
+# Designed for very low trade frequency (~15-25 trades/year) to minimize fee drag on 4h timeframe.
+# Entry requires 1d EMA34 alignment + strict volume spike + Camarilla breakout.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeStrict_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +37,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 12h timeframe stoploss
+    # Calculate ATR(14) for 4h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -65,7 +64,7 @@ def generate_signals(prices):
         curr_ema = ema_34_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 2.0x 20-period average (strict threshold to reduce trades)
+        # Strict volume confirmation: volume > 2.0x 20-period average (high threshold to reduce trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
             volume_confirm = volume[i] > (2.0 * vol_ma_20)
@@ -111,14 +110,14 @@ def generate_signals(prices):
             camarilla_s3 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA34, volume spike
+            # Long: price breaks above Camarilla R3, price above 1d EMA34, strict volume spike
             if (curr_close > camarilla_r3 and 
                 curr_close > curr_ema and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Camarilla S3, price below 1d EMA34, volume spike
+            # Short: price breaks below Camarilla S3, price below 1d EMA34, strict volume spike
             elif (curr_close < camarilla_s3 and 
                   curr_close < curr_ema and 
                   volume_confirm):
