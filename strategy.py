@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Camarilla pivots from 1d provide daily support/resistance levels. R3/S3 are strong reversal zones;
-# breakouts beyond R4/S4 indicate continuation. 1w EMA50 filters for higher-timeframe trend bias.
-# Volume spike confirms breakout validity. Works in bull via breakout longs, in bear via breakout shorts.
-# Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# In bull markets, look for Bull Power > 0 with rising trend; in bear markets, Bear Power < 0 with falling trend.
+# 1d EMA50 provides higher-timeframe trend bias to avoid counter-trend trades.
+# Volume spike confirms institutional participation. Discrete sizing 0.25 minimizes fee churn.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,22 +29,19 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
-    prev_close = prices['close'].shift(1).values
-    prev_high = prices['high'].shift(1).values
-    prev_low = prices['low'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
-    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
-    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
-    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
-    
-    # Calculate 1w EMA(50) for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA(50) for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate EMA(13) for Elder Ray (on 6h timeframe)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,13 +51,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50)  # warmup for volume MA and 1w EMA
+    start_idx = max(20, 13, 50)  # warmup for volume MA, EMA13, and 1d EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(r4[i]) or np.isnan(r3[i]) or
-            np.isnan(s3[i]) or np.isnan(s4[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_13[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -69,40 +67,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_r4 = r4[i]
-        curr_r3 = r3[i]
-        curr_s3 = s3[i]
-        curr_s4 = s4[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish breakout: price breaks above R4 AND above 1w EMA50 (bullish bias)
-                if (curr_close > curr_r4 and 
-                    curr_close > curr_ema_50_1w):
+                # Bullish entry: Bull Power > 0 AND price above 1d EMA50 (bullish bias)
+                if (curr_bull_power > 0 and 
+                    curr_close > curr_ema_50_1d):
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below S4 AND below 1w EMA50 (bearish bias)
-                elif (curr_close < curr_s4 and 
-                      curr_close < curr_ema_50_1w):
+                # Bearish entry: Bear Power < 0 AND price below 1d EMA50 (bearish bias)
+                elif (curr_bear_power < 0 and 
+                      curr_close < curr_ema_50_1d):
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R3 (mean reversion) or breaks below S4 (stop)
-            if curr_close < curr_r3:
+            # Exit when Bull Power turns negative (loss of bullish momentum)
+            if curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above S3 (mean reversion) or breaks above R4 (stop)
-            if curr_close > curr_s3:
+            # Exit when Bear Power turns positive (loss of bearish momentum)
+            if curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
