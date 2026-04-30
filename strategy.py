@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Camarilla R3/S3 levels with 1d trend filter and volume confirmation
-# Weekly Camarilla pivots identify key institutional support/resistance; breakout at R4/S4 with 1d EMA50 trend alignment
-# captures strong momentum moves; volume spike filters false breakouts. Designed for low frequency (20-50 trades/year)
-# to work in both bull (breakout continuation) and bear (fade at R3/S3 then breakdown) markets.
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and 12h trend filter
+# Donchian channels capture institutional breakouts; volume confirms institutional participation;
+# 12h EMA(50) ensures alignment with medium-term trend. Designed for low trade frequency
+# (<20/year) to minimize fee drag in both bull and bear markets.
 
-name = "6h_WeeklyCamarilla_R4S4_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,40 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels (based on prior week OHLC)
-    # Camarilla: H4 = C + 1.1*(H-L)*1.1/2, L4 = C - 1.1*(H-L)*1.1/2
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate Camarilla levels
-    camarilla_r4 = weekly_close + 1.1 * (weekly_high - weekly_low) / 2
-    camarilla_s4 = weekly_close - 1.1 * (weekly_high - weekly_low) / 2
-    camarilla_r3 = weekly_close + 1.1 * (weekly_high - weekly_low) / 4
-    camarilla_s3 = weekly_close - 1.1 * (weekly_high - weekly_low) / 4
-    
-    # Align weekly Camarilla levels to 6h timeframe (wait for completed weekly bar)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    
-    # Load 1d data for trend filter
+    # Load 1d data ONCE before loop for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian upper/lower bands (20-period lookback)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Calculate 12h EMA(50) for trend filter
+    close_s = pd.Series(close)
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -76,51 +62,49 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        curr_ema = ema_50[i]
         curr_atr = atr[i]
-        curr_r4 = camarilla_r4_aligned[i]
-        curr_s4 = camarilla_s4_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        curr_donch_high = donchian_high_aligned[i]
+        curr_donch_low = donchian_low_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
+            # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish breakout: price breaks above weekly R4 with 1d uptrend
-                if curr_close > curr_r4 and curr_close > curr_ema_1d:
+                # Bullish entry: price breaks above 1d Donchian high with 12h uptrend
+                if curr_close > curr_donch_high and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below weekly S4 with 1d downtrend
-                elif curr_close < curr_s4 and curr_close < curr_ema_1d:
+                # Bearish entry: price breaks below 1d Donchian low with 12h downtrend
+                elif curr_close < curr_donch_low and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks weekly S3 (mean reversion level)
+            # Stoploss: 2.5 * ATR below entry price OR price breaks 1d Donchian low
             if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s3:
+            elif curr_close < curr_donch_low:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches weekly R3 (profit target)
-            elif curr_close >= curr_r3:
+            # Take profit: price reaches midpoint of Donchian channel
+            elif curr_close >= (curr_donch_high + curr_donch_low) / 2:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks weekly R3 (mean reversion level)
+            # Stoploss: 2.5 * ATR above entry price OR price breaks 1d Donchian high
             if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r3:
+            elif curr_close > curr_donch_high:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches weekly S3 (profit target)
-            elif curr_close <= curr_s3:
+            # Take profit: price reaches midpoint of Donchian channel
+            elif curr_close <= (curr_donch_high + curr_donch_low) / 2:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
