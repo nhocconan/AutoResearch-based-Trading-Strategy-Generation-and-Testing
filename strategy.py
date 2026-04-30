@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~19-50/year) to minimize fee drag.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~12-37/year) to minimize fee drag.
 # Camarilla pivots from 1d provide strong intraday support/resistance levels that work in both trending and ranging markets.
 # Volume confirmation ensures breakouts have institutional participation. Works in bull/bear via trend following.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,11 +42,11 @@ def generate_signals(prices):
     r3 = pivot + range_1d * 1.1 / 4
     s3 = pivot - range_1d * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 4h ATR(14) for dynamic trailing stop
+    # Calculate 6h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
