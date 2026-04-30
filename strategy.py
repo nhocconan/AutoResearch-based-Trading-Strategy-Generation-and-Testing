@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Uses discrete sizing 0.25 to limit fee drag. Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian provides clear breakout levels; 12h EMA50 filters counter-trend moves.
-# Volume spike ensures institutional participation. Works in both bull and bear via trend filter.
+# Hypothesis: 1h EMA crossover with 4h Supertrend filter and volume confirmation
+# Uses discrete sizing 0.20 to limit fee drag. Target: 60-150 total trades over 4 years (15-37/year).
+# 4h Supertrend provides robust trend direction; 1h EMA(8/21) captures pullback entries.
+# Volume spike ensures institutional participation. Session filter (08-20 UTC) reduces noise.
+# Works in both bull and bear via 4h trend filter - only trades in direction of 4h trend.
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_EMA8_21_4hSupertrend_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,22 +28,67 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1h EMA(8) and EMA(21)
+    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 4h Supertrend for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: volume > 1.8x 20-period average (balanced frequency)
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
+    
+    # Calculate ATR for 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    tr1_4h = high_4h[1:] - low_4h[1:]
+    tr2_4h = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3_4h = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
+    atr_4h = pd.Series(tr_4h).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Calculate Supertrend
+    hl2_4h = (high_4h + low_4h) / 2
+    upper_band_4h = hl2_4h + (multiplier * atr_4h)
+    lower_band_4h = hl2_4h - (multiplier * atr_4h)
+    
+    supertrend_4h = np.zeros_like(close_4h)
+    direction_4h = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend_4h[0] = upper_band_4h[0]
+    direction_4h[0] = 1
+    
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > upper_band_4h[i-1]:
+            direction_4h[i] = 1
+        elif close_4h[i] < lower_band_4h[i-1]:
+            direction_4h[i] = -1
+        else:
+            direction_4h[i] = direction_4h[i-1]
+            if direction_4h[i] == 1 and lower_band_4h[i] < lower_band_4h[i-1]:
+                lower_band_4h[i] = lower_band_4h[i-1]
+            if direction_4h[i] == -1 and upper_band_4h[i] > upper_band_4h[i-1]:
+                upper_band_4h[i] = upper_band_4h[i-1]
+        
+        if direction_4h[i] == 1:
+            supertrend_4h[i] = lower_band_4h[i]
+        else:
+            supertrend_4h[i] = upper_band_4h[i]
+    
+    # Align 4h Supertrend and direction to 1h
+    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
+    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
-    # ATR for stoploss (14-period)
+    # ATR for stoploss (14-period) on 1h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -53,57 +99,56 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 20, 50, 20, 14)  # warmup
+    start_idx = max(50, 20, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready or outside session
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_14[i]) or not in_session[i]):
+        if (np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or
+            np.isnan(supertrend_4h_aligned[i]) or np.isnan(direction_4h_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr_14[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_8 = ema_8[i]
+        curr_ema_21 = ema_21[i]
+        curr_supertrend_4h = supertrend_4h_aligned[i]
+        curr_direction_4h = direction_4h_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_atr = atr_14[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on volume spike with Donchian break and 12h EMA50 trend filter
+            # Only trade on volume spike with EMA crossover and 4h Supertrend filter
             if curr_volume_spike:
-                # Bullish: Close breaks above upper Donchian + close above 12h EMA50
-                if curr_close > curr_donchian_upper and curr_close > curr_ema_50_12h:
-                    signals[i] = 0.25
+                # Bullish: EMA8 crosses above EMA21 + 4h uptrend
+                if curr_ema_8 > curr_ema_21 and curr_direction_4h == 1:
+                    signals[i] = 0.20
                     position = 1
                     entry_price = curr_close
-                # Bearish: Close breaks below lower Donchian + close below 12h EMA50
-                elif curr_close < curr_donchian_lower and curr_close < curr_ema_50_12h:
-                    signals[i] = -0.25
+                # Bearish: EMA8 crosses below EMA21 + 4h downtrend
+                elif curr_ema_8 < curr_ema_21 and curr_direction_4h == -1:
+                    signals[i] = -0.20
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry
+            # Stoploss: 2 * ATR below entry OR Supertrend flip
             stop_loss = entry_price - 2.0 * curr_atr
-            # Exit: Stoploss hit OR close drops below lower Donchian OR loses 12h trend
-            if curr_low <= stop_loss or curr_close < curr_donchian_lower or curr_close < curr_ema_50_12h:
+            # Exit: Stoploss hit OR EMA8 crosses below EMA21 OR Supertrend turns down
+            if curr_low <= stop_loss or curr_ema_8 < curr_ema_21 or curr_direction_4h == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry
+            # Stoploss: 2 * ATR above entry OR Supertrend flip
             stop_loss = entry_price + 2.0 * curr_atr
-            # Exit: Stoploss hit OR close rises above upper Donchian OR loses 12h trend
-            if curr_high >= stop_loss or curr_close > curr_donchian_upper or curr_close > curr_ema_50_12h:
+            # Exit: Stoploss hit OR EMA8 crosses above EMA21 OR Supertrend turns up
+            if curr_high >= stop_loss or curr_ema_8 > curr_ema_21 or curr_direction_4h == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
