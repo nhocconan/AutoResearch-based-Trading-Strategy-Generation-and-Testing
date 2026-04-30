@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Uses ATR(14) trailing stop (2.0x) for risk management. Designed for very low trade frequency (~5-15/year)
-# to minimize fee drag on daily timeframe. Donchian channels provide clear structure-based breakouts,
-# 1w EMA50 ensures we only trade with the primary weekly trend avoiding whipsaws, and volume confirmation
-# filters for institutional participation. This strategy aims to capture major trends while avoiding
-# counter-trend noise in both bull and bear markets.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume spike confirmation.
+# Elder Ray measures bull/bear power relative to EMA13. Long when bull power > 0 + uptrend + volume spike.
+# Short when bear power < 0 + downtrend + volume spike. Uses ATR trailing stop (2.0x) for risk management.
+# Designed for low trade frequency (~12-25/year) to minimize fee drag. Works in both bull and bear markets
+# by measuring actual buying/selling pressure behind price moves, avoiding fakeouts.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,32 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_ma_20
-    donchian_lower = low_ma_20
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1d ATR(14) for dynamic trailing stop
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Volume confirmation: volume > 2.0x 20-period average (tight to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
+    
+    # ATR for trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.5x 50-period average (moderate to avoid overtrading)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=1).mean().values
-    volume_spike = volume > (1.5 * vol_ma_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,10 +57,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = 50  # warmup for EMA50
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1w EMA50 determines trend direction
+        # Regime filter: price above/below 1d EMA50 determines trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
@@ -68,21 +68,21 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above Donchian upper with volume
-                if curr_close > curr_donchian_upper and curr_volume_spike:
+                # In uptrend: look for long when bull power > 0 (buying pressure) with volume
+                if curr_bull_power > 0 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below Donchian lower with volume
-                if curr_close < curr_donchian_lower and curr_volume_spike:
+                # In downtrend: look for short when bear power < 0 (selling pressure) with volume
+                if curr_bear_power < 0 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
