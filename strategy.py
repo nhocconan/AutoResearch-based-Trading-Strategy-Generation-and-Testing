@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Williams Fractals (bearish for short, bullish for long) from prior 1d as structure levels.
-# 1d EMA34 for higher timeframe trend filter (more responsive than 200, smoother than 20).
-# Volume confirmation (>1.8x 24-bar avg) to reduce false breakouts.
+# Hypothesis: 12h Camarilla R4/S4 breakout with 1w EMA50 trend filter, volume spike confirmation, and ATR-based trailing stop.
+# Uses Camarilla R4/S4 levels (more extreme than R3/S3) from prior 1w for higher-probability breakouts in ranging/low-volatility regimes.
+# 1w EMA50 for higher timeframe trend filter (captures multi-week momentum).
+# Volume confirmation (>2.5x 20-bar avg) to reduce false breakouts and ensure institutional participation.
+# ATR-based trailing stop (exit when price moves against position by 2.0*ATR) to protect capital in choppy markets.
 # Discrete position sizing at ±0.25 to balance capture and fee drag.
-# Target: 60-120 total trades over 4 years (15-30/year) to avoid overtrading on 6h.
-# Session filter (08:00-20:00 UTC) to avoid low-liquidity periods.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid overtrading on 12h timeframe.
+# Session filter (08:00-20:00 UTC) to focus on active London/NY overlap.
 
-name = "6h_WilliamsFractal_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,90 +30,106 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for Williams Fractals and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for Camarilla pivots (R4, S4)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Calculate Williams Fractals (bearish = sell fractal, bullish = buy fractal)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Camarilla pivot levels (R4, S4) from prior 1w
+    # Camarilla: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    camarilla_r4 = close_1w + (1.1 * (high_1w - low_1w))
+    camarilla_s4 = close_1w - (1.1 * (high_1w - low_1w))
     
-    # Bearish fractal: high[i] is highest among [i-2, i-1, i, i+1, i+2]
-    # Bullish fractal: low[i] is lowest among [i-2, i-1, i, i+1, i+2]
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Load 1d data ONCE before loop for EMA50 trend filter (more responsive than 1w for entries)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
+        return np.zeros(n)
     
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d_vals = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d indicators to 6h timeframe with extra delay for fractals (need 2-bar confirmation)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w and 1d indicators to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.8x 24-period average (4d on 6h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_24)
+    # ATR(14) for volatility and stoploss
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Volume confirmation: volume > 2.5x 20-period average (stricter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA34 and fractals
+    start_idx = 70  # warmup for EMA50 and ATR
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_bearish_fractal = bearish_fractal_aligned[i]
-        curr_bullish_fractal = bullish_fractal_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_r4 = camarilla_r4_aligned[i]
+        curr_s4 = camarilla_s4_aligned[i]
+        curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above bullish fractal, above 1d EMA34, volume spike
-            if (curr_close > curr_bullish_fractal and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price breaks above Camarilla R4, above 1d EMA50, volume spike
+            if (curr_close > curr_r4 and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below bearish fractal, below 1d EMA34, volume spike
-            elif (curr_close < curr_bearish_fractal and 
-                  curr_close < curr_ema_34_1d and 
+                highest_since_entry = curr_close
+            # Short: price breaks below Camarilla S4, below 1d EMA50, volume spike
+            elif (curr_close < curr_s4 and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+                lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price closes below 1d EMA34 (trend change)
-            if curr_close < curr_ema_34_1d:
+            # Update highest price since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            # ATR trailing stop: exit if price drops 2.0*ATR from highest point
+            if curr_close < highest_since_entry - (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price closes above 1d EMA34 (trend change)
-            if curr_close > curr_ema_34_1d:
+            # Update lowest price since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            # ATR trailing stop: exit if price rises 2.0*ATR from lowest point
+            if curr_close > lowest_since_entry + (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
