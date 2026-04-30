@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and choppiness regime filter.
-# Long when price breaks above R3 with uptrend (price > 1d EMA34), volume > 2x 20-bar average, and choppy market (CHOP > 61.8).
-# Short when price breaks below S3 with downtrend (price < 1d EMA34), volume spike, and choppy market.
-# Uses ATR trailing stop (2.0x) for risk management.
-# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
-# Chop filter reduces whipsaw in strong trends, improving performance in both bull/bear markets.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian with uptrend (close > 1w EMA50) and volume > 2x 20-bar average.
+# Short when price breaks below lower Donchian with downtrend (close < 1w EMA50) and volume spike.
+# Uses ATR trailing stop (2.5x) for risk management.
+# Targets 30-100 total trades over 4 years (7-25/year) with discrete position sizing (0.25).
+# Works in both bull/bear markets by requiring 1w EMA50 trend alignment and volume confirmation.
+# Uses 1w HTF for trend filter to reduce noise and look-ahead bias.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,50 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla pivot levels from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d_arr + (rng * 1.1 / 4)
-    camarilla_s3 = close_1d_arr - (rng * 1.1 / 4)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Donchian channels (20-period) on 1d data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Choppiness Index (CHOP) regime filter - calculates on 4h data
-    # CHOP > 61.8 indicates ranging/choppy market (good for mean reversion/breakouts)
-    # CHOP < 38.2 indicates trending market (we avoid breakouts in strong trends)
+    # ATR for trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    # Handle division by zero and edge cases
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
-    chop = np.where(np.isnan(chop), 50, chop)
-    choppy_market = chop > 61.8  # Only trade in choppy/ranging markets
-    
-    # ATR for trailing stop
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
@@ -75,22 +55,28 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA34 and CHOP
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
-        # Skip if Camarilla levels not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if EMA50 not available
+        if np.isnan(ema_50_aligned[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Regime filters: price above/below 1d EMA34 determines trend direction
-        # AND choppy market filter
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
-        is_choppy = choppy_market[i]
+        # Skip if Donchian levels not available
+        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            continue
+        
+        # Regime filter: price above/below 1w EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
@@ -99,12 +85,11 @@ def generate_signals(prices):
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only enter in choppy markets with volume spike and Camarilla breakout
-            if is_uptrend and curr_close > r3_aligned[i] and curr_volume_spike and is_choppy:
+            if is_uptrend and curr_close > highest_20[i] and curr_volume_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            elif is_downtrend and curr_close < s3_aligned[i] and curr_volume_spike and is_choppy:
+            elif is_downtrend and curr_close < lowest_20[i] and curr_volume_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
@@ -114,8 +99,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,8 +111,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
