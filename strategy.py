@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
 # Uses 1d EMA34 for trend alignment to reduce whipsaws in both bull and bear markets.
-# Volume > 2.0x 20-period average confirms strong momentum (high threshold to control trade frequency).
-# ATR-based stoploss (2.5x) manages risk. Session filter (00-24 UTC) always active for 12h timeframe.
-# Designed for low trade frequency (~12-25 trades/year) to minimize fee drag on 12h timeframe.
+# Volume > 2.0x 20-period average confirms strong momentum (strict threshold to control trade frequency).
+# ATR-based stoploss (2.5x) manages risk. Designed for low trade frequency (~20-40 trades/year) to minimize fee drag.
 # Entry requires 1d EMA34 alignment + volume spike + Camarilla breakout.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (00-24 UTC) - always active for 12h timeframe
+    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
     hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = np.ones(n, dtype=bool)  # 12h candles cover full day, no session filter needed
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -37,7 +36,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 12h timeframe stoploss
+    # Calculate ATR(14) for 4h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -51,7 +50,7 @@ def generate_signals(prices):
     start_idx = 100  # warmup for EMA and ATR
     
     for i in range(start_idx, n):
-        # Skip if indicators not available
+        # Skip if indicators not available or outside session
         if (np.isnan(ema_34_aligned[i]) or
             np.isnan(atr[i]) or
             not in_session[i]):
@@ -64,7 +63,7 @@ def generate_signals(prices):
         curr_ema = ema_34_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 2.0x 20-period average (high threshold to control trades)
+        # Volume confirmation: volume > 2.0x 20-period average (strict threshold to control trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
             volume_confirm = volume[i] > (2.0 * vol_ma_20)
@@ -72,12 +71,9 @@ def generate_signals(prices):
             volume_confirm = False
         
         # Calculate Camarilla levels for current day using previous day's OHLC
-        if i >= 2:  # Need at least 2 bars (2 days) of 12h data for previous day
+        if i >= 6:  # Need at least 6 bars (1.5 days) of 4h data for previous day
             # Get timestamp of current bar
             curr_time = prices.iloc[i]["open_time"]
-            # Get start of current 12h period (already at 00:00 or 12:00 UTC)
-            # For 12h timeframe, we need to get the previous 12h candle's data
-            # But for Camarilla, we need previous day's OHLC, so we'll use 1d data
             # Get start of current day (00:00 UTC)
             curr_day_start = curr_time.replace(hour=0, minute=0, second=0, microsecond=0)
             # Get start of previous day
@@ -85,21 +81,23 @@ def generate_signals(prices):
             # Get end of previous day (23:59:59.999 UTC)
             prev_day_end = curr_day_start - pd.Timedelta(microseconds=1)
             
-            # Filter prices for previous day using 1d timeframe data
-            # Since we're on 12h timeframe, we need to check if we have 1d data available
-            # We'll use the 1d dataframe we already loaded
-            prev_day_idx = len(df_1d) - 1  # Most recent completed 1d candle
-            if prev_day_idx >= 0:
-                prev_day_data = df_1d.iloc[prev_day_idx]
-                prev_high = prev_day_data["high"]
-                prev_low = prev_day_data["low"]
-                prev_close = prev_day_data["close"]
-                
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                if range_val > 0:
-                    camarilla_r3 = prev_close + (range_val * 1.1 / 4)  # R3 level
-                    camarilla_s3 = prev_close - (range_val * 1.1 / 4)  # S3 level
+            # Filter prices for previous day
+            mask = (prices["open_time"] >= prev_day_start) & (prices["open_time"] <= prev_day_end)
+            if mask.any():
+                prev_day_data = prices.loc[mask]
+                if len(prev_day_data) > 0:
+                    prev_high = prev_day_data["high"].max()
+                    prev_low = prev_day_data["low"].min()
+                    prev_close = prev_day_data["close"].iloc[-1]
+                    
+                    # Calculate Camarilla levels
+                    range_val = prev_high - prev_low
+                    if range_val > 0:
+                        camarilla_r3 = prev_close + (range_val * 1.1 / 4)  # R3 level
+                        camarilla_s3 = prev_close - (range_val * 1.1 / 4)  # S3 level
+                    else:
+                        camarilla_r3 = curr_close
+                        camarilla_s3 = curr_close
                 else:
                     camarilla_r3 = curr_close
                     camarilla_s3 = curr_close
