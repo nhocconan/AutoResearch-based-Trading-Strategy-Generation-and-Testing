@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~12-37/year) to minimize fee drag.
-# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws in ranging markets.
-# Donchian breakouts capture momentum, volume confirmation ensures institutional participation, ATR trailing stop manages risk.
-# Works in both bull and bear markets by following the weekly trend.
+# Camarilla pivots from 12h provide strong support/resistance levels. 1d EMA34 filters trend direction.
+# Volume confirmation ensures breakouts have institutional participation. Works in bull/bear via trend following.
 
-name = "6h_Donchian20_WeeklyEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,21 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h Donchian channels (20-period)
-    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=1).max().values
-    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=1).min().values
+    # Load 12h data ONCE before loop for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
     
-    # Calculate 6h ATR(14) for dynamic trailing stop
+    # Calculate 12h Camarilla pivot levels (R3, S3)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r3 = pivot + range_12h * 1.1 / 4
+    s3 = pivot - range_12h * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    
+    # Calculate 12h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,29 +71,29 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1w EMA50 determines trend direction
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
+        # Regime filter: price above/below 1d EMA34 determines trend direction
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_donchian_high = high_rolling_max[i]
-        curr_donchian_low = low_rolling_min[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above Donchian high with volume
-                if curr_close > curr_donchian_high and curr_volume_spike:
+                # In uptrend: look for long breakouts above R3 with volume
+                if curr_close > curr_r3 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below Donchian low with volume
-                if curr_close < curr_donchian_low and curr_volume_spike:
+                # In downtrend: look for short breakdowns below S3 with volume
+                if curr_close < curr_s3 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
