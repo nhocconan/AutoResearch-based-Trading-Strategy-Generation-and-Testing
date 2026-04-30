@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA34), break above/below Donchian channel triggers continuation entries.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1d EMA50), break above/below Donchian(20) with volume triggers continuation entries.
 # Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~20-50/year) to minimize fee drag.
-# Works in bull/bear via trend filter: only trade in direction of 1d EMA34.
+# Works in bull/bear via trend following in strong trends. Focus on BTC/ETH as primary targets.
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,18 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 4h Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 4h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
@@ -55,29 +57,29 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Trend filter: price above/below 1d EMA34 determines trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Regime filter: price above/below 1d EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_highest = highest_high[i]
-        curr_lowest = lowest_low[i]
+        curr_high_20 = high_20[i]
+        curr_low_20 = low_20[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
                 # In uptrend: look for long breakouts above Donchian high with volume
-                if curr_close > curr_highest and curr_volume_spike:
+                if curr_close > curr_high_20 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
                 # In downtrend: look for short breakdowns below Donchian low with volume
-                if curr_close < curr_lowest and curr_volume_spike:
+                if curr_close < curr_low_20 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
