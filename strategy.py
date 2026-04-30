@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter
+# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter
 # Donchian channel breakouts capture strong momentum moves. Volume confirmation ensures breakout validity.
-# 1d EMA(50) filters trades to align with higher-timeframe trend, reducing false breakouts in choppy markets.
-# Designed for low trade frequency (~30-60/year on 4h) to minimize fee drag and improve bear market performance.
+# 1d EMA(34) filters trades to align with higher-timeframe trend, reducing false breakouts in choppy markets.
+# Designed for low trade frequency (~20-40/year on 4h) to minimize fee drag and improve bear market performance.
+# Uses discrete position sizes (0.0, ±0.25) to reduce fee churn.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,10 +32,10 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d EMA(34) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -47,7 +48,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50) and Donchian
+    start_idx = 50  # warmup for EMA(34) and Donchian
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 20-period average
@@ -57,7 +58,7 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_50_1d_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_highest = highest_high[i]
         curr_lowest = lowest_low[i]
