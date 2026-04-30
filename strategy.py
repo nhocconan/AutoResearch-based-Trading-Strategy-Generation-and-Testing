@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter
-# Donchian channels from 1d provide structural support/resistance. Breakouts beyond upper/lower bands
-# indicate continuation with momentum. 1w ADX > 20 filters for trending markets only on weekly timeframe.
-# Volume spike (2.0x 20-period average) confirms breakout validity. Works in bull via breakout longs, 
-# in bear via breakout shorts. Discrete sizing 0.25 balances risk and minimizes fee churn. 
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume spike
+# Williams %R identifies overbought/oversold conditions. In ranging markets (ADX < 25 on 1d),
+# we fade extremes: long when %R < -80, short when %R > -20. In trending markets (ADX >= 25),
+# we only take trades in trend direction: long if price > EMA34, short if price < EMA34.
+# Volume spike (2.0x 20-period average) confirms signal validity. Uses discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via trend-following longs,
+# in bear via mean reversion shorts and trend-following shorts.
 
-name = "1d_Donchian20_1wVolumeSpike_1wADX20_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_ME_1dEMA34_ADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,62 +30,63 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Williams %R(14)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    
+    # Align 1d Williams %R to 6h timeframe (wait for completed 1d bar)
+    willr_aligned = align_htf_to_ltf(prices, df_1d, willr)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate 1d ADX(14) for regime filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    dm_plus = np.where(
+        (df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']),
+        np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0),
+        0
+    )
+    dm_minus = np.where(
+        (df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)),
+        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0),
+        0
+    )
+    
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Calculate 1w ADX(14) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    dm_plus = np.where(
-        (df_1w['high'] - df_1w['high'].shift(1)) > (df_1w['low'].shift(1) - df_1w['low']),
-        np.maximum(df_1w['high'] - df_1w['high'].shift(1), 0),
-        0
-    )
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    dm_minus = np.where(
-        (df_1w['low'].shift(1) - df_1w['low']) > (df_1w['high'] - df_1w['high'].shift(1)),
-        np.maximum(df_1w['low'].shift(1) - df_1w['low'], 0),
-        0
-    )
-    
-    # Smoothed +DM and -DM
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1w ADX to 1d timeframe (wait for completed 1w bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for Donchian, volume MA and ADX
+    start_idx = max(34, 14, 20)  # warmup for EMA34, ADX, and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+        if (np.isnan(willr_aligned[i]) or np.isnan(ema_34_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -95,41 +97,66 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_highest = highest_20[i]
-        curr_lowest = lowest_20[i]
+        curr_willr = willr_aligned[i]
+        curr_ema = ema_34_aligned[i]
         curr_adx = adx_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trending market (ADX > 20)
-            if curr_volume_spike and curr_adx > 20:
-                # Bullish breakout: price breaks above upper Donchian band
-                if curr_close > curr_highest:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                # Bearish breakout: price breaks below lower Donchian band
-                elif curr_close < curr_lowest:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
+            # Require volume spike
+            if curr_volume_spike:
+                # Determine market regime based on ADX
+                if curr_adx < 25:  # Ranging market: mean reversion
+                    # Long when oversold (%R < -80)
+                    if curr_willr < -80:
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = curr_close
+                    # Short when overbought (%R > -20)
+                    elif curr_willr > -20:
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = curr_close
+                else:  # Trending market: trend following
+                    # Long if price above EMA34
+                    if curr_close > curr_ema:
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = curr_close
+                    # Short if price below EMA34
+                    elif curr_close < curr_ema:
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below midpoint (mean reversion)
-            midpoint = (curr_highest + curr_lowest) / 2.0
-            if curr_close < midpoint:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit conditions: reversal signal or trend change
+            if curr_adx < 25:  # In ranging regime, exit on overbought
+                if curr_willr > -20:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # In trending regime, exit if price crosses below EMA34
+                if curr_close < curr_ema:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above midpoint (mean reversion)
-            midpoint = (curr_highest + curr_lowest) / 2.0
-            if curr_close > midpoint:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit conditions: reversal signal or trend change
+            if curr_adx < 25:  # In ranging regime, exit on oversold
+                if curr_willr < -80:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # In trending regime, exit if price crosses above EMA34
+                if curr_close > curr_ema:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
