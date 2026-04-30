@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # ATR trailing stop (2.0x) for risk management. Designed for low trade frequency (~12-37/year)
 # to minimize fee drag. Works in both bull and bear markets by requiring alignment with 1d trend.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v2"
 timeframe = "12h"
 leverage = 1.0
 
