@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based stoploss
-# Donchian channels provide clear breakout levels; volume spike confirms breakout strength.
-# ATR stoploss limits downside in volatile markets. Works in bull via breakout longs, in bear via breakout shorts.
-# Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX > 25 trend filter
+# Donchian channel breakouts capture strong momentum moves. Volume spike (2.0x 20-period average) confirms breakout validity.
+# 1w ADX > 25 ensures we only trade in strong trending markets, reducing whipsaws in ranging conditions.
+# Works in bull via breakout longs, in bear via breakout shorts. Discrete sizing 0.25 minimizes fee churn.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wVolumeSpike_1wADX25_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,34 +28,62 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Calculate 1w volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    vol_1w = df_1w['volume'].values
+    vol_ma_20_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1w = vol_1w > (2.0 * vol_ma_20_1w)
+    volume_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w)
     
-    # ATR(14) for stoploss calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar TR
-    tr2[0] = np.abs(high[0] - close[0])  # first bar TR with previous close (itself)
-    tr3[0] = np.abs(low[0] - close[0])  # first bar TR with previous close (itself)
+    # Calculate 1w ADX(14) for trend filter
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DM and -DM
+    dm_plus = np.where(
+        (df_1w['high'] - df_1w['high'].shift(1)) > (df_1w['low'].shift(1) - df_1w['low']),
+        np.maximum(df_1w['high'] - df_1w['high'].shift(1), 0),
+        0
+    )
+    dm_minus = np.where(
+        (df_1w['low'].shift(1) - df_1w['low']) > (df_1w['high'] - df_1w['high'].shift(1)),
+        np.maximum(df_1w['low'].shift(1) - df_1w['low'], 0),
+        0
+    )
+    
+    # Smoothed +DM and -DM
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    di_plus = 100 * dm_plus_smooth / atr_1w
+    di_minus = 100 * dm_minus_smooth / atr_1w
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1w = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 20  # warmup for Donchian and volume MA
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(volume_spike_1w_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
             
@@ -64,36 +93,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_highest = highest_20[i]
-        curr_lowest = lowest_20[i]
-        curr_volume_spike = volume_spike[i]
-        curr_atr = atr[i]
+        curr_high_roll = high_roll[i]
+        curr_low_roll = low_roll[i]
+        curr_volume_spike = volume_spike_1w_aligned[i]
+        curr_adx = adx_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
+            # Require volume spike and strong trending market (ADX > 25)
+            if curr_volume_spike and curr_adx > 25:
                 # Bullish breakout: price breaks above upper Donchian channel
-                if curr_close > curr_highest:
+                if curr_close > curr_high_roll:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                 # Bearish breakout: price breaks below lower Donchian channel
-                elif curr_close < curr_lowest:
+                elif curr_close < curr_low_roll:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2 * ATR below entry price
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # Exit when price drops below the midpoint of the Donchian channel
+            midpoint = (curr_high_roll + curr_low_roll) / 2.0
+            if curr_close < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2 * ATR above entry price
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # Exit when price rises above the midpoint of the Donchian channel
+            midpoint = (curr_high_roll + curr_low_roll) / 2.0
+            if curr_close > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
