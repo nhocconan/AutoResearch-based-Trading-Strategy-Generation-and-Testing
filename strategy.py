@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian breakout captures strong momentum moves; 1w EMA50 ensures alignment with weekly trend
-# Volume spike >1.8x confirms institutional participation
-# Discrete sizing (0.25) targets 30-100 total trades over 4 years to avoid fee drag
-# Works in bull/bear: breakouts work in both regimes; weekly trend filter avoids counter-trend trades
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d EMA50 trend filter and volume confirmation
+# Bollinger Band Squeeze (BB Width < 20th percentile) identifies low volatility periods
+# Breakout from squeeze + volume spike > 1.8x + 1d EMA50 trend filter captures explosive moves
+# Works in bull/bear: squeeze breakouts occur in all regimes, volume confirmation ensures legitimacy
+# Discrete sizing (0.25) targets 50-150 total trades over 4 years to avoid fee drag
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_BollingerSqueezeBreakout_1dEMA50_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,77 +23,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss reference (14-period)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = 0
-    tr3.iloc[0] = 0
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_s.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_middle + (bb_std * bb_std_dev)
+    bb_lower = bb_middle - (bb_std * bb_std_dev)
+    bb_width = bb_upper - bb_lower
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate BB Width percentile (20-period lookback for squeeze detection)
+    bb_width_s = pd.Series(bb_width)
+    bb_width_percentile = bb_width_s.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Squeeze condition: BB Width < 20th percentile
+    squeeze = bb_width_percentile < 0.20
+    
+    # Breakout condition: price breaks above upper OR below lower band
+    breakout_up = close > bb_upper
+    breakout_down = close < bb_lower
+    
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_20)
+    
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_30)
-    
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 30, 20, 50)  # warmup
+    start_idx = max(100, bb_period, 20, 50)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i])):
+        if (np.isnan(bb_width_percentile[i]) or 
+            np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_squeeze = squeeze[i]
+        curr_breakout_up = breakout_up[i]
+        curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
-        curr_high_20 = high_20[i]
-        curr_low_20 = low_20[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend filter
-            if curr_volume_confirm:
-                # Bullish breakout: price above upper Donchian + above weekly EMA50
-                if curr_close > curr_high_20 and curr_close > curr_ema_50_1w:
+            # Only trade after squeeze breakout with volume confirmation and trend filter
+            if not curr_squeeze and curr_volume_confirm:  # squeeze just broke
+                # Bullish breakout: price above upper band + above 1d EMA50
+                if curr_breakout_up and curr_close > curr_ema_50_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below lower Donchian + below weekly EMA50
-                elif curr_close < curr_low_20 and curr_close < curr_ema_50_1w:
+                # Bearish breakout: price below lower band + below 1d EMA50
+                elif curr_breakout_down and curr_close < curr_ema_50_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price crosses below weekly EMA50 or ATR-based stoploss
-            if curr_close < curr_ema_50_1w or curr_close < (prices['close'].iloc[i-1] - 2.5 * atr[i]):
+            # Exit: price closes below middle band or squeeze re-establishes
+            if curr_close < bb_middle[i] or squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above weekly EMA50 or ATR-based stoploss
-            if curr_close > curr_ema_50_1w or curr_close > (prices['close'].iloc[i-1] + 2.5 * atr[i]):
+            # Exit: price closes above middle band or squeeze re-establishes
+            if curr_close > bb_middle[i] or squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
