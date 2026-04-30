@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h ADX25 trend filter and volume confirmation
-# Uses Donchian channel breakouts for structure, traded only in direction of 12h ADX>25 (trending market)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels from previous day for structure
+# Only trade breakouts above R3 or below S3 in direction of 1d EMA34 trend
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Works in bull markets via buying breakouts in uptrends and bear markets via selling breakdowns in downtrends
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-150 total trades over 4 years (19-37/year).
 
-name = "6h_Donchian20_Breakout_12hADX25_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop (MTF Rule #1)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 25:
+    # Load 1d data ONCE before loop (MTF Rule #1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h ADX25
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    # Directional Movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(values[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(values)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    atr_12h = wilders_smoothing(tr, 25)
-    plus_di_12h = 100 * wilders_smoothing(plus_dm, 25) / atr_12h
-    minus_di_12h = 100 * wilders_smoothing(minus_dm, 25) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = wilders_smoothing(dx_12h, 25)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian calculation
+    start_idx = 1  # warmup for Camarilla calculation (need previous day)
     
     for i in range(start_idx, n):
-        # Donchian channel: 20-period high/low
-        donchian_high = np.max(high[i-20:i])
-        donchian_low = np.min(low[i-20:i])
+        # Need previous day's high/low/close for Camarilla calculation
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Previous period's high/low/close for Camarilla levels
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        # Calculate Camarilla pivot levels
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        range_val = prev_high - prev_low
+        r3 = pivot + (range_val * 1.1 / 4.0)  # R3 level
+        s3 = pivot - (range_val * 1.1 / 4.0)  # S3 level
         
         # Volume confirmation: volume > 2.0x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i])
         volume_spike = volume[i] > (2.0 * vol_ma_20)
         
         curr_close = close[i]
-        curr_adx_12h = adx_12h_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trending market (ADX > 25)
-            if volume_spike and not np.isnan(curr_adx_12h) and curr_adx_12h > 25:
-                # Bullish entry: price breaks above Donchian high
-                if curr_close > donchian_high:
+            # Require volume spike
+            if volume_spike:
+                # Bullish entry: price breaks above R3 AND above 1d EMA34 (uptrend)
+                if curr_close > r3 and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian low
-                elif curr_close < donchian_low:
+                # Bearish entry: price breaks below S3 AND below 1d EMA34 (downtrend)
+                elif curr_close < s3 and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when price falls below Donchian low or ADX < 20 (trend weak)
-            if curr_close < donchian_low or (not np.isnan(curr_adx_12h) and curr_adx_12h < 20):
+            # Exit when price falls below S3 or below 1d EMA34
+            if curr_close < s3 or curr_close < curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Donchian high or ADX < 20 (trend weak)
-            if curr_close > donchian_high or (not np.isnan(curr_adx_12h) and curr_adx_12h < 20):
+            # Exit when price rises above R3 or above 1d EMA34
+            if curr_close > r3 or curr_close > curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
