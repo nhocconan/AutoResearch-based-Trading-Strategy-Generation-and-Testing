@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # In trending markets (price > 1d EMA34), break above R3 or below S3 with volume triggers continuation entries.
 # In ranging markets (price near 1d EMA34), fade at extreme R4/S4 levels for mean reversion.
 # Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~12-37/year) to minimize fee drag.
 # Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,14 +42,14 @@ def generate_signals(prices):
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d Camarilla levels and EMA34 to 6h timeframe
+    # Align 1d Camarilla levels and EMA34 to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h ATR(14) for dynamic trailing stop
+    # Calculate 12h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
