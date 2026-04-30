@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume confirmation
-# Camarilla R4/S4 levels act as strong intraday support/resistance - breakouts indicate significant momentum shifts
-# 1w EMA50 provides long-term trend filter to avoid counter-trend trades in bear markets like 2025
-# Volume confirmation (>1.4x average) ensures breakout legitimacy with controlled frequency
-# Works in bull/bear: breakouts occur in all regimes, volume confirms legitimacy, weekly trend filter reduces false signals
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Donchian channels provide robust breakout levels - breakouts indicate strong momentum shifts
+# 1w EMA50 provides long-term trend filter to avoid counter-trend trades in bear markets
+# Volume confirmation (>1.5x average) ensures breakout legitimacy with lower frequency
+# Works in bull/bear: breakouts occur in all regimes, volume confirms legitimacy, trend filter reduces false signals
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
 
-name = "4h_Camarilla_R4S4_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Camarilla levels (R4, S4) from previous bar
-    # R4 = Close + 1.1*(High-Low)
-    # S4 = Close - 1.1*(High-Low)
-    hl_range = high - low
-    camarilla_r4 = close + 1.1 * hl_range
-    camarilla_s4 = close - 1.1 * hl_range
+    # Calculate 1d Donchian channels (20-period) from previous bar
+    # Upper = max(high, lookback=20)
+    # Lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Need previous bar's levels to avoid look-ahead
-    camarilla_r4_prev = np.roll(camarilla_r4, 1)
-    camarilla_s4_prev = np.roll(camarilla_s4, 1)
-    camarilla_r4_prev[0] = np.nan
-    camarilla_s4_prev[0] = np.nan
+    donchian_upper_prev = np.roll(donchian_upper, 1)
+    donchian_lower_prev = np.roll(donchian_lower, 1)
+    donchian_upper_prev[0] = np.nan
+    donchian_lower_prev[0] = np.nan
     
     # Breakout conditions
-    breakout_up = close > camarilla_r4_prev
-    breakout_down = close < camarilla_s4_prev
+    breakout_up = close > donchian_upper_prev
+    breakout_down = close < donchian_lower_prev
     
-    # Volume confirmation: volume > 1.4x 20-period average (balanced frequency)
+    # Volume confirmation: volume > 1.5x 20-period average (strict to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.4 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     # Calculate 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -60,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r4_prev[i]) or 
-            np.isnan(camarilla_s4_prev[i]) or
+        if (np.isnan(donchian_upper_prev[i]) or 
+            np.isnan(donchian_lower_prev[i]) or
             np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
@@ -76,26 +77,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade on breakout with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish breakout: price above Camarilla R4 + above 1w EMA50
+                # Bullish breakout: price above Donchian upper + above 1w EMA50
                 if curr_breakout_up and curr_close > curr_ema_50_1w:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below Camarilla S4 + below 1w EMA50
+                # Bearish breakout: price below Donchian lower + below 1w EMA50
                 elif curr_breakout_down and curr_close < curr_ema_50_1w:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price closes below Camarilla S4 (reversal) or above Camarilla R4 (take profit)
-            if curr_close < camarilla_s4_prev[i] or curr_close > camarilla_r4_prev[i]:
+            # Exit: price closes below Donchian lower (reversal) or above Donchian upper (take profit)
+            if curr_close < donchian_lower_prev[i] or curr_close > donchian_upper_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above Camarilla R4 (reversal) or below Camarilla S4 (take profit)
-            if curr_close > camarilla_r4_prev[i] or curr_close < camarilla_s4_prev[i]:
+            # Exit: price closes above Donchian upper (reversal) or below Donchian lower (take profit)
+            if curr_close > donchian_upper_prev[i] or curr_close < donchian_lower_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
