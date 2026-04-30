@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot (R3/S3) Breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivots provide mathematically derived support/resistance levels from prior day
-# Breakouts above R3 or below S3 with 1d EMA34 trend alignment indicate strong momentum
-# Volume spike (>2x 20-period average) confirms institutional participation
+# Hypothesis: 4h Camarilla R3/S3 Breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels (R3/S3) from daily candles for structure
+# Only trade breakouts above R3 or below S3 in direction of 1d EMA34 trend
+# Volume spike (2.0x 20-period average) confirms institutional participation
 # Works in bull markets via buying R3 breakouts in uptrends and bear markets via selling S3 breakdowns in downtrends
 # Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
@@ -31,7 +31,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop (MTF Rule #1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
@@ -39,21 +39,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from prior 1d bar (OHLC)
-    # Standard Camarilla formulas using prior day's range
+    # Calculate Camarilla pivots from previous 1d bar (HLC of completed daily candle)
+    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use the previous day's HLC to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Camarilla levels
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
+    # Calculate Camarilla levels for previous day
+    camarilla_range = prev_high_1d - prev_low_1d
+    r3 = prev_close_1d + (camarilla_range * 1.1 / 4)
+    s3 = prev_close_1d - (camarilla_range * 1.1 / 4)
     
-    # Align HTF levels to LTF (1d levels are valid for the entire following 4h session)
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -64,7 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for EMA34 and volume MA
+    start_idx = max(100, 34, 20)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
