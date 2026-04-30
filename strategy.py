@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
-# Donchian channels provide clear breakout levels based on 20-period highs/lows
-# Breakout above upper band or below lower band with volume confirmation indicates strong momentum
-# 1d EMA50 ensures alignment with daily trend to avoid counter-trend whipsaws
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d ATR regime filter and volume confirmation
+# Camarilla R3/S3 levels provide precise intraday support/resistance from prior day's range
+# Breakout above R3 or below S3 indicates strong momentum
+# 1d ATR ratio (ATR(5)/ATR(20) > 1.2) identifies expanding volatility regimes favorable for breakouts
 # Volume spike (2.0x 24-period average) confirms institutional participation
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_1dATR_Ratio_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,23 +29,54 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ATR ratio for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*4h = 4 days)
+    # ATR(5) and ATR(20) using Wilder's smoothing
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan, dtype=float)
+        if len(x) < period:
+            return result
+        result[period-1] = np.nansum(x[:period])
+        for i in range(period, len(x)):
+            result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
+    
+    atr5 = wilders_smoothing(tr, 5)
+    atr20 = wilders_smoothing(tr, 20)
+    
+    # ATR ratio: ATR(5)/ATR(20) > 1.2 indicates expanding volatility
+    atr_ratio = np.where(atr20 != 0, atr5 / atr20, 0)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels based on prior day's OHLC
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    
+    # Align to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*6h = 6 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma_24)
     
@@ -53,12 +84,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 24)  # warmup for EMA and volume MA
+    start_idx = max(50, 24)  # warmup for ATR ratio and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -71,36 +102,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_50_aligned[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
+        curr_atr_ratio = atr_ratio_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish entry: break above upper band with close > upper band AND price > daily EMA50 (uptrend)
-                if curr_close > curr_upper and curr_close > curr_ema:
+            # Require volume spike, expanding volatility (ATR ratio > 1.2), and breakout
+            if curr_volume_spike and curr_atr_ratio > 1.2:
+                # Bullish entry: break above R3 with close > R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below lower band with close < lower band AND price < daily EMA50 (downtrend)
-                elif curr_close < curr_lower and curr_close < curr_ema:
+                # Bearish entry: break below S3 with close < S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower band (breakout fails) OR price crosses below daily EMA50 (trend change)
-            if curr_close < curr_lower or curr_close < curr_ema:
+            # Exit when price drops below R3 (breakout fails) OR volatility contracts (ATR ratio < 0.8)
+            if curr_close < curr_r3 or curr_atr_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper band (breakdown fails) OR price crosses above daily EMA50 (trend change)
-            if curr_close > curr_upper or curr_close > curr_ema:
+            # Exit when price rises above S3 (breakdown fails) OR volatility contracts (ATR ratio < 0.8)
+            if curr_close > curr_s3 or curr_atr_ratio < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
