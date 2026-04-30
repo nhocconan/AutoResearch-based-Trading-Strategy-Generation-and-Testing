@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-day high + 1w EMA50 uptrend + volume spike.
-# Short when price breaks below 20-day low + 1w EMA50 downtrend + volume spike.
-# ATR trailing stop (2.0x) for risk management.
-# Designed for low trade frequency (~10-25/year) on 1d timeframe to minimize fee drag.
-# Works in both bull and bear markets by combining structure (Donchian), trend (1w EMA50),
-# and momentum (volume spike) to avoid fakeouts and capture strong directional moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike confirmation, and ATR trailing stop.
+# Camarilla pivot levels provide high-probability support/resistance. Breakout above R3 or below S3 with volume
+# and 1d EMA trend alignment captures strong momentum moves. ATR trailing stop manages risk.
+# Designed for low trade frequency (~12-37/year) on 12h timeframe to minimize fee drag. Works in both bull and bear
+# markets by using 1d EMA for trend filter and volume confirmation to avoid fakeouts.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,25 +23,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 1d data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low),
+    #            S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    camarilla_r3 = close_1d_arr + 1.125 * (high_1d - low_1d)
+    camarilla_s3 = close_1d_arr - 1.125 * (high_1d - low_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 20-period average (tight to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # ATR for trailing stop (14-period)
+    # ATR for trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,30 +63,36 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for highest_20/lowest_20 and ema_50_aligned
+    start_idx = 50  # warmup for EMA34
     
     for i in range(start_idx, n):
+        # Regime filter: price above/below 1d EMA34 determines trend direction
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        is_uptrend = curr_close > ema_50_aligned[i]
-        is_downtrend = curr_close < ema_50_aligned[i]
         curr_volume_spike = volume_spike[i]
+        camarilla_r3_val = camarilla_r3_aligned[i]
+        camarilla_s3_val = camarilla_s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above 20-day high + uptrend + volume spike
-            if curr_high > highest_20[i] and is_uptrend and curr_volume_spike:
-                signals[i] = 0.25
-                position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_close
-            # Short: price breaks below 20-day low + downtrend + volume spike
-            elif curr_low < lowest_20[i] and is_downtrend and curr_volume_spike:
-                signals[i] = -0.25
-                position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_close
+            if is_uptrend:
+                # In uptrend: look for long when price breaks above Camarilla R3 with volume
+                if curr_close > camarilla_r3_val and curr_volume_spike:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+            elif is_downtrend:
+                # In downtrend: look for short when price breaks below Camarilla S3 with volume
+                if curr_close < camarilla_s3_val and curr_volume_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
             # Update highest high since entry
