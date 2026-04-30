@@ -4,12 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation
-# Donchian channels provide objective breakout levels based on 20-period highs/lows
+# Donchian channels provide clear breakout levels based on 20-period highs/lows
 # Breakout above upper channel or below lower channel with volume confirmation indicates strong momentum
 # 1d ADX > 25 ensures alignment with strong daily trend to avoid whipsaw in ranging markets
 # Volume spike (2.0x 24-period average) confirms institutional participation
 # Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in both bull (breakouts with trend) and bear (breakdowns with trend) markets.
 
 name = "4h_Donchian20_1dADX25_VolumeSpike_v1"
 timeframe = "4h"
@@ -82,10 +81,8 @@ def generate_signals(prices):
     # Calculate 4h Donchian channels (20-period)
     if len(close) < 20:
         return np.zeros(n)
-    # Upper channel: 20-period high
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower channel: 20-period low
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 2.0x 24-period average (24*4h = 4 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -100,7 +97,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -114,8 +111,8 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_adx = adx_aligned[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
+        curr_upper = highest_high[i]
+        curr_lower = lowest_low[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
