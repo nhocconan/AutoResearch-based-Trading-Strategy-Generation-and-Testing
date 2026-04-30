@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA34 trend filter and volume spike confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Bullish when Bull Power > 0 AND Bear Power < 0 (strong bullish momentum)
-# Bearish when Bull Power < 0 AND Bear Power > 0 (strong bearish momentum)
-# 1d EMA34 as trend filter: only long when price > EMA34, short when price < EMA34
-# Volume spike (2.0x 20-period average) confirms momentum
-# Discrete sizing 0.25 minimizes fee churn. Works in bull via Elder Ray longs with uptrend,
-# in bear via Elder Ray shorts with downtrend. Target: 12-37 trades/year (50-150 total over 4 years).
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume spike confirmation
+# Donchian breakout captures momentum; 12h EMA50 filters for higher timeframe trend alignment
+# Volume spike (2.0x 20-period average) confirms strong participation
+# Works in bull via upward breakouts with uptrend, in bear via downward breakouts with downtrend
+# Discrete sizing 0.25 minimizes fee churn. Target: 20-50 trades/year (80-200 total over 4 years).
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,34 +28,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Elder Ray components (6h timeframe)
-    # EMA13 for Elder Ray calculation
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema_13
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 13, 34)  # warmup for volume MA, EMA13, and 1d EMA34
+    start_idx = max(20, 50)  # warmup for Donchian and 12h EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_13[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
             
@@ -70,36 +64,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
-        curr_ema_34 = ema_34_1d_aligned[i]
+        curr_ema_50 = ema_50_12h_aligned[i]
         curr_volume_spike = volume_spike[i]
+        curr_highest_high = highest_high[i]
+        curr_lowest_low = lowest_low[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: Bull Power > 0 AND Bear Power < 0 (strong bullish momentum) AND price > 1d EMA34 (uptrend)
-                if curr_bull_power > 0 and curr_bear_power < 0 and curr_close > curr_ema_34:
+                # Bullish entry: price breaks above Donchian upper channel AND price > 12h EMA50 (uptrend)
+                if curr_close > curr_highest_high and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Bull Power < 0 AND Bear Power > 0 (strong bearish momentum) AND price < 1d EMA34 (downtrend)
-                elif curr_bull_power < 0 and curr_bear_power > 0 and curr_close < curr_ema_34:
+                # Bearish entry: price breaks below Donchian lower channel AND price < 12h EMA50 (downtrend)
+                elif curr_close < curr_lowest_low and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when Elder Ray loses bullish momentum (Bull Power <= 0 OR Bear Power >= 0) OR price drops below EMA34
-            if curr_bull_power <= 0 or curr_bear_power >= 0 or curr_close < curr_ema_34:
+            # Exit when price breaks below Donchian lower channel OR price drops below 12h EMA50
+            if curr_close < curr_lowest_low or curr_close < curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Elder Ray loses bearish momentum (Bull Power >= 0 OR Bear Power <= 0) OR price rises above EMA34
-            if curr_bull_power >= 0 or curr_bear_power <= 0 or curr_close > curr_ema_34:
+            # Exit when price breaks above Donchian upper channel OR price rises above 12h EMA50
+            if curr_close > curr_highest_high or curr_close > curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
