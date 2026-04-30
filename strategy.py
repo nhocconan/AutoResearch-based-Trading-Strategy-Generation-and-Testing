@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to 75-200 total over 4 years.
-# Only enters when price breaks 4h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
-# Designed for low trade frequency to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~100 total over 4 years.
+# Only enters when price breaks 4h Camarilla R3 (long) or S3 (short) with volume confirmation and 1d EMA34 trend alignment.
+# Designed for low trade frequency (<200 total 4h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -71,26 +71,41 @@ def generate_signals(prices):
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Calculate 4h Donchian channels using only completed 4h bars
-        # Since we're on 4h timeframe, we can use a 20-period lookback
-        if i >= 20:
-            donchian_high = np.max(high[i-20:i])
-            donchian_low = np.min(low[i-20:i])
+        # Calculate 4h Camarilla levels using only completed 4h bars
+        # We need to get the 4h data for Camarilla calculation
+        if i >= 4:  # Need at least one 4h bar to calculate
+            # For simplicity, we'll use a rolling window on the primary timeframe
+            # but we need to ensure we're using completed 4h periods
+            # Since we're on 4h timeframe, we can use a 20-period lookback for daily range
+            if i >= 20:
+                # Calculate daily range from 20 periods ago (approximate 1d range)
+                daily_high = np.max(high[i-20:i])
+                daily_low = np.min(low[i-20:i])
+                daily_range = daily_high - daily_low
+                camarilla_r3 = daily_close + (1.1/12) * daily_range
+                camarilla_s3 = daily_close - (1.1/12) * daily_range
+                # We need the close from 20 periods ago for the calculation
+                daily_close = close[i-20]
+                camarilla_r3 = daily_close + (1.1/12) * daily_range
+                camarilla_s3 = daily_close - (1.1/12) * daily_range
+            else:
+                camarilla_r3 = np.nan
+                camarilla_s3 = np.nan
         else:
-            donchian_high = np.nan
-            donchian_low = np.nan
+            camarilla_r3 = np.nan
+            camarilla_s3 = np.nan
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper channel, 1d EMA34 uptrend, volume spike confirmation
-            if (curr_close > donchian_high and 
+            # Long: price breaks above Camarilla R3, 1d EMA34 uptrend, volume spike confirmation
+            if (curr_close > camarilla_r3 and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Donchian lower channel, 1d EMA34 downtrend, volume spike confirmation
-            elif (curr_close < donchian_low and 
+            # Short: price breaks below Camarilla S3, 1d EMA34 downtrend, volume spike confirmation
+            elif (curr_close < camarilla_s3 and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
