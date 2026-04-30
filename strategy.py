@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~100 total over 4 years.
-# Only enters when price breaks 12h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
-# Designed for low trade frequency (<200 total 12h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
+# Only enters when price breaks 4h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
+# Designed for low trade frequency (<200 total 4h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
 
-name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,6 +47,10 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
     
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -60,6 +64,8 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
@@ -70,26 +76,12 @@ def generate_signals(prices):
         curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
-        
-        # Calculate 12h Donchian channels using only completed 12h bars
-        # We need to get the 12h data for Donchian calculation
-        if i >= 12:  # Need at least one 12h bar to calculate
-            # For simplicity, we'll use a rolling window on the primary timeframe
-            # but we need to ensure we're using completed 12h periods
-            # Since we're on 12h timeframe, we can use a 20-period lookback
-            if i >= 20:
-                donchian_high = np.max(high[i-20:i])
-                donchian_low = np.min(low[i-20:i])
-            else:
-                donchian_high = np.nan
-                donchian_low = np.nan
-        else:
-            donchian_high = np.nan
-            donchian_low = np.nan
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: price breaks above Donchian upper channel, 1d EMA34 uptrend, volume spike confirmation
-            if (curr_close > donchian_high and 
+            if (curr_close > curr_donchian_high and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
@@ -97,7 +89,7 @@ def generate_signals(prices):
                 entry_price = curr_close
                 highest_since_entry = curr_close
             # Short: price breaks below Donchian lower channel, 1d EMA34 downtrend, volume spike confirmation
-            elif (curr_close < donchian_low and 
+            elif (curr_close < curr_donchian_low and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
