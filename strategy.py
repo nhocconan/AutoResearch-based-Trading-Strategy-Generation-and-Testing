@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above R3, 1d EMA34 uptrend, and volume > 2.0x 20-bar avg.
 # Short when price breaks below S3, 1d EMA34 downtrend, and volume > 2.0x 20-bar avg.
 # Exit on touch of S3 (for longs) or R3 (for shorts) to capture mean reversion in ranging markets.
-# Camarilla pivots provide precise intraday support/resistance levels that work well on 12h timeframe.
+# Camarilla pivots provide precise intraday support/resistance levels that work well on 4h timeframe.
 # Combined with 1d EMA34 trend filter to avoid counter-trend trades and volume confirmation to reduce false breakouts.
-# Timeframe: 12h as per experiment guidelines.
+# Timeframe: 4h as per experiment guidelines.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     low_shift = df_1d['low'].shift(1).values
     close_shift = df_1d['close'].shift(1).values
     
-    # Align the prior day's OHLC to 12h timeframe
+    # Align the prior day's OHLC to 4h timeframe
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_shift)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_shift)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_shift)
