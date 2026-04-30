@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long: Bull Power > 0 AND price > 1d EMA50 AND volume spike
-# Short: Bear Power < 0 AND price < 1d EMA50 AND volume spike
-# ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14)
-# Works in bull via Bull Power longs, in bear via Bear Power shorts
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses discrete sizing 0.30 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume spike.
+# Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume spike.
+# ATR-based stoploss: exit when price moves against position by 2.0 * ATR(14).
+# Works in bull via breakout longs, in bear via breakdown shorts.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,12 +29,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA(13)
-    bear_power = low - ema_13   # Low - EMA(13)
+    # Calculate Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1d EMA(50) for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -58,12 +55,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(13, 30, 50, 14)  # warmup
+    start_idx = max(20, 30, 50, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_13[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma_30[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_30[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
             
@@ -73,8 +70,10 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_atr = atr[i]
@@ -82,33 +81,33 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: Bull Power > 0 AND price > 1d EMA50
-                if (curr_bull_power > 0 and 
+                # Bullish entry: price breaks above Donchian high AND above 1d EMA50
+                if (curr_close > curr_donchian_high and 
                     curr_close > curr_ema_50_1d):
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Bear Power < 0 AND price < 1d EMA50
-                elif (curr_bear_power < 0 and 
+                # Bearish entry: price breaks below Donchian low AND below 1d EMA50
+                elif (curr_close < curr_donchian_low and 
                       curr_close < curr_ema_50_1d):
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # ATR-based stoploss: exit when price drops below entry - 2.5 * ATR
-            if curr_close < entry_price - 2.5 * curr_atr:
+            # ATR-based stoploss: exit when price drops below entry - 2.0 * ATR
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # ATR-based stoploss: exit when price rises above entry + 2.5 * ATR
-            if curr_close > entry_price + 2.5 * curr_atr:
+            # ATR-based stoploss: exit when price rises above entry + 2.0 * ATR
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
