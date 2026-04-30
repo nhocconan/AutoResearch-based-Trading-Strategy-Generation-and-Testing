@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h KAMA trend filter + 1d ATR-based volatility regime + volume confirmation
-# KAMA adapts to market efficiency - slow in ranging markets (reduces false breakouts), fast in trending markets
-# ATR regime filter: only trade when volatility is elevated (ATR ratio > 1.2) to avoid low-volatility whipsaws
-# Volume confirmation ensures institutional participation on breakouts
-# Designed for low trade frequency (~30-60/year on 4h) to minimize fee drag while capturing strong moves
-# Works in bull markets via trend continuation and bear markets via volatility expansion mean reversion
+# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation
+# Uses 1w HTF for Camarilla pivot levels (key institutional support/resistance) and 1d EMA for trend filter.
+# Breakouts above R3 in uptrend or below S3 in downtrend with volume spike signal institutional participation.
+# Designed for very low trade frequency (~7-25/year on 1d) to minimize fee drag while capturing strong directional moves.
+# Works in bull markets via breakout continuation and in bear markets via mean-reversion at extreme levels.
+# Focus on BTC/ETH as primary targets with SOL as secondary.
 
-name = "4h_12hKAMA_1dATRRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_1wCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,97 +24,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for KAMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1w data ONCE before loop for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 12h KAMA (Adaptive Moving Average)
-    close_12h = pd.Series(df_12h['close'].values)
-    change_12h = np.abs(close_12h.diff(10)).values  # 10-period change
-    volatility_12h = close_12h.diff().abs().rolling(10, min_periods=1).sum().values  # 10-period volatility
-    er_12h = np.where(volatility_12h > 0, change_12h / volatility_12h, 0)  # Efficiency Ratio
-    sc_12h = (er_12h * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # Smoothing Constant
-    ama_12h = np.zeros_like(close_12h)
-    ama_12h[0] = close_12h.iloc[0]
-    for j in range(1, len(close_12h)):
-        ama_12h[j] = ama_12h[j-1] + sc_12h[j] * (close_12h.iloc[j] - ama_12h[j-1])
-    ama_12h = ama_12h
-    ama_12h_aligned = align_htf_to_ltf(prices, df_12h, ama_12h)
+    # Calculate 1w Camarilla levels (based on prior 1w bar's OHLC)
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    hl_range = df_1w['high'] - df_1w['low']
+    camarilla_r3 = typical_price + hl_range * 1.1 / 4
+    camarilla_s3 = typical_price - hl_range * 1.1 / 4
     
-    # Load 1d data ONCE before loop for ATR-based volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align 1w Camarilla levels to 1d timeframe (wait for 1w bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3.values)
     
-    # Calculate 1d ATR(14) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([tr1_1d[0], tr2_1d[0], tr3_1d[0]])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_ratio_1d = atr_1d / atr_ma_1d  # Current ATR vs 20-period average
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Calculate 1d EMA(34) for trend filter
+    close_s = pd.Series(close)
+    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 4h ATR(14) for stoploss
+    # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 1.3x 20-period average
+        # Volume confirmation: volume > 1.5x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i]) if i >= 20 else np.mean(volume[:i]) if i > 0 else 0
-        volume_spike = volume[i] > (1.3 * vol_ma_20) if i > 0 else False
+        volume_spike = volume[i] > (1.5 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
-        curr_ama = ama_12h_aligned[i]
-        curr_atr_ratio = atr_ratio_1d_aligned[i]
-        curr_atr = atr_4h[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema = ema_34[i]
+        curr_atr = atr[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and elevated volatility regime
-            if volume_spike and curr_atr_ratio > 1.2:
-                # Bullish entry: price above KAMA (uptrend)
-                if curr_close > curr_ama:
+            # Require volume spike and trend alignment
+            if volume_spike:
+                # Bullish entry: price breaks above 1w R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price below KAMA (downtrend)
-                elif curr_close < curr_ama:
+                # Bearish entry: price breaks below 1w S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price
-            if curr_close < entry_price - 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1w S3 (reversal signal)
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price crosses below KAMA (trend change)
-            elif curr_close < curr_ama:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
+            # Take profit: price reaches 1w R4 (mean reversion tendency)
+            # R4 = C + (H-L)*1.1/2 = R3 + (H-L)*1.1/4
+            hl_range_1w = (df_1w['high'].iloc[-1] - df_1w['low'].iloc[-1]) if len(df_1w) > 0 else 0
+            typical_price_1w = (df_1w['high'].iloc[-1] + df_1w['low'].iloc[-1] + df_1w['close'].iloc[-1]) / 3 if len(df_1w) > 0 else 0
+            camarilla_r4 = typical_price_1w + hl_range_1w * 1.1 / 2
+            camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(df_1w['close'].values, camarilla_r4))[i] if len(df_1w) > 0 else curr_r3
+            if curr_close >= camarilla_r4_aligned:
+                signals[i] = 0.10  # reduce position
+            else:
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price
-            if curr_close > entry_price + 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1w R3 (reversal signal)
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price crosses above KAMA (trend change)
-            elif curr_close > curr_ama:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
+            # Take profit: price reaches 1w S4 (mean reversion tendency)
+            # S4 = C - (H-L)*1.1/2 = S3 - (H-L)*1.1/4
+            hl_range_1w = (df_1w['high'].iloc[-1] - df_1w['low'].iloc[-1]) if len(df_1w) > 0 else 0
+            typical_price_1w = (df_1w['high'].iloc[-1] + df_1w['low'].iloc[-1] + df_1w['close'].iloc[-1]) / 3 if len(df_1w) > 0 else 0
+            camarilla_s4 = typical_price_1w - hl_range_1w * 1.1 / 2
+            camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(df_1w['close'].values, camarilla_s4))[i] if len(df_1w) > 0 else curr_s3
+            if curr_close <= camarilla_s4_aligned:
+                signals[i] = -0.10  # reduce position
+            else:
+                signals[i] = -0.25
     
     return signals
