@@ -4,10 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Donchian channel from prior 20 bars for breakout structure, 1d EMA34 for trend alignment (avoids counter-trend),
+# Uses Donchian channel from prior 20 periods for structure, 1d EMA34 for trend alignment (avoids counter-trend),
 # volume > 1.8x 20-bar average for confirmation, and ATR(14) trailing stop (2.0x) for risk management.
 # Discrete position sizing at ±0.25 to limit fee drag. Target: 80-150 total trades over 4 years (20-38/year).
 # Session filter (08:00-20:00 UTC) to avoid low-liquidity periods.
+# Works in both bull and bear markets by requiring trend alignment via 1d EMA34.
 
 name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
 timeframe = "4h"
@@ -15,7 +16,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -51,7 +52,7 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # Donchian channel (20-period) - use shift(1) to avoid look-ahead
+    # Donchian(20) channels from prior 20 periods (avoid look-ahead)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -61,7 +62,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 35  # warmup for EMA34 and Donchian
+    start_idx = 50  # warmup for EMA34, Donchian, and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
@@ -84,7 +85,7 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper band, above 1d EMA34, volume confirmation
+            # Long: price breaks above Donchian upper, above 1d EMA34, volume confirmation
             if (curr_close > curr_highest_20 and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
@@ -92,7 +93,7 @@ def generate_signals(prices):
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Donchian lower band, below 1d EMA34, volume confirmation
+            # Short: price breaks below Donchian lower, below 1d EMA34, volume confirmation
             elif (curr_close < curr_lowest_20 and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
