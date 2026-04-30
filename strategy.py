@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian channel breakouts for structure, filtered by 1d EMA50 trend direction
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses Donchian channels from previous 20 periods for structure
+# Only trade breakouts above upper channel or below lower channel in direction of 1d EMA50 trend
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Works in bull markets via buying breakouts in uptrends and bear markets via selling breakdowns in downtrends
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-150 total trades over 4 years (19-37/year).
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,12 +37,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian calculation (need 20-period lookback)
+    start_idx = 20  # warmup for Donchian calculation (need 20 periods)
     
     for i in range(start_idx, n):
-        # Donchian channel: 20-period high/low
-        period_high = np.max(high[i-20:i])
-        period_low = np.min(low[i-20:i])
+        # Need previous period's high/low for Donchian calculation
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Previous 20 periods' high/low for Donchian channels
+        lookback_start = max(0, i-20)
+        highest_high = np.max(high[lookback_start:i])
+        lowest_low = np.min(low[lookback_start:i])
         
         # Volume confirmation: volume > 2.0x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i])
@@ -53,26 +60,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if volume_spike:
-                # Bullish entry: price breaks above 20-period high AND above 1d EMA50 (uptrend)
-                if curr_close > period_high and curr_close > curr_ema_50_1d:
+                # Bullish entry: price breaks above upper Donchian AND above 1d EMA50 (uptrend)
+                if curr_close > highest_high and curr_close > curr_ema_50_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below 20-period low AND below 1d EMA50 (downtrend)
-                elif curr_close < period_low and curr_close < curr_ema_50_1d:
+                # Bearish entry: price breaks below lower Donchian AND below 1d EMA50 (downtrend)
+                elif curr_close < lowest_low and curr_close < curr_ema_50_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when price falls below 20-period low or below 1d EMA50
-            if curr_close < period_low or curr_close < curr_ema_50_1d:
+            # Exit when price falls below lower Donchian or below 1d EMA50
+            if curr_close < lowest_low or curr_close < curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above 20-period high or above 1d EMA50
-            if curr_close > period_high or curr_close > curr_ema_50_1d:
+            # Exit when price rises above upper Donchian or above 1d EMA50
+            if curr_close > highest_high or curr_close > curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
