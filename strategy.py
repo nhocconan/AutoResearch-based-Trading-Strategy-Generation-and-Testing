@@ -3,25 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike >1.8x
-# Donchian provides clear structure for breakouts in both bull and bear markets
-# 1d EMA34 ensures alignment with higher timeframe trend; volume spike confirms breakout validity
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
+# Hypothesis: 1d Williams Alligator with 1w EMA34 trend filter and volume spike >1.8x
+# Williams Alligator (jaw=13, teeth=8, lips=5) identifies trend via SMAs
+# 1w EMA34 ensures alignment with higher timeframe trend; volume spike confirms momentum
+# Discrete sizing (0.25) minimizes fee churn; target 30-100 total trades over 4 years
+# Works in bull/bear: Alligator convergence/divergence signals trend strength, volume filter ensures legitimacy
 
-name = "4h_Donchian20_VolumeSpike1.8x_1dEMA34_Trend_v1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate Williams Alligator components (1d timeframe)
+    # Jaw: 13-period SMA, shifted 8 bars forward
+    # Teeth: 8-period SMA, shifted 5 bars forward  
+    # Lips: 5-period SMA, shifted 3 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
     # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
@@ -32,68 +40,60 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume confirmation: volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = max(34, 30, 14, 13, 8, 5)  # warmup: need 34 for EMA, 30 for volume, 14 for ATR, etc.
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(atr[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
+        
+        # Alligator conditions
+        # Bullish: Lips > Teeth > Jaw (all aligned upward)
+        # Bearish: Lips < Teeth < Jaw (all aligned downward)
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation and trend filter
-            if curr_volume_confirm:
-                # Bullish entry: price breaks above upper Donchian + above 1d EMA34
-                if curr_high > curr_highest_high and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish entry: price breaks below lower Donchian + below 1d EMA34
-                elif curr_low < curr_lowest_low and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
-                    position = -1
+            if bullish_alignment and curr_volume_confirm and curr_close > curr_ema_34_1w:
+                signals[i] = 0.25
+                position = 1
+            elif bearish_alignment and curr_volume_confirm and curr_close < curr_ema_34_1w:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower Donchian
-            if curr_low < curr_lowest_low:
+            # Exit: Alligator convergence (Lips crosses below Teeth) OR price crosses below EMA
+            if lips[i] < teeth[i] or curr_close < curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian
-            if curr_high > curr_highest_high:
+            # Exit: Alligator convergence (Lips crosses above Teeth) OR price crosses above EMA
+            if lips[i] > teeth[i] or curr_close > curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
