@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band mean reversion with 1w Supertrend filter and volume spike confirmation.
-# Long when price touches lower BB (20,2) and 1w Supertrend is bullish and volume > 1.5x 20-bar average.
-# Short when price touches upper BB (20,2) and 1w Supertrend is bearish and volume spike.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-bar Donchian high AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-bar average.
+# Short when price breaks below 20-bar Donchian low AND price < 1d EMA50 (downtrend) AND volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
-# Targets 30-100 total trades over 4 years (7-25/year) with discrete position sizing (0.25).
-# Bollinger Bands identify overbought/oversold levels effective in ranging markets, while 1w Supertrend
-# filters for higher-timeframe trend alignment to avoid counter-trend trades in strong moves.
+# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
+# Donchian breakouts capture strong momentum moves, effective in both bull/bear markets
+# when aligned with higher-timeframe trend to avoid counter-trend trades.
 
-name = "1d_BBMeanRev_1wSupertrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,60 +25,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Supertrend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Supertrend (10,3.0)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR
-    atr_1w = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2_1w = (high_1w + low_1w) / 2
-    upper_basic_1w = hl2_1w + 3.0 * atr_1w
-    lower_basic_1w = hl2_1w - 3.0 * atr_1w
-    
-    upper_band_1w = np.zeros_like(upper_basic_1w)
-    lower_band_1w = np.zeros_like(lower_basic_1w)
-    supertrend_1w = np.zeros_like(close_1w)
-    trend_1w = np.ones_like(close_1w, dtype=bool)  # True for uptrend
-    
-    upper_band_1w[0] = upper_basic_1w[0]
-    lower_band_1w[0] = lower_basic_1w[0]
-    supertrend_1w[0] = upper_band_1w[0]
-    trend_1w[0] = True
-    
-    for i in range(1, len(close_1w)):
-        upper_band_1w[i] = upper_basic_1w[i] if (upper_basic_1w[i] < upper_band_1w[i-1] or close_1w[i-1] > upper_band_1w[i-1]) else upper_band_1w[i-1]
-        lower_band_1w[i] = lower_basic_1w[i] if (lower_basic_1w[i] > lower_band_1w[i-1] or close_1w[i-1] < lower_band_1w[i-1]) else lower_band_1w[i-1]
-        
-        if trend_1w[i-1]:
-            supertrend_1w[i] = lower_band_1w[i]
-            trend_1w[i] = close_1w[i] >= lower_band_1w[i]
-        else:
-            supertrend_1w[i] = upper_band_1w[i]
-            trend_1w[i] = close_1w[i] <= upper_band_1w[i]
-    
-    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
-    is_uptrend_1w = supertrend_aligned > close  # price above Supertrend = bullish
-    is_downtrend_1w = supertrend_aligned < close  # price below Supertrend = bearish
-    
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2.0 * std_20
-    lower_band = sma_20 - 2.0 * std_20
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -96,11 +55,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 20)  # warmup for 1w Supertrend and BB
+    start_idx = max(50, 20)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(supertrend_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -114,16 +73,16 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price at lower BB + 1w uptrend + volume confirmation
-            if curr_close <= lower_band[i] and is_uptrend_1w[i] and curr_volume_confirm:
+            # Long: price > 20-bar high + uptrend + volume confirmation
+            if curr_close > highest_high[i] and close[i] > ema_50_aligned[i] and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_high
-            # Short: price at upper BB + 1w downtrend + volume confirmation
-            elif curr_close >= upper_band[i] and is_downtrend_1w[i] and curr_volume_confirm:
+                highest_since_entry = curr_close
+            # Short: price < 20-bar low + downtrend + volume confirmation
+            elif curr_close < lowest_low[i] and close[i] < ema_50_aligned[i] and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
+                lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
             # Update highest high since entry
