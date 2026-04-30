@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA50), break above/below Donchian channels triggers continuation entries.
-# In ranging markets (price near 1d EMA50), fade at Donchian extremes for mean reversion.
-# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~20-40/year) to minimize fee drag.
-# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
-# Based on proven 4h Donchian breakout patterns that work on BTC/ETH in test period.
+# Hypothesis: 12h strategy using 1d Williams %R extreme readings combined with 1w EMA50 trend filter and volume confirmation.
+# In strong trends (price > 1w EMA50), enter on Williams %R pullbacks from extreme levels (>80 for short, <20 for long) with volume.
+# In ranging markets (price near 1w EMA50), fade at extreme Williams %R levels (<10 for long, >90 for short) with volume.
+# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~12-25/year) to minimize fee drag.
+# Works in bull/bear via regime adaptation: trend-following pullbacks in strong trends, mean reversion at extremes in ranges.
 
-name = "4h_Donchian20_1dEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "12h_1dWilliamsR_1wEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,19 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1d data ONCE before loop for Williams %R
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d Williams %R(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
     
-    # Calculate 4h ATR(14) for dynamic trailing stop
+    # Align 1d Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 12h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -47,10 +63,6 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -60,7 +72,7 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA50 determines trend direction
+        # Regime filter: price above/below 1w EMA50 determines trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
@@ -68,35 +80,34 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_high_roll_max = high_roll_max[i]
-        curr_low_roll_min = low_roll_min[i]
+        curr_williams_r = williams_r_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above upper Donchian with volume
-                if curr_close > curr_high_roll_max and curr_volume_spike:
+                # In uptrend: look for long on Williams %R pullback from oversold with volume
+                if curr_williams_r < -20 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below lower Donchian with volume
-                if curr_close < curr_low_roll_min and curr_volume_spike:
+                # In downtrend: look for short on Williams %R pullback from overbought with volume
+                if curr_williams_r > -80 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
                     lowest_since_entry = curr_close
             else:
-                # In ranging market (near EMA): mean reversion at Donchian extremes
-                if curr_close < curr_low_roll_min:
-                    # Oversold at lower Donchian: look for long
+                # In ranging market (near EMA): mean reversion at extreme Williams %R levels
+                if curr_williams_r < -90:
+                    # Extreme oversold: look for long
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
-                elif curr_close > curr_high_roll_max:
-                    # Overbought at upper Donchian: look for short
+                elif curr_williams_r > -10:
+                    # Extreme overbought: look for short
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
