@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h for trend direction (HMA21) and 1d for volume regime (above/below 20-period MA)
-# Enter longs when: price > 4h HMA21 AND 1d volume > 20-period MA (bullish regime)
-# Enter shorts when: price < 4h HMA21 AND 1d volume < 20-period MA (bearish regime)
-# Uses session filter (08-20 UTC) to reduce noise. Discrete sizing 0.20 to minimize fee churn.
-# Target: 60-150 total trades over 4 years (15-37/year) by requiring both trend and volume regime alignment.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions. In ranging markets (ADX < 25 on 1d), 
+# we fade extremes: long when %R < -80, short when %R > -20. 
+# In trending markets (ADX >= 25), we trade pullbacks: long on pullback to EMA34 in uptrend, 
+# short on pullback to EMA34 in downtrend. 
+# Volume spike (1.5x 20-period average) confirms momentum. 
+# Uses discrete sizing 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1h_HMA21_Trend_1dVolumeRegime_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_ME_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +26,76 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC)
+    # Pre-compute session hours (08-20 UTC) to avoid datetime errors
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 4h HMA21 for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
-        return np.zeros(n)
-    hma_21 = calculate_hma(df_4h['close'].values, 21)
-    hma_21_aligned = align_htf_to_ltf(prices, df_4h, hma_21)
-    
-    # 1d volume regime: above/below 20-period MA
+    # Calculate 1d Williams %R(14)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 14:
         return np.zeros(n)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_regime = df_1d['volume'].values > vol_ma_20  # True = bullish regime, False = bearish regime
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime.astype(float))
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    
+    # Align 1d Williams %R to 6h timeframe (wait for completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 1d EMA34 for trend and dynamic support/resistance
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate 1d ADX(14) for regime filter (trending vs ranging)
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    dm_plus = np.where(
+        (df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']),
+        np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0),
+        0
+    )
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    dm_minus = np.where(
+        (df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)),
+        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0),
+        0
+    )
+    
+    # Smoothed +DM and -DM
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX and EMA34 to 6h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 21  # warmup for HMA and volume MA
+    start_idx = max(34, 20)  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(hma_21_aligned[i]) or np.isnan(volume_regime_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -60,75 +105,60 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_hma = hma_21_aligned[i]
-        curr_vol_regime = volume_regime_aligned[i] > 0.5  # Convert back to boolean
+        curr_williams_r = williams_r_aligned[i]
+        curr_ema_34 = ema_34_aligned[i]
+        curr_adx = adx_aligned[i]
+        curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Bullish: price above 4h HMA AND bullish volume regime
-            if curr_close > curr_hma and curr_vol_regime:
-                signals[i] = 0.20
-                position = 1
-            # Bearish: price below 4h HMA AND bearish volume regime
-            elif curr_close < curr_hma and not curr_vol_regime:
-                signals[i] = -0.20
-                position = -1
+            if curr_volume_spike:  # Require volume confirmation
+                if curr_adx < 25:  # Ranging market: mean reversion at extremes
+                    # Oversold: long
+                    if curr_williams_r < -80:
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = curr_close
+                    # Overbought: short
+                    elif curr_williams_r > -20:
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = curr_close
+                else:  # Trending market: pullback to EMA34
+                    # Uptrend: long on pullback to EMA34
+                    if curr_close > curr_ema_34 and curr_close <= curr_ema_34 * 1.01:  # near EMA34
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = curr_close
+                    # Downtrend: short on pullback to EMA34
+                    elif curr_close < curr_ema_34 and curr_close >= curr_ema_34 * 0.99:  # near EMA34
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price crosses below 4h HMA (trend change)
-            if curr_close < curr_hma:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
+            # Exit conditions
+            if curr_adx < 25:  # In ranging market, exit at overbought
+                if curr_williams_r > -20:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # In trending market, exit if breaks below EMA34
+                if curr_close < curr_ema_34:
+                    signals[i] = 0.0
+                    position = 0
+            if position == 1:  # Still long
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price crosses above 4h HMA (trend change)
-            if curr_close > curr_hma:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+            # Exit conditions
+            if curr_adx < 25:  # In ranging market, exit at oversold
+                if curr_williams_r < -80:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # In trending market, exit if breaks above EMA34
+                if curr_close > curr_ema_34:
+                    signals[i] = 0.0
+                    position = 0
+            if position == -1:  # Still short
+                signals[i] = -0.25
     
     return signals
-
-def calculate_hma(values, period):
-    """Calculate Hull Moving Average"""
-    if len(values) < period:
-        return np.full_like(values, np.nan, dtype=float)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = np.zeros_like(values)
-    for i in range(len(values)):
-        if i < half_period - 1:
-            wma_half[i] = np.nan
-        else:
-            start = i - half_period + 1
-            weights = np.arange(1, half_period + 1)
-            wma_half[i] = np.dot(values[start:i+1], weights) / weights.sum()
-    
-    # WMA of full period
-    wma_full = np.zeros_like(values)
-    for i in range(len(values)):
-        if i < period - 1:
-            wma_full[i] = np.nan
-        else:
-            start = i - period + 1
-            weights = np.arange(1, period + 1)
-            wma_full[i] = np.dot(values[start:i+1], weights) / weights.sum()
-    
-    # Raw HMA = 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final HMA = WMA(sqrt_period) of raw_hma
-    hma = np.zeros_like(values)
-    for i in range(len(values)):
-        if i < sqrt_period - 1:
-            hma[i] = np.nan
-        else:
-            start = i - sqrt_period + 1
-            weights = np.arange(1, sqrt_period + 1)
-            hma[i] = np.dot(raw_hma[start:i+1], weights) / weights.sum()
-    
-    return hma
