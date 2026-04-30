@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Supertrend for trend direction, 1h only for entry timing precision.
-# Uses 4h Supertrend (ATR=10, mult=3.0) to filter trend direction and avoid counter-trend trades.
-# Enters on 1h pullbacks to EMA21 in direction of 4h trend with volume confirmation (>1.5x 20-bar avg).
-# Exits on opposite Supertrend signal or ATR(14) trailing stop (2.0x). Discrete sizing ±0.20 to limit fee drag.
-# Session filter (08:00-20:00 UTC) to reduce noise. Target: 80-120 total trades over 4 years (20-30/year).
-# Designed to work in both bull (trend following) and bear (avoids counter-trend, captures retracements).
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+# Uses weekly Camarilla pivots for major trend structure (avoids counter-trend in strong weekly trends),
+# 6h Donchian breakout for entry timing, and volume > 1.8x 20-bar average for confirmation.
+# Discrete position sizing at ±0.25 to limit fee drag. Target: 80-140 total trades over 4 years (20-35/year).
+# Session filter (08:00-20:00 UTC) to avoid low-liquidity periods.
 
-name = "1h_Supertrend4h_EMA21_Pullback_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyCamarilla_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,78 +27,45 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 4h data ONCE before loop for Supertrend trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data ONCE before loop for Camarilla pivots (major trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h ATR(10) for Supertrend
-    atr_period = 10
-    tr1 = df_4h['high'][1:] - df_4h['low'][1:]
-    tr2 = np.abs(df_4h['high'][1:] - df_4h['close'][:-1])
-    tr3 = np.abs(df_4h['low'][1:] - df_4h['close'][:-1])
-    tr_4h = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr_4h).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Calculate weekly Camarilla levels from prior 1w OHLC (use shift(1) to avoid look-ahead)
+    high_1w = df_1w['high'].shift(1).values
+    low_1w = df_1w['low'].shift(1).values
+    close_1w = df_1w['close'].shift(1).values
     
-    # Calculate 4h Supertrend
-    hl2_4h = (df_4h['high'] + df_4h['low']) / 2
-    upper_band = hl2_4h + (3.0 * atr_4h)
-    lower_band = hl2_4h - (3.0 * atr_4h)
+    # Weekly Camarilla R3, S3 (primary breakout levels)
+    camarilla_range = high_1w - low_1w
+    camarilla_r3 = close_1w + (1.1 * camarilla_range * 1.1 / 4)
+    camarilla_s3 = close_1w - (1.1 * camarilla_range * 1.1 / 4)
     
-    # Initialize Supertrend arrays
-    supertrend = np.zeros_like(hl2_4h)
-    direction = np.ones_like(hl2_4h)  # 1 for uptrend, -1 for downtrend
+    # Align weekly Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    supertrend[0] = hl2_4h[0]
-    direction[0] = 1
+    # Donchian(20) channels for breakout detection
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    for i in range(1, len(hl2_4h)):
-        if close_4h := df_4h['close'].iloc[i]:
-            pass  # Just to reference close for type checking
-        
-        if df_4h['close'].iloc[i] > supertrend[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # Align 4h Supertrend and direction to 1h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Calculate 1h EMA21 for pullback entries
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # ATR(14) for volatility and stoploss on 1h
-    atr_period_1h = 14
-    tr1_1h = high[1:] - low[1:]
-    tr2_1h = np.abs(high[1:] - close[:-1])
-    tr3_1h = np.abs(low[1:] - close[:-1])
-    tr_1h = np.concatenate([[np.max([tr1_1h[0], tr2_1h[0], tr3_1h[0]])], np.maximum(tr1_1h, np.maximum(tr2_1h, tr3_1h))])
-    atr_1h = pd.Series(tr_1h).rolling(window=atr_period_1h, min_periods=atr_period_1h).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 21  # warmup for EMA21 and volume MA
+    start_idx = 50  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(supertrend_aligned[i]) or
-            np.isnan(direction_aligned[i]) or
-            np.isnan(ema_21[i]) or
-            np.isnan(atr_1h[i]) or
+        if (np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
@@ -108,50 +74,40 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_supertrend = supertrend_aligned[i]
-        curr_direction = direction_aligned[i]
-        curr_ema_21 = ema_21[i]
-        curr_atr = atr_1h[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: 4h uptrend, price pulls back to EMA21 or above, volume confirmation
-            if (curr_direction == 1 and 
-                curr_close >= curr_ema_21 and 
+            # Long: price breaks above Donchian(20) high, above weekly R3, volume confirmation
+            if (curr_high > highest_high[i] and 
+                curr_close > curr_r3 and 
                 curr_volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_close
-            # Short: 4h downtrend, price pulls back to EMA21 or below, volume confirmation
-            elif (curr_direction == -1 and 
-                  curr_close <= curr_ema_21 and 
+            # Short: price breaks below Donchian(20) low, below weekly S3, volume confirmation
+            elif (curr_low < lowest_low[i] and 
+                  curr_close < curr_s3 and 
                   curr_volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: 4h trend turns down OR ATR trailing stop (2.0x ATR)
-            if (curr_direction == -1 or 
-                curr_close < highest_since_entry - (2.0 * curr_atr)):
+            # Exit: price breaks below Donchian(20) low OR weekly S3
+            if (curr_low < lowest_low[i] or 
+                curr_close < curr_s3):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: 4h trend turns up OR ATR trailing stop (2.0x ATR)
-            if (curr_direction == 1 or 
-                curr_close > lowest_since_entry + (2.0 * curr_atr)):
+            # Exit: price breaks above Donchian(20) high OR weekly R3
+            if (curr_high > highest_high[i] or 
+                curr_close > curr_r3):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
