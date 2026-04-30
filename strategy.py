@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX(14) > 25 trend filter
-# Uses 4h primary timeframe targeting 75-200 total trades over 4 years (19-50/year).
-# Donchian channel breakouts capture strong momentum moves. Volume spike (2.0x 20-period average)
-# confirms validity. 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
+# Uses 4h primary timeframe to target 75-200 trades over 4 years (19-50/year).
+# Camarilla pivots from 1d provide strong support/resistance. Breakouts beyond R3/S3
+# indicate momentum moves. Volume spike (2.0x 20-period average) confirms validity.
+# 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
 # in bear via breakout shorts with trend filter.
 
-name = "4h_Donchian20_Breakout_1dVolumeSpike_1dADX25_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_1dADX25_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,19 +30,25 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
-    # Use previous day's data for today's Donchian levels
+    # Use previous day's OHLC for today's Camarilla levels
+    prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
-    upper_20 = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
+    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
+    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
+    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1d Donchian levels to 4h timeframe (wait for completed 1d bar)
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -95,7 +102,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -106,36 +114,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_upper = upper_20_aligned[i]
-        curr_lower = lower_20_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_s4 = s4_aligned[i]
         curr_adx = adx[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trending market (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish breakout: price breaks above upper Donchian
-                if curr_close > curr_upper:
+                # Bullish breakout: price breaks above R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below lower Donchian
-                elif curr_close < curr_lower:
+                # Bearish breakout: price breaks below S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower Donchian (mean reversion)
-            if curr_close < curr_lower:
+            # Exit when price drops below S3 (mean reversion to pivot area)
+            if curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper Donchian (mean reversion)
-            if curr_close > curr_upper:
+            # Exit when price rises above R3 (mean reversion to pivot area)
+            if curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
