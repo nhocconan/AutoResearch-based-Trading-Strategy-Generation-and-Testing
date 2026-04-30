@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d ATR regime filter and volume confirmation
-# Camarilla R3/S3 levels provide precise intraday support/resistance from prior day's range
-# Breakout above R3 or below S3 indicates strong momentum
-# 1d ATR ratio (ATR(5)/ATR(20) > 1.2) identifies expanding volatility regimes favorable for breakouts
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w ADX trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance based on prior week's range
+# Breakout above R3 or below S3 with volume confirmation indicates strong momentum
+# 1w ADX > 25 ensures alignment with strong weekly trend to avoid whipsaw in ranging markets
 # Volume spike (2.0x 24-period average) confirms institutional participation
 # Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_Camarilla_R3S3_1dATR_Ratio_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1wADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,22 +29,30 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d ATR ratio for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate 1w ADX for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
-    # ATR(5) and ATR(20) using Wilder's smoothing
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
     def wilders_smoothing(x, period):
         result = np.full_like(x, np.nan, dtype=float)
         if len(x) < period:
@@ -54,29 +62,38 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    atr5 = wilders_smoothing(tr, 5)
-    atr20 = wilders_smoothing(tr, 20)
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # ATR ratio: ATR(5)/ATR(20) > 1.2 indicates expanding volatility
-    atr_ratio = np.where(atr20 != 0, atr5 / atr20, 0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, (dm_plus_smooth / atr) * 100, 0)
+    di_minus = np.where(atr != 0, (dm_minus_smooth / atr) * 100, 0)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    if len(df_1d) < 2:
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0,
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 1w Camarilla pivot levels (R3, S3)
+    if len(df_1w) < 2:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels based on prior day's OHLC
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    # Camarilla levels based on prior week's OHLC
+    camarilla_r3 = close_1w + ((high_1w - low_1w) * 1.25 / 2)
+    camarilla_s3 = close_1w - ((high_1w - low_1w) * 1.25 / 2)
     
-    # Align to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*6h = 6 days)
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma_24)
     
@@ -84,11 +101,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 24)  # warmup for ATR ratio and volume MA
+    start_idx = max(50, 24)  # warmup for ADX and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr_ratio_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
@@ -102,14 +119,14 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_atr_ratio = atr_ratio_aligned[i]
+        curr_adx = adx_aligned[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike, expanding volatility (ATR ratio > 1.2), and breakout
-            if curr_volume_spike and curr_atr_ratio > 1.2:
+            # Require volume spike and strong trend (ADX > 25)
+            if curr_volume_spike and curr_adx > 25:
                 # Bullish entry: break above R3 with close > R3
                 if curr_close > curr_r3:
                     signals[i] = 0.25
@@ -122,16 +139,16 @@ def generate_signals(prices):
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R3 (breakout fails) OR volatility contracts (ATR ratio < 0.8)
-            if curr_close < curr_r3 or curr_atr_ratio < 0.8:
+            # Exit when price drops below R3 (breakout fails) OR ADX weakens (< 20)
+            if curr_close < curr_r3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above S3 (breakdown fails) OR volatility contracts (ATR ratio < 0.8)
-            if curr_close > curr_s3 or curr_atr_ratio < 0.8:
+            # Exit when price rises above S3 (breakdown fails) OR ADX weakens (< 20)
+            if curr_close > curr_s3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
