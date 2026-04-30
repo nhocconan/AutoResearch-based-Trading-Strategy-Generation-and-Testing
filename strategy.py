@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 12h timeframe for low trade frequency (~12-37 trades/year) to minimize fee drag.
-# Requires price breakout of Camarilla levels, alignment with 1d EMA34 trend, and volume > 2.0x 20-period average.
-# Includes ATR-based stoploss to control drawdown. Designed to work in both bull and bear markets via trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Uses 12h EMA50 for stable trend direction and requires volume > 1.8x 20-period average.
+# Trades only during 08-20 UTC session to avoid low-liquidity periods.
+# Added ATR-based stoploss to limit drawdowns during adverse moves.
+# Designed for low trade frequency (~20-30 trades/year) to minimize fee drag.
+# Camarilla levels provide intraday support/resistance that work in both trending and ranging markets.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,14 +28,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -46,11 +48,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 34  # warmup for EMA34 and ATR
+    start_idx = 50  # warmup for EMA50 and ATR
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or
             np.isnan(atr[i]) or
             not in_session[i]):
             signals[i] = 0.0
@@ -59,13 +61,13 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 2.0x 20-period average
+        # Volume confirmation: volume > 1.8x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > (2.0 * vol_ma_20)
+            volume_confirm = volume[i] > (1.8 * vol_ma_20)
         else:
             volume_confirm = False
         
@@ -109,16 +111,16 @@ def generate_signals(prices):
             camarilla_s3 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, 1d EMA34 uptrend, volume spike
+            # Long: price breaks above Camarilla R3, 12h EMA50 uptrend, volume spike
             if (curr_close > camarilla_r3 and 
-                curr_close > curr_ema_34_1d and 
+                curr_close > curr_ema_50_12h and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Camarilla S3, 1d EMA34 downtrend, volume spike
+            # Short: price breaks below Camarilla S3, 12h EMA50 downtrend, volume spike
             elif (curr_close < camarilla_s3 and 
-                  curr_close < curr_ema_34_1d and 
+                  curr_close < curr_ema_50_12h and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
