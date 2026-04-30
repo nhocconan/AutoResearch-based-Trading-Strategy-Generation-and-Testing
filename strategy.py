@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels provide stronger support/resistance than R1/S1, reducing false breakouts
-# 12h EMA > 50-period EMA ensures alignment with medium-term trend to avoid counter-trend whipsaws
-# Volume spike (2.0x 96-period average) confirms institutional participation on 4h timeframe
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3 with trend filter.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Uses 4h for signal direction (trend via EMA50) and 1d for Camarilla pivot levels (R3/S3)
+# 1h timeframe for precise entry timing on breakouts
+# Volume spike (2.0x 24-period average) confirms institutional participation
+# Session filter (08-20 UTC) reduces noise trades
+# Discrete sizing 0.20 balances profit potential with risk control
+# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
+# Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3
 
-name = "4h_Camarilla_R3S3_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,22 +31,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop (MTF Rule #1)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop (MTF Rule #1)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA50 to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 12h close for EMA comparison (current vs 50 EMA)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Calculate 4h close for EMA comparison (current vs 50 EMA)
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
+    # Load 1d data ONCE before loop (MTF Rule #1)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -53,28 +55,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate 1d Camarilla pivot levels (R3, S3)
     camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.125 / 2)
     camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.125 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 2.0x 96-period average (96*4h = 384h = 16 days)
-    vol_ma_96 = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
-    volume_spike = volume > (2.0 * vol_ma_96)
+    # Volume confirmation: volume > 2.0x 24-period average (24*1h = 24h = 1 day)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 96)  # warmup for volume MA
+    start_idx = max(100, 24)  # warmup for volume MA and indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(close_4h_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma_96[i])):
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
             
@@ -86,27 +89,27 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50 = ema_50_12h_aligned[i]
-        curr_close_12h = close_12h_aligned[i]
+        curr_ema_50 = ema_50_4h_aligned[i]
+        curr_close_4h = close_4h_aligned[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
-        # Determine trend: 12h close > 12h EMA50 = uptrend, < = downtrend
-        is_uptrend = curr_close_12h > curr_ema_50
-        is_downtrend = curr_close_12h < curr_ema_50
+        # Determine trend: 4h close > 4h EMA50 = uptrend, < = downtrend
+        is_uptrend = curr_close_4h > curr_ema_50
+        is_downtrend = curr_close_4h < curr_ema_50
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
                 # Bullish entry: break above R3 in uptrend
                 if is_uptrend and curr_close > curr_r3:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
                     entry_price = curr_close
                 # Bearish entry: break below S3 in downtrend
                 elif is_downtrend and curr_close < curr_s3:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
                     position = -1
                     entry_price = curr_close
         
@@ -116,7 +119,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Exit when price rises above S3 (breakdown fails) OR trend reverses
@@ -124,6 +127,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
