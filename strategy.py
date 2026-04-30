@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d ADX regime filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Strong bullish signal: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong trend) AND volume spike
-# Strong bearish signal: Bull Power < 0 AND Bear Power > 0 AND ADX > 25 AND volume spike
-# Uses 1d timeframe for trend filter (ADX) and 6h for Elder Ray calculation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance based on prior day's range
+# Breakout above R3 or below S3 with volume confirmation indicates strong momentum
+# 1d ADX > 25 ensures alignment with strong daily trend to avoid whipsaw
+# Volume spike (2.0x 24-period average) confirms institutional participation
 # Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Using 12h timeframe to reduce trade frequency and avoid fee drag while capturing multi-day moves.
 
-name = "6h_ElderRay_1dADX25_VolumeSpike_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,21 +30,13 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate 1d ADX for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    
-    # EMA13 calculation
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Align EMA13 to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    
-    # Calculate 1d ADX for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = high_1d - low_1d
@@ -83,16 +76,25 @@ def generate_signals(prices):
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align ADX to 6h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Elder Ray on 6h timeframe
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    bull_power = high - ema13_aligned
-    bear_power = low - ema13_aligned
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*6h = 6 days)
+    # Camarilla levels based on prior day's OHLC
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma_24)
     
@@ -105,8 +107,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(ema13_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -117,36 +118,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_adx = adx_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and strong trend (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Strong bullish: Bull Power > 0 AND Bear Power < 0
-                if curr_bull_power > 0 and curr_bear_power < 0:
+                # Bullish entry: break above R3 with close > R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Strong bearish: Bull Power < 0 AND Bear Power > 0
-                elif curr_bull_power < 0 and curr_bear_power > 0:
+                # Bearish entry: break below S3 with close < S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when bull power turns negative OR bear power becomes positive OR ADX weakens (< 20)
-            if curr_bull_power <= 0 or curr_bear_power >= 0 or curr_adx < 20:
+            # Exit when price drops below R3 (breakout fails) OR ADX weakens (< 20)
+            if curr_close < curr_r3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when bull power becomes positive OR bear power turns negative OR ADX weakens (< 20)
-            if curr_bull_power >= 0 or curr_bear_power <= 0 or curr_adx < 20:
+            # Exit when price rises above S3 (breakdown fails) OR ADX weakens (< 20)
+            if curr_close > curr_s3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
