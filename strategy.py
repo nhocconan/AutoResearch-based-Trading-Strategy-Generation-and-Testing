@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze + 12h EMA50 Trend + Volume Spike Confirmation
-# Bollinger Band Squeeze (low volatility contraction) precedes explosive moves in both bull and bear markets
-# 12h EMA50 filter ensures we trade in the direction of the intermediate-term trend
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla R3/S3 levels act as strong daily support/resistance where breakouts often continue
+# 1d EMA34 filter ensures we only trade in the direction of the higher timeframe trend
 # Volume spike (2.0x 20-period average) confirms institutional participation and reduces false breakouts
-# Works in bull markets via upside breakouts and bear markets via downside breakouts
+# Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3
 # Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_BBand_Squeeze_12hEMA50_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,28 +29,27 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop (MTF Rule #1)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop (MTF Rule #1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2.0
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma_20 + (std_20 * bb_std)
-    bb_lower = sma_20 - (std_20 * bb_std)
-    bb_width = (bb_upper - bb_lower) / sma_20  # Normalized bandwidth
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Band Squeeze: width below 20-period average width
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma
+    daily_range = high_1d - low_1d
+    camarilla_r3 = close_1d + daily_range * 1.1 / 4
+    camarilla_s3 = close_1d - daily_range * 1.1 / 4
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,12 +59,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 50, 20, 20)  # warmup for EMA50, BBands, and volume MA
+    start_idx = max(100, 34, 20)  # warmup for EMA34, Camarilla, and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(bb_width_ma[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -77,37 +76,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
-        curr_bb_upper = bb_upper[i]
-        curr_bb_lower = bb_lower[i]
-        curr_bb_squeeze = bb_squeeze[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_camarilla_r3 = camarilla_r3_aligned[i]
+        curr_camarilla_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require Bollinger Band Squeeze AND volume spike
-            if curr_bb_squeeze and curr_volume_spike:
-                # Bullish entry: break above upper Bollinger Band AND above 12h EMA50 (uptrend)
-                if curr_high > curr_bb_upper and curr_close > curr_ema_50_12h:
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish entry: break above Camarilla R3 AND above 1d EMA34 (uptrend)
+                if curr_high > curr_camarilla_r3 and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below lower Bollinger Band AND below 12h EMA50 (downtrend)
-                elif curr_low < curr_bb_lower and curr_close < curr_ema_50_12h:
+                # Bearish entry: break below Camarilla S3 AND below 1d EMA34 (downtrend)
+                elif curr_low < curr_camarilla_s3 and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below middle Bollinger Band (20-period SMA)
-            if curr_close < sma_20[i]:
+            # Exit when price drops below Camarilla S3 (breakout fails)
+            if curr_close < curr_camarilla_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above middle Bollinger Band (20-period SMA)
-            if curr_close > sma_20[i]:
+            # Exit when price rises above Camarilla R3 (breakdown fails)
+            if curr_close > curr_camarilla_r3:
                 signals[i] = 0.0
                 position = 0
             else:
