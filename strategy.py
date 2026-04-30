@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter
-# Donchian breakouts on daily timeframe capture major trend shifts with lower frequency.
-# Volume confirmation on 12h ensures participation, 1d EMA(34) aligns with medium-term trend.
-# Designed for low trade frequency (~12-37/year) to minimize fee drag and improve bear market performance.
-# Uses 12h timeframe with 1d HTF for structure and trend filter.
+# Hypothesis: 4h strategy using Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike confirmation
+# Camarilla levels provide high-probability reversal points in ranging markets and breakout levels in trending markets.
+# R3 (resistance 3) and S3 (support 3) are the strongest levels for breakouts.
+# 1d EMA(34) ensures we only take breakouts in the direction of the daily trend.
+# Volume spike confirms institutional participation.
+# Designed for 4h timeframe with 1d HTF to achieve ~20-40 trades/year (80-160 total over 4 years).
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
 
-name = "12h_DailyDonchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Donchian calculation and trend filter
+    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d Camarilla levels (R3, R4, S3, S4)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate upper and lower bands
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Camarilla formula: 
+    # R4 = close + ((high - low) * 1.1/2)
+    # R3 = close + ((high - low) * 1.1/4)
+    # S3 = close - ((high - low) * 1.1/4)
+    # S4 = close - ((high - low) * 1.1/2)
+    cam_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
+    cam_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    cam_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    cam_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
     
-    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    cam_r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
+    cam_s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
     
     # Calculate 1d EMA(34) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
@@ -66,48 +75,48 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_upper = donchian_upper_aligned[i]
-        curr_lower = donchian_lower_aligned[i]
+        curr_r3 = cam_r3_aligned[i]
+        curr_s3 = cam_s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d Donchian upper with 1d uptrend
-                if curr_close > curr_upper and curr_close > curr_ema:
+                # Bullish entry: price breaks above 1d Camarilla R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Donchian lower with 1d downtrend
-                elif curr_close < curr_lower and curr_close < curr_ema:
+                # Bearish entry: price breaks below 1d Camarilla S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Donchian lower
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Camarilla S3
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_lower:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel
-            elif curr_close >= (curr_upper + curr_lower) / 2.0:
-                signals[i] = 0.10  # reduce position
+            # Take profit: price reaches 1d Camarilla R4
+            elif curr_close >= cam_r4_aligned[i]:
+                signals[i] = 0.0  # full exit
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Donchian upper
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Camarilla R3
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_upper:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel
-            elif curr_close <= (curr_upper + curr_lower) / 2.0:
-                signals[i] = -0.10  # reduce position
+            # Take profit: price reaches 1d Camarilla S4
+            elif curr_close <= cam_s4_aligned[i]:
+                signals[i] = 0.0  # full exit
             else:
                 signals[i] = -0.25
     
