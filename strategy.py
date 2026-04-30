@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla R3/S3 levels with volume confirmation and 1d trend filter
-# Camarilla pivots identify key intraday support/resistance where institutional order flow clusters.
-# Breakouts above R3 or below S3 with volume spike indicate strong institutional participation.
+# Hypothesis: 6h strategy using 1w Camarilla R3/S3 levels with volume confirmation and 1d trend filter
+# Weekly Camarilla pivots identify key institutional support/resistance where large order flow clusters.
+# Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
 # 1d EMA(50) ensures alignment with longer-term trend to avoid counter-trend trades.
-# Session filter (08-20 UTC) reduces noise trades outside active market hours.
-# Designed for moderate trade frequency (~30-60/year) to balance opportunity and fee drag on 1h timeframe.
-# Uses 1h timeframe as primary, with 4h for signal direction and 1d for trend filter.
+# Designed for low trade frequency (<40/year) to minimize fee drag in both bull and bear markets.
+# Uses 6h timeframe as requested, with 1w HTF for Camarilla levels and 1d HTF for trend filter.
 
-name = "1h_Camarilla_R3S3_Breakout_4hDir_1dTrend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for Camarilla calculation (signal direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load 1w data ONCE before loop for weekly Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (R3, S3, R4, S4)
-    # Based on previous 4h bar's high, low, close
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1w Camarilla levels (R3, S3, R4, S4)
+    # Based on previous week's high, low, close
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate pivot point (PP)
-    pp = (high_4h + low_4h + close_4h) / 3.0
+    pp = (high_1w + low_1w + close_1w) / 3.0
     # Calculate Camarilla levels
-    r3 = pp + (high_4h - low_4h) * 1.1 / 4.0
-    s3 = pp - (high_4h - low_4h) * 1.1 / 4.0
-    r4 = pp + (high_4h - low_4h) * 1.1 / 2.0
-    s4 = pp - (high_4h - low_4h) * 1.1 / 2.0
+    r3 = pp + (high_1w - low_1w) * 1.1 / 4.0
+    s3 = pp - (high_1w - low_1w) * 1.1 / 4.0
+    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
+    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_4h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_4h, s4)
+    # Align weekly Camarilla levels to 6h timeframe (wait for completed 1w bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -78,20 +73,6 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA(50)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position == 1:
-                # Close long at session end if still in session boundary
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                # Close short at session end if still in session boundary
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Volume confirmation: volume > 2.0x 30-period average
         vol_ma_30 = np.mean(volume[max(0, i-30):i])
         volume_spike = volume[i] > (2.0 * vol_ma_30)
@@ -105,47 +86,45 @@ def generate_signals(prices):
         curr_s4 = s4_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike, session, and trend alignment
+            # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 4h Camarilla R3 with 1d uptrend
+                # Bullish entry: price breaks above weekly Camarilla R3 with 1d uptrend
                 if curr_close > curr_r3 and curr_close > curr_ema:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 4h Camarilla S3 with 1d downtrend
+                # Bearish entry: price breaks below weekly Camarilla S3 with 1d downtrend
                 elif curr_close < curr_s3 and curr_close < curr_ema:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 4h Camarilla S3
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks weekly Camarilla S3
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 4h Camarilla R4
+            # Take profit: price reaches weekly Camarilla R4
             elif curr_close >= curr_r4:
-                signals[i] = 0.0  # full exit
-                position = 0
+                signals[i] = 0.10  # reduce position
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 4h Camarilla R3
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks weekly Camarilla R3
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 4h Camarilla S4
+            # Take profit: price reaches weekly Camarilla S4
             elif curr_close <= curr_s4:
-                signals[i] = 0.0  # full exit
-                position = 0
+                signals[i] = -0.10  # reduce position
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
