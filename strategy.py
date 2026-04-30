@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1w Camarilla R3/S3 levels with volume confirmation and 4h trend filter
-# Weekly Camarilla pivots identify key support/resistance where institutional order flow clusters on a higher timeframe.
-# Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
-# 4h EMA(50) ensures alignment with intermediate-term trend to avoid counter-trend trades.
-# Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
-# Weekly HTF provides more robust levels than daily, reducing false breakouts.
+# Hypothesis: 1d strategy using weekly Donchian(20) breakout with volume confirmation and weekly EMA(21) trend filter
+# Weekly Donchian channels identify key structural support/resistance levels where institutional order flow accumulates.
+# Breakouts above weekly upper channel or below weekly lower channel with volume spike indicate strong institutional participation.
+# Weekly EMA(21) ensures alignment with longer-term trend to avoid counter-trend trades.
+# Designed for low trade frequency (15-30/year) to minimize fee drag in both bull and bear markets.
+# Uses discrete position sizes (0.0, ±0.25) to reduce churn and fees.
 
-name = "4h_Camarilla_R3S3_Weekly_4hTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_1wTrend_VolumeSpike_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 100:
+    n = len(prices)
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,34 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Camarilla calculation
+    # Load weekly data ONCE before loop for Donchian calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Camarilla levels (R3, S3, R4, S4)
-    # Based on previous week's high, low, close
+    # Calculate weekly Donchian channels (20-period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    
+    # Upper channel: highest high over last 20 weekly bars
+    upper_channel = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low over last 20 weekly bars
+    lower_channel = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian channels to daily timeframe (wait for completed weekly bar)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
+    
+    # Calculate weekly EMA(21) for trend filter
     close_1w = df_1w['close'].values
-    
-    # Calculate pivot point (PP)
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    # Calculate Camarilla levels
-    r3 = pp + (high_1w - low_1w) * 1.1 / 4.0
-    s3 = pp - (high_1w - low_1w) * 1.1 / 4.0
-    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
-    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
-    
-    # Align Camarilla levels to 4h timeframe (wait for completed 1w bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # Calculate 4h EMA(50) for trend filter
-    close_s = pd.Series(close)
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -64,7 +58,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50)
+    start_idx = 20  # warmup for Donchian(20)
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 30-period average
@@ -72,51 +66,49 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
-        curr_ema = ema_50[i]
+        curr_upper = upper_channel_aligned[i]
+        curr_lower = lower_channel_aligned[i]
+        curr_ema = ema_21_1w_aligned[i]
         curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1w Camarilla R3 with 4h uptrend
-                if curr_close > curr_r3 and curr_close > curr_ema:
+                # Bullish entry: price breaks above weekly upper channel with weekly uptrend
+                if curr_close > curr_upper and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1w Camarilla S3 with 4h downtrend
-                elif curr_close < curr_s3 and curr_close < curr_ema:
+                # Bearish entry: price breaks below weekly lower channel with weekly downtrend
+                elif curr_close < curr_lower and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks 1w Camarilla S3
+            # Stoploss: 2.5 * ATR below entry price OR price breaks weekly lower channel
             if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s3:
+            elif curr_close < curr_lower:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1w Camarilla R4
-            elif curr_close >= curr_r4:
+            # Take profit: price reaches 1.5x weekly channel width above upper channel
+            elif curr_close >= curr_upper + 1.5 * (curr_upper - curr_lower):
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks 1w Camarilla R3
+            # Stoploss: 2.5 * ATR above entry price OR price breaks weekly upper channel
             if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r3:
+            elif curr_close > curr_upper:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1w Camarilla S4
-            elif curr_close <= curr_s4:
+            # Take profit: price reaches 1.5x weekly channel width below lower channel
+            elif curr_close <= curr_lower - 1.5 * (curr_upper - curr_lower):
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
