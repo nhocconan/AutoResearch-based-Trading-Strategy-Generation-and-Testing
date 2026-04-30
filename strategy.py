@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above R3, 1d EMA34 uptrend, and volume > 2.0x 20-bar avg.
 # Short when price breaks below S3, 1d EMA34 downtrend, and volume > 2.0x 20-bar avg.
 # Exit on opposite Camarilla level touch (R3 for long exit, S3 for short exit).
 # Camarilla levels provide intraday support/resistance based on prior day's range.
 # Combined with 1d EMA34 trend filter and volume confirmation to reduce false signals.
-# Timeframe: 4h as per experiment guidelines.
+# Timeframe: 12h as per experiment guidelines.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
