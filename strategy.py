@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R extreme with 1d EMA50 trend filter and volume confirmation (>1.8x average)
-# Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years)
-# Williams %R identifies oversold/overbought conditions: long when %R < -80, short when %R > -20
-# 1d EMA50 provides trend filter to avoid counter-trend trades
-# Volume confirmation >1.8x 20-period average ensures breakout legitimacy
-# Discrete position sizing: 0.25 for entries to limit fee drag
-# Works in all markets: mean reversion in ranging markets, trend filter prevents false signals in trends
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x average)
+# Uses 4h timeframe with proven Donchian breakout structure
+# 1d EMA50 provides robust trend filter for bull/bear markets
+# Volume confirmation >1.5x 20-period average reduces false breakouts
+# ATR-based trailing stoploss to limit drawdown
+# Discrete position sizing: 0.30 for entries to balance return and risk
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_WilliamsR_Extreme_1dEMA50_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Volume_ATR_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +25,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Williams %R (14-period) using previous bar to avoid look-ahead
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using previous bar's data for calculation
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate Donchian channels (20-period) from previous bar to avoid look-ahead
+    # Upper band = highest high of previous 20 bars
+    # Lower band = lowest low of previous 20 bars
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate rolling max/min for Williams %R
-    highest_high = pd.Series(prev_high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(prev_low).rolling(window=14, min_periods=14).min().values
+    # Breakout conditions
+    breakout_up = close > donchian_upper
+    breakout_down = close < donchian_lower
     
-    # Williams %R formula
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - prev_close) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when no range
-    )
-    
-    # Extreme conditions: oversold (< -80) and overbought (> -20)
-    oversold = williams_r < -80
-    overbought = williams_r > -20
-    
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -62,50 +49,94 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
-    start_idx = max(100, 14, 20, 50)  # warmup for Williams %R (14), volume MA (20), EMA (50)
+    start_idx = max(100, 20, 50, 14)  # warmup for Donchian (20), EMA (50), ATR (14)
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or 
+        if (np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
+        curr_breakout_up = breakout_up[i]
+        curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on Williams %R extreme with volume confirmation and trend filter
+            # Only trade on breakout with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish: oversold (%R < -80) + price above 1d EMA50
-                if curr_williams_r < -80 and curr_close > curr_ema_50_1d:
-                    signals[i] = 0.25
+                # Bullish breakout: price above Donchian upper + above 1d EMA50
+                if curr_breakout_up and curr_close > curr_ema_50_1d:
+                    signals[i] = 0.30
                     position = 1
-                # Bearish: overbought (%R > -20) + price below 1d EMA50
-                elif curr_williams_r > -20 and curr_close < curr_ema_50_1d:
-                    signals[i] = -0.25
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
+                # Bearish breakout: price below Donchian lower + below 1d EMA50
+                elif curr_breakout_down and curr_close < curr_ema_50_1d:
+                    signals[i] = -0.30
                     position = -1
+                    entry_price = curr_close
+                    atr_at_entry = curr_atr
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns to neutral range (-50) or opposite extreme
-            if curr_williams_r > -50:  # exited oversold condition
+            # Trailing stoploss: exit if price drops below highest price since entry - 2.5 * ATR
+            # Track highest price since entry
+            if i == start_idx or position != 1:  # Reset tracking when position changes
+                highest_since_entry = curr_close
+            else:
+                highest_since_entry = max(getattr(generate_signals, 'highest_since_entry', curr_close), curr_close)
+            
+            # Update highest price since entry
+            generate_signals.highest_since_entry = highest_since_entry
+            
+            # Exit conditions
+            if curr_close < (highest_since_entry - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                if hasattr(generate_signals, 'highest_since_entry'):
+                    delattr(generate_signals, 'highest_since_entry')
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral range (-50) or opposite extreme
-            if curr_williams_r < -50:  # exited overbought condition
+            # Trailing stoploss: exit if price rises above lowest price since entry + 2.5 * ATR
+            # Track lowest price since entry
+            if i == start_idx or position != -1:  # Reset tracking when position changes
+                lowest_since_entry = curr_close
+            else:
+                lowest_since_entry = min(getattr(generate_signals, 'lowest_since_entry', curr_close), curr_close)
+            
+            # Update lowest price since entry
+            generate_signals.lowest_since_entry = lowest_since_entry
+            
+            # Exit conditions
+            if curr_close > (lowest_since_entry + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
+                if hasattr(generate_signals, 'lowest_since_entry'):
+                    delattr(generate_signals, 'lowest_since_entry')
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
