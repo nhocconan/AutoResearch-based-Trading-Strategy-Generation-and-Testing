@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike.
-# Uses Camarilla pivot levels (R3, S3) from 1d data, with trend alignment from 12h EMA50
-# and volume > 2.0x 20-bar average for confirmation. Enter long when price breaks above
-# R3 in bullish trend, short when breaks below S3 in bearish trend. ATR(14) trailing stop
-# at 2.0x for risk management. Discrete position sizing at ±0.25. Target: 75-200 trades
-# over 4 years (19-50/year). Works in both bull and bear markets by requiring HTF trend
-# alignment and volume confirmation to filter false breakouts.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels (R3, S3) calculated from 1d high/low/close, with trend alignment from 1d EMA34
+# and volume > 2.0x 20-bar average for confirmation. Enter long when price breaks above R3 in bullish trend,
+# short when breaks below S3 in bearish trend. ATR(14) trailing stop at 2.0x for risk management.
+# Discrete position sizing at ±0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by requiring HTF trend alignment to avoid counter-trend whipsaws.
+# Camarilla levels act as dynamic support/resistance that adapt to volatility, effective in ranging and trending markets.
 
-name = "4h_Camarilla_R3S3_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,32 +29,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for Camarilla pivot levels (R3, S3)
+    # Load 1d data ONCE before loop for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 1d data
-    # R3 = Close + 1.1 * (High - Low) * 1.1 / 2
-    # S3 = Close - 1.1 * (High - Low) * 1.1 / 2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) * 1.1 / 2)
-    camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) * 1.1 / 2)
+    # Calculate Camarilla levels from 1d data
+    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    hl_range = df_1d['high'] - df_1d['low']
+    camarilla_r3 = df_1d['close'] + (hl_range * 1.1 / 4)
+    camarilla_s3 = df_1d['close'] - (hl_range * 1.1 / 4)
+    r3_values = camarilla_r3.values
+    s3_values = camarilla_s3.values
     
-    # Align Camarilla levels to primary timeframe (1d -> 4h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 1d indicators to primary timeframe (12h -> 1d: 2 bars per 1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_values)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -74,13 +68,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(2, 50, atr_period, 20) + 1  # warmup
+    start_idx = max(34, 20, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -90,24 +84,24 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, 12h EMA50 uptrend, volume confirmation
+            # Long: price breaks above R3, 1d EMA34 uptrend, volume confirmation
             if (curr_close > curr_r3 and 
-                curr_close > curr_ema_50_12h and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below S3, 12h EMA50 downtrend, volume confirmation
+            # Short: price breaks below S3, 1d EMA34 downtrend, volume confirmation
             elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_50_12h and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
