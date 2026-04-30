@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike >2.0x
-# Elder Ray measures bull/bear power relative to EMA13 to detect trend strength
-# 1d EMA34 ensures alignment with higher timeframe trend; volume spike confirms conviction
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: trend following with pullback entries, volume filter avoids fakeouts
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike >1.8x
+# Camarilla R3/S3 provides reliable intraday support/resistance levels
+# 1d EMA50 ensures alignment with primary trend; volume spike confirms participation
+# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
+# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA50 trend filter avoids counter-trend trades
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,70 +23,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray (13-period)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate ATR for volatility (14-period)
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr2.iloc[0] = 0
+    tr3.iloc[0] = 0
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull power: high minus EMA13
-    bear_power = low - ema13   # Bear power: low minus EMA13
-    
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 30-period average
+    # Volume confirmation: volume > 1.8x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    volume_confirm = volume > (1.8 * vol_ma_30)
+    
+    # Precompute daily data for Camarilla levels
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 13)  # warmup: need 96 6h bars for daily levels
+    start_idx = max(48, 30, 14, 50)  # warmup: need 48 12h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i]) or
+            np.isnan(daily_high_aligned[i]) or
+            np.isnan(daily_low_aligned[i]) or
+            np.isnan(daily_close_aligned[i])):
             signals[i] = 0.0
             continue
             
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
-        curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_close = close[i]
+        curr_volume_confirm = volume_confirm[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        
+        # Use previous day's levels (shift by 1)
+        prev_high = daily_high_aligned[i-1]
+        prev_low = daily_low_aligned[i-1]
+        prev_close = daily_close_aligned[i-1]
         
         if position == 0:  # Flat - look for new entries
-            if curr_volume_confirm:
-                # Bullish entry: strong bull power + price above 1d EMA34
-                if curr_bull > 0 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish entry: strong bear power + price below 1d EMA34
-                elif curr_bear < 0 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
-                    position = -1
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                s3 = prev_close - (range_val * 1.1 / 4)
+                
+                # Only trade with volume confirmation and trend filter
+                if curr_volume_confirm:
+                    # Bullish entry: price breaks above R3 + above 1d EMA50
+                    if curr_high > r3 and curr_close > curr_ema_50_1d:
+                        signals[i] = 0.25
+                        position = 1
+                    # Bearish entry: price breaks below S3 + below 1d EMA50
+                    elif curr_low < s3 and curr_close < curr_ema_50_1d:
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:  # Long position
-            # Exit: bull power turns negative (momentum fading)
-            if curr_bull <= 0:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks below S3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                s3 = prev_close - (range_val * 1.1 / 4)
+                if curr_low < s3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bear power turns positive (momentum fading)
-            if curr_bear >= 0:
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks above R3
+            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+                range_val = prev_high - prev_low
+                r3 = prev_close + (range_val * 1.1 / 4)
+                if curr_high > r3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
