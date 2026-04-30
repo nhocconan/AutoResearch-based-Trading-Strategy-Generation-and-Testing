@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>2.0x average)
-# Uses 1d timeframe to reduce trade frequency (target: 30-100 total trades over 4 years)
-# 1w EMA50 provides strong trend filter for bull/bear markets
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation
+# Uses 6h timeframe to balance trade frequency (target: 50-150 total trades over 4 years)
+# 12h EMA50 provides trend filter for bull/bear markets
 # Volume confirmation >2.0x 20-period average reduces false breakouts
+# Camarilla R3/S3 levels from 1d provide institutional support/resistance
 # Discrete position sizing: 0.25 for entries to limit fee drag
 # Works in all regimes: breakouts occur in all markets, volume confirms legitimacy, trend filter avoids counter-trend
 
-name = "1d_Donchian20_1wEMA50_Volume_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,69 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels (20-period) from previous bar to avoid look-ahead
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d Camarilla levels (R3, S3) from previous day to avoid look-ahead
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Breakout conditions
-    breakout_up = close > donchian_high
-    breakout_down = close < donchian_low
+    # Camarilla calculation: based on previous day's OHLC
+    ph = df_1d['high'].shift(1).values  # previous day high
+    pl = df_1d['low'].shift(1).values   # previous day low
+    pc = df_1d['close'].shift(1).values # previous day close
+    
+    # Camarilla levels
+    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
+    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
+    
+    # Align to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
-    
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 50)  # warmup for Donchian (20), volume MA (20), EMA (50)
+    start_idx = max(100, 20, 50)  # warmup for volume MA (20), EMA (50)
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_breakout_up = breakout_up[i]
-        curr_breakout_down = breakout_down[i]
-        curr_volume_confirm = volume_confirm[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on breakout with volume confirmation and trend filter
-            if curr_volume_confirm:
-                # Bullish breakout: price above Donchian high + above 1w EMA50
-                if curr_breakout_up and curr_close > curr_ema_50_1w:
+            # Only trade on Camarilla breakout with volume spike and trend filter
+            if curr_volume_spike:
+                # Bullish breakout: price above R3 + above 12h EMA50
+                if curr_close > curr_r3 and curr_close > curr_ema_50_12h:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below Donchian low + below 1w EMA50
-                elif curr_breakout_down and curr_close < curr_ema_50_1w:
+                # Bearish breakout: price below S3 + below 12h EMA50
+                elif curr_close < curr_s3 and curr_close < curr_ema_50_12h:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price closes below Donchian low (reversal) or above Donchian high (take profit)
-            if curr_close < donchian_low[i] or curr_close > donchian_high[i]:
+            # Exit: price closes below S3 (reversal) or above R3 (take profit)
+            if curr_close < curr_s3 or curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (reversal) or below Donchian low (take profit)
-            if curr_close > donchian_high[i] or curr_close < donchian_low[i]:
+            # Exit: price closes above R3 (reversal) or below S3 (take profit)
+            if curr_close > curr_r3 or curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
