@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Donchian channels capture volatility breakouts; 1w EMA34 ensures alignment with long-term trend
-# Volume >2.0x 30-period average confirms breakout legitimacy
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via smoothed MAs
+# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish)
+# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume > 1.5x 20-period average confirms participation
+# Discrete sizing (0.25) minimizes fee churn; target 50-150 total trades over 4 years
+# Works in bull/bear: Alligator catches emerging trends, volume filter ensures legitimacy,
+# 1d EMA34 trend filter avoids whipsaws in ranging markets
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +26,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss (20-period)
+    # Calculate ATR for volatility (14-period)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr2.iloc[0] = 0
     tr3.iloc[0] = 0
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=20, min_periods=20).mean().values
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # Calculate daily Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all smoothed with SMMA
+    # SMMA is similar to EMA but with different smoothing factor
+    def smma(values, period):
+        """Smoothed Moving Average"""
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    jaw = smma(close, 13)  # Jaw (blue) - 13-period SMMA
+    teeth = smma(close, 8)  # Teeth (red) - 8-period SMMA
+    lips = smma(close, 5)   # Lips (green) - 5-period SMMA
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30, 20)  # warmup: need 34 for weekly EMA, 30 for volume MA, 20 for Donchian
+    start_idx = max(100, 20, 34)  # warmup: need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(jaw[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_close = close[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1w = ema_34_1w_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_close = close[i]
         
         if position == 0:  # Flat - look for new entries
             if curr_volume_confirm:
-                # Bullish entry: price breaks above Donchian high + above weekly EMA34
-                if curr_high > donchian_high[i] and curr_close > curr_ema_34_1w:
+                # Bullish entry: Lips > Teeth > Jaw (bullish alignment) + above 1d EMA34
+                if curr_lips > curr_teeth > curr_teeth and curr_lips > curr_jaw and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian low + below weekly EMA34
-                elif curr_low < donchian_low[i] and curr_close < curr_ema_34_1w:
+                # Bearish entry: Lips < Teeth < Jaw (bearish alignment) + below 1d EMA34
+                elif curr_lips < curr_teeth < curr_jaw and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Stoploss: close below Donchian low - 1.0*ATR
-            if curr_close < (donchian_low[i] - 1.0 * atr[i]):
+            # Exit: Alligator lines cross (Lips < Teeth or Teeth < Jaw) - trend weakening
+            if curr_lips < curr_teeth or curr_teeth < curr_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: close above Donchian high + 1.0*ATR
-            if curr_close > (donchian_high[i] + 1.0 * atr[i]):
+            # Exit: Alligator lines cross (Lips > Teeth or Teeth > Jaw) - trend weakening
+            if curr_lips > curr_teeth or curr_teeth > curr_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
