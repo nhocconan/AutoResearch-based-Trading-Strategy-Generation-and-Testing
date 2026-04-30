@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator strategy with 1d trend filter and volume confirmation.
-# Williams Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) with future shifts.
-# Long when Lips > Teeth > Jaw (bullish alignment) and price > Lips, with 1d uptrend (close > 1d EMA34) and volume > 1.5x 20-bar avg.
-# Short when Lips < Teeth < Jaw (bearish alignment) and price < Lips, with 1d downtrend (close < 1d EMA34) and volume > 1.5x 20-bar avg.
-# Exit when Alligator lines cross (Lips crosses Teeth) or price crosses Jaw.
-# Uses proven Alligator structure with strict volume confirmation and 1d EMA34 trend filter to limit trades (target 12-37/year).
-# Timeframe: 12h, HTF: 1d as per experiment guidelines.
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
+# Alligator consists of three SMAs (jaw=13, teeth=8, lips=5) shifted forward.
+# Long when lips > teeth > jaw (bullish alignment) with 1d uptrend (close > 1d EMA34) and volume > 1.5x 20-bar avg.
+# Short when lips < teeth < jaw (bearish alignment) with 1d downtrend (close < 1d EMA34) and volume > 1.5x 20-bar avg.
+# Exit when Alligator lines cross (jaws cross lips) or volume drops below threshold.
+# Uses proven Williams Alligator for trend identification with strict volume confirmation to limit trades.
+# Timeframe: 4h, HTF: 1d as per experiment guidelines.
 
-name = "12h_WilliamsAlligator_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dEMA34_Trend_VolumeConfirmation_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,13 +35,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA shifted 8 bars forward
-    # Teeth: 8-period SMMA shifted 5 bars forward  
-    # Lips: 5-period SMMA shifted 3 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Williams Alligator on 4h timeframe
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,60 +54,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(jaw.iloc[i]) or np.isnan(teeth.iloc[i]) or np.isnan(lips.iloc[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_lips = lips[i]
-        curr_teeth = teeth[i]
-        curr_jaw = jaw[i]
+        curr_lips = lips.iloc[i]
+        curr_teeth = teeth.iloc[i]
+        curr_jaw = jaw.iloc[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Bullish Alligator: Lips > Teeth > Jaw
-            bullish_alignment = curr_lips > curr_teeth > curr_jaw
-            # Bearish Alligator: Lips < Teeth < Jaw
-            bearish_alignment = curr_lips < curr_teeth < curr_jaw
-            
-            # Long: bullish alignment, price > Lips, 1d uptrend, volume spike
-            if (bullish_alignment and 
-                curr_close > curr_lips and 
+            # Long: bullish Alligator alignment (lips > teeth > jaw), uptrend, volume spike
+            if (curr_lips > curr_teeth and curr_teeth > curr_jaw and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment, price < Lips, 1d downtrend, volume spike
-            elif (bearish_alignment and 
-                  curr_close < curr_lips and 
+            # Short: bearish Alligator alignment (lips < teeth < jaw), downtrend, volume spike
+            elif (curr_lips < curr_teeth and curr_teeth < curr_jaw and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit conditions: 
-            # 1. Lips crosses below Teeth (Alligator weakening)
-            # 2. Price crosses below Jaw (trend change)
-            lips_cross_below_teeth = curr_lips < curr_teeth and lips[i-1] >= teeth[i-1] if i > 0 else False
-            price_cross_below_jaw = curr_close < curr_jaw and close[i-1] >= jaw[i-1] if i > 0 else False
-            
-            if lips_cross_below_teeth or price_cross_below_jaw:
+            # Exit condition: Alligator lines cross (jaw crosses lips) or volume drops
+            if (curr_jaw >= curr_lips) or (not curr_volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions:
-            # 1. Lips crosses above Teeth (Alligator weakening)
-            # 2. Price crosses above Jaw (trend change)
-            lips_cross_above_teeth = curr_lips > curr_teeth and lips[i-1] <= teeth[i-1] if i > 0 else False
-            price_cross_above_jaw = curr_close > curr_jaw and close[i-1] <= jaw[i-1] if i > 0 else False
-            
-            if lips_cross_above_teeth or price_cross_above_jaw:
+            # Exit condition: Alligator lines cross (jaw crosses lips) or volume drops
+            if (curr_jaw <= curr_lips) or (not curr_volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
