@@ -35,28 +35,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar (use OHLC of completed 1d candle)
-    # Camarilla levels based on previous day's range
-    # H3 = close + 1.1*(high-low)/2
-    # L3 = close - 1.1*(high-low)/2
-    # R3 = close + 1.1*(high-low)/2
-    # S3 = close - 1.1*(high-low)/2
-    # Actually Camarilla: R4=close+1.5*(high-low), R3=close+1.1*(high-low), etc.
-    # We'll use R3 and S3 for breakout, H3 and L3 for exit
-    
-    # Get previous 1d OHLC (completed daily bar)
-    # Since we're on 4h timeframe, we need to reference completed 1d bars
-    # Use the 1d data we already loaded
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)  # Same as R3 in basic Camarilla
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)  # Same as S3 in basic Camarilla
-    
-    # Actually, standard Camarilla:
+    # Standard Camarilla:
     # R4 = close + 1.5*(high-low)
     # R3 = close + 1.1*(high-low)
     # R2 = close + 0.55*(high-low)
@@ -66,6 +45,9 @@ def generate_signals(prices):
     # S2 = close - 0.55*(high-low)
     # S3 = close - 1.1*(high-low)
     # S4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
