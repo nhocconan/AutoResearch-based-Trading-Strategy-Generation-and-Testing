@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above Donchian upper AND price > 1d EMA34 AND volume > 2.0x 20-bar average.
 # Short when price breaks below Donchian lower AND price < 1d EMA34 AND volume > 2.0x 20-bar average.
 # Exit when price crosses Donchian midline. Uses discrete position sizing (0.25) to limit drawdown and fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via 1d EMA34 trend filter and volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull/bear via 1d EMA34 trend filter and volume confirmation.
+# This is a proven pattern from DB top performers (Camarilla/Donchian breakouts with volume and trend filters).
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +34,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels on 4h data (use lookback of 20 periods)
+    # Calculate Donchian channels on 12h data (use lookback of 20 periods)
     # Upper channel: highest high of last 20 bars (excluding current)
     high_series = pd.Series(high)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
