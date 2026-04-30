@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Uses Camarilla pivot levels (R3, S3) from 12h data for precise entry/exit levels,
-# with 12h EMA50 for trend alignment and volume > 1.5x 20-bar average for confirmation.
-# Enter long when price breaks above R3 in bullish trend with volume spike,
-# enter short when price breaks below S3 in bearish trend with volume spike.
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Uses Donchian channel from 1d data, with trend alignment from 1w EMA50 and volume > 1.5x 20-bar average.
+# Enter long when price breaks above upper Donchian band in bullish 1w trend, with volume confirmation.
+# Enter short when price breaks below lower Donchian band in bearish 1w trend, with volume confirmation.
 # ATR(14) trailing stop at 2.5x for risk management. Discrete position sizing at ±0.25.
-# Target: 100-200 total trades over 4 years (25-50/year). Works in both bull and bear markets
-# by requiring 12h trend alignment and institutional Camarilla levels.
+# Target: 30-100 total trades over 4 years (7-25/year). Works in both bull and bear markets
+# by requiring HTF trend alignment and institutional Donchian levels.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,30 +29,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop for Camarilla pivot and EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need at least 50 periods for EMA50
+    # Load 1d data ONCE before loop for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R3, S3) on 12h data
-    # Typical Price = (High + Low + Close) / 3
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    # Pivot Point = Typical Price
-    pp = typical_price.values
-    # R3 = PP + (High - Low) * 1.1 / 2
-    r3 = pp + (df_12h['high'] - df_12h['low']).values * 1.1 / 2
-    # S3 = PP - (High - Low) * 1.1 / 2
-    s3 = pp - (df_12h['high'] - df_12h['low']).values * 1.1 / 2
+    # Calculate Donchian components on 1d data
+    period20_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    upper_band = period20_high
+    lower_band = period20_low
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Donchian bands to primary timeframe (1d -> 1d: identity but using helper for consistency)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Align Camarilla levels and EMA50 to primary timeframe (4h)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # ATR(14) for volatility and stoploss on primary timeframe
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # ATR(14) for volatility and stoploss
     atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -71,13 +71,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 20) + 1  # warmup
+    start_idx = max(20, 50, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(upper_band_aligned[i]) or
+            np.isnan(lower_band_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -87,24 +87,28 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_upper = upper_band_aligned[i]
+        curr_lower = lower_band_aligned[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
+        # Determine trend: bullish when price > EMA50, bearish when price < EMA50
+        trend_bullish = curr_close > curr_ema_50_1w
+        trend_bearish = curr_close < curr_ema_50_1w
+        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, price > EMA50 (bullish trend), volume confirmation
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_50_12h and 
+            # Long: price breaks above upper band, bullish 1w trend, volume confirmation
+            if (curr_close > curr_upper and 
+                trend_bullish and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below S3, price < EMA50 (bearish trend), volume confirmation
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: price breaks below lower band, bearish 1w trend, volume confirmation
+            elif (curr_close < curr_lower and 
+                  trend_bearish and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
