@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter
-# Donchian breakouts capture strong momentum moves. Volume confirmation ensures breakout validity.
-# 1d EMA(34) filters trades to align with higher-timeframe trend, reducing false breakouts.
-# Designed for low trade frequency (~12-37/year on 12h) to minimize fee drag and improve bear market performance.
-# Uses discrete position sizing (0.0, ±0.25) to reduce churn.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout zones. R3/S3 are strong resistance/support.
+# 1d EMA(34) ensures trades align with daily trend, reducing false signals in ranging markets.
+# Volume spike (>2.0x 20-bar average) confirms breakout momentum.
+# Designed for low trade frequency (~20-50/year on 4h) to minimize fee drag and improve bear market performance.
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,9 +28,21 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 1d bar (using typical price)
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    typical_price_s = pd.Series(typical_price)
+    typical_price_ma_5 = typical_price_s.rolling(window=5, min_periods=5).mean().values
+    typical_price_ma_5_aligned = align_htf_to_ltf(prices, df_1d, typical_price_ma_5)
+    
+    # Calculate Camarilla R3 and S3 levels
+    # R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low)
+    camarilla_range = df_1d['high'].values - df_1d['low'].values
+    camarilla_r3 = df_1d['close'].values + 1.1 * camarilla_range
+    camarilla_s3 = df_1d['close'].values - 1.1 * camarilla_range
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate 1d EMA(34) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
@@ -48,7 +60,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34) and Donchian
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 20-period average
@@ -60,47 +72,51 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_highest = highest_high[i]
-        curr_lowest = lowest_low[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above Donchian upper band with 1d uptrend
-                if curr_close > curr_highest and curr_close > curr_ema:
+                # Bullish entry: price breaks above Camarilla R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below Donchian lower band with 1d downtrend
-                elif curr_close < curr_lowest and curr_close < curr_ema:
+                # Bearish entry: price breaks below Camarilla S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks Donchian lower band
+            # Stoploss: 2.0 * ATR below entry price OR price breaks Camarilla S3 (reversal)
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_lowest:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Donchian upper band (mean reversion tendency)
-            elif curr_close >= curr_highest:
+            # Take profit: price reaches Camarilla R4 (strong resistance)
+            camarilla_r4 = df_1d['close'].values[(i//24) if (i//24) < len(df_1d) else -1] + 1.5 * camarilla_range[(i//24) if (i//24) < len(df_1d) else -1]
+            camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+            if curr_close >= camarilla_r4_aligned[i]:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks Donchian upper band
+            # Stoploss: 2.0 * ATR above entry price OR price breaks Camarilla R3 (reversal)
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_highest:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Donchian lower band (mean reversion tendency)
-            elif curr_close <= curr_lowest:
+            # Take profit: price reaches Camarilla S4 (strong support)
+            camarilla_s4 = df_1d['close'].values[(i//24) if (i//24) < len(df_1d) else -1] - 1.5 * camarilla_range[(i//24) if (i//24) < len(df_1d) else -1]
+            camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+            if curr_close <= camarilla_s4_aligned[i]:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
