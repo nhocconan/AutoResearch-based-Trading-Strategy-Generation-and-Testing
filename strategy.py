@@ -8,6 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Breakouts above R3 in uptrend or below S3 in downtrend with volume spike signal institutional participation.
 # Designed for low trade frequency (~20-50/year on 4h) to minimize fee drag while capturing strong directional moves.
 # Works in bull markets via breakout continuation and in bear markets via mean-reversion at extreme levels.
+# Focus on BTC/ETH as primary targets with SOL as secondary.
 
 name = "4h_1dCamarilla_R3S3_Breakout_12hEMA34_VolumeSpike_v1"
 timeframe = "4h"
