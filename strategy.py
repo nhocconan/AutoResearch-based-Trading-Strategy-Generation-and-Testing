@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (1.5x avg)
-# Donchian channels provide clear structure for breakouts in all market regimes
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian channels provide clear trend-following structure with proven robustness
 # 1d EMA34 filters for medium-term trend alignment to avoid counter-trend trades
-# Volume confirmation (>1.5x 20-period average) ensures breakout legitimacy
-# Target: 75-200 total trades over 4 years (19-50/year) for optimal fee drag balance
+# Volume confirmation (>1.5x average) ensures breakout legitimacy with controlled frequency
+# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out by EMA)
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume_v2"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,20 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels from previous 20 bars (avoid look-ahead)
-    # Upper = max(high[i-20:i]), Lower = min(low[i-20:i])
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper_prev = np.roll(high_ma_20, 1)
-    donchian_lower_prev = np.roll(low_ma_20, 1)
-    donchian_upper_prev[0] = np.nan
-    donchian_lower_prev[0] = np.nan
+    # Calculate Donchian channels (20-period) - use previous bar to avoid look-ahead
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Breakout conditions
-    breakout_up = close > donchian_upper_prev
-    breakout_down = close < donchian_lower_prev
+    breakout_up = close > high_20
+    breakout_down = close < low_20
     
-    # Volume confirmation: volume > 1.5x 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
@@ -55,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_upper_prev[i]) or 
-            np.isnan(donchian_lower_prev[i]) or
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
             np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
@@ -81,16 +77,16 @@ def generate_signals(prices):
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price closes below Donchian lower (reversal) or above Donchian upper (take profit)
-            if curr_close < donchian_lower_prev[i] or curr_close > donchian_upper_prev[i]:
+            # Exit: price closes below Donchian lower (trend reversal)
+            if curr_close < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper (reversal) or below Donchian lower (take profit)
-            if curr_close > donchian_upper_prev[i] or curr_close < donchian_lower_prev[i]:
+            # Exit: price closes above Donchian upper (trend reversal)
+            if curr_close > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
