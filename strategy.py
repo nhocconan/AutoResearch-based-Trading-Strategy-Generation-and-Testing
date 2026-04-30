@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
-# Camarilla levels provide intraday support/resistance - breakouts indicate momentum shifts
-# 1w EMA50 provides long-term trend filter to avoid counter-trend trades
-# Volume confirmation (>1.3x average) ensures breakout legitimacy with less frequency than 1.5x
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
+# Camarilla levels from daily chart provide key support/resistance - breakouts indicate momentum shifts
+# 1w EMA50 provides long-term trend filter to avoid counter-trend trades in bear markets
+# Volume confirmation (>1.5x average) ensures breakout legitimacy while minimizing trades
 # Works in bull/bear: breakouts occur in all regimes, volume confirms legitimacy, trend filter reduces false signals
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels (R3, S3) from previous bar
+    # Calculate 1d Camarilla levels (R3, S3) from previous bar
     # R3 = Close + 1.1*(High-Low)
     # S3 = Close - 1.1*(High-Low)
     hl_range = high - low
@@ -41,9 +41,9 @@ def generate_signals(prices):
     breakout_up = close > camarilla_r3_prev
     breakout_down = close < camarilla_s3_prev
     
-    # Volume confirmation: volume > 1.3x 20-period average (less strict to get more trades)
+    # Volume confirmation: volume > 1.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     # Calculate 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
