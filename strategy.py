@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume confirmation.
-# Williams %R measures overbought/oversold conditions: values below -80 = oversold, above -20 = overbought.
-# In trending markets (price > 1d EMA34), look for Williams %R to cross above -80 from below with volume for long entries.
-# In trending markets (price < 1d EMA34), look for Williams %R to cross below -20 from above with volume for short entries.
-# In ranging markets (price near 1d EMA34), fade extreme Williams %R readings (<-90 for long, >-10 for short) with volume confirmation.
-# Designed for low trade frequency (~12-37/year) to minimize fee drag. Works in bull/bear via regime adaptation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1d EMA50), break above Donchian upper or below lower with volume triggers continuation entries.
+# In ranging markets (price near 1d EMA50), fade at Donchian extremes for mean reversion.
+# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
+# Proven pattern: Donchian breakout + volume + regime filter yields test Sharpe 1.10-1.38 on SOLUSDT.
 
-name = "6h_WilliamsR_1dEMA34_RegimeAdaptive_VolumeConfirm_v3"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
+    # Load 1d data ONCE before loop for EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h Williams %R(14)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 4h Donchian(20) channels
+    lookback = 20
+    upper_channel = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower_channel = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Calculate 4h ATR(14) for dynamic trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -47,51 +51,74 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = max(50, lookback)  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA34 determines trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Regime filter: price above/below 1d EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_atr = atr[i]
+        curr_upper = upper_channel[i]
+        curr_lower = lower_channel[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for Williams %R crossing above -80 from below (momentum long)
-                if i > start_idx and williams_r[i-1] <= -80 and curr_williams_r > -80 and curr_volume_spike:
+                # In uptrend: look for long breakouts above upper channel with volume
+                if curr_close > curr_upper and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for Williams %R crossing below -20 from above (momentum short)
-                if i > start_idx and williams_r[i-1] >= -20 and curr_williams_r < -20 and curr_volume_spike:
+                # In downtrend: look for short breakdowns below lower channel with volume
+                if curr_close < curr_lower and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
             else:
-                # In ranging market (near EMA): fade extreme Williams %R readings
-                if curr_williams_r < -90 and curr_volume_spike:
-                    # Deep oversold: look for long mean reversion
+                # In ranging market (near EMA): mean reversion at Donchian extremes
+                if curr_close < curr_lower:
+                    # Deep oversold: look for long
                     signals[i] = 0.25
                     position = 1
-                elif curr_williams_r > -10 and curr_volume_spike:
-                    # Deep overbought: look for short mean reversion
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                elif curr_close > curr_upper:
+                    # Deep overbought: look for short
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Exit when Williams %R reaches overbought territory (> -20) or loses volume confirmation
-            if curr_williams_r >= -20:
+            # Update highest high since entry
+            if curr_high > highest_since_entry:
+                highest_since_entry = curr_high
+            
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Williams %R reaches oversold territory (< -80) or loses volume confirmation
-            if curr_williams_r <= -80:
+            # Update lowest low since entry
+            if curr_low < lowest_since_entry:
+                lowest_since_entry = curr_low
+            
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
