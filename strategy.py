@@ -3,56 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Uses Camarilla pivot levels (R3/S3) from prior 1w for structure-based breakout entries.
-# 1w EMA50 for higher timeframe trend direction filter.
-# Volume confirmation (>2.0x 20-bar avg) to reduce false breakouts.
-# ATR-based trailing stoploss (exit when price moves against position by 2.5*ATR).
-# Discrete position sizing at ±0.25 to balance capture and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) within 12h limits.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based position sizing.
+# Uses Donchian channel (20-period high/low) for structure-based breakout entries.
+# 1d EMA50 for higher timeframe trend direction filter to avoid counter-trend trades.
+# ATR(14) for volatility-adjusted position sizing (inverse vol) and stoploss.
+# Discrete position sizing at ±0.25 to minimize fee drag while maintaining edge.
+# Target: 80-150 total trades over 4 years (20-38/year) within 4h limits.
 # Works in bull markets via breakout continuation and in bear markets via volatility expansion capture.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_ATRVolSizing_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Pre-compute session hours (08-20 UTC) to avoid look-ahead
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1w data ONCE before loop for EMA50 trend filter and Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w_vals = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d_vals = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels (R3, S3) from prior 1w
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    camarilla_r3 = close_1w + (1.1 * (high_1w - low_1w) / 2)
-    camarilla_s3 = close_1w - (1.1 * (high_1w - low_1w) / 2)
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align 1w indicators to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    
-    # ATR(14) for volatility and stoploss
+    # ATR(14) for volatility and position sizing
     atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -60,25 +50,20 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    # Align 1d indicators to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 60  # warmup for EMA50 and ATR
+    start_idx = max(60, donchian_period, atr_period)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
             np.isnan(atr[i]) or
-            np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
@@ -86,45 +71,37 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_upper = highest_high[i]
+        curr_lower = lowest_low[i]
         curr_atr = atr[i]
-        curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, above 1w EMA50, volume spike
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_50_1w and 
-                curr_volume_confirm):
-                signals[i] = 0.25
+            # Long: price breaks above Donchian upper band, above 1d EMA50
+            if curr_close > curr_upper and curr_close > curr_ema_50_1d:
+                # ATR-based position sizing: inverse volatility
+                size = min(0.30, 0.015 / curr_atr * 100)  # scales with volatility
+                size = max(0.15, min(size, 0.30))  # clamp to 0.15-0.30
+                signals[i] = size
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_close
-            # Short: price breaks below Camarilla S3, below 1w EMA50, volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_50_1w and 
-                  curr_volume_confirm):
-                signals[i] = -0.25
+            # Short: price breaks below Donchian lower band, below 1d EMA50
+            elif curr_close < curr_lower and curr_close < curr_ema_50_1d:
+                size = min(0.30, 0.015 / curr_atr * 100)
+                size = max(0.15, min(size, 0.30))
+                signals[i] = -size
                 position = -1
-                entry_price = curr_close
-                lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.5*ATR from highest point
-            if curr_close < highest_since_entry - (2.5 * curr_atr):
+            # ATR trailing stop: exit if price drops 2.0*ATR from entry
+            if curr_close < close[i-1] - (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # maintain discrete size
         
         elif position == -1:  # Short position
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.5*ATR from lowest point
-            if curr_close > lowest_since_entry + (2.5 * curr_atr):
+            # ATR trailing stop: exit if price rises 2.0*ATR from entry
+            if curr_close > close[i-1] + (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
