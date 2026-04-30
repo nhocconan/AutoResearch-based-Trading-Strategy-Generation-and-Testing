@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above R3, close > 1d EMA34, and volume > 2.0x 20-bar avg.
 # Short when price breaks below S3, close < 1d EMA34, and volume > 2.0x 20-bar avg.
 # Exit when price re-enters the Camarilla range (between S3 and R3).
-# Uses 12h timeframe for optimal trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Uses 4h timeframe for optimal trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Camarilla levels provide high-probability reversal/breakout points from 1d OHLC.
 # 1d EMA34 filters for higher timeframe trend alignment.
 # Volume confirmation with higher threshold reduces false breakouts.
 # Works in bull markets via breakouts with trend and in bear markets via breakdowns with trend.
+# Target: 75-200 total trades over 4 years.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +39,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d OHLC
-    # Need to align 1d OHLC to 12h bars: use previous completed 1d bar's OHLC
+    # Need to align 1d OHLC to 4h bars: use previous completed 1d bar's OHLC
     prev_close_1d = df_1d['close'].shift(1).values  # previous 1d close
     prev_high_1d = df_1d['high'].shift(1).values    # previous 1d high
     prev_low_1d = df_1d['low'].shift(1).values      # previous 1d low
@@ -54,7 +55,7 @@ def generate_signals(prices):
     R4 = close_1d + range_hl * 1.1 / 2
     S4 = close_1d - range_hl * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
