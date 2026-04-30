@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3, close > 1d EMA50, and volume > 2.0x 20-bar avg.
-# Short when price breaks below S3, close < 1d EMA50, and volume > 2.0x 20-bar avg.
-# Exit when price re-enters the Camarilla range (between S3 and R3).
-# Uses 12h timeframe for optimal trade frequency (target: 12-37 trades/year) to minimize fee drag.
-# Camarilla levels provide high-probability reversal/breakout points from 1d OHLC.
-# 1d EMA50 filters for higher timeframe trend alignment.
-# Volume confirmation with higher threshold reduces false breakouts.
-# Works in bull markets via breakouts with trend and in bear markets via breakdowns with trend.
+# Hypothesis: 4h Williams %R mean reversal with 1d ADX trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold), price > 1d EMA50 (uptrend), and volume > 1.8x 20-bar avg.
+# Short when Williams %R > -20 (overbought), price < 1d EMA50 (downtrend), and volume > 1.8x 20-bar avg.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses 4h timeframe for optimal trade frequency (target: 30-60 trades/year) to minimize fee drag.
+# Williams %R identifies extreme momentum exhaustion points.
+# 1d EMA50 filters for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume confirmation with moderate threshold reduces false signals while keeping trades sufficient.
+# Works in bull markets via oversold bounces in uptrend and in bear markets via overbought rejections in downtrend.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanRev_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,80 +37,61 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # Need to align 1d OHLC to 12h bars: use previous completed 1d bar's OHLC
-    prev_close_1d = df_1d['close'].shift(1).values  # previous 1d close
-    prev_high_1d = df_1d['high'].shift(1).values    # previous 1d high
-    prev_low_1d = df_1d['low'].shift(1).values      # previous 1d low
-    prev_open_1d = df_1d['open'].shift(1).values    # previous 1d open
+    # Calculate Williams %R on 4h data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Typical price for Camarilla calculation
-    typical_price = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_hl = prev_high_1d - prev_low_1d
-    
-    # Camarilla levels
-    R3 = close_1d + range_hl * 1.1 / 4
-    S3 = close_1d - range_hl * 1.1 / 4
-    R4 = close_1d + range_hl * 1.1 / 2
-    S4 = close_1d - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (higher threshold for fewer trades)
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 70  # warmup for EMA50 and volume MA
+    start_idx = 60  # warmup for Williams %R (14) + EMA50 (50) + volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_williams_r = williams_r[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
-        curr_R3 = R3_aligned[i]
-        curr_S3 = S3_aligned[i]
-        curr_R4 = R4_aligned[i]
-        curr_S4 = S4_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, close > 1d EMA50, volume spike
-            if (curr_close > curr_R3 and 
+            # Long: Williams %R oversold (< -80), price > 1d EMA50 (uptrend), volume spike
+            if (curr_williams_r < -80 and 
                 curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, close < 1d EMA50, volume spike
-            elif (curr_close < curr_S3 and 
+            # Short: Williams %R overbought (> -20), price < 1d EMA50 (downtrend), volume spike
+            elif (curr_williams_r > -20 and 
                   curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price re-enters the Camarilla range (below R3)
-            if curr_close < curr_R3:
+            # Exit condition: Williams %R crosses above -50 (momentum weakening)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price re-enters the Camarilla range (above S3)
-            if curr_close > curr_S3:
+            # Exit condition: Williams %R crosses below -50 (momentum weakening)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
