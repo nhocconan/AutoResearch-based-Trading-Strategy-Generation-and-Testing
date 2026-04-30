@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses tighter Camarilla levels (R3/S3) for more precise entries, reducing trade frequency vs R4/S4.
-# Requires alignment with 1d EMA34 trend and volume > 1.8x 20-bar average for confirmation.
-# ATR(14) trailing stop at 2.5x for wider stops in volatile markets.
-# Discrete position sizing at ±0.25 to minimize fee churn. Target: 50-150 total trades over 4 years (12-38/year).
-# This strategy focuses on BTC/ETH by requiring higher timeframe trend alignment and institutional levels.
-# Camarilla R3/S3 levels act as strong breakout points with less noise than outer levels.
-# Added volume regime filter to avoid low-volume false breakouts and improved trend filter strength.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses Donchian channel breakouts for clear entry/exit signals with strong trend alignment.
+# Volume confirmation (>1.8x 20-bar average) filters false breakouts.
+# ATR(14) trailing stop at 2.0x for risk control.
+# Discrete position sizing at ±0.25 to minimize fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year).
+# Works in both bull and bear markets by requiring 1d EMA50 trend alignment,
+# preventing counter-trend entries that fail in ranging/bear conditions.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v3"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,29 +30,23 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla pivots
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels from prior 1d OHLC
-    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    # We use R3 and S3 for breakout logic (tighter levels than R4/S4)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 1d timeframe
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_20_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_20_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels for each day
-    camarilla_r3 = daily_close + 1.1 * (daily_high - daily_low) * 1.1 / 4
-    camarilla_s3 = daily_close - 1.1 * (daily_high - daily_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (no additional delay needed as these are based on completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Donchian levels to 4h timeframe (no additional delay needed as these are based on completed 1d bar)
+    donchian_20_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_20_high)
+    donchian_20_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_20_low)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -66,52 +60,46 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # Volume regime filter: avoid extremely low volume periods that cause false breakouts
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_regime = volume > (0.5 * vol_ma_50)  # Avoid dead volume periods
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 34, atr_period, 20) + 1  # warmup
+    start_idx = max(50, 50, 20, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
-        # Skip if indicators not available or outside session or volume regime
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        # Skip if indicators not available or outside session
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(donchian_20_high_aligned[i]) or
+            np.isnan(donchian_20_low_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
-            np.isnan(volume_regime[i]) or
-            not in_session[i] or
-            not volume_regime[i]):
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_donchian_high = donchian_20_high_aligned[i]
+        curr_donchian_low = donchian_20_low_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, above 1d EMA34, volume confirmation
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price breaks above Donchian upper band, above 1d EMA50, volume confirmation
+            if (curr_close > curr_donchian_high and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Camarilla S3, below 1d EMA34, volume confirmation
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price breaks below Donchian lower band, below 1d EMA50, volume confirmation
+            elif (curr_close < curr_donchian_low and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -121,8 +109,8 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.5*ATR from highest point
-            if curr_close < highest_since_entry - (2.5 * curr_atr):
+            # ATR trailing stop: exit if price drops 2.0*ATR from highest point
+            if curr_close < highest_since_entry - (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,8 +119,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.5*ATR from lowest point
-            if curr_close > lowest_since_entry + (2.5 * curr_atr):
+            # ATR trailing stop: exit if price rises 2.0*ATR from lowest point
+            if curr_close > lowest_since_entry + (2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
