@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses ATR trailing stop (1.5x) for risk management. Designed for low trade frequency (~12-25/year)
-# to minimize fee drag. Camarilla R3/S3 levels from 1d provide stronger support/resistance than 12h
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses ATR trailing stop (1.8x) for risk management. Designed for low trade frequency (~20-40/year)
+# to minimize fee drag. Camarilla R3/S3 levels from 1d provide stronger support/resistance than 4h
 # in ranging markets, while 1d EMA34 trend filter avoids counter-trend entries. Volume confirmation
 # ensures breakouts have institutional participation. This combination aims to work in both bull
 # and bear markets by focusing on structure-based entries with strict filters.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,20 +44,20 @@ def generate_signals(prices):
     r3 = pivot + range_1d * 1.1 / 4
     s3 = pivot - range_1d * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 12h ATR(14) for dynamic trailing stop
+    # Calculate 4h ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.8x 20-period average (balanced to reduce trades)
+    # Volume confirmation: volume > 2.0x 20-period average (tight to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -101,8 +101,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 1.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 1.5 * curr_atr:
+            # Trailing stop: 1.8 * ATR below highest since entry
+            if curr_close < highest_since_entry - 1.8 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,8 +113,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 1.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 1.5 * curr_atr:
+            # Trailing stop: 1.8 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 1.8 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
