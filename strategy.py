@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1d HTF for Camarilla pivot calculation (R3/S3) for stronger breakout signals and 1d EMA34 for trend to filter false breakouts.
-# Long when price breaks above 1d R3 in uptrend (12h close > 1d EMA34) with volume spike (>1.8x average).
-# Short when price breaks below 1d S3 in downtrend (12h close < 1d EMA34) with volume spike.
-# Designed for low trade frequency (~12-37/year on 12h) to minimize fee drag while capturing strong directional moves.
-# Uses volume confirmation with moderate threshold (>1.8x average) to balance signal quality and trade count.
+# Long when price breaks above 1d R3 in uptrend (4h close > 1d EMA34) with volume spike (>2.0x average).
+# Short when price breaks below 1d S3 in downtrend (4h close < 1d EMA34) with volume spike.
+# Designed for low trade frequency (~20-40/year on 4h) to minimize fee drag while capturing strong directional moves.
+# Uses volume confirmation with strict threshold (>2.0x average) to reduce trade count and improve signal quality.
 # Stoploss at 2.0 * ATR and take profit at 1.5 * ATR to allow for quick profit-taking and risk control.
 # Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at 1d pivot levels.
 # Focus on BTC/ETH as primary targets.
 
-name = "12h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -49,7 +49,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate ATR(14) for dynamic stoploss on 12h
+    # Calculate ATR(14) for dynamic stoploss on 4h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -63,14 +63,14 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 1.8x 50-period average (moderate to balance trades)
+        # Volume confirmation: volume > 2.0x 50-period average (strict to reduce trades)
         if i >= 50:
             vol_ma_50 = np.mean(volume[i-50:i])
         elif i > 0:
             vol_ma_50 = np.mean(volume[:i])
         else:
             vol_ma_50 = 0
-        volume_spike = volume[i] > (1.8 * vol_ma_50) if i > 0 else False
+        volume_spike = volume[i] > (2.0 * vol_ma_50) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
