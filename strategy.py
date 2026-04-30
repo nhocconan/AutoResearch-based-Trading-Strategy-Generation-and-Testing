@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter
-# Camarilla pivots from 1d provide strong support/resistance levels. Breakouts beyond R3/S3
-# indicate momentum continuation. Volume > 2.0x 20-period average confirms breakout strength.
-# Choppiness Index (CHOP) > 61.8 = ranging market (mean revert at S3/R3), CHOP < 38.2 = trending
-# (breakout continuation). Only take breakout trades in trending regimes to avoid false breakouts
-# in chop. Works in bull via breakout longs, in bear via breakout shorts. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter
+# Camarilla pivots from 1d provide intraday support/resistance levels. R3/S3 are strong reversal zones;
+# breakouts beyond R4/S4 indicate continuation with momentum. 1w ADX > 20 filters for trending markets only on weekly timeframe.
+# Volume spike (2.0x 20-period average) confirms breakout validity. Works in bull via breakout longs, in bear via breakout shorts.
+# Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_ChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wADX20_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,62 +28,80 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
+    # Calculate 1d Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 1:
         return np.zeros(n)
+    # Use previous day's OHLC for today's Camarilla levels
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     pivot = (prev_high + prev_low + prev_close) / 3.0
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
     r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
     s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
-    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
     s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    # Calculate 1w ADX(14) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh = df_1d['high'].rolling(window=14, min_periods=14).max().values
-    ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    dm_plus = np.where(
+        (df_1w['high'] - df_1w['high'].shift(1)) > (df_1w['low'].shift(1) - df_1w['low']),
+        np.maximum(df_1w['high'] - df_1w['high'].shift(1), 0),
+        0
+    )
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    dm_minus = np.where(
+        (df_1w['low'].shift(1) - df_1w['low']) > (df_1w['high'] - df_1w['high'].shift(1)),
+        np.maximum(df_1w['low'].shift(1) - df_1w['low'], 0),
+        0
+    )
     
-    # CHOP = 100 * log10(atr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero when hh == ll
-    range_hl = hh - ll
-    chop = np.full_like(atr_sum, 50.0, dtype=float)  # default to neutral
-    mask = (range_hl > 0) & (~np.isnan(atr_sum)) & (~np.isnan(range_hl))
-    chop[mask] = 100 * np.log10(atr_sum[mask] / range_hl[mask]) / np.log10(14)
+    # Smoothed +DM and -DM
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d CHOP to 12h timeframe (wait for completed 1d bar)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # +DI and -DI
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1w ADX to 4h timeframe (wait for completed 1w bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for volume MA and CHOP
+    start_idx = max(20, 14)  # warmup for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -95,16 +111,16 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
+        curr_r4 = r4_aligned[i]
         curr_r3 = r3_aligned[i]
         curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
         curr_s4 = s4_aligned[i]
+        curr_adx = adx_aligned[i]
         curr_volume_spike = volume_spike[i]
-        curr_chop = chop_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trending market (CHOP < 38.2)
-            if curr_volume_spike and curr_chop < 38.2:
+            # Require volume spike and trending market (ADX > 20)
+            if curr_volume_spike and curr_adx > 20:
                 # Bullish breakout: price breaks above R4
                 if curr_close > curr_r4:
                     signals[i] = 0.25
@@ -117,7 +133,7 @@ def generate_signals(prices):
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R3 (mean reversion in chop, or take profit in trend)
+            # Exit when price drops below R3 (mean reversion)
             if curr_close < curr_r3:
                 signals[i] = 0.0
                 position = 0
@@ -125,7 +141,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above S3 (mean reversion in chop, or take profit in trend)
+            # Exit when price rises above S3 (mean reversion)
             if curr_close > curr_s3:
                 signals[i] = 0.0
                 position = 0
