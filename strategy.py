@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian(20) breakout with 1d HMA(21) trend filter and volume spike confirmation
-# Uses 1d HTF for Donchian channel calculation (key support/resistance) and HMA trend to reduce whipsaws.
-# Long when price breaks above 1d Donchian upper channel in uptrend (close > HMA21) with volume spike.
-# Short when price breaks below 1d Donchian lower channel in downtrend (close < HMA21) with volume spike.
-# Designed for low trade frequency (~20-35/year on 4h) to minimize fee drag while capturing strong directional moves.
-# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at extreme levels.
+# Hypothesis: 4h strategy using 1d Williams %R extremes with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. In strong trends, extreme readings can precede continuations.
+# Long when Williams %R < -80 (oversold) in 1d uptrend (close > EMA34) with volume spike on 4h.
+# Short when Williams %R > -20 (overbought) in 1d downtrend (close < EMA34) with volume spike on 4h.
+# Uses discrete position sizing (0.25) to minimize fee drag. Designed for low trade frequency (~20-40/year).
+# Works in bull markets by buying oversold pullbacks in uptrends and in bear markets by selling overbought rallies in downtrends.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1dDonchian20_1dHMA21_Trend_VolumeSpike_v1"
+name = "4h_1dWilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,52 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Donchian and HMA calculations
+    # Load 1d data ONCE before loop for Williams %R and EMA calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian Upper = max(high, 20), Donchian Lower = min(low, 20)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 1d Donchian channels to 4h timeframe (wait for 1d bar to close)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Align 1d Williams %R to 4h timeframe (wait for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 1d HMA(21) for trend filter
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    def calculate_wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
+    # Calculate 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    def calculate_hma(values, window):
-        half_window = window // 2
-        sqrt_window = int(np.sqrt(window))
-        
-        wma_half = calculate_wma(values, half_window)
-        wma_full = calculate_wma(values, window)
-        
-        raw_hma = 2 * wma_half - wma_full
-        hma = calculate_wma(raw_hma, sqrt_window)
-        
-        # Pad to original length
-        hma_padded = np.full(len(values), np.nan)
-        start_idx = window - half_window - sqrt_window + 1
-        end_idx = start_idx + len(hma)
-        hma_padded[start_idx:end_idx] = hma
-        
-        return hma_padded
-    
-    hma_21_1d = calculate_hma(close_1d, 21)
-    
-    # Align 1d HMA to 4h timeframe
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    # Align 1d EMA to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for dynamic stoploss on 4h
     tr1 = high[1:] - low[1:]
@@ -83,7 +61,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 100  # warmup for Donchian(20) and HMA(21)
+    start_idx = 100  # warmup for EMA(34) and Williams %R
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 50-period average (strict to reduce trades)
@@ -99,47 +77,46 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_upper = donchian_upper_aligned[i]
-        curr_lower = donchian_lower_aligned[i]
-        curr_hma = hma_21_1d_aligned[i]
+        curr_williams_r = williams_r_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
-            if volume_spike and not np.isnan(curr_hma):
-                # Bullish entry: price breaks above 1d Donchian upper with 1d uptrend (close > HMA21)
-                if curr_close > curr_upper and curr_close > curr_hma:
+            if volume_spike:
+                # Bullish entry: Williams %R < -80 (oversold) in 1d uptrend (close > EMA34)
+                if curr_williams_r < -80 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Donchian lower with 1d downtrend (close < HMA21)
-                elif curr_close < curr_lower and curr_close < curr_hma:
+                # Bearish entry: Williams %R > -20 (overbought) in 1d downtrend (close < EMA34)
+                elif curr_williams_r > -20 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Donchian lower (reversal signal)
+            # Stoploss: 2.0 * ATR below entry price OR Williams %R > -20 (overbought reversal signal)
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_lower:
+            elif curr_williams_r > -20:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1.5x ATR above entry OR touches 1d Donchian upper (mean reversion)
+            # Take profit: price reaches 1.5x ATR above entry OR Williams %R > -80 (exit oversold)
             elif curr_close > entry_price + 1.5 * curr_atr:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Donchian upper (reversal signal)
+            # Stoploss: 2.0 * ATR above entry price OR Williams %R < -80 (oversold reversal signal)
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_upper:
+            elif curr_williams_r < -80:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1.5x ATR below entry OR touches 1d Donchian lower (mean reversion)
+            # Take profit: price reaches 1.5x ATR below entry OR Williams %R < -20 (exit overbought)
             elif curr_close < entry_price - 1.5 * curr_atr:
                 signals[i] = -0.10  # reduce position
             else:
