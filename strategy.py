@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Williams %R(14) for oversold/overbought signals, 1d EMA34 for trend alignment (avoids counter-trend),
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Uses Donchian channel from prior 1d for structure, 1w EMA50 for trend alignment (avoids counter-trend),
 # volume > 1.8x 20-bar average for confirmation, and ATR(14) trailing stop (2.0x) for risk management.
-# Discrete position sizing at ±0.25 to limit fee drag. Target: 80-160 total trades over 4 years (20-40/year).
-# Session filter (08:00-20:00 UTC) to avoid low-liquidity periods.
+# Discrete position sizing at ±0.25 to limit fee drag. Target: 30-80 total trades over 4 years (7-20/year).
+# Works in both bull and bear: trend filter ensures alignment with higher timeframe momentum,
+# while Donchian breakout captures sustained moves; volume confirmation reduces false signals.
 
-name = "4h_WilliamsR_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 1d data ONCE before loop for EMA34 trend filter
+    # Load 1d data ONCE before loop for Donchian calculation (using shift to avoid look-ahead)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 21:  # Need 20 for Donchian + 1 for shift
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d_vals = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Donchian(20) from PRIOR 1d OHLC (shift(1) to avoid look-ahead)
+    high_1d = df_1d['high'].shift(1).values
+    low_1d = df_1d['low'].shift(1).values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d Donchian levels to 1d timeframe (identity alignment since same timeframe)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Williams %R(14) for mean reversion
-    williams_period = 14
-    highest_high = pd.Series(high).rolling(window=williams_period, min_periods=williams_period).max().values
-    lowest_low = pd.Series(low).rolling(window=williams_period, min_periods=williams_period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 51:  # Need 50 for EMA50
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50 for trend filter
+    close_1w_vals = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -65,38 +69,39 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 34  # warmup for EMA34 and Williams %R
+    start_idx = 50  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        # Skip if indicators not available or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or
+        # Skip if indicators not available
+        if (np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
             np.isnan(atr[i]) or
-            np.isnan(volume_confirm[i]) or
-            not in_session[i]):
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_williams_r = williams_r[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_donchian_high = donchian_high_aligned[i]
+        curr_donchian_low = donchian_low_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R oversold (< -80), above 1d EMA34, volume confirmation
-            if (curr_williams_r < -80 and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price breaks above Donchian high, above 1w EMA50, volume confirmation
+            if (curr_close > curr_donchian_high and 
+                curr_close > curr_ema_50_1w and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: Williams %R overbought (> -20), below 1d EMA34, volume confirmation
-            elif (curr_williams_r > -20 and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price breaks below Donchian low, below 1w EMA50, volume confirmation
+            elif (curr_close < curr_donchian_low and 
+                  curr_close < curr_ema_50_1w and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
