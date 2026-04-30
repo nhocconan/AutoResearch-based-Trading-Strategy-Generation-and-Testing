@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-# Uses actual Camarilla pivot calculation from prior 4h candle for structure. Long when price breaks above R1 with
-# 4h uptrend + volume spike. Short when price breaks below S1 with 4h downtrend + volume spike.
-# ATR trailing stop (2.0x) for risk management. Session filter (08-20 UTC) to reduce noise.
-# Targets 60-150 total trades over 4 years (15-37/year) to minimize fee drag on 1h timeframe.
-# Works in both bull and bear markets by requiring alignment with 4h trend and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses actual Camarilla pivot calculation from prior 1d candle. Long when price breaks above R3 with
+# uptrend + volume spike. Short when price breaks below S3 with downtrend + volume spike.
+# ATR trailing stop (2.5x) for risk management. Targets 50-150 trades over 4 years to minimize fee drag.
+# Works in both bull and bear markets by requiring alignment with 1d trend.
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Trend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +22,41 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for EMA50 trend filter and Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla R1 and S1 levels from prior 4h candle (HLC of previous 4h bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load 12h data for Camarilla pivots (prior completed 12h candle)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Shift by 1 to use prior 4h candle's data (completed 4h candle)
-    high_4h_prev = np.concatenate([[np.nan], high_4h[:-1]])
-    low_4h_prev = np.concatenate([[np.nan], low_4h[:-1]])
-    close_4h_prev = np.concatenate([[np.nan], close_4h[:-1]])
+    # Calculate Camarilla R3 and S3 levels from prior 12h candle (HLC of previous 12h bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla R1 and S1 levels for prior 4h candle
-    # Camarilla: R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
-    rng = high_4h_prev - low_4h_prev
-    camarilla_r1 = close_4h_prev + (rng * 1.1 / 12)
-    camarilla_s1 = close_4h_prev - (rng * 1.1 / 12)
+    # Shift by 1 to use prior 12h candle's data (completed 12h candle)
+    high_12h_prev = np.concatenate([[np.nan], high_12h[:-1]])
+    low_12h_prev = np.concatenate([[np.nan], low_12h[:-1]])
+    close_12h_prev = np.concatenate([[np.nan], close_12h[:-1]])
     
-    # Align Camarilla levels to 1h timeframe (wait for prior 4h candle to complete)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Calculate Camarilla R3 and S3 levels for prior 12h candle
+    # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    rng = high_12h_prev - low_12h_prev
+    camarilla_r3 = close_12h_prev + (rng * 1.1 / 4)
+    camarilla_s3 = close_12h_prev - (rng * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe (wait for prior 12h candle to complete)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -76,28 +75,20 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Camarilla
+    start_idx = 50  # warmup for EMA34 and Camarilla
     
     for i in range(start_idx, n):
-        # Skip if not in trading session (08-20 UTC)
-        if not in_session[i]:
-            if position == 1:
-                signals[i] = 0.0
-            elif position == -1:
-                signals[i] = 0.0
-            continue
-        
         # Skip if Camarilla levels not available (first bar)
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]):
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Regime filter: price above/below 4h EMA50 determines trend direction
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
+        # Regime filter: price above/below 1d EMA34 determines trend direction
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
@@ -107,16 +98,16 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long when price breaks above R1 with volume
-                if curr_high > camarilla_r1_aligned[i] and curr_volume_spike:
-                    signals[i] = 0.20
+                # In uptrend: look for long when price breaks above R3 with volume
+                if curr_high > camarilla_r3_aligned[i] and curr_volume_spike:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short when price breaks below S1 with volume
-                if curr_low < camarilla_s1_aligned[i] and curr_volume_spike:
-                    signals[i] = -0.20
+                # In downtrend: look for short when price breaks below S3 with volume
+                if curr_low < camarilla_s3_aligned[i] and curr_volume_spike:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
                     lowest_since_entry = curr_close
@@ -126,23 +117,23 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Update lowest low since entry
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
