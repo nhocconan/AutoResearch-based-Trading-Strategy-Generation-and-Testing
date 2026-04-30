@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla pivot breakout with volume confirmation and 1d EMA(50) trend filter
-# Camarilla pivots on 4h provide intraday support/resistance levels with high win rate.
-# Volume confirmation ensures participation, 1d EMA(50) aligns with medium-term trend.
-# Session filter (08-20 UTC) reduces noise during low-liquidity periods.
-# Designed for 20-40 trades/year on 1h timeframe to minimize fee drag.
-# Uses 1h timeframe with 4h/1d HTF for structure and trend filter.
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels with volume spike confirmation
+# Camarilla R3/S3 levels act as mean reversion zones in ranging markets, while R4/S4 breaks
+# indicate strong momentum continuation. Weekly pivots provide structure, volume confirms
+# participation. Designed for low trade frequency (~10-25/year) to minimize fee drag.
+# Uses 6h timeframe with 1w HTF for Camarilla calculation and 1d EMA(34) for trend filter.
 
-name = "1h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_R3S3_R4S4_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,55 +22,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load 1w data ONCE before loop for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (R3, S3) using previous 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly Camarilla levels (based on previous week's OHLC)
+    # Camarilla formula: 
+    # H4 = close + 1.1*(high-low)/2
+    # L4 = close - 1.1*(high-low)/2
+    # H3 = close + 1.1*(high-low)/4
+    # L3 = close - 1.1*(high-low)/4
+    # H2 = close + 1.1*(high-low)/6
+    # L2 = close - 1.1*(high-low)/6
+    # H1 = close + 1.1*(high-low)/12
+    # L1 = close - 1.1*(high-low)/12
+    # We'll use R3=H3, S3=L3, R4=H4, S4=L4
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True range for 4h
-    tr_4h = np.maximum(high_4h - low_4h, 
-                       np.maximum(np.abs(high_4h - np.roll(close_4h, 1)), 
-                                  np.abs(low_4h - np.roll(close_4h, 1))))
-    tr_4h[0] = high_4h[0] - low_4h[0]  # first bar
+    # Calculate Camarilla levels for each week
+    rng = high_1w - low_1w
+    camarilla_h4 = close_1w + 1.1 * rng / 2.0  # R4
+    camarilla_l4 = close_1w - 1.1 * rng / 2.0  # S4
+    camarilla_h3 = close_1w + 1.1 * rng / 4.0  # R3
+    camarilla_l3 = close_1w - 1.1 * rng / 4.0  # S3
     
-    # Previous 4h bar's OHLC (wait for completed bar)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h[0] = high_4h[0]
-    prev_low_4h[0] = low_4h[0]
-    prev_close_4h[0] = close_4h[0]
+    # Align Camarilla levels to 6h timeframe (wait for completed 1w bar)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Camarilla equations
-    R3 = prev_close_4h + (prev_high_4h - prev_low_4h) * 1.1 / 4
-    S3 = prev_close_4h - (prev_high_4h - prev_low_4h) * 1.1 / 4
-    
-    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
-    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
-    
-    # Load 1d data ONCE before loop for EMA(50) trend filter
+    # Load 1d data for EMA(34) trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
+    # Calculate 1d EMA(34) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic stoploss on 1h
+    # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -82,64 +77,77 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50)
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Volume confirmation: volume > 2.0x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i]) if i >= 20 else np.mean(volume[:i]) if i > 0 else 0
         volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
-        curr_ema = ema_50_1d_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_R3 = R3_aligned[i]
-        curr_S3 = S3_aligned[i]
+        curr_h4 = camarilla_h4_aligned[i]
+        curr_l4 = camarilla_l4_aligned[i]
+        curr_h3 = camarilla_h3_aligned[i]
+        curr_l3 = camarilla_l3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above R3 with 1d uptrend
-                if curr_close > curr_R3 and curr_close > curr_ema:
+                # Bullish entry: price breaks above weekly R4 with 1d uptrend
+                if curr_close > curr_h4 and curr_close > curr_ema:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                # Bearish entry: price breaks below weekly S4 with 1d downtrend
+                elif curr_close < curr_l4 and curr_close < curr_ema:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                # Mean reversion longs at S3 in downtrend
+                elif curr_close <= curr_l3 and curr_close < curr_ema:
                     signals[i] = 0.20
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below S3 with 1d downtrend
-                elif curr_close < curr_S3 and curr_close < curr_ema:
+                # Mean reversion shorts at R3 in uptrend
+                elif curr_close >= curr_h3 and curr_close > curr_ema:
                     signals[i] = -0.20
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks S3
+            # Stoploss: 2.0 * ATR below entry price OR price breaks weekly S4
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_S3:
+            elif curr_close < curr_l4:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches R3
-            elif curr_close >= curr_R3:
-                signals[i] = 0.0  # full exit
+            # Take profit at weekly H3 for mean reversion, or H4 for breakout
+            elif curr_close >= curr_h3 and curr_close < curr_ema:  # mean reversion TP
+                signals[i] = 0.0
+                position = 0
+            elif curr_close >= curr_h4:  # breakout TP
+                signals[i] = 0.10  # reduce position
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks R3
+            # Stoploss: 2.0 * ATR above entry price OR price breaks weekly H4
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_R3:
+            elif curr_close > curr_h4:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches S3
-            elif curr_close <= curr_S3:
-                signals[i] = 0.0  # full exit
+            # Take profit at weekly L3 for mean reversion, or L4 for breakout
+            elif curr_close <= curr_l3 and curr_close > curr_ema:  # mean reversion TP
+                signals[i] = 0.0
+                position = 0
+            elif curr_close <= curr_l4:  # breakout TP
+                signals[i] = -0.10  # reduce position
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
