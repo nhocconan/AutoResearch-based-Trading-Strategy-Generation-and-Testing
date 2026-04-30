@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels from daily data act as strong support/resistance where breakouts often continue
-# 1w EMA50 filter ensures we only trade in the direction of the higher timeframe trend (bull/bear adaptation)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Camarilla R3/S3 levels act as strong intraday support/resistance where breakouts often continue
+# 1w EMA50 filter ensures we only trade in the direction of the higher timeframe trend
 # Volume spike (2.0x 20-period average) confirms institutional participation and reduces false breakouts
 # Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Uses 12h primary timeframe as specified in experiment #110408.
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,12 +39,11 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Calculate 1d Camarilla pivot levels (R3, S3)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
