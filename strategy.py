@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses discrete sizing 0.20 to limit fee drag. Target: 60-150 total trades over 4 years (15-37/year).
-# Camarilla provides intraday support/resistance levels; 1d EMA34 filters counter-trend moves.
-# Volume spike ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Works in both bull and bear via trend filter.
+# Hypothesis: 6h Williams Alligator + Elder Ray power with 1w trend filter
+# Uses Jaw/Teeth/Lips for trend direction, Bull/Bear power for entry timing.
+# 1w EMA50 filter ensures we only trade with the weekly trend to avoid counter-trend whipsaws.
+# Discrete sizing 0.25 to limit fee drag. Target: 60-120 total trades over 4 years (15-30/year).
+# Alligator identifies trendless markets (all lines intertwined) - we avoid those.
+# Elder Ray power confirms bull/bear energy behind moves.
 
-name = "1h_Camarilla_R3S3_1dEMA34_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,109 +23,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Williams Alligator (13,8,5 SMAs with offsets)
+    # Jaw: 13-period SMA, offset 8 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA, offset 5 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA, offset 3 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 1h Camarilla levels (based on prior day's range)
-    df = prices.copy()
-    df['date'] = pd.DatetimeIndex(open_time).date
-    daily_agg = df.groupby('date').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).reset_index()
+    # Calculate Elder Ray Power (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull power: high - EMA13
+    bear_power = low - ema13   # Bear power: low - EMA13
     
-    date_map = {date: i for i, date in enumerate(daily_agg['date'])}
-    daily_high = np.array([daily_agg.loc[daily_agg['date'] == date, 'high'].values[0] 
-                          if date in date_map else np.nan 
-                          for date in pd.DatetimeIndex(open_time).date])
-    daily_low = np.array([daily_agg.loc[daily_agg['date'] == date, 'low'].values[0] 
-                         if date in date_map else np.nan 
-                         for date in pd.DatetimeIndex(open_time).date])
-    daily_close = np.array([daily_agg.loc[daily_agg['date'] == date, 'close'].values[0] 
-                           if date in date_map else np.nan 
-                           for date in pd.DatetimeIndex(open_time).date])
-    
-    hl_range = daily_high - daily_low
-    camarilla_r3 = daily_close + 1.1 * hl_range / 4
-    camarilla_s3 = daily_close - 1.1 * hl_range / 4
-    
-    # Calculate 1d EMA(34) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA(50) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 2.0x 24-period average (strict to reduce trades)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)
-    
-    # ATR for stoploss (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 24, 34, 14)  # warmup
+    start_idx = max(50, 13, 8, 5)  # warmup
     
     for i in range(start_idx, n):
-        # Skip if indicators not ready or outside session
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i]) or
-            np.isnan(atr_14[i]) or not in_session[i]):
+        # Skip if indicators not ready
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_r3 = camarilla_r3[i]
-        curr_s3 = camarilla_s3[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_volume_spike = volume_spike[i]
-        curr_atr = atr_14[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
+        
+        # Alligator alignment: check if lines are separated (trending market)
+        # Bullish alignment: Lips > Teeth > Jaw
+        # Bearish alignment: Jaw > Teeth > Lips
+        bullish_aligned = curr_lips > curr_teeth and curr_teeth > curr_jaw
+        bearish_aligned = curr_jaw > curr_teeth and curr_teeth > curr_lips
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on volume spike with Camarilla break and 1d EMA34 trend filter
-            if curr_volume_spike:
-                # Bullish: Close breaks above R3 + close above 1d EMA34
-                if curr_close > curr_r3 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.20
+            # Only trade with weekly trend filter and Alligator alignment
+            if bullish_aligned and curr_close > curr_ema_50_1w:
+                # Long: Bull power positive and increasing
+                if curr_bull_power > 0 and curr_bull_power > bull_power[i-1]:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish: Close breaks below S3 + close below 1d EMA34
-                elif curr_close < curr_s3 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.20
+            elif bearish_aligned and curr_close < curr_ema_50_1w:
+                # Short: Bear power negative and decreasing
+                if curr_bear_power < 0 and curr_bear_power < bear_power[i-1]:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2 * ATR below entry
-            stop_loss = entry_price - 2.0 * curr_atr
-            # Exit: Stoploss hit OR close drops below S3 OR loses 1d trend
-            if curr_low <= stop_loss or curr_close < curr_s3 or curr_close < curr_ema_34_1d:
+            # Exit: Alligator reverses OR bear power becomes strong
+            if not bullish_aligned or curr_bear_power < -0.5 * np.std(bear_power[max(0,i-50):i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2 * ATR above entry
-            stop_loss = entry_price + 2.0 * curr_atr
-            # Exit: Stoploss hit OR close rises above R3 OR loses 1d trend
-            if curr_high >= stop_loss or curr_close > curr_r3 or curr_close > curr_ema_34_1d:
+            # Exit: Alligator reverses OR bull power becomes strong
+            if not bearish_aligned or curr_bull_power > 0.5 * np.std(bull_power[max(0,i-50):i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
