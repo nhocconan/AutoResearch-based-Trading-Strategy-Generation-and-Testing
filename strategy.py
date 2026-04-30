@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Ichimoku Cloud (Tenkan/Kijun) with 1d trend filter
-# Ichimoku Cloud acts as dynamic support/resistance; TK cross with cloud filter captures momentum
-# aligned with higher timeframe trend. Works in bull/bear markets by requiring
-# 1d EMA50 alignment to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h strategy using 1d Camarilla R3/S3 levels with 4h trend filter and volume confirmation
+# Camarilla R3/S3 act as strong daily support/resistance; breakouts with volume and 4h trend alignment
+# capture institutional moves. Designed to work in both bull and bear markets by requiring
+# volume confirmation and trend alignment to avoid false breakouts. Target: 75-200 total trades over 4 years.
 
-name = "6h_Ichimoku_TK_Cross_1dTrend_Filter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_4hTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,93 +22,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Ichimoku calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:  # need 26*2 for Ichimoku
-        return np.zeros(n)
-    
-    # Calculate Ichimoku components on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Align Ichimoku components to 6h timeframe (wait for completed 12h bar)
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
-    
-    # Calculate 1d EMA(50) for trend filter
+    # Load 1d data ONCE before loop for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 1d Camarilla levels using prior 1d bar (HLC of previous day)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Camarilla levels based on prior 1d bar (exclude current)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # first bar has no prior
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    # Calculate Camarilla levels
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2  # R3
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2  # S3
+    camarilla_h5 = prev_close + 1.1 * (prev_high - prev_low)      # R4
+    camarilla_l5 = prev_close - 1.1 * (prev_high - prev_low)      # S4
+    
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    
+    # Calculate 4h EMA(50) for trend filter
+    close_s = pd.Series(close)
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate ATR(14) for dynamic position sizing and stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 100  # warmup for Ichimoku calculations
+    start_idx = 50  # warmup for EMA(50)
     
     for i in range(start_idx, n):
-        curr_close = close[i]
-        curr_tenkan = tenkan_aligned[i]
-        curr_kijun = kijun_aligned[i]
-        curr_senkou_a = senkou_a_aligned[i]
-        curr_senkou_b = senkou_b_aligned[i]
-        curr_ema_1d = ema_50_1d_aligned[i]
+        # Volume confirmation: volume > 1.8x 20-period average
+        vol_ma_20 = np.mean(volume[max(0, i-20):i])
+        volume_spike = volume[i] > (1.8 * vol_ma_20)
         
-        # Determine cloud top and bottom
-        cloud_top = max(curr_senkou_a, curr_senkou_b)
-        cloud_bottom = min(curr_senkou_a, curr_senkou_b)
+        curr_close = close[i]
+        curr_ema = ema_50[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Bullish TK cross: Tenkan crosses above Kijun
-            tk_cross_up = curr_tenkan > curr_kijun and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            # Bearish TK cross: Tenkan crosses below Kijun
-            tk_cross_down = curr_tenkan < curr_kijun and tenkan_aligned[i-1] >= kijun_aligned[i-1]
-            
-            if tk_cross_up and curr_close > cloud_top and curr_close > curr_ema_1d:
-                # Bullish: price above cloud and above 1d EMA50
-                signals[i] = 0.25
-                position = 1
-            elif tk_cross_down and curr_close < cloud_bottom and curr_close < curr_ema_1d:
-                # Bearish: price below cloud and below 1d EMA50
-                signals[i] = -0.25
-                position = -1
+            # Require volume spike and trend alignment
+            if volume_spike:
+                # Bullish entry: price breaks above Camarilla R3 with 4h uptrend
+                if curr_close > camarilla_h4_aligned[i] and curr_close > curr_ema:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                # Bearish entry: price breaks below Camarilla S3 with 4h downtrend
+                elif curr_close < camarilla_l4_aligned[i] and curr_close < curr_ema:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: Tenkan crosses below Kijun OR price drops below cloud bottom
-            tk_cross_down = curr_tenkan < curr_kijun and tenkan_aligned[i-1] >= kijun_aligned[i-1]
-            if tk_cross_down or curr_close < cloud_bottom:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks Camarilla S3
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close < camarilla_l4_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches Camarilla R4
+            elif curr_close >= camarilla_h5_aligned[i]:
+                signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Tenkan crosses above Kijun OR price rises above cloud top
-            tk_cross_up = curr_tenkan > curr_kijun and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            if tk_cross_up or curr_close > cloud_top:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks Camarilla R3
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close > camarilla_h4_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches Camarilla S4
+            elif curr_close <= camarilla_l5_aligned[i]:
+                signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
     
