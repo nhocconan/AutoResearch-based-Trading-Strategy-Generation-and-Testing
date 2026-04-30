@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 6h timeframe to capture medium-term breakouts with lower frequency than 4h
-# Williams Fractals identify potential reversal/breakout points (requires 2-bar confirmation)
-# 1d EMA34 provides trend filter to avoid counter-trend trades in bear markets
-# Volume confirmation >1.5x 20-period average reduces false breakouts
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.6x average)
+# Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years)
+# 1d EMA34 provides trend filter for bull/bear markets
+# Volume confirmation >1.6x 20-period average reduces false breakouts
 # Discrete position sizing: 0.25 for entries to limit fee drag
-# Works in both bull and bear markets: trend filter aligns with higher timeframe direction
+# Works in all regimes: breakouts occur in all markets, volume confirms legitimacy, trend filter avoids counter-trend
 
-name = "6h_WilliamsFractal_Breakout_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,111 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Williams Fractals (requires 5-bar window: 2 left, center, 2 right)
-    # Bullish fractal: low[l] < low[l-1] and low[l] < low[l-2] and low[l] < low[l+1] and low[l] < low[l+2]
-    # Bearish fractal: high[h] > high[h-1] and high[h] > high[h-2] and high[h] > high[h+1] and high[h] > high[h+2]
-    # We'll use the high/low of the fractal point as breakout levels
+    # Calculate 12h Camarilla levels (R3, S3) from previous bar to avoid look-ahead
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous bar's OHLC to avoid look-ahead
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # first bar uses current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    bullish_fractal = np.full(n, np.nan)
-    bearish_fractal = np.full(n, np.nan)
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Calculate fractals (avoiding look-ahead by using only past data)
-    for i in range(2, n-2):
-        # Bullish fractal at i: low[i] is lowest of i-2,i-1,i,i+1,i+2
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish_fractal[i] = low[i]
-        # Bearish fractal at i: high[i] is highest of i-2,i-1,i,i+1,i+2
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish_fractal[i] = high[i]
+    # Breakout conditions
+    breakout_up = close > camarilla_r3
+    breakout_down = close < camarilla_s3
+    
+    # Volume confirmation: volume > 1.6x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.6 * vol_ma_20)
     
     # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Williams fractal needs 2 extra 1d bars for confirmation (center bar + 2 more to confirm)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 34)  # warmup for volume MA (20), EMA (34)
+    start_idx = max(100, 20, 34)  # warmup for Camarilla (20), volume MA (20), EMA (34)
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
+        curr_breakout_up = breakout_up[i]
+        curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
-        
-        # Check for bullish fractal breakout (price breaks above recent bullish fractal low)
-        bullish_breakout = False
-        if i >= 2 and not np.isnan(bullish_fractal[i-2]):
-            # Price breaks above the bullish fractal low from 2 bars ago (to allow for confirmation)
-            bullish_breakout = curr_close > bullish_fractal[i-2]
-        
-        # Check for bearish fractal breakout (price breaks below recent bearish fractal high)
-        bearish_breakout = False
-        if i >= 2 and not np.isnan(bearish_fractal[i-2]):
-            # Price breaks below the bearish fractal high from 2 bars ago
-            bearish_breakout = curr_close < bearish_fractal[i-2]
         
         if position == 0:  # Flat - look for new entries
             # Only trade on breakout with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish breakout: price above bullish fractal + above 1d EMA34
-                if bullish_breakout and curr_close > curr_ema_34_1d:
+                # Bullish breakout: price above Camarilla R3 + above 1d EMA34
+                if curr_breakout_up and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below bearish fractal + below 1d EMA34
-                elif bearish_breakout and curr_close < curr_ema_34_1d:
+                # Bearish breakout: price below Camarilla S3 + below 1d EMA34
+                elif curr_breakout_down and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price closes below the most recent bullish fractal (stop loss) 
-            # or above the most recent bearish fractal (take profit at opposite fractal)
-            exit_long = False
-            if i >= 2 and not np.isnan(bullish_fractal[i-2]):
-                # Stop loss: price breaks below bullish fractal low
-                if curr_close < bullish_fractal[i-2]:
-                    exit_long = True
-            if i >= 2 and not np.isnan(bearish_fractal[i-2]):
-                # Take profit: price reaches bearish fractal level (opposite fractal)
-                if curr_close > bearish_fractal[i-2]:
-                    exit_long = True
-            
-            if exit_long:
+            # Exit: price closes below Camarilla S3 (reversal) or above Camarilla R3 (take profit)
+            if curr_close < camarilla_s3[i] or curr_close > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above the most recent bearish fractal (stop loss)
-            # or below the most recent bullish fractal (take profit at opposite fractal)
-            exit_short = False
-            if i >= 2 and not np.isnan(bearish_fractal[i-2]):
-                # Stop loss: price breaks above bearish fractal high
-                if curr_close > bearish_fractal[i-2]:
-                    exit_short = True
-            if i >= 2 and not np.isnan(bullish_fractal[i-2]):
-                # Take profit: price reaches bullish fractal level (opposite fractal)
-                if curr_close < bullish_fractal[i-2]:
-                    exit_short = True
-            
-            if exit_short:
+            # Exit: price closes above Camarilla R3 (reversal) or below Camarilla S3 (take profit)
+            if curr_close > camarilla_r3[i] or curr_close < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
