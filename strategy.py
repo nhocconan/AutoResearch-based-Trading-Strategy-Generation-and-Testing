@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation
-# Donchian channels provide clear trend-following structure with defined breakout levels
-# 1d ADX > 25 ensures alignment with strong daily trend to avoid whipsaw in ranging markets
-# Volume spike (2.0x 24-period average) confirms institutional participation and reduces false breakouts
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in both bull and bear markets by following the dominant daily trend direction.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance based on prior day's range
+# Breakout above R3 or below S3 with volume confirmation indicates strong momentum
+# 1d ADX > 25 ensures alignment with strong daily trend to avoid whipsaw
+# Volume spike (2.0x 24-period average) confirms institutional participation
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_1dADX25_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -75,16 +75,25 @@ def generate_signals(prices):
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    if len(prices) < 20:
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    if len(df_1d) < 2:
         return np.zeros(n)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*4h = 4 days)
+    # Camarilla levels based on prior day's OHLC
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma_24)
     
@@ -97,7 +106,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -111,35 +120,35 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_adx = adx_aligned[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and strong trend (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish entry: break above 20-period high with close > high
-                if curr_close > curr_highest_high:
+                # Bullish entry: break above R3 with close > R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below 20-period low with close < low
-                elif curr_close < curr_lowest_low:
+                # Bearish entry: break below S3 with close < S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below 20-period low (breakdown) OR ADX weakens (< 20)
-            if curr_close < curr_lowest_low or curr_adx < 20:
+            # Exit when price drops below R3 (breakout fails) OR ADX weakens (< 20)
+            if curr_close < curr_r3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above 20-period high (breakout) OR ADX weakens (< 20)
-            if curr_close > curr_highest_high or curr_adx < 20:
+            # Exit when price rises above S3 (breakdown fails) OR ADX weakens (< 20)
+            if curr_close > curr_s3 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
