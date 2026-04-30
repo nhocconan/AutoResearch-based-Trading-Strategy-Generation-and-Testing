@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ADX trend filter
-# Donchian(20) on 1d captures major support/resistance levels where institutional orders accumulate.
-# Breakouts above/below with volume spike indicate strong directional momentum.
-# ADX(14) > 25 ensures we only trade in trending markets, avoiding choppy conditions.
-# Designed for low trade frequency (~25-35/year) to minimize fee drag while capturing strong trends.
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with volume confirmation and 1d trend filter
+# Camarilla pivots identify key intraday support/resistance where institutional order flow clusters.
+# Breakouts above R3 or below S3 with volume spike indicate strong institutional participation.
+# 1d EMA(34) ensures alignment with higher timeframe trend to avoid counter-trend trades.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in both bull and bear markets.
 
-name = "4h_Donchian20_1d_Breakout_VolumeSpike_ADXFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,118 +23,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Donchian calculation
+    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channel (20-period)
+    # Calculate 1d Camarilla levels (R3, S3, R4, S4)
+    # Based on previous day's high, low, close
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Upper band: highest high over last 20 days
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over last 20 days
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
+    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
+    r4 = pp + (high_1d - low_1d) * 1.1 / 2.0
+    s4 = pp - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align Donchian levels to 4h timeframe (wait for completed 1d bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate ADX(14) for trend filter on 1d timeframe
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) for dynamic stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate ATR(14) for 4h timeframe for stoploss
-    tr1_4h = high[1:] - low[1:]
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.max([tr1_4h[0], tr2_4h[0], tr3_4h[0]])], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for ADX and ATR
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 1.8x 20-period average
-        vol_ma_20 = np.mean(volume[max(0, i-20):i])
-        volume_spike = volume[i] > (1.8 * vol_ma_20)
+        # Volume confirmation: volume > 2.0x 30-period average
+        vol_ma_30 = np.mean(volume[max(0, i-30):i])
+        volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
-        curr_upper = upper_aligned[i]
-        curr_lower = lower_aligned[i]
-        curr_adx = adx_aligned[i]
-        curr_atr = atr_4h[i]
+        curr_ema = ema_34_1d_aligned[i]
+        curr_atr = atr[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_s4 = s4_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and strong trend (ADX > 25)
-            if volume_spike and curr_adx > 25:
-                # Bullish entry: price breaks above 1d Donchian upper band
-                if curr_close > curr_upper:
+            # Require volume spike and trend alignment
+            if volume_spike:
+                # Bullish entry: price breaks above 1d Camarilla R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Donchian lower band
-                elif curr_close < curr_lower:
+                # Bearish entry: price breaks below 1d Camarilla S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Donchian lower band
-            if curr_close < entry_price - 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks 1d Camarilla S3
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_lower:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel (trailing exit)
-            elif curr_close >= (curr_upper + curr_lower) / 2:
+            # Take profit: price reaches 1d Camarilla R4
+            elif curr_close >= curr_r4:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Donchian upper band
-            if curr_close > entry_price + 2.0 * curr_atr:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks 1d Camarilla R3
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_upper:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel (trailing exit)
-            elif curr_close <= (curr_upper + curr_lower) / 2:
+            # Take profit: price reaches 1d Camarilla S4
+            elif curr_close <= curr_s4:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
