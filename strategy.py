@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and strict volume confirmation.
-# Uses 1d EMA34 for long-term trend (more responsive than EMA50) to capture medium-term direction.
-# Volume > 2.0x 20-period average (strict threshold) ensures strong momentum and reduces trade frequency.
-# ATR-based stoploss (2.0x) provides tight risk control. Session filter (08-20 UTC) reduces noise.
-# Designed for very low trade frequency (~15-25 trades/year) to minimize fee drag on 4h timeframe.
-# Entry requires 1d EMA34 alignment + strict volume spike + Camarilla breakout.
+# Hypothesis: 6h Camarilla R4/S4 breakout with 1d trend filter (EMA34) and volume confirmation.
+# Uses 1d EMA34 for trend direction to avoid whipsaws in ranging markets.
+# Breakout at R4/S4 (stronger levels than R3/S3) reduces false signals.
+# Volume > 2.0x 20-period average confirms momentum (high threshold to reduce trade frequency).
+# ATR-based stoploss (2.5x) limits drawdown.
+# Designed for very low trade frequency (~10-25 trades/year) to minimize fee drag on 6h timeframe.
+# Works in bull/bear via 1d EMA34 trend filter + volume confirmation + strong breakout levels.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeStrict_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +38,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 4h timeframe stoploss
+    # Calculate ATR(14) for 6h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -64,7 +65,7 @@ def generate_signals(prices):
         curr_ema = ema_34_aligned[i]
         curr_atr = atr[i]
         
-        # Strict volume confirmation: volume > 2.0x 20-period average (high threshold to reduce trades)
+        # Volume confirmation: volume > 2.0x 20-period average (high threshold to reduce trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
             volume_confirm = volume[i] > (2.0 * vol_ma_20)
@@ -94,31 +95,31 @@ def generate_signals(prices):
                     # Calculate Camarilla levels
                     range_val = prev_high - prev_low
                     if range_val > 0:
-                        camarilla_r3 = prev_close + (range_val * 1.1 / 4)  # R3 level
-                        camarilla_s3 = prev_close - (range_val * 1.1 / 4)  # S3 level
+                        camarilla_r4 = prev_close + (range_val * 1.5 / 4)  # R4 level
+                        camarilla_s4 = prev_close - (range_val * 1.5 / 4)  # S4 level
                     else:
-                        camarilla_r3 = curr_close
-                        camarilla_s3 = curr_close
+                        camarilla_r4 = curr_close
+                        camarilla_s4 = curr_close
                 else:
-                    camarilla_r3 = curr_close
-                    camarilla_s3 = curr_close
+                    camarilla_r4 = curr_close
+                    camarilla_s4 = curr_close
             else:
-                camarilla_r3 = curr_close
-                camarilla_s3 = curr_close
+                camarilla_r4 = curr_close
+                camarilla_s4 = curr_close
         else:
-            camarilla_r3 = curr_close
-            camarilla_s3 = curr_close
+            camarilla_r4 = curr_close
+            camarilla_s4 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA34, strict volume spike
-            if (curr_close > camarilla_r3 and 
+            # Long: price breaks above Camarilla R4, price above 1d EMA34, volume spike
+            if (curr_close > camarilla_r4 and 
                 curr_close > curr_ema and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Camarilla S3, price below 1d EMA34, strict volume spike
-            elif (curr_close < camarilla_s3 and 
+            # Short: price breaks below Camarilla S4, price below 1d EMA34, volume spike
+            elif (curr_close < camarilla_s4 and 
                   curr_close < curr_ema and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -126,18 +127,18 @@ def generate_signals(prices):
                 entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
-            if (curr_close < camarilla_s3 or 
-                curr_close < entry_price - 2.0 * curr_atr):
+            # Exit conditions: price breaks below Camarilla S4 OR stoploss hit
+            if (curr_close < camarilla_s4 or 
+                curr_close < entry_price - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
-            if (curr_close > camarilla_r3 or 
-                curr_close > entry_price + 2.0 * curr_atr):
+            # Exit conditions: price breaks above Camarilla R4 OR stoploss hit
+            if (curr_close > camarilla_r4 or 
+                curr_close > entry_price + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
