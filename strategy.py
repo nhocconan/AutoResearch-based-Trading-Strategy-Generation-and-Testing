@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Uses Donchian channel from 1d data, with trend alignment from 1w EMA50 and volume > 1.5x 20-bar average.
-# Enter long when price breaks above upper Donchian band in bullish 1w trend, with volume confirmation.
-# Enter short when price breaks below lower Donchian band in bearish 1w trend, with volume confirmation.
-# ATR(14) trailing stop at 2.5x for risk management. Discrete position sizing at ±0.25.
-# Target: 30-100 total trades over 4 years (7-25/year). Works in both bull and bear markets
-# by requiring HTF trend alignment and institutional Donchian levels.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Uses Donchian channels (20-period high/low) from 12h data, with trend alignment from 1d EMA34
+# and volume > 1.5x 20-bar average for confirmation. Enter long when price breaks above
+# upper Donchian channel in bullish regime (price > 1d EMA34), short when price breaks below
+# lower channel in bearish regime (price < 1d EMA34). ATR(14) trailing stop at 2.5x for risk
+# management. Discrete position sizing at ±0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by requiring HTF trend alignment and institutional structure.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,29 +29,29 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for Donchian calculation
+    # Load 12h data ONCE before loop for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian channels on 12h data
+    period20_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
+    upper_donchian = period20_high
+    lower_donchian = period20_low
+    
+    # Align Donchian channels to primary timeframe (12h -> 12h: identity but using helper for consistency)
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_12h, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_12h, lower_donchian)
+    
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian components on 1d data
-    period20_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    upper_band = period20_high
-    lower_band = period20_low
-    
-    # Align Donchian bands to primary timeframe (1d -> 1d: identity but using helper for consistency)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -71,13 +71,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(20, 50, atr_period, 20) + 1  # warmup
+    start_idx = max(20, 34, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(upper_band_aligned[i]) or
-            np.isnan(lower_band_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(upper_donchian_aligned[i]) or
+            np.isnan(lower_donchian_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -87,28 +87,24 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_upper = upper_band_aligned[i]
-        curr_lower = lower_band_aligned[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_upper = upper_donchian_aligned[i]
+        curr_lower = lower_donchian_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Determine trend: bullish when price > EMA50, bearish when price < EMA50
-        trend_bullish = curr_close > curr_ema_50_1w
-        trend_bearish = curr_close < curr_ema_50_1w
-        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above upper band, bullish 1w trend, volume confirmation
+            # Long: price breaks above upper Donchian, bullish regime (price > 1d EMA34), volume confirmation
             if (curr_close > curr_upper and 
-                trend_bullish and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below lower band, bearish 1w trend, volume confirmation
+            # Short: price breaks below lower Donchian, bearish regime (price < 1d EMA34), volume confirmation
             elif (curr_close < curr_lower and 
-                  trend_bearish and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
