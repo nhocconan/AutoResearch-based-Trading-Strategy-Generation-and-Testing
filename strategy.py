@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla R3/S3 levels with volume confirmation and 6h trend filter
+# Hypothesis: 12h strategy using 1d Camarilla R3/S3 levels with volume confirmation and 12h trend filter
 # Camarilla pivots identify key intraday support/resistance where institutional order flow clusters.
 # Breakouts above R3 or below S3 with volume spike indicate strong institutional participation.
-# 6h EMA(50) ensures alignment with intermediate-term trend to avoid counter-trend trades.
+# 12h EMA(50) ensures alignment with intermediate-term trend to avoid counter-trend trades.
 # Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
 
-name = "6h_Camarilla_R3S3_Breakout_6hTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,13 +42,13 @@ def generate_signals(prices):
     r4 = pp + (high_1d - low_1d) * 1.1 / 2.0
     s4 = pp - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 6h EMA(50) for trend filter
+    # Calculate 12h EMA(50) for trend filter
     close_s = pd.Series(close)
     ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
@@ -81,12 +81,12 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d Camarilla R3 with 6h uptrend
+                # Bullish entry: price breaks above 1d Camarilla R3 with 12h uptrend
                 if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Camarilla S3 with 6h downtrend
+                # Bearish entry: price breaks below 1d Camarilla S3 with 12h downtrend
                 elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
