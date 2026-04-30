@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using Donchian(20) breakout + 12h ADX25 trend filter + volume confirmation
-# Donchian channels provide clear breakout levels; 12h ADX>25 filters for trending markets only.
-# Volume spike (1.8x 20-period average) confirms breakout validity.
-# Uses 6h timeframe for signal generation, 12h for trend filter. Discrete sizing 0.25 to minimize fee churn.
-# Target: 80-120 total trades over 4 years (20-30/year).
+# Hypothesis: 4h strategy using Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
+# Donchian channels provide robust price structure; 1d EMA50 filters for higher-timeframe trend alignment.
+# Volume spike (1.8x 20-period average) confirms institutional participation.
+# Discrete sizing 0.25 to balance return and drawdown. Target: 100-180 total trades over 4 years (25-45/year).
+# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 
-name = "6h_Donchian20_Breakout_12hADX25_VolumeSpike_v2"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,130 +22,64 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC) for efficiency
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 6h data ONCE before loop for Donchian calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 6h Donchian channels (20-period) using prior 6h bar
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    
-    # Donchian upper/lower bands (20-period)
-    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 6h timeframe (wait for completed 6h bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
-    
-    # Load 12h data ONCE before loop for ADX25 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
-        return np.zeros(n)
-    
-    # Calculate 12h ADX (14-period) with DI+ and DI-
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate True Range (TR)
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Calculate +DM and -DM
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
-            else:
-                result[i] = np.nan
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    atr[np.isnan(atr)] = 0  # Replace NaN with 0 for safety
-    
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / (atr + 1e-10)
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / (atr + 1e-10)
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilder_smooth(dx, 14)
-    adx[np.isnan(adx)] = 0  # Replace NaN with 0 for safety
-    
-    # Align ADX to 6h timeframe (wait for completed 12h bar)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for ADX calculation
+    start_idx = 20  # warmup for volume MA calculation
     
     for i in range(start_idx, n):
-        # Skip if outside trading session (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Volume confirmation: volume > 1.8x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i])
         volume_spike = volume[i] > (1.8 * vol_ma_20)
         
+        # Donchian(20) breakout levels using prior 20 bars (excluding current)
+        lookback_start = max(0, i-20)
+        lookback_end = i  # exclude current bar
+        if lookback_end - lookback_start < 20:
+            # Not enough lookback, hold current signal
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            continue
+            
+        highest_high = np.max(high[lookback_start:lookback_end])
+        lowest_low = np.min(low[lookback_start:lookback_end])
+        
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_adx = adx_aligned[i]
-        curr_upper = donchian_upper_aligned[i]
-        curr_lower = donchian_lower_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and ADX > 25 (trending market)
-            if volume_spike and curr_adx > 25:
-                # Bullish entry: price breaks above Donchian upper band
-                if curr_close > curr_upper:
+            # Require volume spike
+            if volume_spike:
+                # Bullish entry: price breaks above Donchian upper AND above 1d EMA50 (uptrend)
+                if curr_close > highest_high and curr_close > curr_ema_50_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian lower band
-                elif curr_close < curr_lower:
+                # Bearish entry: price breaks below Donchian lower AND below 1d EMA50 (downtrend)
+                elif curr_close < lowest_low and curr_close < curr_ema_50_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when price falls below Donchian lower band or ADX < 20 (trend weakens)
-            if curr_close < curr_lower or curr_adx < 20:
+            # Exit when price falls below Donchian lower or below 1d EMA50
+            if curr_close < lowest_low or curr_close < curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Donchian upper band or ADX < 20 (trend weakens)
-            if curr_close > curr_upper or curr_adx < 20:
+            # Exit when price rises above Donchian upper or above 1d EMA50
+            if curr_close > highest_high or curr_close > curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
