@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme Reversal with 1d ADX trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (<-90 or >-10) signal potential reversals
-# 1d ADX > 25 confirms strong trend direction for filtering reversals (only trade pullbacks in strong trends)
-# Volume spike (1.8x 24-period average) confirms institutional participation at reversal points
-# Works in bull markets via buying pullbacks in uptrends and bear markets via selling rallies in downtrends
-# Discrete sizing 0.25 minimizes fee churn. Target: 80-120 total trades over 4 years (20-30/year).
+# Hypothesis: 12h Williams %R Extreme with 1w EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal potential reversals
+# 1w EMA34 establishes primary trend direction - only trade reversals IN DIRECTION of weekly trend
+# Volume spike (2.5x 24-period average) confirms institutional participation in the reversal
+# Works in bull markets (buying oversold in uptrend) and bear markets (selling overbought in downtrend)
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_WilliamsR_Extreme_1dADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1wEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,79 +29,36 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop (MTF Rule #1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop (MTF Rule #1)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA34
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Williams %R (14 period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    period_wr = 14
+    highest_high = pd.Series(high).rolling(window=period_wr, min_periods=period_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=period_wr, min_periods=period_wr).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(values[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(values)):
-                if not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    period_adx = 14
-    tr_smooth = wilders_smoothing(tr, period_adx)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period_adx)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period_adx)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, (dm_plus_smooth / tr_smooth) * 100, 0)
-    di_minus = np.where(tr_smooth != 0, (dm_minus_smooth / tr_smooth) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, period_adx)
-    adx_1d = adx
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Williams %R (14-period) on 6h data
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    
-    # Volume confirmation: volume > 1.8x 24-period average
+    # Volume confirmation: volume > 2.5x 24-period average (more strict for 12h)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma_24)
+    volume_spike = volume > (2.5 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 30, 24, 14)  # warmup for all indicators
+    start_idx = max(100, 34, 24, 14)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
             
@@ -111,33 +68,35 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
-        curr_adx_1d = adx_1d_aligned[i]
+        curr_wr = williams_r[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
         curr_volume_spike = volume_spike[i]
+        curr_highest_high = highest_high[i]
+        curr_lowest_low = lowest_low[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require strong trend (ADX > 25) and volume spike
-            if curr_adx_1d > 25 and curr_volume_spike:
-                # Bullish entry: Williams %R extremely oversold (<-90) in uptrend
-                if curr_williams_r < -90:
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish entry: Williams %R oversold (< -90) AND price above 1w EMA34 (uptrend)
+                if curr_wr < -90 and curr_close > curr_ema_34_1w:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Williams %R extremely overbought (>-10) in downtrend
-                elif curr_williams_r > -10:
+                # Bearish entry: Williams %R overbought (> -10) AND price below 1w EMA34 (downtrend)
+                elif curr_wr > -10 and curr_close < curr_ema_34_1w:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when Williams %R rises above -50 (momentum fading) or ADX weakens
-            if curr_williams_r > -50 or curr_adx_1d < 20:
+            # Exit when Williams %R returns to oversold threshold or price crosses below EMA
+            if curr_wr > -80 or curr_close < curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Williams %R falls below -50 (momentum fading) or ADX weakens
-            if curr_williams_r < -50 or curr_adx_1d < 20:
+            # Exit when Williams %R returns to overbought threshold or price crosses above EMA
+            if curr_wr < -20 or curr_close > curr_ema_34_1w:
                 signals[i] = 0.0
                 position = 0
             else:
