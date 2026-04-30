@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above upper Donchian channel AND price > 1d EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below lower Donchian channel AND price < 1d EMA50 AND volume > 2.0x 20-bar average.
-# Exit when price crosses the Donchian midpoint (mean of upper and lower channel).
-# Uses discrete position sizing (0.30) to limit drawdown and fee churn.
-# Target: 75-150 total trades over 4 years (19-38/year). Works in bull/bear via 1d EMA50 trend filter.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 AND price > 1w EMA34 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND price < 1w EMA34 AND volume > 2.0x 20-bar average.
+# Exit when price crosses the Camarilla pivot point (PP).
+# Uses discrete position sizing (0.25) to limit drawdown and fee churn.
+# Target: 30-100 total trades over 4 years (7-25/year). Works in bull/bear via 1w EMA34 trend filter.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1w data ONCE before loop for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1 / 2
+    # S3 = PP - (H - L) * 1.1 / 2
+    # We need the previous completed 1d bar's H, L, C
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) from 4h data
-    # Upper = max(high, 20), Lower = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
-    midpoint = (upper + lower) / 2.0  # Exit level
+    pp = (high_1d + low_1d + close_1d_vals) / 3.0
+    r3 = pp + (high_1d - low_1d) * 1.1 / 2.0
+    s3 = pp - (high_1d - low_1d) * 1.1 / 2.0
+    
+    # Align Camarilla levels to 1d timeframe (wait for 1d bar to close)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,12 +63,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for EMA and Donchian
+    start_idx = max(50, 20)  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(midpoint[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
@@ -65,33 +79,33 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: break above upper Donchian, uptrend (price > 1d EMA50), volume confirmation
-            if (curr_high > upper[i] and 
-                curr_close > ema_50_1d_aligned[i] and 
+            # Long: break above R3, uptrend (price > 1w EMA34), volume confirmation
+            if (curr_high > r3_aligned[i] and 
+                curr_close > ema_34_1w_aligned[i] and 
                 curr_volume_confirm):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian, downtrend (price < 1d EMA50), volume confirmation
-            elif (curr_low < lower[i] and 
-                  curr_close < ema_50_1d_aligned[i] and 
+            # Short: break below S3, downtrend (price < 1w EMA34), volume confirmation
+            elif (curr_low < s3_aligned[i] and 
+                  curr_close < ema_34_1w_aligned[i] and 
                   curr_volume_confirm):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price crosses below Donchian midpoint
-            if curr_close < midpoint[i]:
+            # Exit condition: price crosses below pivot point (PP)
+            if curr_close < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price crosses above Donchian midpoint
-            if curr_close > midpoint[i]:
+            # Exit condition: price crosses above pivot point (PP)
+            if curr_close > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
