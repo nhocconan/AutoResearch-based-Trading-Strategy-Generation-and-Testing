@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band, price > 12h EMA50, and volume > 2.0x 20-bar avg.
-# Short when price breaks below Donchian lower band, price < 12h EMA50, and volume > 2.0x 20-bar avg.
-# Exit when price reverts to the Donchian middle band (mean reversion).
-# Uses 12h EMA50 for higher timeframe trend alignment, targeting 12-37 trades/year on 6h.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3, price > 1d EMA34, and volume > 2.0x 20-bar avg.
+# Short when price breaks below S3, price < 1d EMA34, and volume > 2.0x 20-bar avg.
+# Exit when price reverts to the Camarilla pivot point (mean reversion).
+# Uses 1d EMA34 for higher timeframe trend alignment, targeting 25-50 trades/year on 4h.
 # Trend filter avoids counter-trend trades, volume confirmation reduces false signals.
 # Works in bull markets via breakouts and in bear markets via short breakdowns with trend alignment.
 
-name = "6h_Donchian20_12hEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 6h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_band = high_roll
-    lower_band = low_roll
-    middle_band = (upper_band + lower_band) / 2
+    # Calculate Camarilla pivot levels from previous day (using same 1d data)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,48 +55,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = 50  # warmup for EMA34 and Camarilla
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(middle_band[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_upper = upper_band[i]
-        curr_lower = lower_band[i]
-        curr_middle = middle_band[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_pivot = pivot_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above upper band, price > 12h EMA50, volume spike
-            if (curr_close > curr_upper and 
-                curr_close > curr_ema_50_12h and 
+            # Long: price breaks above R3, price > 1d EMA34, volume spike
+            if (curr_close > curr_r3 and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band, price < 12h EMA50, volume spike
-            elif (curr_close < curr_lower and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: price breaks below S3, price < 1d EMA34, volume spike
+            elif (curr_close < curr_s3 and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price reverts to middle band (mean reversion)
-            if curr_close <= curr_middle:
+            # Exit condition: price reverts to pivot point (mean reversion)
+            if curr_close <= curr_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price reverts to middle band (mean reversion)
-            if curr_close >= curr_middle:
+            # Exit condition: price reverts to pivot point (mean reversion)
+            if curr_close >= curr_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
