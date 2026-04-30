@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h chop regime filter
-# Donchian breakouts capture momentum moves; volume > 1.5x 20-bar average confirms validity;
-# 12h chop index > 61.8 filters for ranging markets (avoid false breakouts in chop).
-# Works in bull via upside breakouts, in bear via downside breakouts. Discrete sizing 0.25
-# minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 1h strategy using 4h EMA trend filter + 1h Camarilla R3/S3 breakout with volume confirmation
+# 4h EMA(50) determines trend direction (bull/bear). Only take longs in uptrend, shorts in downtrend.
+# Entry on 1h breakout of daily Camarilla R3/S3 levels with volume spike (2.0x 20-period average).
+# Exit on mean reversion to Camarilla pivot or opposite S3/R3 level.
+# Session filter (08-20 UTC) to avoid low-liquidity hours. Discrete size 0.20 minimizes fee churn.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 
-name = "4h_Donchian20_Breakout_VolumeSpike_12hChop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,44 +29,47 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
-    
-    # Calculate 12h Chop Index (choppiness)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Calculate 4h EMA(50) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 1:
         return np.zeros(n)
-    # True Range
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = np.abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = np.abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Chop = 100 * log10(sum(atr,14) / (max(high,14) - min(low,14))) / log10(14)
-    highest_14h = df_12h['high'].rolling(window=14, min_periods=14).max().values
-    lowest_14h = df_12h['low'].rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_12h / (highest_14h - lowest_14h)) / np.log10(14)
-    chop = np.where((highest_14h - lowest_14h) == 0, 100, chop)  # avoid div by zero
-    chop = np.nan_to_num(chop, nan=100.0, posinf=100.0, neginf=0.0)
+    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # Align 12h chop to 4h timeframe (wait for completed 12h bar)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
+    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
+    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
+    
+    # Align 1d Camarilla levels to 1h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 20  # warmup for Donchian and volume MA
+    start_idx = max(50, 20)  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -75,41 +79,43 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_highest_20 = highest_20[i]
-        curr_lowest_20 = lowest_20[i]
+        curr_ema = ema_50_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_s4 = s4_aligned[i]
+        curr_pivot = pivot_aligned[i]
         curr_volume_spike = volume_spike[i]
-        curr_chop = chop_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and chop < 61.8 (trending market)
-            if curr_volume_spike and curr_chop < 61.8:
-                # Bullish breakout: price breaks above highest_20
-                if curr_close > curr_highest_20:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                # Bearish breakout: price breaks below lowest_20
-                elif curr_close < curr_lowest_20:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
+            # Require volume spike
+            if curr_volume_spike:
+                # Determine trend from 4h EMA
+                if curr_close > curr_ema:  # Uptrend - look for longs
+                    # Bullish breakout: price breaks above R3
+                    if curr_close > curr_r3:
+                        signals[i] = 0.20
+                        position = 1
+                elif curr_close < curr_ema:  # Downtrend - look for shorts
+                    # Bearish breakout: price breaks below S3
+                    if curr_close < curr_s3:
+                        signals[i] = -0.20
+                        position = -1
         
         elif position == 1:  # Long position
-            # Exit when price drops below lowest_20 (trailing stop)
-            if curr_close < curr_lowest_20:
+            # Exit conditions: mean reversion to pivot or stop below S3
+            if curr_close < curr_pivot or curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit when price rises above highest_20 (trailing stop)
-            if curr_close > curr_highest_20:
+            # Exit conditions: mean reversion to pivot or stop above R3
+            if curr_close > curr_pivot or curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
