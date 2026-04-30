@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian channel breakouts capture strong momentum moves; 1d EMA50 ensures alignment with daily trend
-# Volume spike >1.8x confirms participation; discrete sizing (0.25) targets 50-150 total trades over 4 years
-# Works in bull/bear: breakouts work in trending markets, volume filter avoids false signals, trend filter avoids counter-trend trades
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
+# Donchian breakout captures momentum, 1d EMA50 ensures alignment with daily trend,
+# volume spike >2.0x confirms participation. Discrete sizing (0.25) targets 75-200 trades over 4 years.
+# Works in bull/bear: breakouts work in trending markets, volume filter ensures legitimacy,
+# trend filter avoids counter-trend trades.
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,11 +40,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.8x 30-period average
+    # Volume confirmation: volume > 2.0x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_30)
+    volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Donchian channel (20-period)
+    # Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -63,8 +64,6 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume_confirm = volume_confirm[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_highest_high = highest_high[i]
@@ -73,26 +72,28 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish breakout: price breaks above upper Donchian + above 1d EMA50
+                # Bullish breakout: price > highest_high(20) + above 1d EMA50
                 if curr_close > curr_highest_high and curr_close > curr_ema_50_1d:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below lower Donchian + below 1d EMA50
+                # Bearish breakout: price < lowest_low(20) + below 1d EMA50
                 elif curr_close < curr_lowest_low and curr_close < curr_ema_50_1d:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower Donchian (trailing stop)
-            if curr_close < curr_lowest_low:
+            # Exit: price < lowest_low(10) for tighter stop or below 1d EMA50
+            lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values[i]
+            if curr_close < lowest_low_10 or curr_close < curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian (trailing stop)
-            if curr_close > curr_highest_high:
+            # Exit: price > highest_high(10) or above 1d EMA50
+            highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values[i]
+            if curr_close > highest_high_10 or curr_close > curr_ema_50_1d:
                 signals[i] = 0.0
                 position = 0
             else:
