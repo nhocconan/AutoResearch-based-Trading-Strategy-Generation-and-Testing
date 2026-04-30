@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses tight volume threshold (2.5x average) to limit trades to ~100 total over 4 years.
-# Only enters when price breaks 6h Camarilla R3 (short) or S3 (long) with volume confirmation and 1d EMA34 trend alignment.
-# Designed for low trade frequency to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses tight volume threshold (2.5x average) and ATR(14) stoploss (2.5x) to limit trades to ~80 total over 4 years.
+# Only enters when price breaks 12h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
+# Designed for low trade frequency (<200 total 12h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -71,38 +71,26 @@ def generate_signals(prices):
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Calculate 6h Camarilla levels using only completed 6h bars
-        # Need at least one completed 6h bar to calculate (4 bars for 6h timeframe)
-        if i >= 4:  # Need at least one 6h bar (since we're on 6h timeframe)
-            # For 6h timeframe, we use the previous completed 6h bar's OHLC
-            # Camarilla calculation uses previous day's OHLC, but we adapt for 6h timeframe
-            # Using the last completed 6h bar (i-1) to calculate levels for current bar
-            if i >= 1:  # Ensure we have at least one previous bar
-                prev_close = close[i-1]
-                prev_high = high[i-1]
-                prev_low = low[i-1]
-                # Camarilla levels for 6h timeframe using previous 6h bar
-                camarilla_range = prev_high - prev_low
-                camarilla_s3 = prev_close - camarilla_range * 1.12 / 6  # S3 level
-                camarilla_r3 = prev_close + camarilla_range * 1.12 / 6  # R3 level
-            else:
-                camarilla_s3 = np.nan
-                camarilla_r3 = np.nan
+        # Calculate 12h Donchian channels using only completed 12h bars
+        # Since we're on 12h timeframe, we can use a 20-period lookback
+        if i >= 20:
+            donchian_high = np.max(high[i-20:i])
+            donchian_low = np.min(low[i-20:i])
         else:
-            camarilla_s3 = np.nan
-            camarilla_r3 = np.nan
+            donchian_high = np.nan
+            donchian_low = np.nan
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks below Camarilla S3 (mean reversion), 1d EMA34 uptrend, volume spike confirmation
-            if (curr_close < camarilla_s3 and 
+            # Long: price breaks above Donchian upper channel, 1d EMA34 uptrend, volume spike confirmation
+            if (curr_close > donchian_high and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks above Camarilla R3 (mean reversion), 1d EMA34 downtrend, volume spike confirmation
-            elif (curr_close > camarilla_r3 and 
+            # Short: price breaks below Donchian lower channel, 1d EMA34 downtrend, volume spike confirmation
+            elif (curr_close < donchian_low and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
@@ -113,8 +101,8 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit if price drops 2.0*ATR from highest point
-            if curr_close < highest_since_entry - (2.0 * curr_atr):
+            # ATR trailing stop: exit if price drops 2.5*ATR from highest point
+            if curr_close < highest_since_entry - (2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,8 +111,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit if price rises 2.0*ATR from lowest point
-            if curr_close > lowest_since_entry + (2.0 * curr_atr):
+            # ATR trailing stop: exit if price rises 2.5*ATR from lowest point
+            if curr_close > lowest_since_entry + (2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
