@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume spike confirmation
 # Camarilla R3/S3 levels provide stronger support/resistance than R1/S1, reducing false breakouts
 # 1d ADX > 25 ensures alignment with strong daily trend to avoid counter-trend whipsaws
-# Volume spike (2.0x 96-period average) confirms institutional participation on 12h timeframe
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Volume spike (2.0x 96-period average) confirms institutional participation on 4h timeframe
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 # Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3 with trend filter.
 
-name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -67,32 +67,32 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
     adx_1d = wilder_smooth(dx_1d, period)
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate 1d Camarilla pivot levels (R3, S3)
     camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.125 / 2)
     camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.125 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 2.0x 48-period average (48*12h = 576h = 24 days)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    volume_spike = volume > (2.0 * vol_ma_48)
+    # Volume confirmation: volume > 2.0x 96-period average (96*4h = 384h = 16 days)
+    vol_ma_96 = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
+    volume_spike = volume > (2.0 * vol_ma_96)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 48)  # warmup for ADX and volume MA
+    start_idx = max(100, 96)  # warmup for ADX and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(adx_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma_48[i])):
+            np.isnan(vol_ma_96[i])):
             signals[i] = 0.0
             continue
             
