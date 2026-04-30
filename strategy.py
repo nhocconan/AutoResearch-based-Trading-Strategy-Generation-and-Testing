@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Daily Camarilla R3/S3 breakout with volume confirmation and 1d EMA(34) trend filter
-# Camarilla R3/S3 levels act as intraday support/resistance with high reversal probability.
-# Breakouts above R3 (bullish) or below S3 (bearish) with volume spike indicate strong momentum.
-# 1d EMA(34) filters trades to align with higher-timeframe trend, reducing false breakouts.
-# Designed for low trade frequency (~20-40/year on 12h) to minimize fee drag and improve bear market performance.
+# Hypothesis: 4h Donchian(20) breakout with 1d HMA(21) trend filter and volume confirmation
+# Donchian channels provide robust volatility-based support/resistance that works in both bull and bear markets.
+# Breakouts above/below 20-period Donchian with volume spike indicate genuine momentum.
+# 1d HMA(21) filters trades to align with higher-timeframe trend, reducing false breakouts.
+# Designed for moderate trade frequency (~30-60/year on 4h) to balance opportunity and fee drag.
 
-name = "12h_DailyCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dHMA21_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
+    # Load 1d data ONCE before loop for HMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3) using previous day's OHLC
+    # Calculate 1d HMA(21) for trend filter
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
+    
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Camarilla formula: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2.0
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2.0
-    
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d EMA(34) for trend filter
-    close_1d_s = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    wma_half = wma(close_1d, half_len)
+    wma_full = wma(close_1d, 21)
+    hma_raw = 2 * wma_half - wma_full
+    hma_1d = wma(hma_raw, sqrt_len)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -57,57 +55,61 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 34  # warmup for EMA(34)
+    start_idx = 20  # warmup for Donchian
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 20-period average
+        # Volume confirmation: volume > 1.5x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i]) if i >= 20 else np.mean(volume[:i]) if i > 0 else 0
-        volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
+        volume_spike = volume[i] > (1.5 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
-        curr_ema = ema_34_1d_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema = hma_1d_aligned[i]
         curr_atr = atr[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        
+        # Calculate Donchian channels (20-period)
+        donchian_high = np.max(high[max(0, i-19):i+1])
+        donchian_low = np.min(low[max(0, i-19):i+1])
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above Camarilla R3 with 1d uptrend
-                if curr_close > curr_r3 and curr_close > curr_ema:
+                # Bullish entry: price breaks above Donchian high with 1d uptrend
+                if curr_close > donchian_high and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below Camarilla S3 with 1d downtrend
-                elif curr_close < curr_s3 and curr_close < curr_ema:
+                # Bearish entry: price breaks below Donchian low with 1d downtrend
+                elif curr_close < donchian_low and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks Camarilla S3
+            # Stoploss: 2.0 * ATR below entry price OR price breaks Donchian low
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s3:
+            elif curr_close < donchian_low:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Camarilla R3 (mean reversion tendency)
-            elif curr_close >= curr_r3:
+            # Take profit: price reaches Donchian high (mean reversion tendency)
+            elif curr_close >= donchian_high:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks Camarilla R3
+            # Stoploss: 2.0 * ATR above entry price OR price breaks Donchian high
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r3:
+            elif curr_close > donchian_high:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches Camarilla S3 (mean reversion tendency)
-            elif curr_close <= curr_s3:
+            # Take profit: price reaches Donchian low (mean reversion tendency)
+            elif curr_close <= donchian_low:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
