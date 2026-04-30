@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 with uptrend (price > 1d EMA50) and volume spike.
-# Short when price breaks below S3 with downtrend (price < 1d EMA50) and volume spike.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 with uptrend (price > 1w EMA50) and volume spike.
+# Short when price breaks below S3 with downtrend (price < 1w EMA50) and volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
 # Targets 50-150 trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Works in both bull/bear markets by requiring 1d EMA50 trend alignment.
+# Uses 1w HTF for stronger trend filter, reducing whipsaw in ranging markets.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for EMA50 trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla pivot levels from 1d OHLC
-    # Camarilla: R4 = close + ((high-low)*1.1/2), R3 = close + ((high-low)*1.1/4), etc.
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Calculate Camarilla pivot levels from 1w OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
     
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d_arr + (rng * 1.1 / 4)
-    camarilla_s3 = close_1d_arr - (rng * 1.1 / 4)
+    rng = high_1w - low_1w
+    camarilla_r3 = close_1w_arr + (rng * 1.1 / 4)
+    camarilla_s3 = close_1w_arr - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -75,7 +74,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Regime filter: price above/below 1d EMA50 determines trend direction
+        # Regime filter: price above/below 1w EMA50 determines trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
