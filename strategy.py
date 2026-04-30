@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and 1d ADX trend filter
-# Uses 12h primary timeframe to target 50-150 trades over 4 years (12-37/year).
-# Williams %R(14) identifies overbought/oversold conditions: long when %R < -80, short when %R > -20.
-# Volume spike (2.0x 20-period average) confirms breakout validity.
-# 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
-# Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
-# in bear via breakout shorts with trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation
+# Targets 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+# Donchian breakouts capture momentum moves; 12h HMA filters for higher-timeframe trend alignment;
+# volume spike (2.0x 20-period average) confirms breakout validity.
+# Works in bull markets via breakout longs with uptrend filter, in bear markets via breakout shorts with downtrend filter.
+# Discrete sizing 0.25 minimizes fee churn while maintaining adequate position size.
 
-name = "12h_WilliamsR_ME_1dVolumeSpike_1dADX25_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hHMA21_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,78 +29,62 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h Williams %R(14)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d volume spike confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Load 12h data ONCE before loop for HMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
-    # Use 1d volume for spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_1d > (2.0 * vol_ma_20_1d)
-    # Align 1d volume spike to 12h timeframe (wait for completed 1d bar)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Calculate 1d ADX(14) for trend filter
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
-    tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
-    tr1.iloc[0] = 0  # first bar has no previous close
-    tr2.iloc[0] = 0
-    tr3.iloc[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h HMA(21) - Hull Moving Average
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA calculation
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
+        
+        wma_half = np.array([np.nan] * (len(arr) - half_period + 1))
+        wma_full = np.array([np.nan] * (len(arr) - period + 1))
+        
+        for i in range(len(arr) - half_period + 1):
+            wma_half[i] = np.dot(arr[i:i+half_period], np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
+        for i in range(len(arr) - period + 1):
+            wma_full[i] = np.dot(arr[i:i+period], np.arange(1, period+1)) / (period * (period + 1) / 2)
+        
+        raw_hma = 2 * wma_half - wma_full
+        hma = np.array([np.nan] * (len(arr) - sqrt_period + 1))
+        for i in range(len(raw_hma)):
+            hma[i + sqrt_period - 1] = np.dot(raw_hma[i:i+sqrt_period], np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
+        
+        # Pad with NaN to match original length
+        result = np.full_like(arr, np.nan)
+        result[period-1:] = hma
+        return result
     
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    dm_plus = np.where(
-        (df_1d['high'] - np.roll(df_1d['high'], 1)) > (np.roll(df_1d['low'], 1) - df_1d['low']),
-        np.maximum(df_1d['high'] - np.roll(df_1d['high'], 1), 0),
-        0
-    )
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    dm_minus = np.where(
-        (np.roll(df_1d['low'], 1) - df_1d['low']) > (df_1d['high'] - np.roll(df_1d['high'], 1)),
-        np.maximum(np.roll(df_1d['low'], 1) - df_1d['low'], 0),
-        0
-    )
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Smoothed +DM and -DM
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    # Handle division by zero when both DI are zero
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Align 1d ADX to 12h timeframe (wait for completed 1d bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for Williams %R and volume MA
+    start_idx = 20  # warmup for Donchian channels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -111,35 +94,36 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
-        curr_volume_spike = volume_spike_aligned[i]
-        curr_adx = adx_aligned[i]
+        curr_highest = highest_20[i]
+        curr_lowest = lowest_20[i]
+        curr_hma = hma_12h_aligned[i]
+        curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trending market (ADX > 25)
-            if curr_volume_spike and curr_adx > 25:
-                # Mean reversion long: Williams %R oversold (< -80)
-                if curr_williams_r < -80:
+            # Require volume spike
+            if curr_volume_spike:
+                # Bullish breakout: price breaks above highest_20 AND 12h HMA is rising (uptrend)
+                if curr_close > curr_highest and curr_hma > hma_12h_aligned[i-1]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Mean reversion short: Williams %R overbought (> -20)
-                elif curr_williams_r > -20:
+                # Bearish breakout: price breaks below lowest_20 AND 12h HMA is falling (downtrend)
+                elif curr_close < curr_lowest and curr_hma < hma_12h_aligned[i-1]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when Williams %R returns to neutral area (> -50)
-            if curr_williams_r > -50:
+            # Exit when price drops below lowest_20 (breakdown of support)
+            if curr_close < curr_lowest:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Williams %R returns to neutral area (< -50)
-            if curr_williams_r < -50:
+            # Exit when price rises above highest_20 (breakout of resistance)
+            if curr_close > curr_highest:
                 signals[i] = 0.0
                 position = 0
             else:
