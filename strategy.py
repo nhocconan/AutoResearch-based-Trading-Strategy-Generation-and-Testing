@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian channel breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 4h HTF for Donchian channel (20-period) for structure and breakout signals, and 1d EMA50 for trend filter to avoid counter-trend trades.
-# Long when price breaks above 4h upper Donchian channel in uptrend (1h close > 1d EMA50) with volume spike (>2.0x average).
-# Short when price breaks below 4h lower Donchian channel in downtrend (1h close < 1d EMA50) with volume spike.
-# Designed for moderate trade frequency (~15-37/year on 1h) to minimize fee drag while capturing strong directional moves.
-# Uses volume confirmation (>2.0x average) and trend alignment to filter false breakouts.
-# Stoploss via signal=0 when price reverses and breaks the opposite Donchian channel level.
-# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at 4h channel levels.
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels (R4/S4) with 1d ADX trend filter and volume confirmation
+# Long when price breaks above 1w R4 in strong uptrend (1d ADX > 25) with volume spike (>2.0x average).
+# Short when price breaks below 1w S4 in strong downtrend (1d ADX > 25) with volume spike.
+# Weekly Camarilla levels provide significant structural barriers; breakouts with ADX confirmation capture strong momentum moves.
+# Designed for very low trade frequency (~12-37/year on 6h) to minimize fee drag while capturing strong directional moves.
+# Uses moderate volume confirmation (>2.0x average) and extreme Camarilla levels (R4/S4) to balance signal quality and frequency.
+# Stoploss at 2.0 * ATR and take profit at 3.0 * ATR for asymmetric risk-reward (1:1.5).
+# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at weekly pivot levels.
+# Focus on BTC/ETH as primary targets.
 
-name = "1h_4hDonchian20_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_1wCamarilla_R4S4_Breakout_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,89 +27,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w and 1d data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1w Camarilla levels (R4, S4) using typical price
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Donchian upper = max(high, lookback=20), lower = min(low, lookback=20)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Camarilla: R4 = close + 1.1*(high-low)/2, S4 = close - 1.1*(high-low)/2
+    camarilla_r4 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_s4 = close_1w - 1.1 * (high_1w - low_1w) / 2
     
-    # Align 4h Donchian levels to 1h timeframe (wait for 4h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align 1w Camarilla levels to 6h timeframe (wait for 1w bar to close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM-
+    tr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate ATR(14) for dynamic stoploss on 6h
+    tr1_6h = high[1:] - low[1:]
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.max([tr1_6h[0], tr2_6h[0], tr3_6h[0]])], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    atr = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for Donchian(20) and EMA(50)
+    start_idx = 50  # warmup for ADX(14)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Volume confirmation: volume > 2.0x 20-period average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
+        # Volume confirmation: volume > 2.0x 50-period average
+        if i >= 50:
+            vol_ma_50 = np.mean(volume[i-50:i])
         elif i > 0:
-            vol_ma_20 = np.mean(volume[:i])
+            vol_ma_50 = np.mean(volume[:i])
         else:
-            vol_ma_20 = 0
-        volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
+            vol_ma_50 = 0
+        volume_spike = volume[i] > (2.0 * vol_ma_50) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_dch = donchian_high_aligned[i]
-        curr_dcl = donchian_low_aligned[i]
-        curr_ema = ema_50_aligned[i]
+        curr_atr = atr[i]
+        curr_r4 = camarilla_r4_aligned[i]
+        curr_s4 = camarilla_s4_aligned[i]
+        curr_adx = adx_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trend alignment
-            if volume_spike:
-                # Bullish entry: price breaks above 4h upper Donchian with 1d uptrend (close > EMA50)
-                if curr_close > curr_dch and curr_close > curr_ema:
-                    signals[i] = 0.20
+            # Require volume spike and strong trend (ADX > 25)
+            if volume_spike and curr_adx > 25:
+                # Bullish entry: price breaks above 1w R4 with strong uptrend
+                if curr_close > curr_r4:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 4h lower Donchian with 1d downtrend (close < EMA50)
-                elif curr_close < curr_dcl and curr_close < curr_ema:
-                    signals[i] = -0.20
+                # Bearish entry: price breaks below 1w S4 with strong downtrend
+                elif curr_close < curr_s4:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: price breaks below 4h lower Donchian channel (reversal signal)
-            if curr_close < curr_dcl:
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1w S4 (reversal signal)
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close < curr_s4:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches 3.0x ATR above entry
+            elif curr_close > entry_price + 3.0 * curr_atr:
+                signals[i] = 0.0  # full exit
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above 4h upper Donchian channel (reversal signal)
-            if curr_close > curr_dch:
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1w R4 (reversal signal)
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close > curr_r4:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches 3.0x ATR below entry
+            elif curr_close < entry_price - 3.0 * curr_atr:
+                signals[i] = 0.0  # full exit
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
