@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels act as strong support/resistance derived from prior day's range
-# Breakout above R3 or below S3 with volume spike indicates institutional participation
-# 1d EMA > EMA34 ensures alignment with daily trend to avoid counter-trend whipsaw
-# Works in bull markets via R3 breakouts and bear markets via S3 breakdowns with trend filter
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian channels provide clear breakout levels based on recent price extremes
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend whipsaws
+# Volume spike (>1.8x 20-period average) confirms institutional participation
+# Discrete sizing 0.28 balances profit potential with drawdown control
+# Works in bull markets via breakouts and bear markets via breakdowns with trend filter
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,34 +40,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) channels: 20-period high/low
+    # Using 20 * 4h = 80h ≈ 3.3 days of price action
+    lookback = 20
+    highest_20 = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_20 = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Camarilla levels based on prior day's OHLC
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.125 / 2)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.125 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 288h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 24)  # warmup for EMA and volume MA
+    start_idx = max(34, 20)  # warmup for EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -79,38 +73,38 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and price above/below EMA34 for trend alignment
+            # Require volume spike and price above/below EMA34_1d for trend alignment
             if curr_volume_spike:
-                # Bullish entry: break above R3 with price > EMA34_1d
-                if curr_close > curr_r3 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
+                # Bullish entry: break above 20-period high with price > EMA34_1d
+                if curr_close > curr_highest_20 and curr_close > curr_ema_34_1d:
+                    signals[i] = 0.28
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below S3 with price < EMA34_1d
-                elif curr_close < curr_s3 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
+                # Bearish entry: break below 20-period low with price < EMA34_1d
+                elif curr_close < curr_lowest_20 and curr_close < curr_ema_34_1d:
+                    signals[i] = -0.28
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R3 (breakout fails) OR price crosses below EMA34_1d
-            if curr_close < curr_r3 or curr_close < curr_ema_34_1d:
+            # Exit when price drops below 20-period low OR price crosses below EMA34_1d
+            if curr_close < curr_lowest_20 or curr_close < curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         
         elif position == -1:  # Short position
-            # Exit when price rises above S3 (breakdown fails) OR price crosses above EMA34_1d
-            if curr_close > curr_s3 or curr_close > curr_ema_34_1d:
+            # Exit when price rises above 20-period high OR price crosses above EMA34_1d
+            if curr_close > curr_highest_20 or curr_close > curr_ema_34_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
