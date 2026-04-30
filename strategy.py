@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Uses Donchian channel from previous 20 periods for structure (proven edge on SOL)
 # Only trade breakouts above upper channel or below lower channel in direction of 1d EMA34 trend
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # 1d EMA34 provides smoother trend than shorter EMAs, reducing whipsaw in ranging markets
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-150 total trades over 4 years (19-37/year).
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by following the 1d EMA34 trend direction.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
