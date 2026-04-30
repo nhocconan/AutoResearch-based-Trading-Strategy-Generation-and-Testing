@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 + 1d EMA34 uptrend + volume > 2.0x 24-bar average.
-# Short when price breaks below S3 + 1d EMA34 downtrend + volume > 2.0x 24-bar average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above R3 + 12h EMA50 uptrend + volume > 2.0x 20-bar average.
+# Short when price breaks below S3 + 12h EMA50 downtrend + volume > 2.0x 20-bar average.
 # ATR trailing stop (2.5x) for risk management.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# 12h timeframe reduces trade frequency vs lower timeframes; Camarilla levels provide institutional support/resistance.
-# 1d EMA34 ensures alignment with daily trend, improving performance in both bull/bear markets.
-# Volume confirmation filter of 2.0x reduces false breakouts.
+# Targets 80-150 total trades over 4 years (20-38/year) with discrete position sizing (0.25).
+# Uses 12h HTF for trend filter (more stable than 1d) and stricter volume confirmation (2.0x) to reduce overtrading.
+# Camarilla levels provide institutional support/resistance; breakouts with volume confirm conviction.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels from previous 12h bar
+    # Calculate Camarilla levels from previous 4h bar
     # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     # Using previous bar's high/low/close to avoid look-ahead
     prev_close = np.concatenate([[close[0]], close[:-1]])
@@ -47,9 +46,9 @@ def generate_signals(prices):
     r3 = prev_close + (camarilla_range * 1.1 / 4)
     s3 = prev_close - (camarilla_range * 1.1 / 4)
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=1).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 2.0x 20-period average (stricter than before)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -63,20 +62,20 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 34  # warmup for EMA34 and volume MA
+    start_idx = 50  # warmup for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_34_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Regime filter: price above/below 1d EMA34 determines trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Regime filter: price above/below 12h EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
