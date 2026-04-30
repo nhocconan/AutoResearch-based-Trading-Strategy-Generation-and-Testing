@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d Supertrend trend filter and volume spike confirmation.
-# Long when price breaks above R3, price > 1d Supertrend (bullish), and volume > 2.0x 20-bar avg.
-# Short when price breaks below S3, price < 1d Supertrend (bearish), and volume > 2.0x 20-bar avg.
-# Exit when price reverts to the Camarilla pivot point (mean reversion).
-# Uses 1d Supertrend for robust higher timeframe trend alignment, targeting 12-37 trades/year on 12h.
-# Supertrend avoids whipsaws better than EMA, volume confirmation reduces false signals.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel, price > 1d EMA50, and volume > 1.5x 20-bar avg.
+# Short when price breaks below lower Donchian channel, price < 1d EMA50, and volume > 1.5x 20-bar avg.
+# Exit when price reverts to the middle of the Donchian channel (mean reversion).
+# Uses 1d EMA50 for higher timeframe trend alignment, targeting 20-50 trades/year on 4h.
+# Trend filter avoids counter-trend trades, volume confirmation reduces false signals.
 # Works in bull markets via breakouts and in bear markets via short breakdowns with trend alignment.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dSupertrend_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,110 +25,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter and Camarilla levels
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Supertrend for trend filter (ATR=10, multiplier=3.0)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper band: highest high over past 20 bars
+    # Lower band: lowest low over past 20 bars
+    # Middle band: average of upper and lower
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # ATR(10)
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_1d + low_1d) / 2
-    upperband = hl2 + (3.0 * atr_10)
-    lowerband = hl2 - (3.0 * atr_10)
-    
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > supertrend[i-1]:
-            supertrend[i] = max(lowerband[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(upperband[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # Align Supertrend direction to 12h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    
-    # Calculate Camarilla pivot levels from previous day (using same 1d data)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Supertrend and Camarilla
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_supertrend_dir = supertrend_aligned[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_pivot = pivot_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
+        curr_middle = donchian_middle[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3, 1d Supertrend bullish (dir=1), volume spike
-            if (curr_close > curr_r3 and 
-                curr_supertrend_dir == 1 and 
+            # Long: price breaks above upper Donchian, price > 1d EMA50, volume spike
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, 1d Supertrend bearish (dir=-1), volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_supertrend_dir == -1 and 
+            # Short: price breaks below lower Donchian, price < 1d EMA50, volume spike
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price reverts to pivot point (mean reversion)
-            if curr_close <= curr_pivot:
+            # Exit condition: price reverts to middle of Donchian channel (mean reversion)
+            if curr_close <= curr_middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price reverts to pivot point (mean reversion)
-            if curr_close >= curr_pivot:
+            # Exit condition: price reverts to middle of Donchian channel (mean reversion)
+            if curr_close >= curr_middle:
                 signals[i] = 0.0
                 position = 0
             else:
