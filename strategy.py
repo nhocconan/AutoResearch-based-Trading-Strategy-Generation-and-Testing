@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA50), break above/below Donchian channels with volume triggers continuation entries.
-# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~19-50/year) to minimize fee drag.
-# Works in bull/bear via trend filter: only takes longs in uptrend, shorts in downtrend.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX regime filter.
+# In trending markets (ADX > 25), breakout above/below Donchian channel with volume triggers continuation entries.
+# In ranging markets (ADX < 20), fade at Donchian channel extremes for mean reversion.
+# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
+# Proven pattern: Donchian breakout + volume + regime filter shows strong test performance in DB.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
+name = "4h_Donchian20_Volume_ADX_RegimeAdaptive_ATRTrail_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,27 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
     # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll
-    donchian_lower = low_roll
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 4h ATR(14) for dynamic trailing stop
+    # Calculate 4h ADX(14) for regime filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / tr_14
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -54,32 +57,45 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 60  # warmup for all indicators
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA50 determines trend direction
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
+        # Regime filter: ADX determines market state
+        is_trending = adx[i] > 25
+        is_ranging = adx[i] < 20
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_donchian_upper = donchian_upper[i]
-        curr_donchian_lower = donchian_lower[i]
+        curr_dc_high = donchian_high[i]
+        curr_dc_low = donchian_low[i]
+        curr_dc_mid = donchian_mid[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            if is_uptrend:
-                # In uptrend: look for long breakouts above Donchian upper with volume
-                if curr_close > curr_donchian_upper and curr_volume_spike:
+            if is_trending:
+                # In trending market: look for breakouts with volume
+                if curr_close > curr_dc_high and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
-            elif is_downtrend:
-                # In downtrend: look for short breakdowns below Donchian lower with volume
-                if curr_close < curr_donchian_lower and curr_volume_spike:
+                elif curr_close < curr_dc_low and curr_volume_spike:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
+            elif is_ranging:
+                # In ranging market: mean reversion at Donchian extremes
+                if curr_close < curr_dc_low:
+                    # Oversold: look for long
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                elif curr_close > curr_dc_high:
+                    # Overbought: look for short
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
