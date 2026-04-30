@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA34 trend filter and volume spike confirmation.
-# Long when Bull Power > 0 (close > EMA13) and price > 12h EMA34 (uptrend) and volume > 2.0x 20-bar average.
-# Short when Bear Power < 0 (close < EMA13) and price < 12h EMA34 (downtrend) and volume spike.
-# Uses ATR trailing stop (2.5x) for risk management.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Works in both bull/bear markets by requiring 12h EMA34 trend alignment to avoid counter-trend trades.
-# Elder Ray measures bull/bear power via price relative to EMA13, effective in trending and ranging markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 level (strong resistance turned support) in uptrend (price > 1d EMA34) with volume > 2.0x 20-bar average.
+# Short when price breaks below S3 level (strong support turned resistance) in downtrend (price < 1d EMA34) with volume spike.
+# Uses ATR trailing stop (2.0x) for risk management.
+# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
+# Camarilla levels provide institutional pivot points that work in both bull/bear markets when aligned with higher timeframe trend.
 
-name = "6h_ElderRay_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = close - ema_13  # Bull Power: close > EMA13
-    bear_power = ema_13 - close  # Bear Power: close < EMA13
+    # Calculate Camarilla levels from previous 1d bar (HLC of completed daily bar)
+    # Camarilla uses: H = high, L = low, C = close of previous period
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Align to LTF: today's 4h bars use yesterday's Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -58,18 +63,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(34, 13, 20)  # warmup for EMA34, EMA13, and volume MA
+    start_idx = max(34, 20)  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_34_aligned[i]) or np.isnan(ema_13[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
-        # Regime filter: price above/below 12h EMA34 determines trend direction
+        # Regime filter: price above/below 1d EMA34 determines trend direction
         is_uptrend = close[i] > ema_34_aligned[i]
         is_downtrend = close[i] < ema_34_aligned[i]
         
@@ -78,17 +83,17 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_R3 = R3_aligned[i]
+        curr_S3 = S3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 + uptrend + volume confirmation
-            if curr_bull_power > 0 and is_uptrend and curr_volume_confirm:
+            # Long: break above R3 + uptrend + volume confirmation
+            if curr_close > curr_R3 and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: Bear Power < 0 + downtrend + volume confirmation
-            elif curr_bear_power > 0 and is_downtrend and curr_volume_confirm:  # Bear Power > 0 means close < EMA13
+            # Short: break below S3 + downtrend + volume confirmation
+            elif curr_close < curr_S3 and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
@@ -98,8 +103,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,8 +115,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
