@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume spike confirmation
-# Donchian breakouts capture strong momentum moves. The 1d EMA(50) ensures alignment with longer-term trend,
-# reducing whipsaw in ranging markets. Volume spike confirms institutional participation.
-# Designed for low trade frequency (~15-37/year on 1h) to minimize fee drag. Works in bull markets via breakout
-# continuation and in bear markets via filtered entries only during strong trending conditions.
-# Uses session filter (08-20 UTC) to avoid low-liquidity periods.
+# Hypothesis: 6h strategy using weekly Williams %R extremes with 1d EMA(34) trend filter and volume spike confirmation
+# Weekly Williams %R identifies overbought/oversold conditions on longer timeframe.
+# The 1d EMA(34) ensures trades align with intermediate-term trend, reducing counter-trend whipsaw.
+# Volume spike confirms institutional participation. Designed for low trade frequency (~12-37/year on 6h) to minimize fee drag.
+# Works in bull markets via mean-reversion from weekly extremes and in bear markets via trend-aligned entries.
 
-name = "1h_Donchian20_1dEMA50_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_WeeklyWilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) - prices.index is already DatetimeIndex
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data ONCE before loop for Williams %R calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 4h Donchian(20) channels
-    donchian_high = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Williams %R (14-period)
+    highest_high_1w = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_1w = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
+    close_1w = df_1w['close'].values
+    williams_r = -100 * (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_1w - lowest_low_1w) == 0, -50, williams_r)
     
-    # Align 4h Donchian levels to 1h timeframe (wait for 4h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align weekly Williams %R to 6h timeframe (wait for weekly bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
-    # Load 1d data ONCE before loop for EMA(50) trend filter
+    # Load daily data ONCE before loop for EMA(34) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    
-    # Calculate 1d EMA(50) for trend filter
     close_1d_s = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -62,63 +58,54 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50) and Donchian(20)
+    start_idx = 50  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: volume > 1.8x 20-period average (stricter to reduce trades)
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-        else:
-            vol_ma_20 = np.mean(volume[:i]) if i > 0 else 0
-        volume_spike = volume[i] > (1.8 * vol_ma_20) if i > 0 else False
+        # Volume confirmation: volume > 1.5x 20-period average
+        vol_ma_20 = np.mean(volume[max(0, i-20):i]) if i >= 20 else np.mean(volume[:i]) if i > 0 else 0
+        volume_spike = volume[i] > (1.5 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_dc_high = donchian_high_aligned[i]
-        curr_dc_low = donchian_low_aligned[i]
-        curr_ema = ema_50_1d_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trend alignment
+            # Require volume spike and extreme Williams %R
             if volume_spike:
-                # Bullish entry: price breaks above 4h Donchian high with 1d uptrend
-                if curr_close > curr_dc_high and curr_close > curr_ema:
-                    signals[i] = 0.20
+                # Bullish entry: weekly Williams %R < -80 (oversold) with price above 1d EMA (uptrend filter)
+                if curr_williams_r < -80 and curr_close > curr_ema:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 4h Donchian low with 1d downtrend
-                elif curr_close < curr_dc_low and curr_close < curr_ema:
-                    signals[i] = -0.20
+                # Bearish entry: weekly Williams %R > -20 (overbought) with price below 1d EMA (downtrend filter)
+                elif curr_williams_r > -20 and curr_close < curr_ema:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks 4h Donchian low (reversal signal)
-            if curr_close < entry_price - 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR below entry price OR Williams %R returns above -50 (mean reversion signal)
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_dc_low:
+            elif curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks 4h Donchian high (reversal signal)
-            if curr_close > entry_price + 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR above entry price OR Williams %R returns below -50 (mean reversion signal)
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_dc_high:
+            elif curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
