@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year).
 # Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume spike.
 # Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume spike.
 # ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14).
 # Works in bull via breakout longs, in bear via breakdown shorts.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
