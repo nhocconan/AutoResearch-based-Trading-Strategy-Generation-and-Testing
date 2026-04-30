@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
-# Uses 4h primary timeframe to target 75-200 trades over 4 years (19-50/year).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
+# Uses 12h primary timeframe to target 50-150 trades over 4 years (12-37/year).
 # Camarilla pivots from 1d provide strong support/resistance. Breakouts beyond R3/S3
 # indicate momentum moves. Volume spike (2.0x 20-period average) confirms validity.
 # 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
 # in bear via breakout shorts with trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_1dADX25_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1dADX25_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
     s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
