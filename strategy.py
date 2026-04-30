@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d HTF for Camarilla pivot calculation (key intraday support/resistance) and EMA trend to avoid whipsaws.
-# Long when price breaks above R3 in uptrend (close > EMA34) with volume spike.
-# Short when price breaks below S3 in downtrend (close < EMA34) with volume spike.
-# Designed for low trade frequency (~25-40/year on 4h) to minimize fee drag while capturing strong directional moves.
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation
+# Uses 1w HTF for Camarilla pivot calculation (weekly support/resistance) and 1d EMA for trend alignment.
+# Long when price breaks above 1w R3 with 1d uptrend (close > EMA34) and volume spike.
+# Short when price breaks below 1w S3 with 1d downtrend (close < EMA34) and volume spike.
+# Designed for low trade frequency (~10-20/year on 1d) to minimize fee drag while capturing strong weekly breakouts.
 # Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at extreme levels.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1dCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_1wCamarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla and EMA calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for Camarilla calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:  # need at least one weekly bar
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3) using typical price
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tp_1d = typical_price.values
+    # Calculate 1w Camarilla levels (R3, S3) using typical price
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tp_1w = typical_price.values
     
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 2
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1w Camarilla levels to 1d timeframe (wait for 1w bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
     # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate ATR(14) for dynamic stoploss on 4h
+    # Calculate ATR(14) for dynamic stoploss on 1d
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -62,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 100  # warmup for EMA(34)
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 2.0x 50-period average (strict to reduce trades)
@@ -80,45 +77,45 @@ def generate_signals(prices):
         curr_atr = atr[i]
         curr_r3 = camarilla_r3_aligned[i]
         curr_s3 = camarilla_s3_aligned[i]
-        curr_ema = ema_34_1d_aligned[i]
+        curr_ema = ema_34_1d[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d R3 with 1d uptrend (close > EMA34)
+                # Bullish entry: price breaks above 1w R3 with 1d uptrend (close > EMA34)
                 if curr_close > curr_r3 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d S3 with 1d downtrend (close < EMA34)
+                # Bearish entry: price breaks below 1w S3 with 1d downtrend (close < EMA34)
                 elif curr_close < curr_s3 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d S3 (reversal signal)
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1w S3 (reversal signal)
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1.5x ATR above entry OR touches 1d R3 (mean reversion)
+            # Take profit: price reaches 1.5x ATR above entry OR touches 1w R3 (mean reversion)
             elif curr_close > entry_price + 1.5 * curr_atr:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d R3 (reversal signal)
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1w R3 (reversal signal)
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1.5x ATR below entry OR touches 1d S3 (mean reversion)
+            # Take profit: price reaches 1.5x ATR below entry OR touches 1w S3 (mean reversion)
             elif curr_close < entry_price - 1.5 * curr_atr:
                 signals[i] = -0.10  # reduce position
             else:
