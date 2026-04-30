@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout)
-# with 1d EMA34 trend filter and volume confirmation (>2.0x average). 
-# Long when price breaks above R4 in uptrend (close > EMA34) with volume spike.
-# Short when price breaks below S4 in downtrend (close < EMA34) with volume spike.
-# Fade longs at R3 in downtrend (close < EMA34) and fade shorts at S3 in uptrend (close > EMA34).
-# Uses ATR-based trailing stop (2.5x ATR) to manage risk.
-# Designed for low trade frequency (~12-37/year on 6h) to minimize fee drag while capturing strong directional moves and mean reversion at key levels.
-# Works in bull markets via R4 breakout continuation and in bear markets via S4 breakdown continuation.
-# Camarilla levels from 1d provide institutional support/resistance that price respects.
+# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation and 1d EMA50 trend filter.
+# Long when price breaks above Donchian upper (20) in uptrend (close > EMA50) with volume > 1.5x average.
+# Short when price breaks below Donchian lower (20) in downtrend (close < EMA50) with volume spike.
+# Uses ATR-based trailing stop (2.0x ATR) for risk management.
+# Designed for low trade frequency (~12-37/year on 12h) to minimize fee drag while capturing strong directional moves.
+# Works in bull markets via upper band breakouts and in bear markets via lower band breakdowns.
+# Donchian channels from 1d provide structural support/resistance that price respects in both regimes.
 
-name = "6h_1dCamarilla_R3S3_R4S4_BreakoutFade_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_1dDonchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,36 +30,25 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla calculations: based on previous day's range
-    # Pivot = (high + low + close) / 3
-    # Range = high - low
-    # R4 = close + range * 1.1/2
-    # R3 = close + range * 1.1/4
-    # S3 = close - range * 1.1/4
-    # S4 = close - range * 1.1/2
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    rng = high_1d - low_1d
-    r4 = close_1d + rng * 1.1 / 2.0
-    r3 = close_1d + rng * 1.1 / 4.0
-    s3 = close_1d - rng * 1.1 / 4.0
-    s4 = close_1d - rng * 1.1 / 2.0
+    # Upper band = highest high over 20 periods
+    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band = lowest low over 20 periods
+    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Camarilla levels to 6h timeframe (wait for 1d bar to close)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align 1d Donchian levels to 12h timeframe (wait for 1d bar to close)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 1d EMA(50) for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate ATR(14) for dynamic trailing stop on 6h
+    # Calculate ATR(14) for dynamic trailing stop on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -74,50 +61,36 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for trailing stop
     lowest_since_entry = 0.0   # for trailing stop
     
-    start_idx = 50  # warmup for EMA(34) and Camarilla calculation
+    start_idx = 50  # warmup for Donchian and EMA(50)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 20-period average
+        # Volume confirmation: volume > 1.5x 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
         elif i > 0:
             vol_ma_20 = np.mean(volume[:i])
         else:
             vol_ma_20 = 0
-        volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
+        volume_spike = volume[i] > (1.5 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_r4 = r4_aligned[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_s4 = s4_aligned[i]
-        curr_ema = ema_34_aligned[i]
+        curr_upper = upper_aligned[i]
+        curr_lower = lower_aligned[i]
+        curr_ema = ema_50_aligned[i]
         
-        if position == 0:  # Flat - look for new entries or fades
+        if position == 0:  # Flat - look for new entries
             if volume_spike:
-                # Breakout longs: price breaks above R4 in uptrend
-                if curr_close > curr_r4 and curr_close > curr_ema:
+                # Breakout longs: price breaks above upper band in uptrend
+                if curr_close > curr_upper and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
-                # Breakout shorts: price breaks below S4 in downtrend
-                elif curr_close < curr_s4 and curr_close < curr_ema:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
-                # Fade longs: price rejects at S3 in uptrend (mean reversion up)
-                elif curr_close < curr_s3 and curr_close > curr_ema:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                # Fade shorts: price rejects at R3 in downtrend (mean reversion down)
-                elif curr_close > curr_r3 and curr_close < curr_ema:
+                # Breakout shorts: price breaks below lower band in downtrend
+                elif curr_close < curr_lower and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -128,8 +101,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,8 +113,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
