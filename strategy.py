@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# In trending markets (price > 1w EMA50), break above upper Donchian or below lower Donchian with volume triggers continuation entries.
-# In ranging markets (price near 1w EMA50), fade at extreme Donchian levels for mean reversion.
-# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~10-25/year) to minimize fee drag.
-# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
+# Hypothesis: 6h Williams %R extreme readings (below -80 for oversold, above -20 for overbought) 
+# combined with 1d EMA50 trend filter and volume confirmation. In strong trends (price > 1d EMA50),
+# we take Williams %R pullbacks to -50 (continuation). In ranging markets (price near 1d EMA50),
+# we fade extremes at Williams %R < -80 or > -20. This captures mean reversion in ranges and 
+# trend continuation in trends, adapting to both bull and bear markets. Low trade frequency via 
+# strict Williams %R thresholds and volume confirmation minimizes fee drag.
 
-name = "1d_Donchian20_1wEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_RegimeAdaptive_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,107 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Donchian(20) channels
-    def donchian_channels(high, low, window):
-        upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate Williams %R(14) on 6h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
-    upper_channel, lower_channel = donchian_channels(high, low, 20)
-    
-    # Calculate 1d ATR(14) for dynamic trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 60  # warmup for Williams %R and EMA
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1w EMA50 determines trend direction
+        # Regime filter: price above/below 1d EMA50 determines trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_atr = atr[i]
-        curr_upper = upper_channel[i]
-        curr_lower = lower_channel[i]
+        curr_wr = williams_r[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long breakouts above upper Donchian with volume
-                if curr_close > curr_upper and curr_volume_spike:
+                # In uptrend: look for long on pullback to Williams %R = -50 with volume
+                if -55 <= curr_wr <= -45 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short breakdowns below lower Donchian with volume
-                if curr_close < curr_lower and curr_volume_spike:
+                # In downtrend: look for short on pullback to Williams %R = -50 with volume
+                if -55 <= curr_wr <= -45 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
             else:
-                # In ranging market (near EMA): mean reversion at extreme Donchian levels
-                if curr_close < curr_lower:
-                    # Deep oversold: look for long
+                # In ranging market (near EMA): fade Williams %R extremes
+                if curr_wr < -80:  # Deep oversold: look for long
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                elif curr_close > curr_upper:
-                    # Deep overbought: look for short
+                elif curr_wr > -20:  # Deep overbought: look for short
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            if curr_high > highest_since_entry:
-                highest_since_entry = curr_high
-            
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Exit on Williams %R overbought or opposite regime
+            if curr_wr > -20 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Exit on Williams %R oversold or opposite regime
+            if curr_wr < -80 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
