@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~100 total over 4 years.
-# Only enters when price breaks 12h Donchian upper/lower channel with volume confirmation and 1d EMA34 trend alignment.
-# Designed for low trade frequency (<200 total 12h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~150 total over 4 years.
+# Only enters when price breaks 4h Camarilla R3 (short) or S3 (long) levels with volume confirmation and 1d EMA34 trend alignment.
+# Designed for low trade frequency (<200 total 4h trades) to avoid fee drag. Works in bull/bear via 1d EMA34 trend filter.
 
-name = "12h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -71,33 +71,47 @@ def generate_signals(prices):
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Calculate 12h Donchian channels using only completed 12h bars
-        # We need to get the 12h data for Donchian calculation
-        if i >= 12:  # Need at least one 12h bar to calculate
-            # For simplicity, we'll use a rolling window on the primary timeframe
-            # but we need to ensure we're using completed 12h periods
-            # Since we're on 12h timeframe, we can use a 20-period lookback
-            if i >= 20:
-                donchian_high = np.max(high[i-20:i])
-                donchian_low = np.min(low[i-20:i])
+        # Calculate Camarilla levels from previous 1d bar
+        # Use completed 1d bar: i-1 index in 1d data aligned to current 4h bar
+        if i >= 1:
+            # Get the previous completed 1d bar's OHLC from aligned arrays
+            # Since we're on 4h timeframe, we need to get the 1d values from the previous day
+            # The aligned arrays already give us the 1d values for each 4h bar
+            # But for Camarilla, we need the previous 1d bar's data
+            # We'll use the 1d data shifted by 1 bar (previous completed day)
+            if len(df_1d) >= 2:
+                # Get index of previous completed 1d bar
+                prev_1d_idx = len(df_1d) - 2  # second to last completed 1d bar
+                if prev_1d_idx >= 0:
+                    ph = df_1d['high'].iloc[prev_1d_idx]
+                    pl = df_1d['low'].iloc[prev_1d_idx]
+                    pc = df_1d['close'].iloc[prev_1d_idx]
+                    
+                    # Calculate Camarilla levels
+                    rang = ph - pl
+                    r3 = pc + (rang * 1.1 / 4)
+                    s3 = pc - (rang * 1.1 / 4)
+                else:
+                    r3 = np.nan
+                    s3 = np.nan
             else:
-                donchian_high = np.nan
-                donchian_low = np.nan
+                r3 = np.nan
+                s3 = np.nan
         else:
-            donchian_high = np.nan
-            donchian_low = np.nan
+            r3 = np.nan
+            s3 = np.nan
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper channel, 1d EMA34 uptrend, volume spike confirmation
-            if (curr_close > donchian_high and 
+            # Long: price breaks above S3, 1d EMA34 uptrend, volume spike confirmation
+            if (curr_close > s3 and 
                 curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Donchian lower channel, 1d EMA34 downtrend, volume spike confirmation
-            elif (curr_close < donchian_low and 
+            # Short: price breaks below R3, 1d EMA34 downtrend, volume spike confirmation
+            elif (curr_close < r3 and 
                   curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
