@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR volatility filter and volume confirmation (>1.5x average)
-# Uses 12h timeframe to minimize trade frequency (target: 50-150 total trades over 4 years)
-# 1d ATR(14) measures volatility regime: only trade when ATR > its 50-period MA (expanding volatility)
-# Volume confirmation >1.5x 20-period average avoids low-conviction breakouts
-# Discrete position sizing: 0.25 for entries to balance return and drawdown
-# Works in all markets: Donchian breakouts capture trends, volatility filter avoids choppy false signals
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation (>1.8x average)
+# Uses 4h timeframe for balance of signal quality and trade frequency (target: 75-200 total trades over 4 years)
+# Donchian channels provide robust price breakout structure
+# 12h EMA50 offers smooth trend filter to avoid counter-trend trades
+# Volume confirmation ensures breakout legitimacy
+# Discrete position sizing: 0.25 for entries to control risk and fee drag
+# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by EMA)
 
-name = "12h_Donchian20_ATR_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA50_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,62 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period) from previous bar
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Need previous bar's levels to avoid look-ahead
-    highest_20_prev = np.roll(highest_20, 1)
-    lowest_20_prev = np.roll(lowest_20, 1)
-    highest_20_prev[0] = np.nan
-    lowest_20_prev[0] = np.nan
+    # Calculate 4h Donchian channels (20-period) from previous bar
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Breakout conditions
-    breakout_up = close > highest_20_prev
-    breakout_down = close < lowest_20_prev
+    breakout_up = close > donchian_high
+    breakout_down = close < donchian_low
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average (balanced to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # Calculate 1d ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    
-    # Volatility filter: only trade when current ATR > its 50-period MA (expanding volatility)
-    volatility_filter = atr_14_aligned > atr_ma_50_aligned
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20, 14, 50)  # warmup for Donchian (20), ATR (14), ATR MA (50)
+    start_idx = max(100, 20, 50)  # warmup for Donchian (20), volume MA (20), EMA (50)
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_20_prev[i]) or 
-            np.isnan(lowest_20_prev[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_14_aligned[i]) or
-            np.isnan(atr_ma_50_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -87,31 +63,31 @@ def generate_signals(prices):
         curr_breakout_up = breakout_up[i]
         curr_breakout_down = breakout_down[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_volatility_filter = volatility_filter[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on breakout with volume confirmation and volatility filter
-            if curr_volume_confirm and curr_volatility_filter:
-                # Bullish breakout: price above Donchian upper band
-                if curr_breakout_up:
+            # Only trade on breakout with volume confirmation and trend filter
+            if curr_volume_confirm:
+                # Bullish breakout: price above Donchian high + above 12h EMA50
+                if curr_breakout_up and curr_close > curr_ema_50_12h:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below Donchian lower band
-                elif curr_breakout_down:
+                # Bearish breakout: price below Donchian low + below 12h EMA50
+                elif curr_breakout_down and curr_close < curr_ema_50_12h:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price closes below Donchian lower band (reversal)
-            if curr_close < lowest_20_prev[i]:
+            # Exit: price closes below Donchian low (reversal) or above Donchian high (take profit)
+            if curr_close < donchian_low[i] or curr_close > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band (reversal)
-            if curr_close > highest_20_prev[i]:
+            # Exit: price closes above Donchian high (reversal) or below Donchian low (take profit)
+            if curr_close > donchian_high[i] or curr_close < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
