@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla R3/S3 levels with volume confirmation and 6h trend filter
+# Hypothesis: 4h strategy using 1d Camarilla R1/S1 levels with volume confirmation and 4h trend filter
 # Camarilla pivots identify key intraday support/resistance where institutional order flow clusters.
-# Breakouts above R3 or below S3 with volume spike indicate strong institutional participation.
-# 6h EMA(50) ensures alignment with intermediate-term trend to avoid counter-trend trades.
-# Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
+# Breakouts above R1 or below S1 with volume spike indicate strong institutional participation.
+# 4h EMA(34) ensures alignment with intermediate-term trend to avoid counter-trend trades.
+# Designed for low trade frequency (~30/year) to minimize fee drag in both bull and bear markets.
+# Uses discrete position sizing (0.25) to reduce churn and ATR-based stops for risk control.
 
-name = "6h_Camarilla_R3S3_Breakout_6hTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_4hTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +29,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R3, S3, R4, S4)
+    # Calculate 1d Camarilla levels (R1, S1, R2, S2)
     # Based on previous day's high, low, close
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -37,20 +38,20 @@ def generate_signals(prices):
     # Calculate pivot point (PP)
     pp = (high_1d + low_1d + close_1d) / 3.0
     # Calculate Camarilla levels
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
-    r4 = pp + (high_1d - low_1d) * 1.1 / 2.0
-    s4 = pp - (high_1d - low_1d) * 1.1 / 2.0
+    r1 = pp + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = pp - (high_1d - low_1d) * 1.1 / 12.0
+    r2 = pp + (high_1d - low_1d) * 1.1 / 6.0
+    s2 = pp - (high_1d - low_1d) * 1.1 / 6.0
     
-    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Calculate 6h EMA(50) for trend filter
+    # Calculate 4h EMA(34) for trend filter
     close_s = pd.Series(close)
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -63,60 +64,60 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50)
+    start_idx = 34  # warmup for EMA(34)
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 30-period average
-        vol_ma_30 = np.mean(volume[max(0, i-30):i])
-        volume_spike = volume[i] > (2.0 * vol_ma_30)
+        # Volume confirmation: volume > 1.8x 20-period average
+        vol_ma_20 = np.mean(volume[max(0, i-20):i])
+        volume_spike = volume[i] > (1.8 * vol_ma_20)
         
         curr_close = close[i]
-        curr_ema = ema_50[i]
+        curr_ema = ema_34[i]
         curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
+        curr_r1 = r1_aligned[i]
+        curr_s1 = s1_aligned[i]
+        curr_r2 = r2_aligned[i]
+        curr_s2 = s2_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d Camarilla R3 with 6h uptrend
-                if curr_close > curr_r3 and curr_close > curr_ema:
+                # Bullish entry: price breaks above 1d Camarilla R1 with 4h uptrend
+                if curr_close > curr_r1 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Camarilla S3 with 6h downtrend
-                elif curr_close < curr_s3 and curr_close < curr_ema:
+                # Bearish entry: price breaks below 1d Camarilla S1 with 4h downtrend
+                elif curr_close < curr_s1 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks 1d Camarilla S3
-            if curr_close < entry_price - 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Camarilla S2
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s3:
+            elif curr_close < curr_s2:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1d Camarilla R4
-            elif curr_close >= curr_r4:
-                signals[i] = 0.10  # reduce position
+            # Take profit: price reaches 1d Camarilla R2
+            elif curr_close >= curr_r2:
+                signals[i] = 0.0  # exit full position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks 1d Camarilla R3
-            if curr_close > entry_price + 2.5 * curr_atr:
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Camarilla R2
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r3:
+            elif curr_close > curr_r2:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1d Camarilla S4
-            elif curr_close <= curr_s4:
-                signals[i] = -0.10  # reduce position
+            # Take profit: price reaches 1d Camarilla S2
+            elif curr_close <= curr_s2:
+                signals[i] = 0.0  # exit full position
             else:
                 signals[i] = -0.25
     
