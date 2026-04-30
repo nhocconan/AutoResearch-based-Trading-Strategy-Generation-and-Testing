@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# Donchian channels provide objective breakout levels based on 20-period high/low
-# Breakout above upper band or below lower band with volume confirmation indicates strong momentum
-# 1d ADX > 25 ensures alignment with strong daily trend to avoid whipsaw in ranging markets
-# Volume spike (2.0x 24-period average) confirms institutional participation
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Williams %R Extreme + 1d ADX Trend + Volume Spike
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) 
+# often precede reversals. In strong trends (ADX > 25), these extremes can signal 
+# continuation rather than reversal - we look for %R to rebound from extreme levels 
+# in the direction of the trend. Volume spike confirms institutional participation.
+# Session filter (08-20 UTC) avoids low-liquidity periods. Discrete sizing 0.25.
+# Target: 60-180 total trades over 4 years (15-45/year).
 
-name = "4h_Donchian20_1dADX25_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -75,16 +76,22 @@ def generate_signals(prices):
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian(20) channels
-    if len(high) < 20:
+    # Calculate 1d Williams %R (14-period)
+    if len(df_1d) < 14:
         return np.zeros(n)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close_1d) / (highest_high - lowest_low))
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*4h = 4 days)
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*6h = 6 days)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma_24)
     
@@ -92,12 +99,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 24)  # warmup for ADX and volume MA
+    start_idx = max(50, 24)  # warmup for ADX, Williams %R and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
@@ -108,38 +115,35 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_williams_r = williams_r_aligned[i]
         curr_adx = adx_aligned[i]
         curr_volume_spike = volume_spike[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and strong trend (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish entry: break above upper band with close > upper band
-                if curr_close > curr_upper:
+                # Bullish entry: Williams %R rebounds from extreme oversold (< -90)
+                if curr_williams_r < -90 and curr_williams_r > -95:  # rebounding from extreme
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below lower band with close < lower band
-                elif curr_close < curr_lower:
+                # Bearish entry: Williams %R drops from extreme overbought (> -10)
+                elif curr_williams_r > -10 and curr_williams_r < -5:  # dropping from extreme
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower band (breakout fails) OR ADX weakens (< 20)
-            if curr_close < curr_lower or curr_adx < 20:
+            # Exit when Williams %R reaches overbought (> -20) or ADX weakens (< 20)
+            if curr_williams_r > -20 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper band (breakdown fails) OR ADX weakens (< 20)
-            if curr_close > curr_upper or curr_adx < 20:
+            # Exit when Williams %R reaches oversold (< -80) or ADX weakens (< 20)
+            if curr_williams_r < -80 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
