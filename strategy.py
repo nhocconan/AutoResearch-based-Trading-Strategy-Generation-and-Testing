@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h volume spike and 1d ADX trend filter
-# Uses 6h primary timeframe to target 50-150 trades over 4 years (12-37/year).
-# Donchian(20) from 6h provides clear breakout levels. Volume spike (2.0x 20-period average) on 12h confirms validity.
-# 1d ADX > 25 filters for trending markets only, avoiding choppy conditions. Works in bull via breakout longs,
-# in bear via breakout shorts with trend filter. Discrete sizing 0.25 minimizes fee churn.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX(14) > 25 trend filter
+# Uses 4h primary timeframe targeting 75-200 total trades over 4 years (19-50/year).
+# Donchian channel breakouts capture strong momentum moves. Volume spike (2.0x 20-period average)
+# confirms validity. 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
+# Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
+# in bear via breakout shorts with trend filter.
 
-name = "6h_Donchian20_Breakout_12hVolumeSpike_1dADX25_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dVolumeSpike_1dADX25_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,46 +29,45 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 12h volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Calculate 1d Donchian channels (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    vol_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = vol_12h > (2.0 * vol_ma_20_12h)
-    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    # Use previous day's data for today's Donchian levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    upper_20 = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d Donchian levels to 4h timeframe (wait for completed 1d bar)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # Calculate 1d ADX(14) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # TR calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first bar has no previous close
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # +DM and -DM
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
     dm_plus = np.where(
-        (high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-        np.maximum(high_1d - np.roll(high_1d, 1), 0),
+        (high - np.roll(high, 1)) > (np.roll(low, 1) - low),
+        np.maximum(high - np.roll(high, 1), 0),
         0
     )
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
     dm_minus = np.where(
-        (np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-        np.maximum(np.roll(low_1d, 1) - low_1d, 0),
+        (np.roll(low, 1) - low) > (high - np.roll(high, 1)),
+        np.maximum(np.roll(low, 1) - low, 0),
         0
     )
     dm_plus[0] = 0
@@ -78,25 +78,25 @@ def generate_signals(prices):
     dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # +DI and -DI
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # Handle division by zero when both DI are zero
     dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 14)  # warmup for Donchian and ADX
+    start_idx = max(20, 14)  # warmup for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -106,36 +106,36 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_volume_spike = volume_spike_12h_aligned[i]
-        curr_adx = adx_1d_aligned[i]
+        curr_upper = upper_20_aligned[i]
+        curr_lower = lower_20_aligned[i]
+        curr_adx = adx[i]
+        curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trending market (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish breakout: price breaks above Donchian high
-                if curr_close > curr_donchian_high:
+                # Bullish breakout: price breaks above upper Donchian
+                if curr_close > curr_upper:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below Donchian low
-                elif curr_close < curr_donchian_low:
+                # Bearish breakout: price breaks below lower Donchian
+                elif curr_close < curr_lower:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below Donchian low (mean reversion)
-            if curr_close < curr_donchian_low:
+            # Exit when price drops below lower Donchian (mean reversion)
+            if curr_close < curr_lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Donchian high (mean reversion)
-            if curr_close > curr_donchian_high:
+            # Exit when price rises above upper Donchian (mean reversion)
+            if curr_close > curr_upper:
                 signals[i] = 0.0
                 position = 0
             else:
