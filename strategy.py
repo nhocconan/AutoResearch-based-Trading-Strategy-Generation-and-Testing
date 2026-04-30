@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above Donchian upper band with 1d uptrend (close > 1d EMA34) and volume > 2.0x 20-bar avg.
 # Short when price breaks below Donchian lower band with 1d downtrend (close < 1d EMA34) and volume > 2.0x 20-bar avg.
 # Exit on opposite Donchian band touch (mean reversion within the channel).
-# Uses proven Donchian structure with strict volume confirmation (2.0x) and 1d EMA34 trend filter to limit trades (target 12-37/year).
-# 1d EMA34 provides long-term trend filter, reducing false signals in choppy markets and bear rallies.
-# Timeframe: 12h, HTF: 1d as per experiment guidelines.
+# Uses proven Donchian structure with strict volume confirmation (2.0x) and 1d EMA34 trend filter to limit trades (target 19-50/year).
+# 1d EMA34 provides longer-term trend filter, reducing false signals in choppy markets and bear rallies.
+# Timeframe: 4h, HTF: 1d as per experiment guidelines.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     prev_low_1d = df_1d_prev['low'].shift(1).values
     prev_close_1d = df_1d_prev['close'].shift(1).values
     
-    # Align 1d data to 12h timeframe (completed 1d bar only)
+    # Align 1d data to 4h timeframe (completed 1d bar only)
     prev_high_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_high_1d)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_low_1d)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_close_1d)
