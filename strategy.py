@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR trailing stop
-# Donchian channels identify key breakout levels where institutional order flow accumulates.
-# Breakouts above/below 20-period high/low with volume spike indicate strong momentum.
-# ATR trailing stop allows profits to run while limiting drawdowns in both bull and bear markets.
-# Designed for moderate trade frequency (~30-50/year) to balance signal quality and fee drag.
-# Uses 4h timeframe with 1d HTF for volume regime filter (avoid low-volume false breakouts).
+# Hypothesis: 6h strategy using 1d Williams Alligator (JAW/TEETH/LIPS) with Elder Ray (Bull/Bear Power) confirmation and volume spike
+# The Alligator identifies trend phases: JAW (13-period SMMA), TEETH (8-period), LIPS (5-period). 
+# When LIPS > TEETH > JAW = bullish alignment; LIPS < TEETH < JAW = bearish alignment.
+# Elder Ray measures bull/bear power: Bull Power = High - EMA(13), Bear Power = Low - EMA(13).
+# Long when: Alligator bullish alignment + Bull Power > 0 + volume spike
+# Short when: Alligator bearish alignment + Bear Power < 0 + volume spike
+# Designed for low trade frequency (<30/year) to minimize fee drag. Works in both bull/bear markets by following the Alligator's trend alignment.
 
-name = "4h_Donchian20_Breakout_VolumeRegime_ATRTrail_v1"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_ElderRay_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,94 +25,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for volume regime filter
+    # Load 1d data ONCE before loop for Alligator and Elder Ray calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d average volume for regime filter (avoid low-volume environment)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 1d EMA(13) for Elder Ray (Smoothed Moving Average approximation)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate ATR(14) for Donchian channels and trailing stop
+    # EMA(13) as proxy for SMMA(13) - close enough for trend identification
+    close_1d_s = pd.Series(close_1d)
+    ema_13_1d = close_1d_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power_1d = high_1d - ema_13_1d    # Bull Power = High - EMA(13)
+    bear_power_1d = low_1d - ema_13_1d     # Bear Power = Low - EMA(13)
+    
+    # Calculate 1d Williams Alligator: JAW (13), TEETH (8), LIPS (5) - all SMMA
+    # Using EMA as approximation for SMMA with same period
+    jaw_1d = close_1d_s.ewm(span=13, adjust=False, min_periods=13).mean().values  # JAW
+    teeth_1d = close_1d_s.ewm(span=8, adjust=False, min_periods=8).mean().values    # TEETH
+    lips_1d = close_1d_s.ewm(span=5, adjust=False, min_periods=5).mean().values     # LIPS
+    
+    # Align all 1d indicators to 6h timeframe (wait for completed 1d bar)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    
+    # Calculate ATR(14) for dynamic stoploss on 6h chart
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period)
-    # Upper channel: highest high over past 20 periods
-    # Lower channel: lowest low over past 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
+    entry_price = 0.0
     
-    start_idx = 20  # warmup for Donchian channels
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Volume regime filter: avoid trading in low-volume environments
-        # Only trade when current 12h volume > 20-period 1d average volume
-        volume_regime_ok = volume[i] > vol_ma_20_1d_aligned[i]
+        # Volume confirmation: volume > 2.0x 30-period average
+        vol_ma_30 = np.mean(volume[max(0, i-30):i]) if i >= 30 else np.mean(volume[:i]) if i > 0 else volume[i]
+        volume_spike = volume[i] > (2.0 * vol_ma_30)
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
+        curr_bull_power = bull_power_aligned[i]
+        curr_bear_power = bear_power_aligned[i]
+        curr_jaw = jaw_aligned[i]
+        curr_teeth = teeth_aligned[i]
+        curr_lips = lips_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume regime confirmation
-            if volume_regime_ok:
-                # Bullish entry: price breaks above Donchian upper channel
-                if curr_close > curr_upper:
-                    signals[i] = 0.30
+            # Require volume spike
+            if volume_spike:
+                # Bullish entry: Alligator bullish alignment (LIPS > TEETH > JAW) + Bull Power > 0
+                if curr_lips > curr_teeth and curr_teeth > curr_jaw and curr_bull_power > 0:
+                    signals[i] = 0.25
                     position = 1
-                    highest_since_entry = curr_close
-                # Bearish entry: price breaks below Donchian lower channel
-                elif curr_close < curr_lower:
-                    signals[i] = -0.30
+                    entry_price = curr_close
+                # Bearish entry: Alligator bearish alignment (LIPS < TEETH < JAW) + Bear Power < 0
+                elif curr_lips < curr_teeth and curr_teeth < curr_jaw and curr_bear_power < 0:
+                    signals[i] = -0.25
                     position = -1
-                    lowest_since_entry = curr_close
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Update highest price since entry for trailing stop
-            if curr_close > highest_since_entry:
-                highest_since_entry = curr_close
-            
-            # ATR trailing stop: 2.5 * ATR below highest price since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Stoploss: 2.5 * ATR below entry price OR Alligator turns bearish (LIPS < JAW)
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Optional: exit if price re-enters Donchian channel (mean reversion)
-            elif curr_close < curr_upper and curr_close > curr_lower:
+            elif curr_lips < curr_jaw:  # Alligator sleeping/turning bearish
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest price since entry for trailing stop
-            if curr_close < lowest_since_entry:
-                lowest_since_entry = curr_close
-            
-            # ATR trailing stop: 2.5 * ATR above lowest price since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Stoploss: 2.5 * ATR above entry price OR Alligator turns bullish (LIPS > JAW)
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Optional: exit if price re-enters Donchian channel (mean reversion)
-            elif curr_close > curr_lower and curr_close < curr_upper:
+            elif curr_lips > curr_jaw:  # Alligator sleeping/turning bullish
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
