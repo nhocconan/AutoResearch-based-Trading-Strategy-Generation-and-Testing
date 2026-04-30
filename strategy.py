@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R4 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below S4 with 1d EMA34 downtrend and volume spike.
-# Uses ATR trailing stop (2.5x) for risk management.
-# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
-# Camarilla R4/S4 levels provide stronger breakout signals than R3/S3, reducing false breakouts.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
+# Short when price breaks below S3 with 1d EMA34 downtrend and volume spike.
+# Uses ATR trailing stop (2.0x) for risk management.
+# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
+# 12h timeframe reduces trade frequency vs lower TFs, minimizing fee drag.
+# Camarilla R3/S3 levels provide reliable breakout signals with proven efficacy.
 # 1d EMA34 filter ensures alignment with higher-timeframe trend, improving performance in both bull and bear markets.
 # Volume spike confirmation ensures breakouts have conviction, reducing whipsaws.
 
-name = "4h_Camarilla_R4S4_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,13 +42,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d_prev = df_1d['close'].shift(1).values  # Previous 1d close
     
-    # Camarilla formulas: R4/S4 = C ± (H-L)*1.1/2
-    cam_r4 = close_1d_prev + (high_1d - low_1d) * 1.1 / 2
-    cam_s4 = close_1d_prev - (high_1d - low_1d) * 1.1 / 2
+    # Camarilla formulas: R3/S3 = C ± (H-L)*1.1/4
+    cam_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
+    cam_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
-    cam_r4_aligned = align_htf_to_ltf(prices, df_1d, cam_r4)
-    cam_s4_aligned = align_htf_to_ltf(prices, df_1d, cam_s4)
+    # Align Camarilla levels to 12h timeframe
+    cam_r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
+    cam_s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
     
     # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -69,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_34_aligned[i]) or np.isnan(cam_r4_aligned[i]) or np.isnan(cam_s4_aligned[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -87,13 +88,13 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R4 + uptrend + volume confirmation
-            if curr_high > cam_r4_aligned[i] and is_uptrend and curr_volume_confirm:
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if curr_high > cam_r3_aligned[i] and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: price breaks below S4 + downtrend + volume confirmation
-            elif curr_low < cam_s4_aligned[i] and is_downtrend and curr_volume_confirm:
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif curr_low < cam_s3_aligned[i] and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
@@ -103,8 +104,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,8 +116,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
