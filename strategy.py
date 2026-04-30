@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using Weekly Donchian(20) breakout with volume confirmation and 1w EMA(34) trend filter
-# Donchian breakouts on weekly timeframe capture major trend shifts with lower frequency.
-# Volume confirmation on daily ensures participation, 1w EMA(34) aligns with longer-term trend.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag and improve bear market performance.
-# Uses 1d timeframe with 1w HTF for structure and trend filter.
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter
+# Donchian breakouts on daily timeframe capture significant trend shifts with moderate frequency.
+# Volume confirmation on 12h ensures participation, 1d EMA(34) aligns with intermediate-term trend.
+# Designed for low trade frequency (~12-25/year) to minimize fee drag and improve bear market performance.
+# Uses 12h timeframe with 1d HTF for structure and trend filter.
 
-name = "1d_WeeklyDonchian20_1wEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Donchian calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for Donchian calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate upper and lower bands
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 1d timeframe (wait for completed 1w bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w_s = pd.Series(df_1w['close'].values)
-    ema_34_1w = close_1w_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d_s = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -64,7 +64,7 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ma_20) if i > 0 else False
         
         curr_close = close[i]
-        curr_ema = ema_34_1w_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
         curr_upper = donchian_upper_aligned[i]
         curr_lower = donchian_lower_aligned[i]
@@ -72,19 +72,19 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1w Donchian upper with 1w uptrend
+                # Bullish entry: price breaks above 1d Donchian upper with 1d uptrend
                 if curr_close > curr_upper and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1w Donchian lower with 1w downtrend
+                # Bearish entry: price breaks below 1d Donchian lower with 1d downtrend
                 elif curr_close < curr_lower and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 1w Donchian lower
+            # Stoploss: 2.0 * ATR below entry price OR price breaks 1d Donchian lower
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 1w Donchian upper
+            # Stoploss: 2.0 * ATR above entry price OR price breaks 1d Donchian upper
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
