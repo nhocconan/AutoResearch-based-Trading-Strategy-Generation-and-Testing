@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In uptrend, buy oversold pullbacks (%R < -80).
-# In downtrend, sell overbought bounces (%R > -20). Volume spike confirms momentum. ATR trailing stop (2.5x).
-# Designed for low trade frequency (target: 75-150/4 years) to minimize fee drag and work in both bull/bear markets.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Uses actual Donchian channel from prior 1d candle. Long when price breaks above upper band with
+# uptrend + volume spike. Short when price breaks below lower band with downtrend + volume spike.
+# ATR trailing stop (2.5x) for risk management. Targets 30-100 trades over 4 years to minimize fee drag.
+# Works in both bull and bear markets by requiring alignment with 1w trend.
 
-name = "4h_WilliamsR_MeanRev_1dEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,26 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load 1d data for Donchian channels (prior completed 1d candle)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate Donchian(20) from prior 1d candle (HLC of previous 1d bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R (14-period) on 4h timeframe
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Shift by 1 to use prior 1d candle's data (completed 1d candle)
+    high_1d_prev = np.concatenate([[np.nan], high_1d[:-1]])
+    low_1d_prev = np.concatenate([[np.nan], low_1d[:-1]])
+    close_1d_prev = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Calculate Donchian(20) upper and lower bands for prior 1d candle
+    # Upper band = max(high_1d_prev over last 20 periods)
+    # Lower band = min(low_1d_prev over last 20 periods)
+    upper_band = pd.Series(high_1d_prev).rolling(window=20, min_periods=1).max().values
+    lower_band = pd.Series(low_1d_prev).rolling(window=20, min_periods=1).min().values
+    
+    # Align Donchian bands to 1d timeframe (wait for prior 1d candle to complete)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -56,31 +75,38 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Williams %R
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
+        # Skip if Donchian bands not available (first bar)
+        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]):
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            continue
+        
+        # Regime filter: price above/below 1w EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
         curr_volume_spike = volume_spike[i]
-        curr_williams_r = williams_r[i]
-        
-        # Regime filter: price above/below 1d EMA50 determines trend direction
-        is_uptrend = curr_close > ema_50_aligned[i]
-        is_downtrend = curr_close < ema_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long when Williams %R is oversold (< -80) with volume spike
-                if curr_williams_r < -80.0 and curr_volume_spike:
+                # In uptrend: look for long when price breaks above upper band with volume
+                if curr_high > upper_band_aligned[i] and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short when Williams %R is overbought (> -20) with volume spike
-                if curr_williams_r > -20.0 and curr_volume_spike:
+                # In downtrend: look for short when price breaks below lower band with volume
+                if curr_low < lower_band_aligned[i] and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
