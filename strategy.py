@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses 1d HTF for both trend and Camarilla levels to avoid look-ahead.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 1d HTF for trend and Camarilla levels from 1d (previous day) to avoid look-ahead.
 # Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 2.0x 20-bar average.
 # Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 2.0x 20-bar average.
 # Exit when price crosses Camarilla H3/L3 midline.
 # Discrete position sizing (0.25) to limit drawdown and fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 # Works in bull/bear via 1d EMA34 trend filter and volume confirmation to avoid false breakouts.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +47,7 @@ def generate_signals(prices):
     camarilla_l3 = prev_close - rang * 1.1 / 6
     camarilla_h3_l3_mid = (camarilla_h3 + camarilla_l3) / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_h3_l3_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_l3_mid)
@@ -60,7 +60,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(34, 20)  # warmup for EMA34 and volume MA
+    start_idx = max(50, 20)  # warmup for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
@@ -86,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: break below Camarilla L3, downtrend (price < 1d EMA34), volume confirmation
+            # Short: break below Camarilla S3, downtrend (price < 1d EMA34), volume confirmation
             elif (curr_low < camarilla_l3_aligned[i] and 
                   curr_close < ema_34_1d_aligned[i] and 
                   curr_volume_confirm):
