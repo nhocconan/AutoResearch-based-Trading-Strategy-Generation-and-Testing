@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX25 trend filter and volume spike confirmation
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Strong bull power + ADX > 25 + volume spike = long entry; strong bear power + ADX > 25 + volume spike = short
-# Works in bull markets via strong bear power reversals and in bear markets via strong bull power reversals
+# Hypothesis: 12h Williams %R extreme + 1d ADX25 trend filter + volume spike confirmation
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) with trend alignment provide high-probability entries
+# 1d ADX > 25 ensures we only trade in the direction of the strong daily trend, avoiding counter-trend whipsaws
+# Volume spike (2.0x 96-period average) confirms institutional participation
 # Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via buying oversold dips in uptrend and bear markets via selling overbought rallies in downtrend.
 
-name = "6h_ElderRay_1dADX25_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,6 +33,17 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate 1d Williams %R (14-period)
+    highest_high_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    close_1d = df_1d['close'].values
+    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
+    # Handle division by zero (when high == low)
+    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
+    
+    # Align 1d Williams %R to 12h timeframe
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
     # Calculate 1d ADX for trend filter
     high_1d = df_1d['high'].values
@@ -63,30 +75,17 @@ def generate_signals(prices):
     
     period = 14
     atr_1d = wilder_smooth(tr, period)
-    # Avoid division by zero
-    atr_1d_safe = np.where(atr_1d == 0, 1e-10, atr_1d)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d_safe
-    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d_safe
-    dx_denom = plus_di_1d + minus_di_1d
-    dx_denom_safe = np.where(dx_denom == 0, 1e-10, dx_denom)
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom_safe
+    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    # Handle division by zero
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
     adx_1d = wilder_smooth(dx_1d, period)
     
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    
-    # Calculate 6h EMA13 for Elder Ray
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_6h
-    bear_power = low - ema13_6h
-    
-    # Volume confirmation: volume > 2.0x 96-period average (96*6h = 576h = 24 days)
+    # Volume confirmation: volume > 2.0x 96-period average (96*12h = 1152h = 48 days)
     vol_ma_96 = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
     volume_spike = volume > (2.0 * vol_ma_96)
     
@@ -98,8 +97,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(ema13_1d_aligned[i]) or np.isnan(ema13_6h[i]) or 
+        if (np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ma_96[i])):
             signals[i] = 0.0
             continue
@@ -110,41 +109,35 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_williams_r = williams_r_1d_aligned[i]
         curr_adx = adx_1d_aligned[i]
-        curr_ema13_1d = ema13_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and strong trend (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish entry: strong bear power (price below EMA13) with reversal signs
-                # Bear power negative and increasing (less negative) = bullish reversal
-                if curr_bear_power < 0 and i > start_idx and curr_bear_power > bear_power[i-1]:
+                # Bullish entry: Williams %R oversold (< -80) in uptrend
+                if curr_williams_r < -80:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: strong bull power (price above EMA13) with reversal signs
-                # Bull power positive and decreasing = bearish reversal
-                elif curr_bull_power > 0 and i > start_idx and curr_bull_power < bull_power[i-1]:
+                # Bearish entry: Williams %R overbought (> -20) in downtrend
+                elif curr_williams_r > -20:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when bear power becomes strongly negative again OR trend weakens (ADX < 20)
-            if curr_bear_power < -0.5 * np.std(bull_power[max(0, i-50):i+1]) or curr_adx < 20:
+            # Exit when Williams %R returns to overbought (> -20) OR trend weakens (ADX < 20)
+            if curr_williams_r > -20 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when bull power becomes strongly positive again OR trend weakens (ADX < 20)
-            if curr_bull_power > 0.5 * np.std(bear_power[max(0, i-50):i+1]) or curr_adx < 20:
+            # Exit when Williams %R returns to oversold (< -80) OR trend weakens (ADX < 20)
+            if curr_williams_r < -80 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
