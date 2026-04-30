@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above Camarilla R3 level with 1d uptrend (close > 1d EMA34) and volume > 2.0x 20-bar avg.
 # Short when price breaks below Camarilla S3 level with 1d downtrend (close < 1d EMA34) and volume > 2.0x 20-bar avg.
 # Exit on opposite Camarilla level touch (mean reversion within the pivot structure).
 # Uses proven Camarilla pivot structure with strict volume confirmation (2.0x) and 1d EMA34 trend filter to limit trades.
 # 1d EMA34 provides longer-term trend filter, reducing false signals in choppy markets and bear rallies.
-# Timeframe: 12h, HTF: 1d as per experiment guidelines.
+# Timeframe: 4h, HTF: 1d as per experiment guidelines.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     prev_low_1d = df_1d_prev['low'].shift(1).values
     prev_close_1d = df_1d_prev['close'].shift(1).values
     
-    # Align 1d data to 12h timeframe (completed 1d bar only)
+    # Align 1d data to 4h timeframe (completed 1d bar only)
     prev_high_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_high_1d)
     prev_low_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_low_1d)
     prev_close_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_close_1d)
