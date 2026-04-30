@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA34), break above R3 or below S3 with volume triggers continuation entries.
-# In ranging markets (price near 1d EMA34), fade at extreme R4/S4 levels for mean reversion.
-# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1w EMA50), break above R3 or below S3 with volume triggers continuation entries.
+# In ranging markets (price near 1w EMA50), fade at extreme R4/S4 levels for mean reversion.
+# Uses ATR-based trailing stop (2.0x) to manage risk. Designed for low trade frequency (~10-25/year) to minimize fee drag.
 # Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
 
-name = "4h_12hCamarilla_1dEMA34_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "1d_1wCamarilla_1wEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,44 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1w data ONCE before loop for Camarilla pivot levels and EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 1w Camarilla pivot levels (R3, S3, R4, S4)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h Camarilla pivot levels (R3, S3, R4, S4)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True range for the 12h period
-    tr_12h = high_12h - low_12h
+    # True range for the 1w period (not strictly needed for Camarilla but good practice)
+    tr_1w = high_1w - low_1w
     
     # Camarilla levels
-    camarilla_r3 = close_12h + 1.1 * (high_12h - low_12h) / 2
-    camarilla_s3 = close_12h - 1.1 * (high_12h - low_12h) / 2
-    camarilla_r4 = close_12h + 1.1 * (high_12h - low_12h)
-    camarilla_s4 = close_12h - 1.1 * (high_12h - low_12h)
+    camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    camarilla_r4 = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_s4 = close_1w - 1.1 * (high_1w - low_1w)
     
-    # Align 12h Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Align 1w Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 4h ATR(14) for dynamic trailing stop
+    # Calculate 1d ATR(14) for dynamic trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -80,9 +74,9 @@ def generate_signals(prices):
     start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA34 determines trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Regime filter: price above/below 1w EMA50 determines trend direction
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
         curr_high = high[i]
@@ -129,8 +123,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,8 +135,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
