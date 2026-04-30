@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation (>1.5x 20-bar avg).
-# Uses weekly EMA200 for higher timeframe trend filter to avoid counter-trend trades.
-# Volume confirmation reduces false breakouts. Session filter (08-20 UTC) avoids low-liquidity periods.
-# Discrete position sizing at ±0.30 to balance return and fee drag.
-# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag on 1d timeframe.
-# Works in bull markets via breakout continuation and in bear markets via mean-reversion exits when price retests the Donchian mid-line.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d trend filter (EMA50) and volume confirmation (>1.5x 20-bar avg).
+# Elder Ray measures bull/bear strength relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 and increasing, price > 1d EMA50, volume spike, in session (08-20 UTC).
+# Short when Bear Power < 0 and decreasing, price < 1d EMA50, volume spike, in session.
+# Uses discrete position sizing at ±0.25 to balance return and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag on 6h timeframe.
+# Works in bull markets via sustained Bull Power > 0 and in bear markets via sustained Bear Power < 0.
 
-name = "1d_Donchian20_1wEMA200_Trend_VolumeConfirm_Session_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA50_Trend_VolumeConfirm_Session_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,22 +29,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1w data ONCE before loop for EMA200
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Load 1d data ONCE before loop for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d_vals = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA200 to 1d timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2
+    # Calculate EMA13 for Elder Ray (on 6h close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,53 +55,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup for Donchian and EMA200
+    start_idx = 60  # warmup for EMA50 and EMA13
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(donchian_mid[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high_20 = high_20[i]
-        curr_low_20 = low_20[i]
-        curr_donchian_mid = donchian_mid[i]
-        curr_ema_200_1w = ema_200_1w_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_volume_confirm = volume_confirm[i]
         
+        # Previous bar values for momentum check
+        prev_bull_power = bull_power[i-1]
+        prev_bear_power = bear_power[i-1]
+        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above 20-day high, close > 1w EMA200, volume spike, in session
-            if (curr_close > curr_high_20 and 
-                curr_close > curr_ema_200_1w and 
+            # Long: Bull Power > 0 and increasing, price > 1d EMA50, volume spike
+            if (curr_bull_power > 0 and 
+                curr_bull_power > prev_bull_power and
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low, close < 1w EMA200, volume spike, in session
-            elif (curr_close < curr_low_20 and 
-                  curr_close < curr_ema_200_1w and 
+            # Short: Bear Power < 0 and decreasing, price < 1d EMA50, volume spike
+            elif (curr_bear_power < 0 and 
+                  curr_bear_power < prev_bear_power and
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price moves back below the Donchian mid-line
-            if curr_close < curr_donchian_mid:
+            # Exit condition: Bull Power <= 0 or Bear Power >= 0 (loss of bullish momentum)
+            if curr_bull_power <= 0 or curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price moves back above the Donchian mid-line
-            if curr_close > curr_donchian_mid:
+            # Exit condition: Bear Power >= 0 or Bull Power <= 0 (loss of bearish momentum)
+            if curr_bear_power >= 0 or curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
