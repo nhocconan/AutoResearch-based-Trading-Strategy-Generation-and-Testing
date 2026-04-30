@@ -4,12 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses 1d EMA50 for stable trend direction and requires volume > 1.8x 20-period average for confirmation.
+# Uses 1d EMA50 for stable trend direction and requires volume > 2.0x 20-period average for confirmation.
 # Only takes breakouts in the direction of the 1d EMA50 trend. Added ATR-based stoploss (2.5x ATR).
-# Designed for very low trade frequency (~15-25 trades/year) to minimize fee drag.
+# Designed for very low trade frequency (~12-25 trades/year) to minimize fee drag and avoid overtrading.
 # Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v2"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -97,10 +97,10 @@ def generate_signals(prices):
             camarilla_r4_aligned = np.full(n, np.nan)
             camarilla_s4_aligned = np.full(n, np.nan)
         
-        # Volume confirmation: volume > 1.8x 20-period average (stricter to reduce trades)
+        # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > (1.8 * vol_ma_20)
+            volume_confirm = volume[i] > (2.0 * vol_ma_20)
         else:
             volume_confirm = False
         
