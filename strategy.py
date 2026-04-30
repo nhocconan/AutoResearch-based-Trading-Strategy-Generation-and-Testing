@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with 12h uptrend (price > 12h HMA21) and volume > 2.0x 20-bar avg.
-# Short when price breaks below Donchian lower band with 12h downtrend (price < 12h HMA21) and volume > 2.0x 20-bar avg.
-# Exit on opposite Donchian band touch (mean reversion within the channel).
-# Uses HMA21 for smoother trend than EMA, reducing whipsaw in chop. Strict volume spike (2.0x) limits trades to target 19-50/year.
-# 12h HMA21 provides intermediate trend filter between 4h and 1d for BTC/ETH, improving bear market performance.
-# Timeframe: 4h, HTF: 12h as per experiment guidelines.
+# Hypothesis: 1h strategy using 4h Supertrend for direction, 1h Williams %R for entry timing, and session filter (08-20 UTC) to reduce noise.
+# Long when 4h Supertrend is bullish, 1h Williams %R crosses above -80 from below, and in session.
+# Short when 4h Supertrend is bearish, 1h Williams %R crosses below -20 from above, and in session.
+# Exit on opposite Williams %R cross (-20 for long, -80 for short) or Supertrend flip.
+# Uses proven Supertrend trend filter with Williams %R momentum entries to target 15-35 trades/year.
+# Session filter reduces choppy off-hour trades. Timeframe: 1h, HTF: 4h for trend.
 
-name = "4h_Donchian20_12hHMA21_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Supertrend4h_WilliamsR_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +23,117 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop for Supertrend trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h HMA21 for trend filter: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+    # Calculate 4h Supertrend (ATR=10, mult=3.0)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    def hma(values, window):
-        half = window // 2
-        sqrt_n = int(np.sqrt(window))
-        wma_half = wma(values, half)
-        wma_full = wma(values, window)
-        raw_hma = 2 * wma_half - wma_full
-        return wma(raw_hma, sqrt_n)
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0] if len(close_4h) > 0 else 0), np.abs(low_4h[0] - close_4h[0] if len(close_4h) > 0 else 0)])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    close_12h = df_12h['close'].values
-    hma_21_12h = hma(close_12h, 21)
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
+    # Basic Upper and Lower Bands
+    hl_avg = (high_4h + low_4h) / 2
+    upper_band = hl_avg + (3.0 * atr_10)
+    lower_band = hl_avg - (3.0 * atr_10)
     
-    # Previous 12h OHLC for completed 12h bar (no look-ahead)
-    df_12h_prev = get_htf_data(prices, '12h')
-    if len(df_12h_prev) < 2:
-        return np.zeros(n)
+    # Supertrend calculation
+    supertrend = np.zeros_like(close_4h)
+    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
     
-    prev_high_12h = df_12h_prev['high'].shift(1).values
-    prev_low_12h = df_12h_prev['low'].shift(1).values
-    prev_close_12h = df_12h_prev['close'].shift(1).values
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
     
-    # Align 12h data to 4h timeframe (completed 12h bar only)
-    prev_high_aligned = align_htf_to_ltf(prices, df_12h_prev, prev_high_12h)
-    prev_low_aligned = align_htf_to_ltf(prices, df_12h_prev, prev_low_12h)
-    prev_close_aligned = align_htf_to_ltf(prices, df_12h_prev, prev_close_12h)
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_4h[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1 and direction[i-1] == -1:
+            supertrend[i] = lower_band[i]
+        elif direction[i] == -1 and direction[i-1] == 1:
+            supertrend[i] = upper_band[i]
+        elif direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Donchian(20) from previous completed 12h bar (no look-ahead)
-    donchian_high = pd.Series(prev_high_aligned).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prev_low_aligned).rolling(window=20, min_periods=20).min().values
+    # Align 4h Supertrend direction to 1h timeframe (completed 4h bar only)
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
     
-    # Volume confirmation: volume > 2.0x 20-period average (strict to avoid overtrading)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    # Williams %R on 1h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for HMA21 and Donchian
+    start_idx = 30  # warmup for Williams %R and Supertrend
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(hma_21_12h_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Only trade during session (08-20 UTC)
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_donch_high = donchian_high[i]
-        curr_donch_low = donchian_low[i]
-        curr_hma_21_12h = hma_21_12h_aligned[i]
-        curr_volume_confirm = volume_confirm[i]
+        curr_wr = williams_r[i]
+        curr_supertrend_dir = supertrend_dir_aligned[i]
+        prev_wr = williams_r[i-1] if i > 0 else -50
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high, uptrend (price > 12h HMA21), volume spike
-            if (curr_close > curr_donch_high and 
-                curr_close > curr_hma_21_12h and 
-                curr_volume_confirm):
-                signals[i] = 0.25
+            # Long: Supertrend bullish, Williams %R crosses above -80 from below
+            if (curr_supertrend_dir == 1 and 
+                curr_wr > -80 and 
+                prev_wr <= -80):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low, downtrend (price < 12h HMA21), volume spike
-            elif (curr_close < curr_donch_low and 
-                  curr_close < curr_hma_21_12h and 
-                  curr_volume_confirm):
-                signals[i] = -0.25
+            # Short: Supertrend bearish, Williams %R crosses below -20 from above
+            elif (curr_supertrend_dir == -1 and 
+                  curr_wr < -20 and 
+                  prev_wr >= -20):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price touches Donchian low (mean reversion)
-            if curr_close <= curr_donch_low:
+            # Exit: Williams %R crosses below -20 from above (overbought) OR Supertrend turns bearish
+            if (curr_wr < -20 and prev_wr >= -20) or curr_supertrend_dir == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit condition: price touches Donchian high (mean reversion)
-            if curr_close >= curr_donch_high:
+            # Exit: Williams %R crosses above -80 from below (oversold) OR Supertrend turns bullish
+            if (curr_wr > -80 and prev_wr <= -80) or curr_supertrend_dir == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
