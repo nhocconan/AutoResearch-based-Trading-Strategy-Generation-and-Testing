@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Uses Camarilla R3/S3 levels for fewer, higher-quality breakouts than R4/S4.
-# 12h EMA50 provides intermediate-term trend filter. Volume > 1.8x 20-period average confirms momentum.
-# ATR-based stoploss (2.5x) limits drawdown. Designed for low trade frequency (~20-30 trades/year)
-# to minimize fee drag and avoid overtrading. Works in bull/bear via trend filter + volume confirmation.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
+# Uses 4h EMA50 for intermediate-term trend filter (aligned to avoid look-ahead).
+# Volume > 2.0x 20-period average confirms momentum.
+# ATR-based stoploss (2.0x) limits drawdown. Designed for low trade frequency (~15-30 trades/year)
+# to minimize fee drag on 1h timeframe. Works in bull/bear via trend filter + volume confirmation.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,14 +27,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -51,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(atr[i]) or
             not in_session[i]):
             signals[i] = 0.0
@@ -60,13 +60,13 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 1.8x 20-period average (stricter to reduce trades)
+        # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > (1.8 * vol_ma_20)
+            volume_confirm = volume[i] > (2.0 * vol_ma_20)
         else:
             volume_confirm = False
         
@@ -109,37 +109,37 @@ def generate_signals(prices):
             camarilla_s3 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, 12h EMA50 uptrend, volume spike
+            # Long: price breaks above Camarilla R3, 4h EMA50 uptrend, volume spike
             if (curr_close > camarilla_r3 and 
-                curr_close > curr_ema_50_12h and 
+                curr_close > curr_ema_50_4h and 
                 volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Camarilla S3, 12h EMA50 downtrend, volume spike
+            # Short: price breaks below Camarilla S3, 4h EMA50 downtrend, volume spike
             elif (curr_close < camarilla_s3 and 
-                  curr_close < curr_ema_50_12h and 
+                  curr_close < curr_ema_50_4h and 
                   volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
         
         elif position == 1:  # Long position
             # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
             if (curr_close < camarilla_s3 or 
-                curr_close < entry_price - 2.5 * curr_atr):
+                curr_close < entry_price - 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
             if (curr_close > camarilla_r3 or 
-                curr_close > entry_price + 2.5 * curr_atr):
+                curr_close > entry_price + 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
