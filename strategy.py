@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme readings (below -80 for oversold, above -20 for overbought) 
-# combined with 1d EMA50 trend filter and volume confirmation. In strong trends (price > 1d EMA50),
-# we take Williams %R pullbacks to -50 (continuation). In ranging markets (price near 1d EMA50),
-# we fade extremes at Williams %R < -80 or > -20. This captures mean reversion in ranges and 
-# trend continuation in trends, adapting to both bull and bear markets. Low trade frequency via 
-# strict Williams %R thresholds and volume confirmation minimizes fee drag.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# In trending markets (price > 1d EMA50), break above R3 or below S3 with volume triggers continuation entries.
+# In ranging markets (price near 1d EMA50), fade at extreme R4/S4 levels for mean reversion.
+# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~12-37/year) to minimize fee drag.
+# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
 
-name = "6h_WilliamsR_1dEMA50_RegimeAdaptive_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_1dEMA50_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,30 +25,59 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Load 1w data ONCE before loop for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w Camarilla pivot levels (R3, S3, R4, S4)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True range for the 1w period
+    tr_1w = high_1w - low_1w
+    
+    # Camarilla levels
+    camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    camarilla_r4 = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_s4 = close_1w - 1.1 * (high_1w - low_1w)
+    
+    # Align 1w Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
     # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h timeframe
+    # Align 1d EMA50 to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R(14) on 6h timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate 12h ATR(14) for dynamic trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.3 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 60  # warmup for Williams %R and EMA
+    start_idx = 50  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Regime filter: price above/below 1d EMA50 determines trend direction
@@ -57,40 +85,64 @@ def generate_signals(prices):
         is_downtrend = close[i] < ema_50_aligned[i]
         
         curr_close = close[i]
-        curr_wr = williams_r[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_atr = atr[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_s4 = s4_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             if is_uptrend:
-                # In uptrend: look for long on pullback to Williams %R = -50 with volume
-                if -55 <= curr_wr <= -45 and curr_volume_spike:
+                # In uptrend: look for long breakouts above R3 with volume
+                if curr_close > curr_r3 and curr_volume_spike:
                     signals[i] = 0.25
                     position = 1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
             elif is_downtrend:
-                # In downtrend: look for short on pullback to Williams %R = -50 with volume
-                if -55 <= curr_wr <= -45 and curr_volume_spike:
+                # In downtrend: look for short breakdowns below S3 with volume
+                if curr_close < curr_s3 and curr_volume_spike:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
             else:
-                # In ranging market (near EMA): fade Williams %R extremes
-                if curr_wr < -80:  # Deep oversold: look for long
+                # In ranging market (near EMA): mean reversion at extreme Camarilla levels
+                if curr_close < curr_s4:
+                    # Deep oversold: look for long
                     signals[i] = 0.25
                     position = 1
-                elif curr_wr > -20:  # Deep overbought: look for short
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                elif curr_close > curr_r4:
+                    # Deep overbought: look for short
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Exit on Williams %R overbought or opposite regime
-            if curr_wr > -20 or not is_uptrend:
+            # Update highest high since entry
+            if curr_high > highest_since_entry:
+                highest_since_entry = curr_high
+            
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Williams %R oversold or opposite regime
-            if curr_wr < -80 or not is_downtrend:
+            # Update lowest low since entry
+            if curr_low < lowest_since_entry:
+                lowest_since_entry = curr_low
+            
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
