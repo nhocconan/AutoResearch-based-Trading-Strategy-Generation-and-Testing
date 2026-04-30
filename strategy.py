@@ -3,101 +3,113 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Extreme Reversal with 12h EMA Trend Filter and Volume Spike
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal exhaustion
-# 12h EMA50 ensures alignment with medium-term trend to avoid counter-trend trades
-# Volume > 2.0x 30-period average confirms participation and reduces false signals
-# Discrete sizing (0.25) minimizes fee churn; targets 75-200 total trades over 4 years
-# Works in bull/bear: mean reversion from extremes works in ranging markets, trend filter adapts to directional moves
+# Hypothesis: 1h EMA crossover with 4h/1d trend filter and session filter
+# Uses fast EMA(9) and slow EMA(21) on 1h for entry timing
+# 4h EMA50 and 1d EMA200 ensure alignment with higher timeframe trends
+# Session filter (08-20 UTC) reduces noise trades during low-volume periods
+# Volume confirmation (>1.5x average) ensures participation
+# Discrete sizing (0.20) minimizes fee churn; target 60-150 total trades over 4 years
+# Works in bull/bear: EMA crossover captures momentum, HTF filters avoid counter-trend trades
 
-name = "4h_WilliamsR_Extreme_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_EMA9_21_Crossover_4hEMA50_1dEMA200_Session_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Calculate ATR for volatility (14-period)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = 0
-    tr3.iloc[0] = 0
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate EMAs for 1h
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Calculate 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    # Calculate 1d EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # warmup for Williams %R
+    start_idx = max(9, 21, 50, 200, 20)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
-            np.isnan(williams_r[i])):
+        if (np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
+        curr_ema_fast = ema_fast[i]
+        curr_ema_slow = ema_slow[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
+        curr_ema_200_1d = ema_200_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_williams_r = williams_r[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        prev_ema_fast = ema_fast[i-1]
+        prev_ema_slow = ema_slow[i-1]
         
         if position == 0:  # Flat - look for new entries
+            # Only trade with volume confirmation and HTF trend alignment
             if curr_volume_confirm:
-                # Bullish entry: Williams %R < -90 (oversold) + price above 12h EMA50
-                if curr_williams_r < -90 and curr_close > curr_ema_50_12h:
-                    signals[i] = 0.25
+                # Bullish entry: fast EMA crosses above slow EMA + above both HTF EMAs
+                if (prev_ema_fast <= prev_ema_slow and curr_ema_fast > curr_ema_slow and
+                    curr_ema_fast > curr_ema_50_4h and curr_ema_fast > curr_ema_200_1d):
+                    signals[i] = 0.20
                     position = 1
-                # Bearish entry: Williams %R > -10 (overbought) + price below 12h EMA50
-                elif curr_williams_r > -10 and curr_close < curr_ema_50_12h:
-                    signals[i] = -0.25
+                # Bearish entry: fast EMA crosses below slow EMA + below both HTF EMAs
+                elif (prev_ema_fast >= prev_ema_slow and curr_ema_fast < curr_ema_slow and
+                      curr_ema_fast < curr_ema_50_4h and curr_ema_fast < curr_ema_200_1d):
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: Williams %R > -50 (returns from oversold) or stoploss
-            if curr_williams_r > -50:
+            # Exit: fast EMA crosses below slow EMA
+            if prev_ema_fast >= prev_ema_slow and curr_ema_fast < curr_ema_slow:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: Williams %R < -50 (returns from overbought) or stoploss
-            if curr_williams_r < -50:
+            # Exit: fast EMA crosses above slow EMA
+            if prev_ema_fast <= prev_ema_slow and curr_ema_fast > curr_ema_slow:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
