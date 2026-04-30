@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and price > 1d EMA50 (uptrend) and volume > 1.5x 20-bar average.
-# Short when Williams %R > -20 (overbought) and price < 1d EMA50 (downtrend) and volume spike.
+# Hypothesis: 12h Donchian breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high and price > 1d EMA50 (uptrend) and volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian(20) low and price < 1d EMA50 (downtrend) and volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
 # Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Works in both bull/bear markets by requiring 1d EMA50 trend alignment to avoid counter-trend trades.
-# Williams %R is a momentum oscillator that identifies overbought/oversold conditions, effective in ranging markets.
+# Donchian channels provide clear structure; EMA50 ensures trend alignment; volume confirms conviction.
 
-name = "6h_WilliamsR_MeanRev_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,13 +34,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 6h data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback = 14
+    # Calculate Donchian channels on 12h data: 20-period high/low
+    lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -59,11 +55,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, lookback)  # warmup for EMA50 and Williams %R
+    start_idx = max(50, lookback)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -79,16 +75,15 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_williams_r = williams_r[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: oversold + uptrend + volume confirmation
-            if curr_williams_r < -80 and is_uptrend and curr_volume_confirm:
+            # Long: break above Donchian high + uptrend + volume confirmation
+            if curr_close > highest_high[i] and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: overbought + downtrend + volume confirmation
-            elif curr_williams_r > -20 and is_downtrend and curr_volume_confirm:
+            # Short: break below Donchian low + downtrend + volume confirmation
+            elif curr_close < lowest_low[i] and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
