@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakout captures momentum, 1d EMA50 ensures trend alignment, volume spike validates strength.
-# Works in bull markets via upside breakouts with uptrend, in bear markets via downside breakouts with downtrend.
-# Target: 12-37 trades/year (50-150 total over 4 years) via tight entry conditions.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Donchian breakouts capture strong momentum moves. 12h EMA50 filters for higher timeframe trend alignment.
+# Volume spike (2.0x 20-period average) confirms breakout validity. Discrete sizing 0.25 minimizes fee churn.
+# Works in bull via upside breakouts with uptrend, in bear via downside breakouts with downtrend.
+# Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits.
 
-name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,14 +28,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter (MTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Donchian channels (20-period) on primary timeframe
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -45,7 +46,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # warmup for Donchian and 1d EMA50
+    start_idx = max(20, 50)  # warmup for Donchian and 12h EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
@@ -68,26 +69,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Long breakout: price > 20-period high AND price > 1d EMA50 (uptrend)
+                # Long breakout: price > 20-period high AND above 12h EMA50 (uptrend)
                 if curr_close > curr_high_20 and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
-                # Short breakout: price < 20-period low AND price < 1d EMA50 (downtrend)
+                # Short breakout: price < 20-period low AND below 12h EMA50 (downtrend)
                 elif curr_close < curr_low_20 and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when price drops below 20-period low (breakdown) OR below 1d EMA50
-            if curr_close < curr_low_20 or curr_close < curr_ema_50:
+            # Exit when price drops below 20-period low (breakdown)
+            if curr_close < curr_low_20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above 20-period high (breakout) OR above 1d EMA50
-            if curr_close > curr_high_20 or curr_close > curr_ema_50:
+            # Exit when price rises above 20-period high (breakout)
+            if curr_close > curr_high_20:
                 signals[i] = 0.0
                 position = 0
             else:
