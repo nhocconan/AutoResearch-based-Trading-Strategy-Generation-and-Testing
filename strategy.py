@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily trend filter (EMA34) and volume confirmation
-# Daily EMA34 provides strong trend direction to avoid counter-trend breakouts
-# Donchian(20) on 4h captures intermediate-term momentum with clear breakout levels
-# Volume spike (2.0x 50-period average) confirms institutional participation
-# Works in bull markets via breakouts above daily EMA and bear markets via breakdowns below daily EMA
-# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13 to detect strength/weakness
+# 1d EMA34 provides higher-timeframe trend direction to avoid counter-trend trades
+# Volume spike (2.0x 20-period average) confirms institutional participation
+# Works in bull markets via strong bull power on uptrends and bear markets via strong bear power on downtrends
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,31 +34,29 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align daily EMA to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Elder Ray components on 6h timeframe
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # Bull Power: High - EMA13
+    bear_power = low - ema_13   # Bear Power: Low - EMA13
     
-    # Calculate Donchian(20) on 4h timeframe
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 2.0x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (2.0 * vol_ma_50)
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(100, 50)  # warmup for volume MA and Donchian
+    start_idx = max(100, 34, 20)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_50[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -68,38 +66,34 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
-        curr_ema_34 = ema_34_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: break above Donchian high AND above daily EMA34
-                if curr_high > curr_donchian_high and curr_close > curr_ema_34:
+                # Bullish entry: strong bull power AND price above 1d EMA34 (uptrend)
+                if curr_bull_power > 0 and curr_close > curr_ema_34_1d:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish entry: break below Donchian low AND below daily EMA34
-                elif curr_low < curr_donchian_low and curr_close < curr_ema_34:
+                # Bearish entry: strong bear power AND price below 1d EMA34 (downtrend)
+                elif curr_bear_power < 0 and curr_close < curr_ema_34_1d:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below Donchian low (breakout fails)
-            if curr_close < curr_donchian_low:
+            # Exit when bull power turns negative (momentum fading)
+            if curr_bull_power <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Donchian high (breakdown fails)
-            if curr_close > curr_donchian_high:
+            # Exit when bear power turns positive (momentum fading)
+            if curr_bear_power >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
