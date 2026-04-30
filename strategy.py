@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 level with 1d uptrend (price > 1d EMA34) and volume spike (>2.5x 20-bar avg).
-# Short when price breaks below Camarilla S3 level with 1d downtrend (price < 1d EMA34) and volume spike.
-# Exit when price returns to the Camarilla pivot point (mean reversion).
-# Uses proven Camarilla structure from top performers, 1d EMA34 for HTF trend, and strict volume confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume confirmation.
+# Long when price breaks above Donchian(20) high in low volatility regime (ATR ratio < 0.8) with volume spike.
+# Short when price breaks below Donchian(20) low in low volatility regime with volume spike.
+# Exit when price crosses the Donchian midpoint (mean reversion).
+# Uses proven Donchian structure with volatility filter to avoid whipsaws in ranging markets.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATRRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,85 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
+    # Load 1d data ONCE before loop for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d ATR(14) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous 1d OHLC for Camarilla levels (completed 1d bar)
-    df_1d_prev = get_htf_data(prices, '1d')
-    if len(df_1d_prev) < 2:
-        return np.zeros(n)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First bar
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])  # First bar
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    prev_high_1d = df_1d_prev['high'].shift(1).values
-    prev_low_1d = df_1d_prev['low'].shift(1).values
-    prev_close_1d = df_1d_prev['close'].shift(1).values
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14_1d / atr_ma_50_1d  # Current ATR vs 50-period average ATR
     
-    # Align 1d data to 12h timeframe (completed 1d bar only)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_high_1d)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_low_1d)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d_prev, prev_close_1d)
+    # Align ATR ratio to 4h timeframe (completed 1d bar only)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Calculate Camarilla levels from previous completed 1d bar
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
-    camarilla_pivot = prev_close_aligned
-    camarilla_r3 = camarilla_pivot + 1.1 * (prev_high_aligned - prev_low_aligned)
-    camarilla_s3 = camarilla_pivot - 1.1 * (prev_high_aligned - prev_low_aligned)
+    # Donchian(20) channels on 4h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Volume confirmation: volume > 2.5x 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 2.0x 20-period average (balanced for trade frequency)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA34 and volume MA
+    start_idx = 50  # warmup for Donchian, ATR regime, and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(camarilla_pivot[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_r3 = camarilla_r3[i]
-        curr_s3 = camarilla_s3[i]
-        curr_pivot = camarilla_pivot[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_high = highest_high[i]
+        curr_low = lowest_low[i]
+        curr_mid = donchian_mid[i]
+        curr_atr_ratio = atr_ratio_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
+        # Low volatility regime filter: ATR ratio < 0.8 (below average volatility)
+        low_vol_regime = curr_atr_ratio < 0.8
+        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 level, uptrend (price > 1d EMA34), volume spike
-            if (curr_close > curr_r3 and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price breaks above Donchian high, low volatility regime, volume spike
+            if (curr_close > curr_high and 
+                low_vol_regime and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 level, downtrend (price < 1d EMA34), volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price breaks below Donchian low, low volatility regime, volume spike
+            elif (curr_close < curr_low and 
+                  low_vol_regime and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price returns to pivot point (mean reversion)
-            if curr_close <= curr_pivot:
+            # Exit condition: price crosses Donchian midpoint (mean reversion)
+            if curr_close <= curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price returns to pivot point (mean reversion)
-            if curr_close >= curr_pivot:
+            # Exit condition: price crosses Donchian midpoint (mean reversion)
+            if curr_close >= curr_mid:
                 signals[i] = 0.0
                 position = 0
             else:
