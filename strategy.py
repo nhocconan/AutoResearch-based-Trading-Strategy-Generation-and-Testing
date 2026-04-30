@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h EMA50 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold), price > 12h EMA50 (uptrend), and volume > 1.5x 20-bar avg.
-# Short when Williams %R > -20 (overbought), price < 12h EMA50 (downtrend), and volume > 1.5x 20-bar avg.
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-# Uses proven mean reversion logic with strict trend and volume filters to limit trades and avoid false signals.
-# Williams %R is effective in ranging markets which dominate 2025+ test period.
-# Timeframe: 6h, HTF: 12h as per experiment guidelines.
+# Hypothesis: 4h Williams Alligator + 1d EMA50 trend + volume confirmation.
+# Long when Alligator jaws (13-period smoothed median) turns up and price > teeth (8-period),
+# with 1d uptrend (close > 1d EMA50) and volume > 1.8x 20-bar avg.
+# Short when jaws turn down and price < teeth, with 1d downtrend (close < 1d EMA50) and volume spike.
+# Exit on Alligator reversal (jaws cross teeth) or opposite signal.
+# Uses Williams Alligator for trend detection with smoothness to reduce whipsaws,
+# 1d EMA50 for stronger trend filter, and volume confirmation to avoid low-quality breakouts.
+# Timeframe: 4h, HTF: 1d as per experiment guidelines.
 
-name = "6h_WilliamsR_MeanRev_12hEMA50_Trend_VolumeConfirmation_v1"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R (14-period) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Williams Alligator components (using median price)
+    median_price = (high + low) / 2
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Jaws: 13-period SMMA of median, shifted 8 bars
+    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaws = np.roll(jaws, 8)
+    jaws[:8] = np.nan
+    
+    # Teeth: 8-period SMMA of median, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
+    
+    # Lips: 5-period SMMA of median, shifted 3 bars (not used in signals but for completeness)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Williams %R and EMA50
+    start_idx = 50  # warmup for EMA50 and Alligator
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(jaws[i]) or np.isnan(teeth[i]) or 
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_jaws = jaws[i]
+        curr_teeth = teeth[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R < -80 (oversold), uptrend (close > 12h EMA50), volume confirmation
-            if (curr_williams_r < -80 and 
-                curr_close > curr_ema_50_12h and 
+            # Long: jaws > teeth (uptrend), price > teeth, 1d uptrend, volume spike
+            if (curr_jaws > curr_teeth and 
+                curr_close > curr_teeth and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought), downtrend (close < 12h EMA50), volume confirmation
-            elif (curr_williams_r > -20 and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: jaws < teeth (downtrend), price < teeth, 1d downtrend, volume spike
+            elif (curr_jaws < curr_teeth and 
+                  curr_close < curr_teeth and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: Williams %R crosses above -50 (mean reversion)
-            if curr_williams_r > -50:
+            # Exit condition: jaws < teeth (trend reversal to down)
+            if curr_jaws < curr_teeth:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: Williams %R crosses below -50 (mean reversion)
-            if curr_williams_r < -50:
+            # Exit condition: jaws > teeth (trend reversal to up)
+            if curr_jaws > curr_teeth:
                 signals[i] = 0.0
                 position = 0
             else:
