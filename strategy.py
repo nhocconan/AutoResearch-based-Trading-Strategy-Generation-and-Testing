@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian channels provide clear breakout levels based on 20-period highs/lows
-# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
-# Volume spike (1.8x 20-period average) confirms institutional participation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise support/resistance based on prior day's range
+# Breakout above R3 or below S3 with volume confirmation indicates strong momentum
+# 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
+# Volume spike (2.0x 24-period average) confirms institutional participation
 # Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,41 +29,86 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ADX for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Donchian(20) channels from 1d timeframe
-    # Upper band = 20-period high, Lower band = 20-period low
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period rolling high and low
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
     
-    # Align to 6h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Volume confirmation: volume > 1.8x 20-period average (20*6h = 5 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    # Smooth TR and DM (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(data)):
+            if not np.isnan(data[i]):
+                result[i] = result[i-1] - (result[i-1]/period) + data[i]
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = wilders_smooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    # Camarilla levels based on prior day's OHLC
+    # R3 = C + ((H-L) * 1.25/2), S3 = C - ((H-L) * 1.25/2)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.25 / 2)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.25 / 2)
+    
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(50, 20)  # warmup for 1d EMA50 and Donchian(20)
+    start_idx = max(30, 2)  # warmup for ADX and 1d data
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
             
@@ -74,36 +120,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50 = ema_50_1d_aligned[i]
-        curr_upper = donchian_upper_aligned[i]
-        curr_lower = donchian_lower_aligned[i]
+        curr_adx = adx_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish entry: break above upper band with close > upper AND price > 1d EMA50 (uptrend)
-                if curr_close > curr_upper and curr_close > curr_ema_50:
+            # Require volume spike and ADX > 25 (trending market)
+            if curr_volume_spike and curr_adx > 25:
+                # Bullish entry: break above R3 with close > R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below lower band with close < lower AND price < 1d EMA50 (downtrend)
-                elif curr_close < curr_lower and curr_close < curr_ema_50:
+                # Bearish entry: break below S3 with close < S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below upper band (breakout fails) OR drops below 1d EMA50 (trend change)
-            if curr_close < curr_upper or curr_close < curr_ema_50:
+            # Exit when price drops below R3 (breakout fails)
+            if curr_close < curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above lower band (breakdown fails) OR rises above 1d EMA50 (trend change)
-            if curr_close > curr_lower or curr_close > curr_ema_50:
+            # Exit when price rises above S3 (breakdown fails)
+            if curr_close > curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
