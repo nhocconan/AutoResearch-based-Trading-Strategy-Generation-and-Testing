@@ -4,10 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 with uptrend (price > 1d EMA34) and volume > 1.5x 20-bar average.
+# Long when price breaks above R3 with uptrend (price > 1d EMA34) and volume > 2x 20-bar average.
 # Short when price breaks below S3 with downtrend (price < 1d EMA34) and volume spike.
-# Uses ATR trailing stop (2.0x) for risk management.
-# Targets 75-200 trades over 4 years (19-50/year) with discrete position sizing (0.25).
+# Uses ATR trailing stop (2.5x) for risk management.
+# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
 # Works in both bull/bear markets by requiring 1d EMA34 trend alignment and volume confirmation.
 # Uses 1d HTF for Camarilla levels and trend filter to reduce noise and look-ahead bias.
 
@@ -48,9 +48,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -100,8 +100,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.0 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,8 +112,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.0 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.0 * curr_atr:
+            # Trailing stop: 2.5 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
