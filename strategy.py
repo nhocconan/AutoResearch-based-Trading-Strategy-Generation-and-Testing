@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to ~100 total over 4 years.
-# Only enters when price breaks 4h Donchian upper/lower channel with volume confirmation and 12h EMA50 trend alignment.
-# Designed for low trade frequency (<200 total 4h trades) to avoid fee drag. Works in bull/bear via 12h EMA50 trend filter.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
+# Uses tight volume threshold (2.0x average) and ATR(14) stoploss (2.0x) to limit trades to 60-150 total over 4 years.
+# Only enters when price breaks 1h Camarilla R3 (short) or S3 (long) levels with volume confirmation and 4h EMA50 trend alignment.
+# Designed for low trade frequency to avoid fee drag. Works in bull/bear via 4h EMA50 trend filter.
+# Session filter (08-20 UTC) reduces noise trades.
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,14 +27,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -57,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -67,32 +68,49 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Calculate 4h Donchian channels using only completed 4h bars
-        if i >= 20:
-            donchian_high = np.max(high[i-20:i])
-            donchian_low = np.min(low[i-20:i])
+        # Calculate 1h Camarilla pivot points using previous day's OHLC
+        # We need the previous day's high, low, close to calculate today's Camarilla levels
+        if i >= 24:  # Need at least 24 hours of data for previous day
+            # Get index of 24 bars ago (previous day at same time)
+            prev_day_idx = i - 24
+            if prev_day_idx >= 0:
+                # Previous day's OHLC
+                prev_high = np.max(high[prev_day_idx:prev_day_idx+24])
+                prev_low = np.min(low[prev_day_idx:prev_day_idx+24])
+                prev_close = close[prev_day_idx+23]  # Close of previous day
+                
+                # Calculate pivot point
+                pivot = (prev_high + prev_low + prev_close) / 3.0
+                range_val = prev_high - prev_low
+                
+                # Camarilla levels
+                r3 = pivot + (range_val * 1.1 / 4)
+                s3 = pivot - (range_val * 1.1 / 4)
+            else:
+                r3 = np.nan
+                s3 = np.nan
         else:
-            donchian_high = np.nan
-            donchian_low = np.nan
+            r3 = np.nan
+            s3 = np.nan
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper channel, 12h EMA50 uptrend, volume spike confirmation
-            if (curr_close > donchian_high and 
-                curr_close > curr_ema_50_12h and 
+            # Long: price breaks above Camarilla S3, 4h EMA50 uptrend, volume spike confirmation
+            if (curr_close > s3 and 
+                curr_close > curr_ema_50_4h and 
                 curr_volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Donchian lower channel, 12h EMA50 downtrend, volume spike confirmation
-            elif (curr_close < donchian_low and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: price breaks below Camarilla R3, 4h EMA50 downtrend, volume spike confirmation
+            elif (curr_close < r3 and 
+                  curr_close < curr_ema_50_4h and 
                   curr_volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
                 lowest_since_entry = curr_close
@@ -105,7 +123,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Update lowest price since entry
@@ -115,6 +133,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
