@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# In trending markets (price > 1d EMA34), break above R3 or below S3 with volume triggers continuation entries.
-# In ranging markets (price near 1d EMA34), fade at extreme R4/S4 levels for mean reversion.
-# Uses ATR-based trailing stop (2.5x) to manage risk. Designed for low trade frequency (~20-50/year) to minimize fee drag.
-# Works in bull/bear via regime adaptation: trend following in strong trends, mean reversion in ranges.
+# Hypothesis: 6h Williams Alligator + 1d EMA50 trend filter + volume confirmation.
+# Uses Alligator's Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA) from 1d timeframe.
+# In strong trends (price > 1d EMA50 and Alligator aligned bullish): long on pullback to Teeth with volume.
+# In strong trends (price < 1d EMA50 and Alligator aligned bearish): short on pullback to Teeth with volume.
+# In ranging markets (Alligator intertwined): fade at extremes with volume confirmation.
+# Designed for low trade frequency (~12-30/year) to minimize fee drag on 6h timeframe.
 
-name = "4h_12hCamarilla_1dEMA34_RegimeAdaptive_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "6h_1dWilliamsAlligator_1dEMA50_Trend_VolumePullback_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,126 +24,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop for EMA34 trend filter
+    # Load 1d data ONCE before loop for Williams Alligator and EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels (R3, S3, R4, S4)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True range for the 12h period
-    tr_12h = high_12h - low_12h
-    
-    # Camarilla levels
-    camarilla_r3 = close_12h + 1.1 * (high_12h - low_12h) / 2
-    camarilla_s3 = close_12h - 1.1 * (high_12h - low_12h) / 2
-    camarilla_r4 = close_12h + 1.1 * (high_12h - low_12h)
-    camarilla_s4 = close_12h - 1.1 * (high_12h - low_12h)
-    
-    # Align 12h Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
-    
-    # Calculate 1d EMA34 for trend filter
+    # Calculate Williams Alligator components (SMMA = Smoothed Moving Average)
+    # SMMA formula: SMMA_t = (SMMA_{t-1} * (period-1) + close_t) / period
+    # Initialize with SMA for first value
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    def smma(arr, period):
+        """Calculate Smoothed Moving Average"""
+        sma = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return sma
+        # First value is SMA
+        sma[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA_t = (SMMA_{t-1} * (period-1) + close_t) / period
+        for i in range(period, len(arr)):
+            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
+        return sma
     
-    # Calculate 4h ATR(14) for dynamic trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA
+    jaw = smma(close_1d, 13)   # Blue line
+    teeth = smma(close_1d, 8)  # Red line
+    lips = smma(close_1d, 5)   # Green line
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Align Alligator components to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for all indicators
+    start_idx = 100  # warmup for all indicators
     
     for i in range(start_idx, n):
-        # Regime filter: price above/below 1d EMA34 determines trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Regime filter: price above/below 1d EMA50 determines trend strength
+        is_strong_uptrend = close[i] > ema_50_aligned[i]
+        is_strong_downtrend = close[i] < ema_50_aligned[i]
+        
+        # Alligator alignment: bullish (Lips > Teeth > Jaw), bearish (Lips < Teeth < Jaw)
+        is_alligator_bullish = (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])
+        is_alligator_bearish = (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])
+        is_alligator_ranging = not (is_alligator_bullish or is_alligator_bearish)
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            if is_uptrend:
-                # In uptrend: look for long breakouts above R3 with volume
-                if curr_close > curr_r3 and curr_volume_spike:
+            if is_strong_uptrend and is_alligator_bullish:
+                # In strong uptrend: long on pullback to Teeth with volume confirmation
+                if curr_close <= teeth_aligned[i] * 1.005 and curr_close >= teeth_aligned[i] * 0.995:
+                    if curr_volume_spike:
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = curr_close
+            elif is_strong_downtrend and is_alligator_bearish:
+                # In strong downtrend: short on pullback to Teeth with volume confirmation
+                if curr_close <= teeth_aligned[i] * 1.005 and curr_close >= teeth_aligned[i] * 0.995:
+                    if curr_volume_spike:
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = curr_close
+            elif is_alligator_ranging:
+                # In ranging market: mean reversion at extremes with volume
+                # Define extremes as 2 ATR from Alligator midline (average of all three)
+                alligator_mid = (jaw_aligned[i] + teeth_aligned[i] + lips_aligned[i]) / 3
+                # Approximate ATR using recent price range (simplified for 1d)
+                # We'll use a fixed percentage for ranging extremes
+                upper_extreme = alligator_mid * 1.02
+                lower_extreme = alligator_mid * 0.98
+                
+                if curr_close <= lower_extreme and curr_volume_spike:
+                    # Oversold: long
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                    highest_since_entry = curr_close
-            elif is_downtrend:
-                # In downtrend: look for short breakdowns below S3 with volume
-                if curr_close < curr_s3 and curr_volume_spike:
+                elif curr_close >= upper_extreme and curr_volume_spike:
+                    # Overbought: short
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
-                    lowest_since_entry = curr_close
-            else:
-                # In ranging market (near EMA): mean reversion at extreme Camarilla levels
-                if curr_close < curr_s4:
-                    # Deep oversold: look for long
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                    highest_since_entry = curr_close
-                elif curr_close > curr_r4:
-                    # Deep overbought: look for short
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
-                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            if curr_high > highest_since_entry:
-                highest_since_entry = curr_high
-            
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Exit conditions: price crosses above Lips (taking profit) or volume dries up
+            if curr_close >= lips_aligned[i] or not curr_volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if curr_low < lowest_since_entry:
-                lowest_since_entry = curr_low
-            
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Exit conditions: price crosses below Lips (taking profit) or volume dries up
+            if curr_close <= lips_aligned[i] or not curr_volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
