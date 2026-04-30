@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Uses Donchian channel from prior 20 1d bars for structure, 1w EMA50 for trend alignment (avoids counter-trend),
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX25 trend filter and volume confirmation.
+# Uses Donchian channels from 4h for breakout signals, 1d ADX > 25 to ensure trending market,
 # volume > 1.8x 20-bar average for confirmation, and ATR(14) trailing stop (2.0x) for risk management.
-# Discrete position sizing at ±0.25 to limit fee drag. Target: 30-100 total trades over 4 years (7-25/year).
-# No session filter to avoid over-filtering on daily timeframe.
+# Discrete position sizing at ±0.25 to limit fee drag. Target: 80-150 total trades over 4 years (20-38/year).
+# Session filter (08:00-20:00 UTC) to avoid low-liquidity periods.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dADX25_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,14 +27,71 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    atr_period = 14
+    alpha = 1.0 / atr_period
+    
+    tr_14 = np.zeros_like(tr_1d)
+    dm_plus_14 = np.zeros_like(dm_plus)
+    dm_minus_14 = np.zeros_like(dm_minus)
+    
+    tr_14[0] = np.mean(tr_1d[:atr_period])
+    dm_plus_14[0] = np.mean(dm_plus[:atr_period])
+    dm_minus_14[0] = np.mean(dm_minus[:atr_period])
+    
+    for i in range(1, len(tr_1d)):
+        tr_14[i] = tr_14[i-1] - (tr_14[i-1] / atr_period) + tr_1d[i]
+        dm_plus_14[i] = dm_plus_14[i-1] - (dm_plus_14[i-1] / atr_period) + dm_plus[i]
+        dm_minus_14[i] = dm_minus_14[i-1] - (dm_minus_14[i-1] / atr_period) + dm_minus[i]
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = np.zeros_like(tr_1d)
+    mask = (di_plus + di_minus) > 0
+    dx[mask] = 100 * np.abs(di_plus[mask] - di_minus[mask]) / (di_plus[mask] + di_minus[mask])
+    
+    adx_1d = np.zeros_like(tr_1d)
+    adx_1d[:atr_period] = np.nan
+    for i in range(atr_period, len(dx)):
+        if i == atr_period:
+            adx_1d[i] = np.mean(dx[:i+1])
+        else:
+            adx_1d[i] = (adx_1d[i-1] * (atr_period - 1) + dx[i]) / atr_period
+    
+    # Align 1d ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Donchian(20) on 4h
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -48,62 +105,46 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # Donchian(20) from prior 20 1d bars (use shift(1) to avoid look-ahead)
-    # We need to calculate this on 1d data then align
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:  # need 20 for Donchian + 1 for shift
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].shift(1).values  # prior 1d high
-    low_1d = df_1d['low'].shift(1).values    # prior 1d low
-    
-    # Calculate rolling max/min on 1d data
-    high_roll_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_roll_max)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_roll_min)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for EMA50 and Donchian
+    start_idx = max(30, donchian_period, atr_period)  # warmup
     
     for i in range(start_idx, n):
-        # Skip if indicators not available
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+        # Skip if indicators not available or outside session
+        if (np.isnan(adx_1d_aligned[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
             np.isnan(atr[i]) or
-            np.isnan(volume_confirm[i])):
+            np.isnan(volume_confirm[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
-        curr_donchian_high = donchian_high[i]
-        curr_donchian_low = donchian_low[i]
+        curr_adx = adx_1d_aligned[i]
+        curr_highest = highest_high[i]
+        curr_lowest = lowest_low[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high, above 1w EMA50, volume confirmation
-            if (curr_close > curr_donchian_high and 
-                curr_close > curr_ema_50_1w and 
+            # Long: price breaks above Donchian high, ADX > 25, volume confirmation
+            if (curr_close > curr_highest and 
+                curr_adx > 25 and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: price breaks below Donchian low, below 1w EMA50, volume confirmation
-            elif (curr_close < curr_donchian_low and 
-                  curr_close < curr_ema_50_1w and 
+            # Short: price breaks below Donchian low, ADX > 25, volume confirmation
+            elif (curr_close < curr_lowest and 
+                  curr_adx > 25 and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
