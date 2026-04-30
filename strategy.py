@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
+# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
 # Uses discrete sizing 0.25 to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year).
 # Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out by 1d EMA).
 # Focus on BTC/ETH as primary symbols with proven edge from Donchian + volume + trend confluence.
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
