@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and 12h trend filter
-# Donchian channels capture institutional breakouts; volume confirms institutional participation;
-# 12h EMA(50) ensures alignment with longer-term trend. Designed for very low trade frequency
-# (<20/year) to minimize fee drag and work in both bull and bear markets by requiring
-# confluence of breakout, volume, and trend alignment.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakout with volume confirmation and 4h EMA(50) trend filter
+# Donchian channels from daily timeframe capture major institutional breakouts; volume confirms participation;
+# 4h EMA(50) ensures alignment with medium-term trend. Designed for low trade frequency (<30/year) to minimize fee drag
+# in both bull and bear markets by requiring confluence of HTF structure, volume, and trend.
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1d_Breakout_4hTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,11 +35,11 @@ def generate_signals(prices):
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
+    # Align Donchian levels to 4h timeframe (wait for completed 1d bar)
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate 12h EMA(50) for trend filter
+    # Calculate 4h EMA(50) for trend filter
     close_s = pd.Series(close)
     ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
@@ -71,12 +70,12 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d Donchian high with 12h uptrend
+                # Bullish entry: price breaks above 1d Donchian high with 4h uptrend
                 if curr_close > curr_donch_high and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d Donchian low with 12h downtrend
+                # Bearish entry: price breaks below 1d Donchian low with 4h downtrend
                 elif curr_close < curr_donch_low and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
