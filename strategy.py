@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 with 1d EMA50 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below S3 with 1d EMA50 downtrend and volume spike.
-# Uses ATR trailing stop (2.5x) for risk management.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Camarilla R3/S3 levels provide strong breakout signals with moderate frequency.
-# 1d EMA50 filter ensures alignment with higher-timeframe trend, improving performance in both bull and bear markets.
-# Volume confirmation ensures breakouts have conviction, reducing whipsaws.
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) in 1d uptrend with volume > 1.5x 20-bar average.
+# Short when Williams %R > -20 (overbought) in 1d downtrend with volume spike.
+# Uses ATR trailing stop (2.0x) for risk management.
+# Targets 80-150 total trades over 4 years (20-38/year) with discrete position sizing (0.25).
+# Williams %R captures short-term exhaustion in both bull/bear markets.
+# 1d EMA50 filter ensures alignment with higher-timeframe trend, improving performance in ranging and trending markets.
+# Volume confirmation ensures mean-reversion signals have conviction, reducing false signals.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanRev_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and EMA50 trend filter
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -36,22 +36,17 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla levels (based on previous 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].shift(1).values  # Previous 1d close
+    # Calculate 14-period Williams %R on 4h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
+    # Replace division by zero with -50 (neutral)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Camarilla formulas: R3/S3 = C ± (H-L)*1.1/4
-    cam_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 4
-    cam_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    cam_r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
-    cam_s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -65,11 +60,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 20)  # warmup for EMA50 and volume MA
+    start_idx = max(50, 20, 14)  # warmup for EMA50, volume MA, and Williams %R
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -84,16 +79,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 + uptrend + volume confirmation
-            if curr_high > cam_r3_aligned[i] and is_uptrend and curr_volume_confirm:
+            # Long: Williams %R < -80 (oversold) + uptrend + volume confirmation
+            if curr_williams_r < -80 and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            # Short: price breaks below S3 + downtrend + volume confirmation
-            elif curr_low < cam_s3_aligned[i] and is_downtrend and curr_volume_confirm:
+            # Short: Williams %R > -20 (overbought) + downtrend + volume confirmation
+            elif curr_williams_r > -20 and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
@@ -103,8 +99,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,8 +111,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
