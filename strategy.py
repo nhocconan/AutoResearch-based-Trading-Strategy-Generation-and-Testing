@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike
-# Donchian channels capture volatility-based breakouts; 1d EMA34 ensures alignment with daily trend
-# Volume >1.8x 30-period average confirms breakout legitimacy
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, daily EMA34 trend filter avoids counter-trend trades
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Donchian channels capture medium-term breakouts; 1w EMA34 ensures alignment with weekly trend
+# Volume >1.5x 20-period average confirms breakout legitimacy
+# Discrete sizing (0.25) minimizes fee churn; target 30-100 total trades over 4 years
+# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, weekly trend filter avoids counter-trend trades
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,66 +32,68 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_30)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Precompute Donchian channels (20-period)
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 34, 30, 20)  # warmup: need 96 4h bars for daily levels
+    start_idx = max(20, 14, 34)  # warmup: need 20 days for Donchian, 14 for ATR, 34 for EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_30[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(high_rolling[i]) or
+            np.isnan(low_rolling[i])):
             signals[i] = 0.0
             continue
             
+        curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Only trade with volume confirmation and trend filter
             if curr_volume_confirm:
-                # Bullish entry: price breaks above Donchian high + above 1d EMA34
-                if curr_high > donchian_high[i] and curr_close > curr_ema_34_1d:
+                # Bullish entry: price breaks above 20-day high + above 1w EMA34
+                if curr_high > high_rolling[i] and curr_close > curr_ema_34_1w:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below Donchian low + below 1d EMA34
-                elif curr_low < donchian_low[i] and curr_close < curr_ema_34_1d:
+                # Bearish entry: price breaks below 20-day low + below 1w EMA34
+                elif curr_low < low_rolling[i] and curr_close < curr_ema_34_1w:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low
-            if curr_low < donchian_low[i]:
+            # Exit: price breaks below 10-day low (faster exit to lock profits)
+            low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values[i]
+            if not np.isnan(low_10) and curr_low < low_10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high
-            if curr_high > donchian_high[i]:
+            # Exit: price breaks above 10-day high (faster exit to lock profits)
+            high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values[i]
+            if not np.isnan(high_10) and curr_high > high_10:
                 signals[i] = 0.0
                 position = 0
             else:
