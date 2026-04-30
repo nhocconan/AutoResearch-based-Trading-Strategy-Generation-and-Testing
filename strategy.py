@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakout captures momentum; 1d EMA50 ensures alignment with higher timeframe trend
-# Volume spike (2.0x 20-period average) confirms breakout validity
-# Discrete sizing 0.25 minimizes fee churn. Works in bull via longs on uptrend breakouts,
-# in bear via shorts on downtrend breakdowns. Target: 12-37 trades/year (50-150 total over 4 years).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakout provides clear structure, 1d EMA50 filters for primary trend direction,
+# volume spike (2.0x 20-period average) confirms breakout strength.
+# Discrete sizing 0.25 minimizes fee churn. Works in bull via longs with uptrend,
+# in bear via shorts with downtrend. Target: 19-50 trades/year (75-200 total over 4 years).
 
-name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate Donchian channels (20-period) on primary timeframe
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -45,7 +45,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     start_idx = max(20, 50)  # warmup for Donchian and 1d EMA50
     
@@ -72,28 +71,26 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish breakout: price breaks above Donchian upper band AND above 1d EMA50 (uptrend)
+                # Bullish breakout: price breaks above Donchian upper AND above 1d EMA50 (uptrend)
                 if curr_close > curr_highest_20 and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish breakdown: price breaks below Donchian lower band AND below 1d EMA50 (downtrend)
+                # Bearish breakout: price breaks below Donchian lower AND below 1d EMA50 (downtrend)
                 elif curr_close < curr_lowest_20 and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price falls below Donchian lower band (breakdown) or below 1d EMA50 (trend change)
-            if curr_close < curr_lowest_20 or curr_close < curr_ema_50:
+            # Exit when price breaks below Donchian lower (20-period low)
+            if curr_close < curr_lowest_20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Donchian upper band (breakout) or above 1d EMA50 (trend change)
-            if curr_close > curr_highest_20 or curr_close > curr_ema_50:
+            # Exit when price breaks above Donchian upper (20-period high)
+            if curr_close > curr_highest_20:
                 signals[i] = 0.0
                 position = 0
             else:
