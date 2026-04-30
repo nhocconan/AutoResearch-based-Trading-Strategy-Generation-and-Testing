@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA21 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian upper band with 1w uptrend (close > 1w HMA21) and volume > 2.0x 20-bar avg.
-# Short when price breaks below Donchian lower band with 1w downtrend (close < 1w HMA21) and volume > 2.0x 20-bar avg.
-# Exit on opposite Donchian band touch (mean reversion within the channel).
-# Uses proven Donchian structure with strict volume confirmation (2.0x) and 1w HMA21 trend filter to limit trades (target 7-25/year).
-# 1w HMA21 provides higher timeframe trend filter for 1d, reducing false signals in choppy markets.
-# Timeframe: 1d, HTF: 1w as per experiment guidelines.
+# Hypothesis: 12h Williams Alligator strategy with 1d trend filter and volume confirmation.
+# Williams Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) with future shifts.
+# Long when Lips > Teeth > Jaw (bullish alignment) and price > Lips, with 1d uptrend (close > 1d EMA34) and volume > 1.5x 20-bar avg.
+# Short when Lips < Teeth < Jaw (bearish alignment) and price < Lips, with 1d downtrend (close < 1d EMA34) and volume > 1.5x 20-bar avg.
+# Exit when Alligator lines cross (Lips crosses Teeth) or price crosses Jaw.
+# Uses proven Alligator structure with strict volume confirmation and 1d EMA34 trend filter to limit trades (target 12-37/year).
+# Timeframe: 12h, HTF: 1d as per experiment guidelines.
 
-name = "1d_Donchian20_1wHMA21_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,88 +25,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w HMA21 for trend filter
-    close_1w = df_1w['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_1w).ewm(span=half_len, adjust=False).mean()
-    wma_full = pd.Series(close_1w).ewm(span=21, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma_21_1w = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous 1w OHLC for completed 1w bar (no look-ahead)
-    df_1w_prev = get_htf_data(prices, '1w')
-    if len(df_1w_prev) < 2:
-        return np.zeros(n)
+    # Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    # Teeth: 8-period SMMA shifted 5 bars forward  
+    # Lips: 5-period SMMA shifted 3 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    prev_high_1w = df_1w_prev['high'].shift(1).values
-    prev_low_1w = df_1w_prev['low'].shift(1).values
-    prev_close_1w = df_1w_prev['close'].shift(1).values
-    
-    # Align 1w data to 1d timeframe (completed 1w bar only)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1w_prev, prev_high_1w)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1w_prev, prev_low_1w)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1w_prev, prev_close_1w)
-    
-    # Donchian(20) from previous completed 1w bar (no look-ahead)
-    donchian_high = pd.Series(prev_high_aligned).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prev_low_aligned).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 2.0x 20-period average (strict to avoid overtrading)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for HMA21 and Donchian
+    start_idx = 50  # warmup for Alligator and EMA
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if (np.isnan(hma_21_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_donch_high = donchian_high[i]
-        curr_donch_low = donchian_low[i]
-        curr_hma_21_1w = hma_21_1w_aligned[i]
+        curr_lips = lips[i]
+        curr_teeth = teeth[i]
+        curr_jaw = jaw[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high, uptrend (close > 1w HMA21), volume spike
-            if (curr_close > curr_donch_high and 
-                curr_close > curr_hma_21_1w and 
+            # Bullish Alligator: Lips > Teeth > Jaw
+            bullish_alignment = curr_lips > curr_teeth > curr_jaw
+            # Bearish Alligator: Lips < Teeth < Jaw
+            bearish_alignment = curr_lips < curr_teeth < curr_jaw
+            
+            # Long: bullish alignment, price > Lips, 1d uptrend, volume spike
+            if (bullish_alignment and 
+                curr_close > curr_lips and 
+                curr_close > curr_ema_34_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, downtrend (close < 1w HMA21), volume spike
-            elif (curr_close < curr_donch_low and 
-                  curr_close < curr_hma_21_1w and 
+            # Short: bearish alignment, price < Lips, 1d downtrend, volume spike
+            elif (bearish_alignment and 
+                  curr_close < curr_lips and 
+                  curr_close < curr_ema_34_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            # Exit condition: price touches Donchian low (mean reversion)
-            if curr_close <= curr_donch_low:
+            # Exit conditions: 
+            # 1. Lips crosses below Teeth (Alligator weakening)
+            # 2. Price crosses below Jaw (trend change)
+            lips_cross_below_teeth = curr_lips < curr_teeth and lips[i-1] >= teeth[i-1] if i > 0 else False
+            price_cross_below_jaw = curr_close < curr_jaw and close[i-1] >= jaw[i-1] if i > 0 else False
+            
+            if lips_cross_below_teeth or price_cross_below_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: price touches Donchian high (mean reversion)
-            if curr_close >= curr_donch_high:
+            # Exit conditions:
+            # 1. Lips crosses above Teeth (Alligator weakening)
+            # 2. Price crosses above Jaw (trend change)
+            lips_cross_above_teeth = curr_lips > curr_teeth and lips[i-1] <= teeth[i-1] if i > 0 else False
+            price_cross_above_jaw = curr_close > curr_jaw and close[i-1] <= jaw[i-1] if i > 0 else False
+            
+            if lips_cross_above_teeth or price_cross_above_jaw:
                 signals[i] = 0.0
                 position = 0
             else:
