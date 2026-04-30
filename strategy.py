@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 1h Williams %R mean reversion with 4h EMA50 trend filter and volume spike confirmation
 # Uses discrete sizing 0.20 to minimize fee drag. Target: 60-150 total trades over 4 years (15-37/year).
 # Williams %R identifies overbought/oversold conditions for mean reversion in ranging markets.
-# 1d EMA34 filters for higher timeframe trend alignment to avoid counter-trend trades.
+# 4h EMA50 filters for higher timeframe trend alignment to avoid counter-trend trades.
 # Volume spike ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Only takes mean reversion trades when price is near Camarilla S3/R3 levels for structure.
+# Only takes mean reversion trades when price is near prior day's Camarilla S3/R3 levels for structure.
 
-name = "1h_WilliamsR_ME_1dEMA34_VolumeSpike_v1"
+name = "1h_WilliamsR_ME_4hEMA50_VolumeSpike_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -34,12 +34,12 @@ def generate_signals(prices):
     lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Calculate 1d EMA(34) for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 4h EMA(50) for trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: volume > 2.0x 24-period average (strict to reduce trades)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -73,11 +73,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 24, 34, 14)  # warmup
+    start_idx = max(100, 24, 50, 14)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(vol_ma_24[i]) or np.isnan(camarilla_s3[i]) or
             np.isnan(camarilla_r3[i])):
             signals[i] = 0.0
@@ -92,7 +92,7 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_williams_r = williams_r[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_50_4h = ema_50_4h_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_camarilla_s3 = camarilla_s3[i]
         curr_camarilla_r3 = camarilla_r3[i]
@@ -100,25 +100,25 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade on volume spike with Williams %R extreme and Camarilla proximity
             if curr_volume_spike:
-                # Bullish mean reversion: Williams %R oversold (< -80) + near S3 + above 1d EMA34
+                # Bullish mean reversion: Williams %R oversold (< -80) + near S3 + above 4h EMA50
                 if (curr_williams_r < -80 and 
                     curr_close >= curr_camarilla_s3 * 0.995 and  # Near S3 (within 0.5%)
-                    curr_close > curr_ema_34_1d):
+                    curr_close > curr_ema_50_4h):
                     signals[i] = 0.20
                     position = 1
                     entry_price = curr_close
-                # Bearish mean reversion: Williams %R overbought (> -20) + near R3 + below 1d EMA34
+                # Bearish mean reversion: Williams %R overbought (> -20) + near R3 + below 4h EMA50
                 elif (curr_williams_r > -20 and 
                       curr_close <= curr_camarilla_r3 * 1.005 and  # Near R3 (within 0.5%)
-                      curr_close < curr_ema_34_1d):
+                      curr_close < curr_ema_50_4h):
                     signals[i] = -0.20
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns to neutral OR loses 1d trend OR hits Camarilla R3
+            # Exit: Williams %R returns to neutral OR loses 4h trend OR hits Camarilla R3
             if (curr_williams_r > -50 or  # Returned to neutral territory
-                curr_close < curr_ema_34_1d or  # Lost 1d uptrend
+                curr_close < curr_ema_50_4h or  # Lost 4h uptrend
                 curr_close >= curr_camarilla_r3 * 0.995):  # Reached R3 level
                 signals[i] = 0.0
                 position = 0
@@ -126,9 +126,9 @@ def generate_signals(prices):
                 signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral OR loses 1d trend OR hits Camarilla S3
+            # Exit: Williams %R returns to neutral OR loses 4h trend OR hits Camarilla S3
             if (curr_williams_r < -50 or  # Returned to neutral territory
-                curr_close > curr_ema_34_1d or  # Lost 1d downtrend
+                curr_close > curr_ema_50_4h or  # Lost 4h downtrend
                 curr_close <= curr_camarilla_s3 * 1.005):  # Reached S3 level
                 signals[i] = 0.0
                 position = 0
