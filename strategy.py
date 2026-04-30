@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1w Camarilla R3/S3 levels with volume confirmation and 1w trend filter
-# Weekly Camarilla levels identify key institutional support/resistance where large players operate.
-# Breakouts above R3 or below S3 with volume spike indicate strong institutional participation.
+# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakouts with volume confirmation and 1w trend filter
+# Camarilla pivots from weekly data identify key support/resistance where institutional order flow clusters.
+# Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
 # 1w EMA(50) ensures alignment with longer-term trend to avoid counter-trend trades.
-# Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
-# Uses 4h timeframe as primary, with 1w HTF for Camarilla levels and trend filter.
+# Designed for very low trade frequency (<25/year) to minimize fee drag in both bull and bear markets.
+# Uses 1d timeframe with 1w HTF for Camarilla levels and trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 100:
         return np.zeros(n)
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
     s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1w bar)
+    # Align Camarilla levels to 1d timeframe (wait for completed 1w bar)
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
