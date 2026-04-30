@@ -3,23 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 12h EMA50 trend filter and volume spike confirmation.
-# Williams %R identifies overbought/oversold conditions (-20 to -80 range). 
-# In 6h timeframe, we look for reversals from extreme readings with trend alignment.
-# Long: Williams %R crosses above -80 from below, price > 12h EMA50, volume > 2x 20-bar average.
-# Short: Williams %R crosses below -20 from above, price < 12h EMA50, volume > 2x 20-bar average.
-# Uses ATR(14) trailing stop at 2.0x for risk management.
-# Discrete position sizing at ±0.25 to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Williams %R works well in ranging markets and captures reversals in both bull and bear regimes.
-# The 12h EMA50 filter ensures we trade with the higher timeframe trend, reducing false signals.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses discrete ±0.30 position sizing to limit fee churn. ATR(14) trailing stop at 2.0x.
+# Target: 80-160 total trades over 4 years (20-40/year) to avoid fee drag.
+# Works in bull markets via breakouts; in bear markets via short breakdowns with trend filter.
+# Volume confirmation ensures institutional participation. 1d EMA50 provides robust trend filter.
 
-name = "6h_WilliamsR_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,22 +27,19 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R calculation (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Donchian(20) channels: upper = 20-period high, lower = 20-period low
+    donchian_window = 20
+    donchian_upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # ATR(14) for volatility and stoploss
     atr_period = 14
@@ -66,12 +59,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 14, atr_period, 20) + 1  # warmup
+    start_idx = max(50, donchian_window, atr_period, 20) + 1  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(williams_r[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
             np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
@@ -81,28 +75,26 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
-        curr_williams_r = williams_r[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
+        curr_upper = donchian_upper[i]
+        curr_lower = donchian_lower[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Williams %R crossover signals
-        williams_r_prev = williams_r[i-1] if i > 0 else -50
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R crosses above -80 from below, above 12h EMA50, volume confirmation
-            if (curr_williams_r > -80 and williams_r_prev <= -80 and 
-                curr_close > curr_ema_50_12h and 
+            # Long: price breaks above Donchian upper, above 1d EMA50, volume confirmation
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
-            # Short: Williams %R crosses below -20 from above, below 12h EMA50, volume confirmation
-            elif (curr_williams_r < -20 and williams_r_prev >= -20 and 
-                  curr_close < curr_ema_50_12h and 
+            # Short: price breaks below Donchian lower, below 1d EMA50, volume confirmation
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
                 lowest_since_entry = curr_close
@@ -115,7 +107,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Update lowest price since entry
@@ -125,6 +117,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
