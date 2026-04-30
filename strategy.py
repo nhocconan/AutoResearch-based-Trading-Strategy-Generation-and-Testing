@@ -3,21 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d trend filter (EMA50) and volume confirmation (>1.5x 20-bar avg).
-# Elder Ray measures bull/bear strength relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 and increasing, price > 1d EMA50, volume spike, in session (08-20 UTC).
-# Short when Bear Power < 0 and decreasing, price < 1d EMA50, volume spike, in session.
-# Uses discrete position sizing at ±0.25 to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag on 6h timeframe.
-# Works in bull markets via sustained Bull Power > 0 and in bear markets via sustained Bear Power < 0.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation (>1.5x 20-bar avg), and ATR(14) stoploss.
+# Uses discrete position sizing (±0.25) to minimize fee churn. Session filter (08-20 UTC) avoids low liquidity.
+# Designed to capture trends in bull markets and avoid whipsaws in bear markets via strict volume and trend confirmation.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_Trend_VolumeConfirm_Session_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_ATRStop_Session_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,24 +26,28 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA50
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
-    close_1d_vals = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 6h timeframe
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # ATR(14) for stoploss and volatility filter
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Donchian channels (20-period) for breakout signals
+    donchian_window = 20
+    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,55 +55,63 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 60  # warmup for EMA50 and EMA13
+    start_idx = max(50, donchian_window, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_confirm[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_ema_50_1d = ema_50_1d_aligned[i]
-        curr_bull_power = bull_power[i]
-        curr_bear_power = bear_power[i]
+        curr_upper = highest_high[i]
+        curr_lower = lowest_low[i]
+        curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
-        # Previous bar values for momentum check
-        prev_bull_power = bull_power[i-1]
-        prev_bear_power = bear_power[i-1]
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 and increasing, price > 1d EMA50, volume spike
-            if (curr_bull_power > 0 and 
-                curr_bull_power > prev_bull_power and
+            # Long: price breaks above upper Donchian, close > 1d EMA50, volume spike, in session
+            if (curr_close > curr_upper and 
                 curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and decreasing, price < 1d EMA50, volume spike
-            elif (curr_bear_power < 0 and 
-                  curr_bear_power < prev_bear_power and
+                entry_price = curr_close
+            # Short: price breaks below lower Donchian, close < 1d EMA50, volume spike, in session
+            elif (curr_close < curr_lower and 
                   curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit condition: Bull Power <= 0 or Bear Power >= 0 (loss of bullish momentum)
-            if curr_bull_power <= 0 or curr_bear_power >= 0:
+            # Stoploss: 2 * ATR below entry price
+            if curr_low <= entry_price - 2.0 * curr_atr:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: close below upper Donchian (breakdown)
+            elif curr_close < curr_upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit condition: Bear Power >= 0 or Bull Power <= 0 (loss of bearish momentum)
-            if curr_bear_power >= 0 or curr_bull_power <= 0:
+            # Stoploss: 2 * ATR above entry price
+            if curr_high >= entry_price + 2.0 * curr_atr:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: close above lower Donchian (breakout)
+            elif curr_close > curr_lower:
                 signals[i] = 0.0
                 position = 0
             else:
