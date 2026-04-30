@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1w trend filter + volume confirmation.
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1w EMA34 AND volume > 1.5x 20-period average.
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1w EMA34 AND volume > 1.5x 20-period average.
-# Uses 1w EMA34 for trend alignment to reduce whipsaws in both bull and bear markets.
-# Volume confirmation ensures strong momentum. Designed for low trade frequency (~12-30 trades/year) to minimize fee drag on 6h timeframe.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 1d EMA34 for trend alignment to reduce whipsaws in both bull and bear markets.
+# Volume > 2.0x 20-period average confirms strong momentum (high threshold to control trade frequency).
+# ATR-based stoploss (2.5x) manages risk. Session filter (00-24 UTC) always active for 12h timeframe.
+# Designed for low trade frequency (~12-25 trades/year) to minimize fee drag on 12h timeframe.
+# Entry requires 1d EMA34 alignment + volume spike + Camarilla breakout.
 
-name = "6h_ElderRay_BullBearPower_1wEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,27 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
+    # Pre-compute session hours (00-24 UTC) - always active for 12h timeframe
     hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = np.ones(n, dtype=bool)  # 12h candles cover full day, no session filter needed
     
-    # Load 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1w data
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate EMA34 on 1d data
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (6h timeframe)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
-    
-    # Calculate ATR(14) for 6h timeframe stoploss
+    # Calculate ATR(14) for 12h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -58,10 +51,8 @@ def generate_signals(prices):
     start_idx = 100  # warmup for EMA and ATR
     
     for i in range(start_idx, n):
-        # Skip if indicators not available or outside session
+        # Skip if indicators not available
         if (np.isnan(ema_34_aligned[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
             np.isnan(atr[i]) or
             not in_session[i]):
             signals[i] = 0.0
@@ -70,57 +61,84 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
-        curr_ema_1w = ema_34_aligned[i]
+        curr_ema = ema_34_aligned[i]
         curr_atr = atr[i]
         
-        # Volume confirmation: volume > 1.5x 20-period average (moderate threshold to control trades)
+        # Volume confirmation: volume > 2.0x 20-period average (high threshold to control trades)
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > (1.5 * vol_ma_20)
+            volume_confirm = volume[i] > (2.0 * vol_ma_20)
         else:
             volume_confirm = False
         
-        # Elder Ray momentum: Bull Power rising (less negative) or Bear Power falling (less positive)
-        if i >= 1:
-            bull_rising = curr_bull > bull_power[i-1]   # Bull Power increasing
-            bear_falling = curr_bear < bear_power[i-1]  # Bear Power decreasing (more negative)
+        # Calculate Camarilla levels for current day using previous day's OHLC
+        if i >= 2:  # Need at least 2 bars (2 days) of 12h data for previous day
+            # Get timestamp of current bar
+            curr_time = prices.iloc[i]["open_time"]
+            # Get start of current 12h period (already at 00:00 or 12:00 UTC)
+            # For 12h timeframe, we need to get the previous 12h candle's data
+            # But for Camarilla, we need previous day's OHLC, so we'll use 1d data
+            # Get start of current day (00:00 UTC)
+            curr_day_start = curr_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Get start of previous day
+            prev_day_start = curr_day_start - pd.Timedelta(days=1)
+            # Get end of previous day (23:59:59.999 UTC)
+            prev_day_end = curr_day_start - pd.Timedelta(microseconds=1)
+            
+            # Filter prices for previous day using 1d timeframe data
+            # Since we're on 12h timeframe, we need to check if we have 1d data available
+            # We'll use the 1d dataframe we already loaded
+            prev_day_idx = len(df_1d) - 1  # Most recent completed 1d candle
+            if prev_day_idx >= 0:
+                prev_day_data = df_1d.iloc[prev_day_idx]
+                prev_high = prev_day_data["high"]
+                prev_low = prev_day_data["low"]
+                prev_close = prev_day_data["close"]
+                
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                if range_val > 0:
+                    camarilla_r3 = prev_close + (range_val * 1.1 / 4)  # R3 level
+                    camarilla_s3 = prev_close - (range_val * 1.1 / 4)  # S3 level
+                else:
+                    camarilla_r3 = curr_close
+                    camarilla_s3 = curr_close
+            else:
+                camarilla_r3 = curr_close
+                camarilla_s3 = curr_close
         else:
-            bull_rising = False
-            bear_falling = False
+            camarilla_r3 = curr_close
+            camarilla_s3 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND Bull Power rising AND price > 1w EMA34 AND volume spike
-            if (curr_bull > 0 and 
-                bull_rising and 
-                curr_close > curr_ema_1w and 
+            # Long: price breaks above Camarilla R3, price above 1d EMA34, volume spike
+            if (curr_close > camarilla_r3 and 
+                curr_close > curr_ema and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Bear Power < 0 AND Bear Power falling AND price < 1w EMA34 AND volume spike
-            elif (curr_bear < 0 and 
-                  bear_falling and 
-                  curr_close < curr_ema_1w and 
+            # Short: price breaks below Camarilla S3, price below 1d EMA34, volume spike
+            elif (curr_close < camarilla_s3 and 
+                  curr_close < curr_ema and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit conditions: Bear Power >= 0 OR stoploss hit
-            if (curr_bear >= 0 or 
-                curr_close < entry_price - 2.0 * curr_atr):
+            # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
+            if (curr_close < camarilla_s3 or 
+                curr_close < entry_price - 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions: Bull Power <= 0 OR stoploss hit
-            if (curr_bull <= 0 or 
-                curr_close > entry_price + 2.0 * curr_atr):
+            # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
+            if (curr_close > camarilla_r3 or 
+                curr_close > entry_price + 2.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
