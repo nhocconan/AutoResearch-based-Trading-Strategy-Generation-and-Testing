@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion works well.
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume spike (>2x 30-bar avg).
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume spike.
+# Hypothesis: 1d Williams %R mean reversion with 1w EMA34 trend filter and volume confirmation
+# Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend.
+# Williams %R(14) < -80 for long, > -20 for short. Requires price > 1w EMA34 for longs,
+# price < 1w EMA34 for shorts, and volume > 1.5x 20-period average.
 # ATR-based stoploss: exit when price moves against position by 2.0 * ATR(14).
-# Discrete sizing 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull via mean reversion longs in pullbacks, in bear via mean reversion shorts in rallies.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "4h_WilliamsR_ME_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_ME_1wEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,19 +33,19 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
+    # Handle division by zero (when highest_high == lowest_low)
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d EMA(34) for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA(34) for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.0 * vol_ma_30)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     # ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -59,12 +58,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(14, 30, 34)  # warmup
+    start_idx = max(14, 20, 34)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma_30[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
             
@@ -74,23 +73,25 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_williams_r = williams_r[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_34_1w = ema_34_1w_aligned[i]
         curr_volume_spike = volume_spike[i]
         curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike
             if curr_volume_spike:
-                # Bullish entry: Williams %R oversold (< -80) AND price above 1d EMA34
+                # Bullish entry: Williams %R < -80 (oversold) AND price > 1w EMA34 (uptrend)
                 if (curr_williams_r < -80 and 
-                    curr_close > curr_ema_34_1d):
+                    curr_close > curr_ema_34_1w):
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Williams %R overbought (> -20) AND price below 1d EMA34
+                # Bearish entry: Williams %R > -20 (overbought) AND price < 1w EMA34 (downtrend)
                 elif (curr_williams_r > -20 and 
-                      curr_close < curr_ema_34_1d):
+                      curr_close < curr_ema_34_1w):
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
