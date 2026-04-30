@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike >2.0x
-# Camarilla R3/S3 provide strong intraday support/resistance levels
-# 1d EMA34 ensures alignment with higher timeframe trend; volume spike confirms institutional participation
-# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
+# Hypothesis: 4h Williams Alligator with 1d EMA34 trend filter and volume spike confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend through smoothed MAs
+# 1d EMA34 ensures alignment with daily trend; volume spike >2.0x confirms participation
+# Discrete sizing (0.25) targets 75-200 total trades over 4 years to avoid fee drag
+# Works in bull/bear: Alligator convergence/divergence signals trend changes, volume filter ensures legitimacy
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,83 +44,60 @@ def generate_signals(prices):
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (2.0 * vol_ma_30)
     
-    # Precompute daily data for Camarilla levels
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Williams Alligator: Jaw(13), Teeth(8), Lips(5) - all smoothed with SMMA
+    # SMMA is similar to EMA but with different smoothing - we'll use EMA as approximation
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 4h bars for daily levels
+    start_idx = max(100, 30, 13, 34)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(atr[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_30[i]) or
-            np.isnan(daily_high_aligned[i]) or
-            np.isnan(daily_low_aligned[i]) or
-            np.isnan(daily_close_aligned[i])):
+            np.isnan(jaw[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
         curr_close = close[i]
         curr_volume_confirm = volume_confirm[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
-        
-        # Use previous day's levels (shift by 1)
-        prev_high = daily_high_aligned[i-1]
-        prev_low = daily_low_aligned[i-1]
-        prev_close = daily_close_aligned[i-1]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
         
         if position == 0:  # Flat - look for new entries
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                s3 = prev_close - (range_val * 1.1 / 4)
-                
-                # Only trade with volume confirmation and trend filter
-                if curr_volume_confirm:
-                    # Bullish entry: price breaks above R3 + above 1d EMA34
-                    if curr_high > r3 and curr_close > curr_ema_34_1d:
-                        signals[i] = 0.25
-                        position = 1
-                    # Bearish entry: price breaks below S3 + below 1d EMA34
-                    elif curr_low < s3 and curr_close < curr_ema_34_1d:
-                        signals[i] = -0.25
-                        position = -1
+            # Only trade with volume confirmation and trend filter
+            if curr_volume_confirm:
+                # Bullish entry: Lips > Teeth > Jaw (Alligator aligned up) + above 1d EMA34
+                if curr_lips > curr_teeth and curr_teeth > curr_jaw and curr_close > curr_ema_34_1d:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish entry: Lips < Teeth < Jaw (Alligator aligned down) + below 1d EMA34
+                elif curr_lips < curr_teeth and curr_teeth < curr_jaw and curr_close < curr_ema_34_1d:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                s3 = prev_close - (range_val * 1.1 / 4)
-                if curr_low < s3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: Alligator convergence (Lips < Teeth) or price below Jaw
+            if curr_lips < curr_teeth or curr_close < curr_jaw:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3
-            if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
-                range_val = prev_high - prev_low
-                r3 = prev_close + (range_val * 1.1 / 4)
-                if curr_high > r3:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: Alligator convergence (Lips > Teeth) or price above Jaw
+            if curr_lips > curr_teeth or curr_close > curr_jaw:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
