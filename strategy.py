@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and 1w ADX trend filter
-# Uses 1d primary timeframe to target 30-100 trades over 4 years (7-25/year).
-# Donchian channel from 1w provides strong weekly support/resistance. Breakouts beyond
-# upper/lower bands indicate momentum moves. Volume spike (2.0x 20-period average) confirms validity.
-# 1w ADX > 25 filters for trending markets only, avoiding choppy conditions.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX trend filter
+# Uses 12h primary timeframe to target 50-150 trades over 4 years (12-37/year).
+# Camarilla pivots from 1d provide strong intraday support/resistance. Breakouts beyond R3/S3
+# indicate momentum moves. Volume spike (2.0x 20-period average) confirms validity.
+# 1d ADX > 25 filters for trending markets only, avoiding choppy conditions.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Works in bull via breakout longs,
 # in bear via breakout shorts with trend filter.
+# Added ATR-based trailing stop (3x ATR) to reduce drawdown and improve symmetry.
 
-name = "1d_Donchian20_Breakout_1wVolumeSpike_1wADX25_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_1dADX25_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,25 +31,31 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1w Donchian channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 1d Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
-    # Use previous week's high/low for current week's Donchian bands
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    upper_band = prev_high
-    lower_band = prev_low
+    # Use previous day's OHLC for today's Camarilla levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
+    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
+    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
+    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Align 1w Donchian bands to 1d timeframe (wait for completed 1w bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Calculate 1w ADX(14) for trend filter
+    # Calculate 1d ADX(14) for trend filter
     # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -88,55 +95,80 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) == 0, 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # ATR for trailing stop (3x ATR)
+    atr_14 = atr  # already calculated above
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0  # for long trailing stop
+    lowest_since_entry = 0.0   # for short trailing stop
     
     start_idx = max(20, 14)  # warmup for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
             
         # Session filter: only trade 08-20 UTC
         if not in_session[i]:
             signals[i] = 0.0
+            if position != 0:
+                # Force exit on session close
+                signals[i] = 0.0
+                position = 0
             continue
             
         curr_close = close[i]
-        curr_upper = upper_aligned[i]
-        curr_lower = lower_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_s4 = s4_aligned[i]
         curr_adx = adx[i]
         curr_volume_spike = volume_spike[i]
+        curr_atr = atr_14[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trending market (ADX > 25)
             if curr_volume_spike and curr_adx > 25:
-                # Bullish breakout: price breaks above upper band
-                if curr_close > curr_upper:
+                # Bullish breakout: price breaks above R3
+                if curr_close > curr_r3:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below lower band
-                elif curr_close < curr_lower:
+                    highest_since_entry = curr_close
+                # Bearish breakout: price breaks below S3
+                elif curr_close < curr_s3:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
+                    lowest_since_entry = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower band (mean reversion)
-            if curr_close < curr_lower:
+            # Update highest price since entry
+            highest_since_entry = max(highest_since_entry, curr_close)
+            
+            # Exit conditions:
+            # 1. Price drops below S3 (mean reversion to pivot area)
+            # 2. ATR trailing stop: price drops 3*ATR from highest since entry
+            if curr_close < curr_s3 or curr_close < (highest_since_entry - 3.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper band (mean reversion)
-            if curr_close > curr_upper:
+            # Update lowest price since entry
+            lowest_since_entry = min(lowest_since_entry, curr_close)
+            
+            # Exit conditions:
+            # 1. Price rises above R3 (mean reversion to pivot area)
+            # 2. ATR trailing stop: price rises 3*ATR from lowest since entry
+            if curr_close > curr_r3 or curr_close > (lowest_since_entry + 3.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
