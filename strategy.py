@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
 # Long when price breaks above upper Donchian + 1d EMA50 uptrend + volume > 2.0x 20-bar average.
 # Short when price breaks below lower Donchian + 1d EMA50 downtrend + volume > 2.0x 20-bar average.
 # ATR trailing stop (2.0x) for risk management.
-# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
-# Uses 1d HTF for trend filter (more stable than lower timeframes) and stricter volume confirmation (2.0x) to reduce overtrading.
-# Donchian channels provide clear price structure; breakouts with volume confirm conviction in both bull and bear markets.
+# Targets 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25).
+# Uses 1d HTF for trend filter (more stable than 4h) and stricter volume confirmation (2.0x) to reduce overtrading.
+# Donchian channels provide clear structure; breakouts with volume confirm conviction.
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,16 +35,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) from previous 12h bar
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
-    # Using previous bar's high/low to avoid look-ahead
-    lookback = 20
-    prev_high = np.concatenate([[high[0]], high[:-1]])
-    prev_low = np.concatenate([[low[0]], low[:-1]])
-    
-    # Calculate rolling max/min for Donchian channels
-    upper = pd.Series(prev_high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(prev_low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Donchian(20) from previous 20 periods (avoid look-ahead)
+    # Upper = max(high[-20:-1]), Lower = min(low[-20:-1])
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=1).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=1).min().values
+    # Shift by 1 to use only past data
+    upper_channel = np.concatenate([[high[0]], high_ma_20[:-1]])
+    lower_channel = np.concatenate([[low[0]], low_ma_20[:-1]])
     
     # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce overtrading)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
@@ -62,11 +59,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, 20)  # warmup for EMA50 and Donchian channels
+    start_idx = 50  # warmup for EMA50 and indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -85,12 +82,12 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             # Long: price breaks above upper Donchian + uptrend + volume confirmation
-            if curr_high > upper[i] and is_uptrend and curr_volume_confirm:
+            if curr_high > upper_channel[i] and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
             # Short: price breaks below lower Donchian + downtrend + volume confirmation
-            elif curr_low < lower[i] and is_downtrend and curr_volume_confirm:
+            elif curr_low < lower_channel[i] and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
