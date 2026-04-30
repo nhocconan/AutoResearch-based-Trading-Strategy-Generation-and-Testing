@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 2.0x 20-period average.
-# Uses discrete sizing (0.25) and ATR-based trailing stop (2.0x ATR).
-# Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year) with low fee drag.
+# Hypothesis: 12h Williams %R + 1d EMA50 trend filter + volume confirmation.
+# Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R < -80 (oversold) AND price > 1d EMA50 + volume > 1.5x 20-period average
+# Short when %R > -20 (overbought) AND price < 1d EMA50 + volume > 1.5x 20-period average
+# Uses 12h timeframe for lower frequency (target: 50-150 trades over 4 years) and discrete sizing (0.25).
+# Works in bull/bear markets by requiring trend alignment via 1d EMA50 and mean reversion via Williams %R.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,14 +34,15 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Williams %R on 12h (primary timeframe)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -54,31 +56,36 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, lookback)  # warmup for EMA50 and Donchian
+    start_idx = 50  # warmup for EMA50 and Williams %R
     
     for i in range(start_idx, n):
         # Skip if indicators not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
                 signals[i] = -0.25
             continue
         
+        # Trend filter: price relative to 1d EMA50
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_williams_r = williams_r[i]
         curr_atr = atr[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price > Donchian high AND uptrend + volume confirmation
-            if curr_close > highest_high[i] and curr_close > ema_50_aligned[i] and curr_volume_confirm:
+            # Long: Williams %R < -80 (oversold) + uptrend + volume confirmation
+            if curr_williams_r < -80 and is_uptrend and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price < Donchian low AND downtrend + volume confirmation
-            elif curr_close < lowest_low[i] and curr_close < ema_50_aligned[i] and curr_volume_confirm:
+            # Short: Williams %R > -20 (overbought) + downtrend + volume confirmation
+            elif curr_williams_r > -20 and is_downtrend and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
