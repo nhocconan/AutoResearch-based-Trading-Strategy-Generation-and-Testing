@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and volume confirmation
-# Uses discrete sizing 0.20 to minimize fee drag. Target: 60-150 total trades over 4 years (15-37/year).
-# RSI(2) identifies extreme short-term reversals. 4h EMA50 filters counter-trend trades.
-# Volume spike ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Works in both bull and bear via 4h trend filter - only long in uptrend, short in downtrend.
+# Hypothesis: 6h Williams Alligator + Elder Ray combination with 1w EMA50 trend filter
+# Uses discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Williams Alligator identifies trend via jaw/teeth/lips alignment. Elder Ray measures bull/bear power.
+# 1w EMA50 filter ensures trading only with the primary weekly trend to avoid counter-trend whipsaws.
+# Works in both bull and bear markets by aligning with higher timeframe direction.
 
-name = "1h_RSI2_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,26 +28,34 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate RSI(2) on 1h timeframe
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_2 = 100 - (100 / (1 + rs))
-    rsi_2 = rsi_2.fillna(50).values  # Neutral when undefined
+    # Calculate Williams Alligator (13,8,5 smoothed with 8,5,3)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CLOSE) / PERIOD
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate 4h EMA(50) for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Calculate Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Calculate 1w EMA(50) for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Volume confirmation: volume > 1.5x 20-period average (balanced frequency)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # ATR for stoploss (14-period)
     tr1 = high[1:] - low[1:]
@@ -60,53 +68,69 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50, 14)  # warmup
+    start_idx = max(100, 13, 8, 5, 13, 50)  # warmup
     
     for i in range(start_idx, n):
         # Skip if indicators not ready or outside session
-        if (np.isnan(rsi_2[i]) or np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr_14[i]) or not in_session[i]):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
             
         curr_close = close[i]
-        curr_rsi = rsi_2[i]
-        curr_ema_50_4h = ema_50_4h_aligned[i]
-        curr_volume_spike = volume_spike[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
+        curr_ema_50_1w = ema_50_1w_aligned[i]
         curr_atr = atr_14[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade on volume spike with RSI extreme and 4h EMA50 trend filter
-            if curr_volume_spike:
-                # Bullish: RSI < 10 (oversold) + close above 4h EMA50 (uptrend)
-                if curr_rsi < 10 and curr_close > curr_ema_50_4h:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = curr_close
-                # Bearish: RSI > 90 (overbought) + close below 4h EMA50 (downtrend)
-                elif curr_rsi > 90 and curr_close < curr_ema_50_4h:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = curr_close
+            # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+            # Elder Ray confirmation: Bull Power > 0 and rising, Bear Power < 0 and falling
+            # Weekly trend filter: Price > EMA50 for long, Price < EMA50 for short
+            
+            # Bullish entry: Alligator bullish alignment + Bull Power positive + above weekly EMA
+            if (curr_lips > curr_teeth > curr_jaw and 
+                curr_bull_power > 0 and 
+                curr_close > curr_ema_50_1w):
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+            # Bearish entry: Alligator bearish alignment + Bear Power negative + below weekly EMA
+            elif (curr_lips < curr_teeth < curr_jaw and 
+                  curr_bear_power < 0 and 
+                  curr_close < curr_ema_50_1w):
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
         
         elif position == 1:  # Long position
             # Stoploss: 2 * ATR below entry
             stop_loss = entry_price - 2.0 * curr_atr
-            # Exit: Stoploss hit OR RSI returns to neutral (50) OR loses 4h trend
-            if curr_low <= stop_loss or curr_rsi >= 50 or curr_close < curr_ema_50_4h:
+            # Exit: Stoploss hit OR Alligator loses bullish alignment OR Elder Ray turns negative
+            if (curr_low <= stop_loss or 
+                not (curr_lips > curr_teeth > curr_jaw) or 
+                curr_bull_power <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Stoploss: 2 * ATR above entry
             stop_loss = entry_price + 2.0 * curr_atr
-            # Exit: Stoploss hit OR RSI returns to neutral (50) OR loses 4h trend
-            if curr_high >= stop_loss or curr_rsi <= 50 or curr_close > curr_ema_50_4h:
+            # Exit: Stoploss hit OR Alligator loses bearish alignment OR Elder Ray turns positive
+            if (curr_high >= stop_loss or 
+                not (curr_lips < curr_teeth < curr_jaw) or 
+                curr_bear_power >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
