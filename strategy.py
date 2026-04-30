@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high with uptrend (price > 1w EMA50) and volume > 1.5x 20-bar average.
-# Short when price breaks below 20-period Donchian low with downtrend (price < 1w EMA50) and volume spike.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high with uptrend (price > 1w EMA50) and volume > 2x 20-bar average.
+# Short when price breaks below Donchian(20) low with downtrend (price < 1w EMA50) and volume spike.
 # Uses ATR trailing stop (2.0x) for risk management.
-# Targets 75-200 trades over 4 years (19-50/year) with discrete position sizing (0.25).
-# Works in both bull/bear markets by requiring 1w EMA50 trend alignment and volume confirmation to avoid whipsaws.
+# Targets 30-100 trades over 4 years (7-25/year) with discrete position sizing (0.25).
+# Works in both bull/bear markets by requiring 1w EMA50 trend alignment and volume confirmation.
 
-name = "4h_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRTrail_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,13 +34,13 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 20-period Donchian channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) channels from 1d OHLC
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -54,7 +54,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = 100  # warmup for Donchian and EMA50
+    start_idx = 50  # warmup for Donchian and EMA50
     
     for i in range(start_idx, n):
         # Skip if EMA50 not available
@@ -65,18 +65,6 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Skip if Donchian channels not available
-        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            continue
-        
-        # Regime filter: price above/below 1w EMA50 determines trend direction
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
-        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
@@ -84,11 +72,11 @@ def generate_signals(prices):
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            if is_uptrend and curr_close > highest_20[i] and curr_volume_spike:
+            if curr_close > high_20[i] and curr_close > ema_50_aligned[i] and curr_volume_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_close
-            elif is_downtrend and curr_close < lowest_20[i] and curr_volume_spike:
+            elif curr_close < low_20[i] and curr_close < ema_50_aligned[i] and curr_volume_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_close
