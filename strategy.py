@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation >1.5x
-# Donchian(20) captures medium-term structure; 1w EMA34 ensures alignment with weekly trend
-# Volume spike confirms institutional participation; discrete sizing (0.25) minimizes fee churn
-# Target: 30-100 total trades over 4 years (7-25/year). Works in bull/bear: breakouts catch momentum,
-# volume filter ensures legitimacy, weekly EMA trend filter avoids counter-trend trades
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike >2.0x
+# Elder Ray measures bull/bear power relative to EMA13 to detect trend strength
+# 1d EMA34 ensures alignment with higher timeframe trend; volume spike confirms conviction
+# Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
+# Works in bull/bear: trend following with pullback entries, volume filter avoids fakeouts
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,108 +23,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for volatility (14-period)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = 0
-    tr3.iloc[0] = 0
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (13-period)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Elder Ray components
+    bull_power = high - ema13  # Bull power: high minus EMA13
+    bear_power = low - ema13   # Bear power: low minus EMA13
     
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation: volume > 1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_50)
-    
-    # Precompute daily data for Donchian levels
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Volume confirmation: volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (2.0 * vol_ma_30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 50, 14, 34)  # warmup: need 200 daily bars for Donchian(20)
+    start_idx = max(96, 30, 13)  # warmup: need 96 6h bars for daily levels
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_50[i]) or
-            np.isnan(daily_high_aligned[i]) or
-            np.isnan(daily_low_aligned[i]) or
-            np.isnan(daily_close_aligned[i])):
+        if (np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
             
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_close = close[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
         curr_volume_confirm = volume_confirm[i]
-        curr_ema_34_1w = ema_34_1w_aligned[i]
-        
-        # Use 20-day lookback for Donchian levels (excluding current bar)
-        lookback_start = i - 20
-        if lookback_start < 0:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Donchian levels from previous 20 days (i-20 to i-1)
-        period_high = np.max(daily_high_aligned[lookback_start:i])
-        period_low = np.min(daily_low_aligned[lookback_start:i])
+        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_close = close[i]
         
         if position == 0:  # Flat - look for new entries
-            if not (np.isnan(period_high) or np.isnan(period_low)):
-                # Only trade with volume confirmation and trend filter
-                if curr_volume_confirm:
-                    # Bullish entry: price breaks above 20-day high + above 1w EMA34
-                    if curr_high > period_high and curr_close > curr_ema_34_1w:
-                        signals[i] = 0.25
-                        position = 1
-                    # Bearish entry: price breaks below 20-day low + below 1w EMA34
-                    elif curr_low < period_low and curr_close < curr_ema_34_1w:
-                        signals[i] = -0.25
-                        position = -1
+            if curr_volume_confirm:
+                # Bullish entry: strong bull power + price above 1d EMA34
+                if curr_bull > 0 and curr_close > curr_ema_34_1d:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish entry: strong bear power + price below 1d EMA34
+                elif curr_bear < 0 and curr_close < curr_ema_34_1d:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:  # Long position
-            # Exit: price breaks below 10-day low (faster exit to reduce drawdown)
-            lookback_start_exit = i - 10
-            if lookback_start_exit >= 0:
-                exit_low = np.min(daily_low_aligned[lookback_start_exit:i])
-                if not np.isnan(exit_low) and curr_low < exit_low:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: bull power turns negative (momentum fading)
+            if curr_bull <= 0:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above 10-day high (faster exit to reduce drawdown)
-            lookback_start_exit = i - 10
-            if lookback_start_exit >= 0:
-                exit_high = np.max(daily_high_aligned[lookback_start_exit:i])
-                if not np.isnan(exit_high) and curr_high > exit_high:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: bear power turns positive (momentum fading)
+            if curr_bear >= 0:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
