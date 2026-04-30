@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter
-# Donchian channels identify key support/resistance where breakouts indicate strong momentum.
-# Volume confirmation ensures institutional participation. 1d EMA(50) aligns with daily trend to avoid counter-trend trades.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
-# Designed for low trade frequency (15-37/year) to minimize fee drag in both bull and bear markets.
+# Hypothesis: 6h strategy using 1w Camarilla R3/S3 levels with volume confirmation and 1d trend filter
+# Weekly Camarilla levels identify key institutional support/resistance where large order flow clusters.
+# Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
+# 1d EMA(50) ensures alignment with short-to-medium term trend to avoid counter-trend trades.
+# Designed for very low trade frequency (<20/year) to minimize fee drag in both bull and bear markets.
+# Weekly timeframe provides more reliable levels that withstand BTC/ETH volatility.
 
-name = "1h_Donchian20_4hTrend_VolumeSpike_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1w data ONCE before loop for weekly Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1w Camarilla levels (R3, S3, R4, S4)
+    # Based on previous week's high, low, close
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate upper and lower bands
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot point (PP)
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate Camarilla levels
+    r3 = pp + (high_1w - low_1w) * 1.1 / 4.0
+    s3 = pp - (high_1w - low_1w) * 1.1 / 4.0
+    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
+    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Align Donchian levels to 1h timeframe (wait for completed 4h bar)
-    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    # Align weekly Camarilla levels to 6h timeframe (wait for completed weekly bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Load 1d data ONCE before loop for EMA(50) trend filter
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA to 1h timeframe (wait for completed 1d bar)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for dynamic stoploss
@@ -59,72 +66,65 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(50) and Donchian(20)
+    start_idx = 50  # warmup for EMA(50)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: volume > 2.0x 20-period average
-        vol_ma_20 = np.mean(volume[max(0, i-20):i])
-        volume_spike = volume[i] > (2.0 * vol_ma_20)
+        # Volume confirmation: volume > 2.5x 30-period average
+        vol_ma_30 = np.mean(volume[max(0, i-30):i])
+        volume_spike = volume[i] > (2.5 * vol_ma_30)
         
         curr_close = close[i]
-        curr_upper = upper_20_aligned[i]
-        curr_lower = lower_20_aligned[i]
         curr_ema = ema_50_1d_aligned[i]
         curr_atr = atr[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_s4 = s4_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
+            # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 4h Donchian upper with 1d uptrend
-                if curr_close > curr_upper and curr_close > curr_ema:
-                    signals[i] = 0.20
+                # Bullish entry: price breaks above weekly Camarilla R3 with 1d uptrend
+                if curr_close > curr_r3 and curr_close > curr_ema:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 4h Donchian lower with 1d downtrend
-                elif curr_close < curr_lower and curr_close < curr_ema:
-                    signals[i] = -0.20
+                # Bearish entry: price breaks below weekly Camarilla S3 with 1d downtrend
+                elif curr_close < curr_s3 and curr_close < curr_ema:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR price breaks 4h Donchian lower
+            # Stoploss: 2.0 * ATR below entry price OR price breaks weekly Camarilla S3
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_lower:
+            elif curr_close < curr_s3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel
-            elif curr_close >= (curr_upper + curr_lower) / 2.0:
+            # Take profit: price reaches weekly Camarilla R4
+            elif curr_close >= curr_r4:
                 signals[i] = 0.10  # reduce position
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR price breaks 4h Donchian upper
+            # Stoploss: 2.0 * ATR above entry price OR price breaks weekly Camarilla R3
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_upper:
+            elif curr_close > curr_r3:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches midpoint of Donchian channel
-            elif curr_close <= (curr_upper + curr_lower) / 2.0:
+            # Take profit: price reaches weekly Camarilla S4
+            elif curr_close <= curr_s4:
                 signals[i] = -0.10  # reduce position
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
