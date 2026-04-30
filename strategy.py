@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (>80 or <20) 
-# combined with 1d EMA34 trend direction captures mean reversion in trending markets.
-# Volume spike (2.0x 20-period average) confirms institutional participation at extremes.
-# Works in both bull and bear markets by following the 1d EMA34 trend for direction.
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation
+# Bollinger Band squeeze (low volatility) precedes explosive moves. Breakout direction 
+# filtered by 1d ADX > 25 (trending market) and volume spike (2.0x 20-period average).
+# Works in both bull and bear markets by taking breakout direction only when 
+# 1d ADX confirms trending conditions. Discrete sizing 0.25 minimizes fee churn.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_WilliamsR_Extreme_1dEMA34_VolumeConfirm_v1"
+name = "6h_BollingerSqueeze_Breakout_1dADX_VolumeConfirm_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -29,79 +29,96 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = previous_smoothed * (1 - 1/period) + current * (1/period)
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
+    
+    period_adx = 14
+    atr = wilders_smoothing(tr, period_adx)
+    plus_di = 100 * wilders_smoothing(plus_dm, period_adx) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, period_adx) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period_adx)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    bb_width = (upper_band - lower_band) / sma_20
+    
+    # Bollinger Band squeeze: width below 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
+    squeeze_condition = bb_width < bb_width_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume MA calculation
+    start_idx = max(bb_period, 20, 34)  # warmup
     
     for i in range(start_idx, n):
-        # Get the prior completed 1d bar's OHLC for Williams %R calculation
-        o_1d = df_1d['open'].values
-        h_1d = df_1d['high'].values
-        l_1d = df_1d['low'].values
-        c_1d = df_1d['close'].values
+        # Get 1d ADX value (prior completed 1d bar)
+        curr_adx = adx_1d_aligned[i]
         
-        # Shift by 1 to use prior completed 1d bar (no look-ahead)
-        o_1d_shifted = np.roll(o_1d, 1)
-        h_1d_shifted = np.roll(h_1d, 1)
-        l_1d_shifted = np.roll(l_1d, 1)
-        c_1d_shifted = np.roll(c_1d, 1)
-        o_1d_shifted[0] = np.nan
-        h_1d_shifted[0] = np.nan
-        l_1d_shifted[0] = np.nan
-        c_1d_shifted[0] = np.nan
-        
-        # Align the shifted 1d OHLC to 6h timeframe
-        h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d_shifted)
-        l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d_shifted)
-        c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d_shifted)
-        
-        # Calculate Williams %R for prior 1d bar: %R = (H - C)/(H - L) * -100
-        prior_high = h_1d_aligned[i]
-        prior_low = l_1d_aligned[i]
-        prior_close = c_1d_aligned[i]
-        
-        if np.isnan(prior_high) or np.isnan(prior_low) or np.isnan(prior_close) or prior_high == prior_low:
-            signals[i] = 0.0
-            continue
-            
-        williams_r = (prior_high - prior_close) / (prior_high - prior_low) * -100
+        # Bollinger Band conditions
+        bb_squeeze = squeeze_condition[i]
+        breakout_up = close[i] > upper_band[i]
+        breakout_down = close[i] < lower_band[i]
         
         # Volume confirmation: volume > 2.0x 20-period average
         vol_ma_20 = np.mean(volume[max(0, i-20):i])
         volume_spike = volume[i] > (2.0 * vol_ma_20)
         
-        curr_close = close[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if volume_spike:
-                # Bullish entry: Williams %R < -80 (oversold) AND price above 1d EMA34 (uptrend)
-                if williams_r < -80 and curr_close > curr_ema_34_1d:
+            # Require ADX > 25 (trending market), volume spike, and Bollinger squeeze breakout
+            if curr_adx > 25 and volume_spike and bb_squeeze:
+                if breakout_up:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Williams %R > -20 (overbought) AND price below 1d EMA34 (downtrend)
-                elif williams_r > -20 and curr_close < curr_ema_34_1d:
+                elif breakout_down:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:  # Long position
-            # Exit when Williams %R rises above -50 (momentum weakening) or price falls below 1d EMA34
-            if williams_r > -50 or curr_close < curr_ema_34_1d:
+            # Exit when price returns to middle Bollinger Band (mean reversion) or ADX weakens
+            if close[i] < sma_20[i] or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Williams %R falls below -50 (momentum weakening) or price rises above 1d EMA34
-            if williams_r < -50 or curr_close > curr_ema_34_1d:
+            # Exit when price returns to middle Bollinger Band (mean reversion) or ADX weakens
+            if close[i] > sma_20[i] or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
