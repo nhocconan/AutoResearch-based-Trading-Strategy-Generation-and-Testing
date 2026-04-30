@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation.
-# Long when RSI < 30 AND price > 4h EMA50 (uptrend) AND volume > 1.5x 20-bar average.
-# Short when RSI > 70 AND price < 4h EMA50 (downtrend) AND volume > 1.5x 20-bar average.
-# Exit when RSI crosses 50 (mean reversion complete) or after 12 bars max hold.
-# Uses discrete position sizing (0.20) to limit drawdown and reduce fee churn.
-# 4h EMA50 ensures we only trade with the dominant trend to avoid counter-trend entries in bear markets.
-# Volume confirmation filters for institutional participation.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 6h Williams %R mean reversion with 1d ADX trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-bar average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-bar average.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn.
+# Williams %R identifies overextended moves likely to reverse, while 1d EMA34 filters for dominant daily trend.
+# Volume spike confirms participation in mean reversion moves.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
-name = "1h_RSI14_MeanReversion_4hEMA50_Trend_Volume_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanRev_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,89 +25,78 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate 6h Williams %R (14-period) from previous completed bar to avoid look-ahead
+    # Shift by 1 to use only completed 6h bars
+    high_shifted = np.roll(high, 1)
+    low_shifted = np.roll(low, 1)
+    high_shifted[0] = np.nan
+    low_shifted[0] = np.nan
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_shifted).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_shifted).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # track holding period for time-based exit
     
-    start_idx = max(50, 20)  # warmup for EMA and RSI calculations
+    start_idx = max(35, 20)  # warmup for Williams %R and volume calculations
     
     for i in range(start_idx, n):
-        # Skip if not in trading session or indicators not available
-        if not in_session[i] or \
-           np.isnan(ema_50_4h_aligned[i]) or \
-           np.isnan(rsi_values[i]) or \
-           np.isnan(volume_confirm[i]):
+        # Skip if indicators not available
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
         curr_close = close[i]
-        curr_rsi = rsi_values[i]
+        curr_williams_r = williams_r[i]
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            bars_since_entry = 0
-            # Long: RSI < 30 (oversold), uptrend (price > 4h EMA50), volume confirmation
-            if (curr_rsi < 30 and 
-                curr_close > ema_50_4h_aligned[i] and 
+            # Long: oversold (Williams %R < -80), uptrend (price > 1d EMA34), volume confirmation
+            if (curr_williams_r < -80 and 
+                curr_close > ema_34_1d_aligned[i] and 
                 curr_volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought), downtrend (price < 4h EMA50), volume confirmation
-            elif (curr_rsi > 70 and 
-                  curr_close < ema_50_4h_aligned[i] and 
+            # Short: overbought (Williams %R > -20), downtrend (price < 1d EMA34), volume confirmation
+            elif (curr_williams_r > -20 and 
+                  curr_close < ema_34_1d_aligned[i] and 
                   curr_volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:  # Long position
-            bars_since_entry += 1
-            # Exit conditions: RSI crosses 50 (mean reversion) OR max hold of 12 bars reached
-            if curr_rsi > 50 or bars_since_entry >= 12:
+            # Exit condition: Williams %R crosses above -50 (mean reversion complete)
+            if curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            bars_since_entry += 1
-            # Exit conditions: RSI crosses 50 (mean reversion) OR max hold of 12 bars reached
-            if curr_rsi < 50 or bars_since_entry >= 12:
+            # Exit condition: Williams %R crosses below -50 (mean reversion complete)
+            if curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
