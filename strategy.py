@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter
-# Donchian channel breakouts capture strong momentum moves. Volume confirmation ensures breakout validity.
-# 1d EMA(34) filters trades to align with higher-timeframe trend, reducing false breakouts in choppy markets.
-# Designed for low trade frequency (~20-40/year on 4h) to minimize fee drag and improve bear market performance.
-# Uses discrete position sizes (0.0, ±0.25) to reduce fee churn.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA(34) trend filter + ATR stoploss.
+# Uses volume spike (2.0x 20-period avg) to confirm breakout validity.
+# 1d EMA(34) ensures trades align with higher-timeframe trend, reducing false breakouts.
+# Discrete position sizing (0.25) minimizes fee churn. Target: ~30-60 trades/year on 4h.
+# Designed to work in both bull (trend continuation) and bear (mean reversion from bands) markets.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v2"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
