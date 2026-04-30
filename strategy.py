@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla levels provide precise intraday support/resistance; breakouts capture momentum
-# 1d EMA34 ensures alignment with daily trend; volume >2.0x confirms participation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla levels from daily provide precise support/resistance; breakouts capture momentum
+# 1d EMA34 ensures alignment with medium-term trend; volume >1.8x confirms participation
 # Discrete sizing (0.25) minimizes fee churn; target 75-200 total trades over 4 years
-# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, daily EMA trend filter avoids counter-trend trades
+# Works in bull/bear: breakouts catch momentum moves, volume filter ensures legitimacy, EMA34 trend filter avoids counter-trend trades
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -40,26 +40,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 30-period average
+    # Volume confirmation: volume > 1.8x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    volume_confirm = volume > (1.8 * vol_ma_30)
     
     # Precompute daily data for Camarilla levels
-    if len(df_1d) < 2:
+    df_1d_camarilla = get_htf_data(prices, '1d')
+    if len(df_1d_camarilla) < 2:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    daily_high = df_1d_camarilla['high'].values
+    daily_low = df_1d_camarilla['low'].values
+    daily_close = df_1d_camarilla['close'].values
     
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d_camarilla, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d_camarilla, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d_camarilla, daily_close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(96, 30, 14, 34)  # warmup: need 96 4h bars for daily levels
+    start_idx = max(34, 30, 14)  # warmup: need EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
