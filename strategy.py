@@ -3,85 +3,78 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR-based volatility filter and volume spike confirmation
-# Donchian(20) provides clear breakout levels with proven edge in crypto markets
-# 1d ATR ratio (current ATR(7) / ATR(30)) > 1.5 confirms elevated volatility for breakout follow-through
-# Volume spike (2.0x 24-period average) confirms institutional participation
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via upside breakouts and bear markets via downside breakdowns with volatility filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d Williams %R extreme filter and volume confirmation
+# Williams %R > -20 (overbought) or < -80 (oversold) on 1d timeframe provides mean-reversion edge
+# Camarilla R3/S3 levels offer strong intraday support/resistance on 4h
+# Volume spike (2.0x 96-period average) confirms institutional participation
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Works in bull markets via breakouts above R3 with %R not extreme, and bear markets via breakdowns below S3 with %R not extreme.
+# Williams %R filter prevents entries during exhaustion moves, reducing false breakouts.
 
-name = "12h_Donchian20_1dATR_Ratio_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dWilliamsR_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Pre-compute session hours (08-20 UTC) to avoid datetime errors
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     # Load 1d data ONCE before loop (MTF Rule #1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR for volatility filter
+    # Calculate 1d Williams %R
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # ATR calculation using Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                         ((highest_high - close_1d) / (highest_high - lowest_low)) * -100, 
+                         -50.0)
     
-    atr_7 = wilder_smooth(tr, 7)
-    atr_30 = wilder_smooth(tr, 30)
-    # Avoid division by zero
-    atr_ratio = np.where(atr_30 != 0, atr_7 / atr_30, 0.0)
+    # Align 1d Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align 1d ATR ratio to 12h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.125 / 2)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.125 / 2)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 2.0x 24-period average (24*12h = 288h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma_24)
+    # Volume confirmation: volume > 2.0x 96-period average (96*4h = 384h = 16 days)
+    vol_ma_96 = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
+    volume_spike = volume > (2.0 * vol_ma_96)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(30, 24)  # warmup for indicators
+    start_idx = max(100, 96)  # warmup for Williams %R and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma_96[i])):
             signals[i] = 0.0
             continue
             
@@ -93,36 +86,37 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_atr_ratio = atr_ratio_aligned[i]
+        curr_williams_r = williams_r_aligned[i]
+        curr_r3 = camarilla_r3_aligned[i]
+        curr_s3 = camarilla_s3_aligned[i]
         curr_volume_spike = volume_spike[i]
-        curr_upper = high_ma_20[i]
-        curr_lower = low_ma_20[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require elevated volatility and volume spike
-            if curr_atr_ratio > 1.5 and curr_volume_spike:
-                # Bullish entry: break above upper Donchian band
-                if curr_close > curr_upper:
+            # Require volume spike and Williams %R not in extreme territory
+            # Avoid overbought (> -20) for longs, avoid oversold (< -80) for shorts
+            if curr_volume_spike:
+                # Bullish entry: break above R3 and Williams %R not overbought
+                if curr_close > curr_r3 and curr_williams_r <= -20:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: break below lower Donchian band
-                elif curr_close < curr_lower:
+                # Bearish entry: break below S3 and Williams %R not oversold
+                elif curr_close < curr_s3 and curr_williams_r >= -80:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower Donchian band (breakout fails)
-            if curr_close < curr_lower:
+            # Exit when price drops below R3 (breakout fails) OR Williams %R becomes overbought
+            if curr_close < curr_r3 or curr_williams_r > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper Donchian band (breakdown fails)
-            if curr_close > curr_upper:
+            # Exit when price rises above S3 (breakdown fails) OR Williams %R becomes oversold
+            if curr_close > curr_s3 or curr_williams_r < -80:
                 signals[i] = 0.0
                 position = 0
             else:
