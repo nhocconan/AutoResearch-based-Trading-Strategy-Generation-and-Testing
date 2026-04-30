@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme levels with 12h EMA(34) trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) with trend alignment
-# and volume spike signal high-probability reversals. Designed for low trade frequency (~20-50/year on 4h)
-# to minimize fee drag while capturing strong mean-reversion moves in both bull and bear markets.
-# Works in bull markets via buying extreme fear (> -90) in uptrend and in bear markets via selling extreme greed (< -10) in downtrend.
+# Hypothesis: 6h Williams %R extreme + 1d EMA(34) trend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions on 6h chart.
+# In bull markets (price > 1d EMA34): long when %R < -80 (oversold pullback)
+# In bear markets (price < 1d EMA34): short when %R > -20 (overbought bounce)
+# Volume confirmation ensures institutional participation during reversals.
+# Designed for low trade frequency (~12-30/year on 6h) to minimize fee drag.
+# Works in bull markets via buying dips and in bear markets via selling rallies.
+# Focus on BTC/ETH as primary targets.
 
-name = "4h_1dWilliamsR_Extreme_12hEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_1dWilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +26,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Williams %R calculation
+    # Load 1d data ONCE before loop for EMA(34) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d_s = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d Williams %R to 4h timeframe (wait for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Load 12h data ONCE before loop for EMA(34) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA(34) for trend filter
-    close_12h_s = pd.Series(df_12h['close'].values)
-    ema_34_12h = close_12h_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     # Calculate ATR(14) for dynamic stoploss
     tr1 = high[1:] - low[1:]
@@ -57,7 +52,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34)
+    start_idx = 50  # warmup for Williams %R and EMA
     
     for i in range(start_idx, n):
         # Volume confirmation: volume > 1.5x 20-period average
@@ -67,48 +62,42 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_34_12h_aligned[i]
+        curr_williams_r = williams_r[i]
+        curr_ema = ema_34_1d_aligned[i]
         curr_atr = atr[i]
-        curr_williams_r = williams_r_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and extreme Williams %R with trend alignment
+            # Require volume spike
             if volume_spike:
-                # Bullish entry: Williams %R < -90 (extreme oversold) with 12h uptrend
-                if curr_williams_r < -90 and curr_close > curr_ema:
+                # Bullish entry: price above 1d EMA34 (uptrend) and Williams %R oversold
+                if curr_close > curr_ema and curr_williams_r < -80:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: Williams %R > -10 (extreme overbought) with 12h downtrend
-                elif curr_williams_r > -10 and curr_close < curr_ema:
+                # Bearish entry: price below 1d EMA34 (downtrend) and Williams %R overbought
+                elif curr_close < curr_ema and curr_williams_r > -20:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price OR Williams %R > -10 (exiting extreme oversold)
+            # Stoploss: 2.0 * ATR below entry price
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_williams_r > -10:
-                signals[i] = 0.0
-                position = 0
-            # Take profit: Williams %R < -50 (returning from extreme)
-            elif curr_williams_r < -50:
+            # Take profit: Williams %R reaches overbought territory (-20) or midpoint (-50)
+            elif curr_williams_r >= -20:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price OR Williams %R < -90 (exiting extreme overbought)
+            # Stoploss: 2.0 * ATR above entry price
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_williams_r < -90:
-                signals[i] = 0.0
-                position = 0
-            # Take profit: Williams %R > -50 (returning from extreme)
-            elif curr_williams_r > -50:
+            # Take profit: Williams %R reaches oversold territory (-80) or midpoint (-50)
+            elif curr_williams_r <= -80:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
