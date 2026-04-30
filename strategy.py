@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h RSI(14) for mean reversion in ranging markets and 1d trend filter.
-# Uses 4h RSI(14) with extreme levels (RSI<30 for long, RSI>70 for short) in ranging markets.
-# 1d EMA(50) trend filter: only take long when price > 1d EMA50, short when price < 1d EMA50.
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise.
-# Designed for low trade frequency (~15-37/year on 1h) to minimize fee drag.
-# Works in bull markets via trend-following longs and in bear markets via mean-reversion shorts.
-# Focus on BTC/ETH as primary targets.
+# Hypothesis: 6h strategy using weekly Williams %R extremes with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions on weekly timeframe (contrarian signals)
+# 1d EMA34 provides trend filter to avoid counter-trend trades in strong moves
+# Volume spike confirms institutional participation at extremes
+# Designed for low trade frequency (~12-37/year on 6h) to minimize fee drag
+# Works in bull markets via oversold bounces and in bear markets via overbought reversals
 
-name = "1h_4hRSI14_1dEMA50_Trend_MeanReversion_v1"
-timeframe = "1h"
+name = "6h_1wWilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,43 +23,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours for 08-20 UTC filter
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for RSI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Load weekly data ONCE before loop for Williams %R calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_4h = 100 - (100 / (1 + rs))
+    # Calculate weekly Williams %R(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 4h RSI to 1h timeframe
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
+    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1w) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Align weekly Williams %R to 6h timeframe (wait for weekly bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
+    
+    # Load daily data ONCE before loop for EMA34 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 1h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily EMA34 to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic stoploss on 1h
+    # Calculate ATR(14) for dynamic stoploss on 6h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,53 +66,58 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 100  # warmup for RSI(14) and EMA(50)
+    start_idx = 100  # warmup for Williams %R(14) and EMA34
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-            
+        # Volume confirmation: volume > 2.0x 50-period average (stricter to reduce trades)
+        vol_ma_50 = np.mean(volume[max(0, i-50):i]) if i >= 50 else np.mean(volume[:i]) if i > 0 else 0
+        volume_spike = volume[i] > (2.0 * vol_ma_50) if i > 0 else False
+        
         curr_close = close[i]
-        curr_rsi = rsi_14_4h_aligned[i]
-        curr_ema = ema_50_1d_aligned[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r_aligned[i]
+        curr_ema = ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Mean reversion entries with trend filter
-            if curr_rsi < 30 and curr_close > curr_ema:  # Oversold + uptrend filter
-                signals[i] = 0.20
-                position = 1
-                entry_price = curr_close
-            elif curr_rsi > 70 and curr_close < curr_ema:  # Overbought + downtrend filter
-                signals[i] = -0.20
-                position = -1
-                entry_price = curr_close
+            # Require volume spike
+            if volume_spike:
+                # Bullish entry: weekly Williams %R oversold (< -80) with price above daily EMA34 (uptrend)
+                if curr_williams_r < -80 and curr_close > curr_ema:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                # Bearish entry: weekly Williams %R overbought (> -20) with price below daily EMA34 (downtrend)
+                elif curr_williams_r > -20 and curr_close < curr_ema:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.0 * ATR below entry price
+            # Stoploss: 2.0 * ATR below entry price OR Williams %R returns to neutral (> -50)
             if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: RSI returns to neutral (50) or reaches 1.5x ATR profit
-            elif curr_rsi >= 50 or curr_close > entry_price + 1.5 * curr_atr:
+            elif curr_williams_r > -50:
                 signals[i] = 0.0
                 position = 0
+            # Take profit: price reaches 1.5x ATR above entry OR Williams %R reaches extreme oversold (< -90) for re-entry
+            elif curr_close > entry_price + 1.5 * curr_atr:
+                signals[i] = 0.10  # reduce position
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.0 * ATR above entry price
+            # Stoploss: 2.0 * ATR above entry price OR Williams %R returns to neutral (< -50)
             if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: RSI returns to neutral (50) or reaches 1.5x ATR profit
-            elif curr_rsi <= 50 or curr_close < entry_price - 1.5 * curr_atr:
+            elif curr_williams_r < -50:
                 signals[i] = 0.0
                 position = 0
+            # Take profit: price reaches 1.5x ATR below entry OR Williams %R reaches extreme overbought (> -10) for re-entry
+            elif curr_close < entry_price - 1.5 * curr_atr:
+                signals[i] = -0.10  # reduce position
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
