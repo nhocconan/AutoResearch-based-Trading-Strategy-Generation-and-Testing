@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. In trending markets (1d EMA34 slope),
-# we fade extreme %R readings: long when %R < -80 and price > EMA, short when %R > -20 and price < EMA.
-# Volume spike confirms momentum. Works in bull via pullback longs, in bear via bounce shorts.
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
+# Uses 12h primary timeframe to minimize fee drag while capturing multi-day trends.
+# Camarilla levels from prior 1d provide structured support/resistance.
+# Breakouts beyond R3/S3 with volume confirmation and ADX > 25 indicate strong momentum.
+# Exits on mean reversion to opposite Camarilla level (R3 for longs, S3 for shorts).
+# Discrete sizing 0.25 balances risk and minimizes churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_WilliamsR_ME_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX25_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,17 +29,54 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d Camarilla pivot levels from previous day's OHLC
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:  # Need at least 2 days for shift(1) and warmup
         return np.zeros(n)
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r3 = pivot + (prev_high - prev_low) * 1.1 / 4.0
+    s3 = pivot - (prev_high - prev_low) * 1.1 / 4.0
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
+    s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Calculate Williams %R(14) on 6h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 1d ADX(14) for trend filter
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    dm_plus = np.where(
+        (df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']),
+        np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0),
+        0
+    )
+    dm_minus = np.where(
+        (df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)),
+        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0),
+        0
+    )
+    
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,13 +84,15 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(34, 20)  # warmup for Williams %R and EMA
+    start_idx = max(20, 14)  # warmup for volume MA and ADX
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -62,33 +102,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_wr = williams_r[i]
-        curr_ema = ema_34_aligned[i]
+        curr_r3 = r3_aligned[i]
+        curr_s3 = s3_aligned[i]
+        curr_r4 = r4_aligned[i]
+        curr_s4 = s4_aligned[i]
+        curr_adx = adx_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish mean reversion: oversold + price above EMA (uptrend)
-                if curr_wr < -80 and curr_close > curr_ema:
+            # Require volume spike and trending market (ADX > 25)
+            if curr_volume_spike and curr_adx > 25:
+                # Bullish breakout: price breaks above R4
+                if curr_close > curr_r4:
                     signals[i] = 0.25
                     position = 1
-                # Bearish mean reversion: overbought + price below EMA (downtrend)
-                elif curr_wr > -20 and curr_close < curr_ema:
+                    entry_price = curr_close
+                # Bearish breakout: price breaks below S4
+                elif curr_close < curr_s4:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when Williams %R returns to neutral zone (-50) or price crosses below EMA
-            if curr_wr > -50 or curr_close < curr_ema:
+            # Exit when price drops below R3 (mean reversion)
+            if curr_close < curr_r3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when Williams %R returns to neutral zone (-50) or price crosses above EMA
-            if curr_wr < -50 or curr_close > curr_ema:
+            # Exit when price rises above S3 (mean reversion)
+            if curr_close > curr_s3:
                 signals[i] = 0.0
                 position = 0
             else:
