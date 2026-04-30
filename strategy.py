@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Donchian channels provide clear breakout levels. 12h EMA50 filters for higher-timeframe trend bias.
-# Volume spike confirms breakout validity. Works in bull via breakout longs, in bear via breakout shorts.
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR filter + volume confirmation
+# Donchian channel breakouts capture strong momentum moves. 1d ATR filter ensures breakouts occur in sufficient volatility regimes.
+# Volume confirmation avoids false breakouts. Works in bull via upside breakouts, in bear via downside breakouts.
 # Discrete sizing 0.25 balances risk and minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_Donchian20_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dATRFilter_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,16 +27,23 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 6h Donchian(20) channels
+    # Calculate 4h Donchian(20) channels
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h EMA(50) for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 1d ATR(14) for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # True Range calculation
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift(1))).abs()
+    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift(1))).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ATR to 4h timeframe (wait for completed 1d bar)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,12 +53,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(20, 50)  # warmup for Donchian and 12h EMA
+    start_idx = max(20, 14)  # warmup for Donchian and ATR
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(atr_14_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -61,38 +68,38 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_highest = highest_20[i]
-        curr_lowest = lowest_20[i]
-        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
+        curr_atr_14 = atr_14_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish breakout: price breaks above upper Donchian AND above 12h EMA50 (bullish bias)
-                if (curr_close > curr_highest and 
-                    curr_close > curr_ema_50_12h):
+            # Require volume spike and sufficient volatility (ATR > 0)
+            if curr_volume_spike and curr_atr_14 > 0:
+                # Bullish breakout: price breaks above 20-period high
+                if curr_high > curr_highest_20:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish breakout: price breaks below lower Donchian AND below 12h EMA50 (bearish bias)
-                elif (curr_close < curr_lowest and 
-                      curr_close < curr_ema_50_12h):
+                # Bearish breakout: price breaks below 20-period low
+                elif curr_low < curr_lowest_20:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below lower Donchian (mean reversion) or breaks below 12h EMA50 (stop)
-            if curr_close < curr_lowest:
+            # Exit when price drops below 20-period low (mean reversion)
+            if curr_low < curr_lowest_20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above upper Donchian (mean reversion) or breaks above 12h EMA50 (stop)
-            if curr_close > curr_highest:
+            # Exit when price rises above 20-period high (mean reversion)
+            if curr_high > curr_highest_20:
                 signals[i] = 0.0
                 position = 0
             else:
