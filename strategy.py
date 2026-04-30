@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation.
 # Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 2.0x 20-period average.
 # Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 2.0x 20-period average.
-# Uses 4h timeframe for optimal trade frequency (target: 75-200 total over 4 years).
-# Works in bull/bear markets by requiring trend alignment via 1d EMA50 and momentum via price breakout.
+# Uses discrete sizing (0.25) and ATR-based trailing stop (2.0x ATR).
+# Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year) with low fee drag.
 
 name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
 timeframe = "4h"
@@ -54,7 +54,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    start_idx = max(50, lookback, 20)  # warmup for EMA50 and Donchian
+    start_idx = max(50, lookback)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if indicators not available
@@ -65,10 +65,6 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Trend filter: price relative to 1d EMA50
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
-        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
@@ -76,13 +72,13 @@ def generate_signals(prices):
         curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high + uptrend + volume confirmation
-            if curr_high > highest_high[i-1] and is_uptrend and curr_volume_confirm:
+            # Long: price > Donchian high AND uptrend + volume confirmation
+            if curr_close > highest_high[i] and curr_close > ema_50_aligned[i] and curr_volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below Donchian low + downtrend + volume confirmation
-            elif curr_low < lowest_low[i-1] and is_downtrend and curr_volume_confirm:
+            # Short: price < Donchian low AND downtrend + volume confirmation
+            elif curr_close < lowest_low[i] and curr_close < ema_50_aligned[i] and curr_volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
@@ -92,8 +88,8 @@ def generate_signals(prices):
             if curr_high > highest_since_entry:
                 highest_since_entry = curr_high
             
-            # Trailing stop: 2.5 * ATR below highest since entry
-            if curr_close < highest_since_entry - 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR below highest since entry
+            if curr_close < highest_since_entry - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,8 +100,8 @@ def generate_signals(prices):
             if curr_low < lowest_since_entry:
                 lowest_since_entry = curr_low
             
-            # Trailing stop: 2.5 * ATR above lowest since entry
-            if curr_close > lowest_since_entry + 2.5 * curr_atr:
+            # Trailing stop: 2.0 * ATR above lowest since entry
+            if curr_close > lowest_since_entry + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
