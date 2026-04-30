@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (20) with 1d EMA50 trend filter and volume spike confirmation
-# Uses 4h HTF for Donchian channel calculation (upper/lower 20-period) for structure and 1d EMA50 for trend filter to avoid counter-trend trades.
-# Long when price breaks above 4h Donchian upper in uptrend (1h close > 1d EMA50) with volume spike (>2.0x average).
-# Short when price breaks below 4h Donchian lower in downtrend (1h close < 1d EMA50) with volume spike.
-# Designed for moderate trade frequency (~30-60/year on 1h) to minimize fee drag while capturing strong directional moves.
-# Uses volume confirmation with moderate threshold (>2.0x average) to balance signal quality and trade count.
-# Stoploss via signal=0 when price reverses and closes back inside the 4h Donchian channel.
-# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at 4h Donchian levels.
+# Hypothesis: 6h strategy using 1w Donchian breakout with 1d ADX trend filter and volume confirmation
+# Uses 1w HTF for Donchian channel calculation (20-period) for strong structural breakouts and 1d ADX for trend strength.
+# Long when price breaks above 1w Donchian upper in strong uptrend (1d ADX > 25) with volume spike (>2.0x average).
+# Short when price breaks below 1w Donchian lower in strong downtrend (1d ADX > 25) with volume spike.
+# Designed for very low trade frequency (~10-30/year on 6h) to minimize fee drag while capturing major trend changes.
+# Uses volume confirmation with high threshold (>2.0x average) to ensure only significant breakouts trigger entries.
+# Stoploss at 2.5 * ATR and take profit at 3.0 * ATR to allow for trend continuation.
+# Works in bull markets via breakout continuation and in bear markets via breakdown continuation.
 # Focus on BTC/ETH as primary targets.
 
-name = "1h_4hDonchian20_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_1wDonchian20_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,88 +27,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for Donchian calculations
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1w data ONCE before loop for Donchian calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Align 4h Donchian levels to 1h timeframe (wait for 4h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Donchian upper: highest high over 20 periods
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: lowest low over 20 periods
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
+    # Align 1w Donchian levels to 6h timeframe (wait for 1w bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Load 1d data ONCE before loop for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d ADX(14) for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume spike: >2.0x 50-period average (pre-computed for efficiency)
-    volume_ma_50 = np.zeros(n)
-    for i in range(50, n):
-        volume_ma_50[i] = np.mean(volume[i-50:i])
-    for i in range(1, 50):
-        volume_ma_50[i] = np.mean(volume[:i])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(values, period):
+        """Apply Wilder's smoothing (similar to EMA with alpha=1/period)"""
+        result = np.zeros_like(values)
+        result[period-1] = np.mean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    tr_14 = wilders_smoothing(tr_1d, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align 1d ADX to 6h timeframe (wait for 1d bar to close)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate ATR(14) for dynamic stoploss on 6h
+    tr1_6h = high[1:] - low[1:]
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.max([tr1_6h[0], tr2_6h[0], tr3_6h[0]])], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    atr_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(50, 60)  # warmup for EMA(50) and volume MA
+    start_idx = 100  # warmup for Donchian(20) and ADX
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC only
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume confirmation: volume > 2.0x 50-period average
-        volume_spike = volume[i] > (2.0 * volume_ma_50[i])
+        # Volume confirmation: volume > 2.0x 100-period average (high threshold for significant breakouts)
+        if i >= 100:
+            vol_ma_100 = np.mean(volume[i-100:i])
+        elif i > 0:
+            vol_ma_100 = np.mean(volume[:i])
+        else:
+            vol_ma_100 = 0
+        volume_spike = volume[i] > (2.0 * vol_ma_100) if i > 0 else False
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_dc_high = donchian_high_aligned[i]
-        curr_dc_low = donchian_low_aligned[i]
-        curr_ema = ema_50_aligned[i]
+        curr_atr = atr_6h[i]
+        curr_dch_high = donchian_high_aligned[i]
+        curr_dch_low = donchian_low_aligned[i]
+        curr_adx = adx_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and trend alignment
-            if volume_spike:
-                # Bullish entry: price breaks above 4h Donchian upper with 1d uptrend (close > EMA50)
-                if curr_close > curr_dc_high and curr_close > curr_ema:
-                    signals[i] = 0.20
+            # Require volume spike, strong trend (ADX > 25), and Donchian breakout
+            if volume_spike and curr_adx > 25:
+                # Bullish entry: price breaks above 1w Donchian upper in strong uptrend
+                if curr_close > curr_dch_high:
+                    signals[i] = 0.25
                     position = 1
-                # Bearish entry: price breaks below 4h Donchian lower with 1d downtrend (close < EMA50)
-                elif curr_close < curr_dc_low and curr_close < curr_ema:
-                    signals[i] = -0.20
+                    entry_price = curr_close
+                # Bearish entry: price breaks below 1w Donchian lower in strong downtrend
+                elif curr_close < curr_dch_low:
+                    signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit: price closes back inside 4h Donchian channel (reversal signal)
-            if curr_close < curr_dc_high and curr_close > curr_dc_low:
+            # Stoploss: 2.5 * ATR below entry price OR price breaks 1w Donchian lower (reversal signal)
+            if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close < curr_dch_low:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches 3.0x ATR above entry
+            elif curr_close > entry_price + 3.0 * curr_atr:
+                signals[i] = 0.0  # full exit
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes back inside 4h Donchian channel (reversal signal)
-            if curr_close < curr_dc_high and curr_close > curr_dc_low:
+            # Stoploss: 2.5 * ATR above entry price OR price breaks 1w Donchian upper (reversal signal)
+            if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
+            elif curr_close > curr_dch_high:
+                signals[i] = 0.0
+                position = 0
+            # Take profit: price reaches 3.0x ATR below entry
+            elif curr_close < entry_price - 3.0 * curr_atr:
+                signals[i] = 0.0  # full exit
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
