@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg), and ATR(14) stoploss.
-# Uses discrete position sizing (±0.25) to manage fee drag. Target: 80-160 total trades over 4 years (20-40/year).
-# Works in bull markets via breakout continuation and in bear markets via volatility expansion capture after squeezes.
-# Entry: price breaks Donchian channel + trend alignment + volume spike.
-# Exit: ATR-based stoploss (2.0 * ATR) or time-based exit (10 bars) to prevent whipsaws.
+# Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation.
+# Uses Donchian(20) for price channel structure, 1d EMA50 for higher timeframe trend,
+# and volume > 1.5x 20-bar average for confirmation. Discrete position sizing at ±0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe to minimize fee drag.
+# Works in bull markets via breakout continuation and in bear markets via volatility expansion capture.
+# Uses proper MTF data loading with get_htf_data() called ONCE before loop.
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_VolumeConfirm_Session_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,30 +28,25 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d_vals = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20) on 4h
+    # Donchian Channel (20) on 12h
     dc_period = 20
     upper_channel = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
     lower_channel = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
     
-    # ATR(14) for stoploss and volatility filter
-    atr_period = 14
-    tr1 = pd.Series(high).rolling(window=2).max().values - pd.Series(low).rolling(window=2).min().values
-    tr2 = abs(pd.Series(high).rolling(window=2).shift(1).values - pd.Series(close).rolling(window=2).shift(1).values)
-    tr3 = abs(pd.Series(low).rolling(window=2).shift(1).values - pd.Series(close).rolling(window=2).shift(1).values)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Middle channel for exit
+    middle_channel = (upper_channel + lower_channel) / 2.0
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,73 +54,53 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
     
-    start_idx = max(dc_period, atr_period)  # warmup
+    start_idx = 60  # warmup for Donchian and EMA50
     
     for i in range(start_idx, n):
         # Skip if indicators not available or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(upper_channel[i]) or 
             np.isnan(lower_channel[i]) or
-            np.isnan(atr[i]) or
             np.isnan(volume_confirm[i]) or
             not in_session[i]):
             signals[i] = 0.0
-            bars_since_entry += 1 if position != 0 else 0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_upper = upper_channel[i]
-        curr_lower = lower_channel[i]
-        curr_atr = atr[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         curr_volume_confirm = volume_confirm[i]
+        curr_middle = middle_channel[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above upper Donchian channel, close > 1d EMA34, volume spike
-            if (curr_high > curr_upper and 
-                curr_close > curr_ema_34_1d and 
+            # Long: Donchian breakout above upper channel, close > 1d EMA50, volume spike
+            if (curr_high > upper_channel[i] and 
+                curr_close > curr_ema_50_1d and 
                 curr_volume_confirm):
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                bars_since_entry = 0
-            # Short: price breaks below lower Donchian channel, close < 1d EMA34, volume spike
-            elif (curr_low < curr_lower and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: Donchian breakdown below lower channel, close < 1d EMA50, volume spike
+            elif (curr_low < lower_channel[i] and 
+                  curr_close < curr_ema_50_1d and 
                   curr_volume_confirm):
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                bars_since_entry = 0
         
         elif position == 1:  # Long position
-            bars_since_entry += 1
-            # Exit conditions: ATR stoploss, time-based exit, or mean reversion to middle
-            stop_loss = entry_price - (2.0 * curr_atr)
-            if (curr_low <= stop_loss or  # ATR stoploss hit
-                bars_since_entry >= 10):   # time-based exit (max 10 bars)
+            # Exit condition: price returns to middle channel (mean reversion)
+            if curr_close < curr_middle:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            bars_since_entry += 1
-            # Exit conditions: ATR stoploss, time-based exit, or mean reversion to middle
-            stop_loss = entry_price + (2.0 * curr_atr)
-            if (curr_high >= stop_loss or  # ATR stoploss hit
-                bars_since_entry >= 10):   # time-based exit (max 10 bars)
+            # Exit condition: price returns to middle channel
+            if curr_close > curr_middle:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
