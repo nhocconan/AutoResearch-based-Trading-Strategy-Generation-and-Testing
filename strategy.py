@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h ADX20 trend filter and volume spike confirmation
-# Camarilla R1/S1 levels provide intraday support/resistance for precise 1h entries
-# 4h ADX > 20 ensures alignment with intermediate trend to avoid counter-trend whipsaws
-# Volume spike (1.8x 50-period average) confirms participation on 1h timeframe
-# Discrete sizing 0.20 controls risk and minimizes fee churn. Target: 80-120 total trades over 4 years (20-30/year).
-# Works in bull markets via breakouts above R1 and bear markets via breakdowns below S1 with trend filter.
-# Session filter (08-20 UTC) reduces noise trades during low-volume periods.
+# Hypothesis: 6h Williams %R extreme reversal with 1d ADX25 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) with reversal signal capture mean reversion
+# 1d ADX > 25 ensures alignment with strong daily trend to avoid counter-trend whipsaws in ranging markets
+# Volume spike (2.0x 48-period average) confirms institutional participation on 6h timeframe
+# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via oversold bounces and bear markets via overbought reversals with trend filter.
 
-name = "1h_Camarilla_R1S1_4hADX20_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +23,32 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Pre-compute session hours (08-20 UTC) to avoid datetime errors
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 4h data ONCE before loop (MTF Rule #1)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop (MTF Rule #1)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h ADX for trend filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1d ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
     # Calculate +DM and -DM
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
@@ -63,38 +63,36 @@ def generate_signals(prices):
         return result
     
     period = 14
-    atr_4h = wilder_smooth(tr, period)
-    plus_di_4h = 100 * wilder_smooth(plus_dm, period) / atr_4h
-    minus_di_4h = 100 * wilder_smooth(minus_dm, period) / atr_4h
-    dx_4h = 100 * np.abs(plus_di_4h - minus_di_4h) / (plus_di_4h + minus_di_4h)
-    adx_4h = wilder_smooth(dx_4h, period)
+    atr_1d = wilder_smooth(tr, period)
+    plus_di_1d = 100 * wilder_smooth(plus_dm, period) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, period) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilder_smooth(dx_1d, period)
     
-    # Align 4h ADX to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 4h Camarilla pivot levels (R1, S1)
-    camarilla_r1 = close_4h + ((high_4h - low_4h) * 1.125 / 4)
-    camarilla_s1 = close_4h - ((high_4h - low_4h) * 1.125 / 4)
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
-    
-    # Volume confirmation: volume > 1.8x 50-period average (50*1h = ~2 days)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (1.8 * vol_ma_50)
+    # Volume confirmation: volume > 2.0x 48-period average (48*6h = 288h = 12 days)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    volume_spike = volume > (2.0 * vol_ma_48)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(100, 50)  # warmup for ADX and volume MA
+    start_idx = max(100, 14, 48)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma_50[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
             
@@ -104,41 +102,36 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_adx = adx_4h_aligned[i]
-        curr_r1 = camarilla_r1_aligned[i]
-        curr_s1 = camarilla_s1_aligned[i]
+        curr_wr = williams_r[i]
+        curr_adx = adx_1d_aligned[i]
         curr_volume_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike and intermediate trend (ADX > 20)
-            if curr_volume_spike and curr_adx > 20:
-                # Bullish entry: break above R1
-                if curr_close > curr_r1:
-                    signals[i] = 0.20
+            # Require volume spike and strong trend (ADX > 25)
+            if curr_volume_spike and curr_adx > 25:
+                # Bullish entry: Williams %R crosses above -90 from oversold
+                if curr_wr > -90 and williams_r[i-1] <= -90:
+                    signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish entry: break below S1
-                elif curr_close < curr_s1:
-                    signals[i] = -0.20
+                # Bearish entry: Williams %R crosses below -10 from overbought
+                elif curr_wr < -10 and williams_r[i-1] >= -10:
+                    signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below R1 (breakout fails) OR trend weakens (ADX < 15)
-            if curr_close < curr_r1 or curr_adx < 15:
+            # Exit when Williams %R crosses below -50 (momentum loss) OR trend weakens (ADX < 20)
+            if curr_wr < -50 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above S1 (breakdown fails) OR trend weakens (ADX < 15)
-            if curr_close > curr_s1 or curr_adx < 15:
+            # Exit when Williams %R crosses above -50 (momentum loss) OR trend weakens (ADX < 20)
+            if curr_wr > -50 or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
