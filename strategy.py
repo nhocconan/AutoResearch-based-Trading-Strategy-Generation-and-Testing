@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels act as strong support/resistance where breakouts often continue
-# 1d EMA34 filter ensures we only trade in the direction of the higher timeframe trend
-# Volume spike (2.0x 20-period average) confirms institutional participation and reduces false breakouts
-# Works in bull markets via breakouts above R3 and bear markets via breakdowns below S3
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Using 12h timeframe to reduce trade frequency and avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and ATR(14) volatility filter
+# Donchian channels provide clear breakout levels that work in both trending and ranging markets
+# 12h HMA21 ensures we only trade breakouts in the direction of the higher timeframe trend
+# ATR filter avoids low volatility environments where false breakouts are common
+# Discrete sizing 0.25 minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hHMA21_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,42 +28,53 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop (MTF Rule #1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop (MTF Rule #1)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h HMA21 (Hull Moving Average)
+    close_12h = df_12h['close'].values
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # WMA function
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    daily_range = high_1d - low_1d
-    camarilla_r3 = close_1d + daily_range * 1.1 / 4
-    camarilla_s3 = close_1d - daily_range * 1.1 / 4
+    # HMA calculation
+    wma_half = np.array([wma(close_12h[i:i+half_len], half_len) if i+half_len <= len(close_12h) else np.nan 
+                         for i in range(len(close_12h))])
+    wma_full = np.array([wma(close_12h[i:i+21], 21) if i+21 <= len(close_12h) else np.nan 
+                         for i in range(len(close_12h))])
+    hma_21_raw = 2 * wma_half - wma_full
+    hma_21 = np.array([wma(hma_21_raw[i:i+sqrt_len], sqrt_len) if i+sqrt_len <= len(hma_21_raw) else np.nan 
+                       for i in range(len(hma_21_raw))])
+    hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # ATR(14) for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First period
+    atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = max(100, 34, 20)  # warmup for EMA34, Camarilla, and volume MA
+    start_idx = max(100, 20, 14)  # warmup for Donchian, ATR, and session
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(hma_21_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
             
@@ -77,36 +86,45 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
-        curr_camarilla_r3 = camarilla_r3_aligned[i]
-        curr_camarilla_s3 = camarilla_s3_aligned[i]
-        curr_volume_spike = volume_spike[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_hma_21_12h = hma_21_aligned[i]
+        curr_atr_14 = atr_14[i]
+        
+        # Volatility filter: avoid low volatility environments
+        atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+        if np.isnan(atr_ma_50[i]) or curr_atr_14 < 0.5 * atr_ma_50[i]:
+            # Low volatility - reduce position or stay flat
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish entry: break above Camarilla R3 AND above 1d EMA34 (uptrend)
-                if curr_high > curr_camarilla_r3 and curr_close > curr_ema_34_1d:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                # Bearish entry: break below Camarilla S3 AND below 1d EMA34 (downtrend)
-                elif curr_low < curr_camarilla_s3 and curr_close < curr_ema_34_1d:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
+            # Bullish entry: break above Donchian high AND above 12h HMA21 (uptrend)
+            if curr_high > curr_donchian_high and curr_close > curr_hma_21_12h:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+            # Bearish entry: break below Donchian low AND below 12h HMA21 (downtrend)
+            elif curr_low < curr_donchian_low and curr_close < curr_hma_21_12h:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price drops below Camarilla S3 (breakout fails)
-            if curr_close < curr_camarilla_s3:
+            # Exit when price drops below Donchian low (breakout fails)
+            if curr_close < curr_donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price rises above Camarilla R3 (breakdown fails)
-            if curr_close > curr_camarilla_r3:
+            # Exit when price rises above Donchian high (breakdown fails)
+            if curr_close > curr_donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
