@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R4/S4) with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d HTF for Camarilla pivot calculation to reduce noise and 1d EMA34 for trend to filter false breakouts.
-# Long when price breaks above 1d R4 in uptrend (4h close > 1d EMA34) with volume spike (>2.0x average).
-# Short when price breaks below 1d S4 in downtrend (4h close < 1d EMA34) with volume spike.
-# Designed for low trade frequency (~20-50/year on 4h) to minimize fee drag while capturing strong directional moves.
-# Uses volume confirmation with moderate threshold (>2.0x average) to balance signal quality and trade count.
-# Stoploss at 2.5 * ATR and take profit at 2.0 * ATR to allow for larger swings on 4h timeframe.
-# Works in bull markets via breakout continuation and in bear markets via fade of false breakouts at 1d pivot levels.
+# Hypothesis: 6h strategy using 1d Williams %R extremes (overbought/oversold) with 1d EMA50 trend filter and volume spike confirmation
+# Williams %R identifies reversal points in ranging markets. Long when %R < -80 (oversold) in uptrend (price > EMA50) with volume spike.
+# Short when %R > -20 (overbought) in downtrend (price < EMA50) with volume spike.
+# Uses 1d HTF for Williams %R calculation to reduce noise and 1d EMA50 for trend to filter false signals.
+# Designed for low trade frequency (~12-37/year on 6h) to minimize fee drag while capturing mean reversion moves.
+# Volume confirmation (>2.0x average) ensures institutional participation. Stoploss at 2.5 * ATR, take profit at 2.0 * ATR.
+# Works in bull markets via buying oversold dips in uptrend and in bear markets via selling overbought rallies in downtrend.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1dCamarilla_R4S4_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_1dWilliamsR_Extreme_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +26,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculations
+    # Load 1d data ONCE before loop for Williams %R and EMA calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (R4, S4) using typical price
+    # Calculate 1d Williams %R (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
-    camarilla_r4 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.1 * (high_1d - low_1d)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align 1d Williams %R to 6h timeframe (wait for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 1d EMA(50) for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate ATR(14) for dynamic stoploss on 4h
+    # Calculate ATR(14) for dynamic stoploss on 6h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -60,10 +61,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start_idx = 50  # warmup for EMA(34)
+    start_idx = 50  # warmup for EMA(50) and Williams %R
     
     for i in range(start_idx, n):
-        # Volume confirmation: volume > 2.0x 50-period average (moderate to balance trades)
+        # Volume confirmation: volume > 2.0x 50-period average
         if i >= 50:
             vol_ma_50 = np.mean(volume[i-50:i])
         elif i > 0:
@@ -76,30 +77,29 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_atr = atr[i]
-        curr_r4 = camarilla_r4_aligned[i]
-        curr_s4 = camarilla_s4_aligned[i]
-        curr_ema = ema_34_aligned[i]
+        curr_williams_r = williams_r_aligned[i]
+        curr_ema = ema_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1d R4 with 1d uptrend (close > EMA34)
-                if curr_close > curr_r4 and curr_close > curr_ema:
+                # Bullish entry: Williams %R oversold (< -80) with 1d uptrend (close > EMA50)
+                if curr_williams_r < -80 and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1d S4 with 1d downtrend (close < EMA34)
-                elif curr_close < curr_s4 and curr_close < curr_ema:
+                # Bearish entry: Williams %R overbought (> -20) with 1d downtrend (close < EMA50)
+                elif curr_williams_r > -20 and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks 1d S4 (reversal signal)
+            # Stoploss: 2.5 * ATR below entry price OR Williams %R becomes overbought (> -20) (reversal signal)
             if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s4:
+            elif curr_williams_r > -20:
                 signals[i] = 0.0
                 position = 0
             # Take profit: price reaches 2.0x ATR above entry
@@ -109,11 +109,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks 1d R4 (reversal signal)
+            # Stoploss: 2.5 * ATR above entry price OR Williams %R becomes oversold (< -80) (reversal signal)
             if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r4:
+            elif curr_williams_r < -80:
                 signals[i] = 0.0
                 position = 0
             # Take profit: price reaches 2.0x ATR below entry
