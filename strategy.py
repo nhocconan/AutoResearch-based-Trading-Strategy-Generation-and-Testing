@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with volume confirmation and 1w trend filter
-# Weekly Camarilla levels identify key support/resistance where institutional order flow clusters.
-# Breakouts above weekly R3 or below weekly S3 with volume spike indicate strong institutional participation.
-# 1w EMA(50) ensures alignment with long-term trend to avoid counter-trend trades.
-# Designed for low trade frequency (7-25/year) to minimize fee drag in both bull and bear markets.
-# Uses 1d timeframe as primary with 1w HTF for structure.
+# Hypothesis: 6h strategy using 12h Donchian breakout with volume confirmation and 6h trend filter
+# Donchian channels identify key support/resistance where price breaks indicate institutional participation.
+# Breakouts above/below 12h Donchian(20) with volume spike indicate strong directional momentum.
+# 6h EMA(50) ensures alignment with intermediate-term trend to avoid counter-trend trades.
+# Designed for low trade frequency (<30/year) to minimize fee drag in both bull and bear markets.
 
-name = "1d_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +23,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 12h data ONCE before loop for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Camarilla levels (R3, S3, R4, S4)
-    # Based on previous week's high, low, close
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate pivot point (PP)
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    # Calculate Camarilla levels
-    r3 = pp + (high_1w - low_1w) * 1.1 / 4.0
-    s3 = pp - (high_1w - low_1w) * 1.1 / 4.0
-    r4 = pp + (high_1w - low_1w) * 1.1 / 2.0
-    s4 = pp - (high_1w - low_1w) * 1.1 / 2.0
+    # Upper band: highest high of last 20 periods
+    upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 1d timeframe (wait for completed 1w bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Donchian levels to 6h timeframe (wait for completed 12h bar)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
     
-    # Calculate 1w EMA(50) for trend filter
+    # Calculate 6h EMA(50) for trend filter
     close_s = pd.Series(close)
     ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
@@ -74,49 +66,47 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_ema = ema_50[i]
         curr_atr = atr[i]
-        curr_r3 = r3_aligned[i]
-        curr_s3 = s3_aligned[i]
-        curr_r4 = r4_aligned[i]
-        curr_s4 = s4_aligned[i]
+        curr_upper = upper_aligned[i]
+        curr_lower = lower_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Require volume spike and trend alignment
             if volume_spike:
-                # Bullish entry: price breaks above 1w Camarilla R3 with 1w uptrend
-                if curr_close > curr_r3 and curr_close > curr_ema:
+                # Bullish entry: price breaks above 12h Donchian upper with 6h uptrend
+                if curr_close > curr_upper and curr_close > curr_ema:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Bearish entry: price breaks below 1w Camarilla S3 with 1w downtrend
-                elif curr_close < curr_s3 and curr_close < curr_ema:
+                # Bearish entry: price breaks below 12h Donchian lower with 6h downtrend
+                elif curr_close < curr_lower and curr_close < curr_ema:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Stoploss: 2.5 * ATR below entry price OR price breaks 1w Camarilla S3
+            # Stoploss: 2.5 * ATR below entry price OR price breaks 12h Donchian lower
             if curr_close < entry_price - 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close < curr_s3:
+            elif curr_close < curr_lower:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1w Camarilla R4
-            elif curr_close >= curr_r4:
+            # Take profit: price reaches 1.5x ATR above entry OR middle of channel
+            elif curr_close >= entry_price + 1.5 * curr_atr:
                 signals[i] = 0.10  # reduce position
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: 2.5 * ATR above entry price OR price breaks 1w Camarilla R3
+            # Stoploss: 2.5 * ATR above entry price OR price breaks 12h Donchian upper
             if curr_close > entry_price + 2.5 * curr_atr:
                 signals[i] = 0.0
                 position = 0
-            elif curr_close > curr_r3:
+            elif curr_close > curr_upper:
                 signals[i] = 0.0
                 position = 0
-            # Take profit: price reaches 1w Camarilla S4
-            elif curr_close <= curr_s4:
+            # Take profit: price reaches 1.5x ATR below entry OR middle of channel
+            elif curr_close <= entry_price - 1.5 * curr_atr:
                 signals[i] = -0.10  # reduce position
             else:
                 signals[i] = -0.25
