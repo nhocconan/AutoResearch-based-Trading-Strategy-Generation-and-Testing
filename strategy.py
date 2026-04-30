@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend direction + 1d RSI(14) mean reversion + volume spike
-# KAMA adapts to market noise - tracks trend efficiently in both bull and bear markets
-# 1d RSI < 30 = oversold (long bias), RSI > 70 = overbought (short bias) on higher timeframe
-# Volume spike (2.0x 20-period average) confirms momentum for entry
-# Discrete sizing 0.25 minimizes fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
-# Works in bull via KAMA uptrend + RSI mean reversion longs, in bear via KAMA downtrend + RSI mean reversion shorts.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above 20-period high AND price > 1d EMA50 AND volume > 1.5x 20-period average
+# Short when price breaks below 20-period low AND price < 1d EMA50 AND volume > 1.5x 20-period average
+# Discrete sizing 0.25 to minimize fee churn. Works in bull via breakout longs with uptrend,
+# in bear via breakdown shorts with downtrend. Target: 20-50 trades/year (80-200 total over 4 years).
 
-name = "12h_KAMA_1dRSI_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +22,36 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     # Pre-compute session hours (08-20 UTC) to avoid datetime errors
+    open_time = prices['open_time'].values
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 1d RSI(14) for mean reversion filter
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1d = pd.Series(df_1d['close'].values)
-    delta = close_1d.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate KAMA(10, 2, 30) for trend direction
-    # ER = |net change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])))
-
-    # Avoid division by zero
-    er = np.zeros_like(change)
-    er[volatility != 0] = change[volatility != 0] / volatility[volatility != 0]
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(20, 30)  # warmup for volume MA and KAMA
+    start_idx = 20  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
             
@@ -83,35 +61,34 @@ def generate_signals(prices):
             continue
             
         curr_close = close[i]
-        curr_kama = kama[i]
-        curr_rsi = rsi_1d_aligned[i]
-        curr_volume_spike = volume_spike[i]
+        curr_high_20 = high_20[i]
+        curr_low_20 = low_20[i]
+        curr_ema_50 = ema_50_1d_aligned[i]
+        curr_volume_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Require volume spike
-            if curr_volume_spike:
-                # Bullish entry: price > KAMA (uptrend) AND RSI < 30 (oversold)
-                if curr_close > curr_kama and curr_rsi < 30:
+            # Require volume confirmation
+            if curr_volume_confirm:
+                # Long entry: price breaks above 20-period high AND price > 1d EMA50 (uptrend)
+                if curr_close > curr_high_20 and curr_close > curr_ema_50:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = curr_close
-                # Bearish entry: price < KAMA (downtrend) AND RSI > 70 (overbought)
-                elif curr_close < curr_kama and curr_rsi > 70:
+                # Short entry: price breaks below 20-period low AND price < 1d EMA50 (downtrend)
+                elif curr_close < curr_low_20 and curr_close < curr_ema_50:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = curr_close
         
         elif position == 1:  # Long position
-            # Exit when price crosses below KAMA OR RSI > 50 (mean reversion complete)
-            if curr_close < curr_kama or curr_rsi > 50:
+            # Exit when price drops below 20-period low OR price drops below 1d EMA50
+            if curr_close < curr_low_20 or curr_close < curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price crosses above KAMA OR RSI < 50 (mean reversion complete)
-            if curr_close > curr_kama or curr_rsi < 50:
+            # Exit when price rises above 20-period high OR price rises above 1d EMA50
+            if curr_close > curr_high_20 or curr_close > curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
