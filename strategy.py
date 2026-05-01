@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Long when: price breaks above Donchian upper (20) AND 1d close > 1d EMA50 AND 12h volume > 2.0x 20-period average
-# Short when: price breaks below Donchian lower (20) AND 1d close < 1d EMA50 AND 12h volume > 2.0x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when: price breaks above Donchian upper (20) AND 1d close > 1d EMA50 AND 4h volume > 2.0x 20-period average
+# Short when: price breaks below Donchian lower (20) AND 1d close < 1d EMA50 AND 4h volume > 2.0x 20-period average
 # Uses Donchian channels for structure, 1d EMA50 for trend alignment, volume spike for conviction.
-# Target: 12-37 trades/year on 12h. Discrete sizing 0.30 to balance return and fee drag.
+# Target: 20-50 trades/year on 4h. Discrete sizing 0.30 to balance return and fee drag.
 # Works in bull (breakouts with trend) and bear (breakdowns with trend) by trading with aligned 1d trend.
 
-name = "12h_Donchian20_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,9 +27,9 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 12h data ONCE before loop for price action and volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE before loop for price action and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # Load 1d data ONCE before loop for Donchian calculation and trend filter
@@ -46,7 +46,7 @@ def generate_signals(prices):
     # Donchian lower (20-period low)
     donch_lo_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h primary timeframe
+    # Align Donchian levels to 4h primary timeframe
     donch_hi_aligned = align_htf_to_ltf(prices, df_1d, donch_hi_20)
     donch_lo_aligned = align_htf_to_ltf(prices, df_1d, donch_lo_20)
     
@@ -54,10 +54,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h volume average (20-period) for volume confirmation
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # 4h volume average (20-period) for volume confirmation
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,7 +80,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(donch_hi_aligned[i]) or np.isnan(donch_lo_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -88,12 +88,12 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_vol = volume[i]
-        curr_vol_ma = vol_ma_12h_aligned[i]
+        curr_vol_ma = vol_ma_4h_aligned[i]
         curr_donch_hi = donch_hi_aligned[i]
         curr_donch_lo = donch_lo_aligned[i]
         curr_ema_50 = ema_50_aligned[i]
         
-        # Volume confirmation: current 12h volume > 2.0x 20-period average
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
         # 1d trend filter
