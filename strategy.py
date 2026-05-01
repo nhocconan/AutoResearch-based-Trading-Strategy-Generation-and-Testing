@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 12h close > EMA34 AND volume > 1.8x 20-bar average.
-# Short when price breaks below S3 AND 12h close < EMA34 AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Volume spike threshold set to 1.8x to reduce false breakouts and improve signal quality.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1w close > EMA50 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1w close < EMA50 AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 30-100 total trades over 4 years (7-25/year).
+# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
 # Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 4h, HTF: 12h for trend filter.
+# Primary timeframe: 1d, HTF: 1w for trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,18 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:  # Need enough for EMA34 calculation
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
     
-    # 12h EMA34 calculation
-    close_12h = df_12h['close'].values
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    # 1w EMA50 calculation
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate 12h close aligned for trend bias
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Calculate 1w close aligned for trend bias
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
     # Calculate Camarilla pivot levels from previous day (using 1d data)
     df_1d = get_htf_data(prices, '1d')
@@ -54,11 +54,11 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 1d timeframe (no alignment needed as already 1d)
+    r3_aligned = camarilla_r3  # Already aligned to 1d bars
+    s3_aligned = camarilla_s3  # Already aligned to 1d bars
     
-    # Volume confirmation: current 4h volume > 1.8x 20-bar average
+    # Volume confirmation: current 1d volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,7 +67,7 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_aligned[i]) or np.isnan(close_12h_aligned[i]) or \
+        if np.isnan(ema_aligned[i]) or np.isnan(close_1w_aligned[i]) or \
            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
@@ -82,15 +82,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
         # Camarilla breakout signals
         breakout_up = curr_high > r3_aligned[i]  # break above R3
         breakout_down = curr_low < s3_aligned[i]  # break below S3
         
-        # Trend filter: use 12h close vs its EMA34 for bias
-        bullish_bias = close_12h_aligned[i] > ema_aligned[i]  # 12h close above its EMA34 = bullish
-        bearish_bias = close_12h_aligned[i] < ema_aligned[i]  # 12h close below its EMA34 = bearish
+        # Trend filter: use 1w close vs its EMA50 for bias
+        bullish_bias = close_1w_aligned[i] > ema_aligned[i]  # 1w close above its EMA50 = bullish
+        bearish_bias = close_1w_aligned[i] < ema_aligned[i]  # 1w close below its EMA50 = bearish
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
