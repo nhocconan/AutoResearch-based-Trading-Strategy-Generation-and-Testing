@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based stoploss.
-# Uses Donchian channel breakouts for entry, volume spike (>2.0x 20-bar MA) for confirmation,
-# and ATR(14) trailing stop for risk control. Designed for 4h timeframe to achieve
-# 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.30).
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+# Uses Donchian channel breakouts for entry, 1w EMA34 for trend direction, and volume spike (>1.5x 20-bar MA) for confirmation.
+# Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with discrete sizing (0.25).
 # Works in both bull and bear markets via volatility-based breakouts and tight entry conditions.
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,27 +27,24 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 2.0)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
-    # ATR(14) for stoploss and position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Multi-timeframe: 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_stop = 0.0
     
     # Start after warmup for all indicators
-    start_idx = max(lookback, 20, 14) + 1  # 21
+    start_idx = max(lookback, 20, 34) + 1  # 35
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(ema_1w_34_aligned[i]):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -66,40 +62,38 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
+        # Trend filter: 1w EMA34 slope (using previous bar's value)
+        trend_up = ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]
+        trend_down = ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]
+        
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND volume confirmation
-            if breakout_up and vol_confirm:
-                signals[i] = 0.30
+            # Long: Donchian breakout up AND volume confirmation AND 1w EMA34 trending up
+            if breakout_up and vol_confirm and trend_up:
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                atr_stop = entry_price - 2.5 * atr[i]  # 2.5x ATR stoploss
-            # Short: Donchian breakdown down AND volume confirmation
-            elif breakdown_down and vol_confirm:
-                signals[i] = -0.30
+            # Short: Donchian breakdown down AND volume confirmation AND 1w EMA34 trending down
+            elif breakdown_down and vol_confirm and trend_down:
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                atr_stop = entry_price + 2.5 * atr[i]  # 2.5x ATR stoploss
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update ATR trailing stop (only move up)
-            atr_stop = max(atr_stop, curr_close - 2.5 * atr[i])
-            # Exit on stoploss hit
-            if curr_low <= atr_stop:
+            # Exit on Donchian breakdown (break below lowest low of lookback period)
+            if curr_low < lowest_low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update ATR trailing stop (only move down)
-            atr_stop = min(atr_stop, curr_close + 2.5 * atr[i])
-            # Exit on stoploss hit
-            if curr_high >= atr_stop:
+            # Exit on Donchian breakout (break above highest high of lookback period)
+            if curr_high > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
