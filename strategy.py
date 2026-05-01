@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + 1w ADX regime filter
-# Donchian breakout provides clear structure with proven edge in crypto
-# Volume spike confirms institutional participation, reducing false breakouts
-# 1w ADX > 25 filters for trending regimes, avoiding whipsaws in ranging markets
-# Designed for low frequency (75-200 trades over 4 years) with discrete sizing
-# Works in both bull and bear: ADX regime filter avoids ranging markets, volume confirms legitimacy
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1w ADX regime filter
+# Designed to capture strong trending moves while avoiding false breakouts in ranging markets
+# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
+# Target: 75-200 trades over 4 years (19-50/year) for optimal fee drag control
+# Works in bull markets via long breakouts and bear markets via short breakouts
+# ADX > 25 ensures we only trade in trending regimes, reducing whipsaws
 
-name = "4h_Donchian20_1dVolume_1wADX_Regime_v2"
+name = "4h_Donchian20_1dVolume_1wADX_Regime_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -107,11 +107,11 @@ def generate_signals(prices):
             if trending:
                 # Long: Break above Donchian high with volume spike
                 if close[i] > highest_high[i] and volume_spike[i]:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                     position = 1
                 # Short: Break below Donchian low with volume spike
                 elif close[i] < lowest_low[i] and volume_spike[i]:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -119,19 +119,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian low or opposite breakout
-            if close[i] <= lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
+            # Exit: price returns to Donchian low or opposite breakout with volume
+            if close[i] <= lowest_low[i] or (close[i] < highest_high[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian high or opposite breakout
-            if close[i] >= highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
+            # Exit: price returns to Donchian high or opposite breakout with volume
+            if close[i] >= highest_high[i] or (close[i] > lowest_low[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
