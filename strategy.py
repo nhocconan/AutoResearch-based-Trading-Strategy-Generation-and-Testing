@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction with 1w EMA34 filter and RSI(14) momentum confirmation
-# KAMA adapts to market noise, reducing whipsaws in choppy markets. 1w EMA34 ensures alignment with weekly trend.
-# RSI(14) > 50 for long, < 50 for short adds momentum confirmation. Discrete sizing 0.25 minimizes fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year). Works in bull (trend continuation) and bear (trend respect).
+# Hypothesis: 6h Williams Alligator + Elder Ray combination with 1d trend filter
+# Williams Alligator (jaw/teeth/lips) identifies trend absence/presence via SMAs
+# Elder Ray (Bull/Bear power = EMA13 - high/low) measures trend strength
+# 1d EMA50 filter ensures trades align with higher timeframe trend
+# Works in bull markets (Alligator awake + Bull power > 0) and bear markets (Alligator awake + Bear power < 0)
+# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_KAMA_Trend_1wEMA34_RSI_V1"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_ElderRay_1dEMA50_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,83 +24,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for EMA calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 1d HTF data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(34) on 1w close
-    ema_1w_34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA(50) on 1d close
+    ema_1d_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA to 1d timeframe
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
+    # Align 1d EMA50 to 6h timeframe
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # KAMA (Adaptive Moving Average) - ER = 10, fast = 2, slow = 30
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(10))
-    volatility = close_s.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Williams Alligator: SMAs of median price (typical price = (H+L+C)/3)
+    typical_price = (high + low + close) / 3.0
     
-    # RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Jaw: SMA(13, 8) - 13-period SMA shifted 8 bars forward
+    jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: SMA(8, 5) - 8-period SMA shifted 5 bars forward
+    teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: SMA(5, 3) - 5-period SMA shifted 3 bars forward
+    lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for all indicators
-    start_idx = 30  # Need 30 for KAMA stability and RSI
+    # Start after warmup for all indicators (max shift is 8 for jaw)
+    start_idx = 13  # Need 13 for EMA13 and SMAs
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1w_34_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
+        # Williams Alligator conditions: 
+        # - Mouth open (teeth above/below lips) indicates trend
+        # - All lines aligned: jaw < teeth < lips for uptrend, jaw > teeth > lips for downtrend
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         
-        # Trend and momentum conditions
-        kama_up = curr_close > kama[i]
-        kama_down = curr_close < kama[i]
-        rsi_long = rsi[i] > 50
-        rsi_short = rsi[i] < 50
-        weekly_trend_up = curr_close > ema_1w_34_aligned[i]
-        weekly_trend_down = curr_close < ema_1w_34_aligned[i]
+        alligator_long = jaw_val < teeth_val < lips_val  # Mouth open up
+        alligator_short = jaw_val > teeth_val > lips_val  # Mouth open down
+        
+        # Elder Ray conditions:
+        # - Long: Bull power > 0 and increasing (current > previous)
+        # - Short: Bear power < 0 and decreasing (current < previous)
+        bull_long = bull_power[i] > 0 and (i == start_idx or bull_power[i] > bull_power[i-1])
+        bear_short = bear_power[i] < 0 and (i == start_idx or bear_power[i] < bear_power[i-1])
+        
+        # 1d trend filter:
+        # - Long: price above 1d EMA50
+        # - Short: price below 1d EMA50
+        trend_long = close[i] > ema_1d_50_aligned[i]
+        trend_short = close[i] < ema_1d_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price above KAMA, above 1w EMA34, RSI > 50
-            if kama_up and weekly_trend_up and rsi_long:
+            # Long: Alligator mouth open up + Bull power positive + Uptrend on 1d
+            if alligator_long and bull_long and trend_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA, below 1w EMA34, RSI < 50
-            elif kama_down and weekly_trend_down and rsi_short:
+            # Short: Alligator mouth open down + Bear power negative + Downtrend on 1d
+            elif alligator_short and bear_short and trend_short:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price below KAMA or below 1w EMA34
-            if curr_close < kama[i] or curr_close < ema_1w_34_aligned[i]:
+            # Exit: Alligator mouth closes OR Bear power turns negative OR price below 1d EMA50
+            if not alligator_long or not bull_long or not trend_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on price above KAMA or above 1w EMA34
-            if curr_close > kama[i] or curr_close > ema_1w_34_aligned[i]:
+            # Exit: Alligator mouth closes OR Bull power turns positive OR price above 1d EMA50
+            if not alligator_short or not bear_short or not trend_short:
                 signals[i] = 0.0
                 position = 0
             else:
