@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below S3 with 1d EMA34 downtrend and volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to avoid overtrading.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above upper Donchian with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
+# Short when price breaks below lower Donchian with 1d EMA34 downtrend and volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to avoid overtrading.
 # Works in bull (buy breakouts) and bear (sell breakdowns) via trend filter.
 
-name = "12h_Camarilla_R3_S3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,10 +38,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for EMA34 and Camarilla calculation
+    start_idx = 100  # warmup for EMA34 and Donchian calculation
     
     for i in range(start_idx, n):
-        # Session filter: 00-23 UTC (trade all sessions for 12h timeframe)
+        # Session filter: 00-23 UTC (trade all sessions for 4h timeframe)
         hour = hours[i]
         
         if np.isnan(ema_34_1d_aligned[i]):
@@ -54,26 +54,20 @@ def generate_signals(prices):
         curr_vol = volume[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
         
-        # Calculate Camarilla levels from previous 20 12h bars (typical pivot lookback)
-        # Use bars i-20 to i-1 for prior period calculation
+        # Calculate Donchian levels from previous 20 4h bars
+        # Use bars i-20 to i-1 for prior period calculation (20 bars lookback)
         if i-20 < start_idx:
             signals[i] = 0.0
             continue
             
         lookback_high = np.max(high[i-20:i])  # highest high of last 20 bars
         lookback_low = np.min(low[i-20:i])    # lowest low of last 20 bars
-        lookback_close = close[i-1]           # previous close for pivot calculation
         
         if lookback_high <= lookback_low:
             signals[i] = 0.0
             continue
             
-        # Camarilla levels calculation
-        range_val = lookback_high - lookback_low
-        r3 = lookback_close + range_val * 1.1 / 4
-        s3 = lookback_close - range_val * 1.1 / 4
-        
-        # Volume confirmation: current 12h volume > 2.0x 20-period average
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -86,14 +80,14 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 AND price > 1d EMA34 AND volume confirmation
-            if (curr_close > r3 and 
+            # Long: price breaks above upper Donchian AND price > 1d EMA34 AND volume confirmation
+            if (curr_close > lookback_high and 
                 curr_close > curr_ema_34_1d and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND price < 1d EMA34 AND volume confirmation
-            elif (curr_close < s3 and 
+            # Short: price breaks below lower Donchian AND price < 1d EMA34 AND volume confirmation
+            elif (curr_close < lookback_low and 
                   curr_close < curr_ema_34_1d and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -102,8 +96,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3 (reversal) OR price < 1d EMA34 (trend violation)
-            if (curr_close < s3 or 
+            # Exit: price breaks below lower Donchian (reversal) OR price < 1d EMA34 (trend violation)
+            if (curr_close < lookback_low or 
                 curr_close < curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
@@ -111,8 +105,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (reversal) OR price > 1d EMA34 (trend violation)
-            if (curr_close > r3 or 
+            # Exit: price breaks above upper Donchian (reversal) OR price > 1d EMA34 (trend violation)
+            if (curr_close > lookback_high or 
                 curr_close > curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
