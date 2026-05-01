@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation
-# Uses weekly EMA for stronger trend filter to reduce whipsaw in ranging markets, combined with
-# Donchian breakouts and volume confirmation for high-probability entries. Designed for low
-# trade frequency to minimize fee drag and work in both bull and bear markets via trend following.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation
+# Donchian channels provide clear breakout levels, 1w EMA50 filters for higher timeframe trend,
+# volume spike confirms breakout strength. Designed for low trade frequency (30-100 total over 4 years)
+# to minimize fee drag and work in both bull and bear markets via trend following.
+# Uses daily timeframe to avoid overtrading and capture significant market moves.
 
-name = "4h_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +33,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 1d
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
