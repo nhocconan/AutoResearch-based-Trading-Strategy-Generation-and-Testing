@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above 6h Donchian upper band AND 12h close > EMA50 (bullish trend) AND volume > 2.0x 20-bar average.
-# Short when price breaks below 6h Donchian lower band AND 12h close < EMA50 (bearish trend) AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Donchian provides clear structure, 12h EMA50 filters trend alignment, volume spike confirms momentum.
-# Primary timeframe: 6h, HTF: 12h for EMA trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 1d close > EMA50 (bullish trend) AND volume > 1.8x 20-bar average.
+# Short when price breaks below Donchian lower band AND 1d close < EMA50 (bearish trend) AND volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian channels provide clear structure, EMA50 filters major trend alignment, volume confirms momentum strength.
+# Primary timeframe: 4h, HTF: 1d for EMA trend filter.
 
-name = "6h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirmation_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 trend filter
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 6h Donchian(20) channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll
-    donchian_lower = low_roll
+    # 1d EMA50 trend filter
+    prev_close = df_1d['close'].values
+    ema_50 = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: current 6h volume > 2.0x 20-bar average
+    # Volume confirmation: current 4h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and indicators
+    start_idx = 50  # warmup for Donchian and EMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+           np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -62,7 +66,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume confirmation threshold
         
         # Donchian breakout signals
         breakout_up = curr_high > donchian_upper[i]  # break above upper band
