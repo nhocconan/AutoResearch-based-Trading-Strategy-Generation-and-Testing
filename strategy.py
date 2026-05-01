@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band (20) AND 1d EMA50 uptrend AND volume > 1.8x 20-period median.
-# Short when price breaks below Donchian lower band (20) AND 1d EMA50 downtrend AND volume > 1.8x 20-period median.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 (1d Camarilla) AND 1d EMA50 uptrend AND volume > 1.8x 20-period median.
+# Short when price breaks below S3 (1d Camarilla) AND 1d EMA50 downtrend AND volume > 1.8x 20-period median.
 # Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
 # Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year on 4h timeframe.
-# Donchian channels provide clear breakout levels that work in both trending and ranging markets.
+# Camarilla levels from higher timeframe (1d) provide institutional pivot points that work in both bull and bear markets.
 # Volume confirmation ensures breakouts have participation, reducing false signals.
-# 1d EMA50 filter avoids counter-trend trades during major reversals.
+# ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATR_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATR_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,13 +35,28 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) on primary timeframe
-    # Upper band = highest high over last 20 periods
-    # Lower band = lowest low over last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels (R3, S3, R4, S4) - using previous day's OHLC
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    # where C = (H+L+C)/3 (typical price), but for intraday we use previous day's values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Typical price for pivot calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -59,13 +74,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA, Donchian, volume, and ATR
+    # Start after warmup for EMA, Camarilla, volume, and ATR
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
             np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -88,15 +105,15 @@ def generate_signals(prices):
             volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian upper band AND uptrend AND volume spike
-            if curr_close > donchian_upper[i] and uptrend and volume_confirm:
+            # Long: Price breaks above R3 AND uptrend AND volume spike
+            if curr_close > r3_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below Donchian lower band AND downtrend AND volume spike
-            elif curr_close < donchian_lower[i] and downtrend and volume_confirm:
+            # Short: Price breaks below S3 AND downtrend AND volume spike
+            elif curr_close < s3_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -110,9 +127,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break below Donchian lower band (reversal) OR trend reversal
+            # Exit conditions: ATR stoploss OR break below S3 (reversal) OR trend reversal
             stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or curr_close < donchian_lower[i] or not uptrend:
+            if curr_close < stop_price or curr_close < s3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,9 +140,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break above Donchian upper band (reversal) OR trend reversal
+            # Exit conditions: ATR stoploss OR break above R3 (reversal) OR trend reversal
             stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or curr_close > donchian_upper[i] or not downtrend:
+            if curr_close > stop_price or curr_close > r3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
