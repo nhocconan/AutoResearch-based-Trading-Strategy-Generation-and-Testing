@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d ADX trend filter and volume confirmation.
-# Long when Williams %R crosses above -80 from below (oversold bounce) AND 1d ADX > 25 (trending market) AND volume > 1.5x 20-bar average.
-# Short when Williams %R crosses below -20 from above (overbought rejection) AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to avoid overtrading.
-# Works in bull (buy oversold bounces in uptrend) and bear (sell overbought rejections in downtrend) via ADX trend filter.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) and Jaw > Teeth > Lips (bullish alignment) with volume > 1.5x 20-bar average.
+# Short when price < Alligator Jaw and Jaw < Teeth < Lips (bearish alignment) with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to avoid overtrading.
+# Williams Alligator identifies trendless periods (all lines intertwined) and strong trends (lines diverged in order).
+# Works in bull (buy aligned uptrend) and bear (sell aligned downtrend) via Alligator alignment filter.
 
-name = "6h_WilliamsR_Reversal_1dADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,51 +27,25 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ADX trend filter
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d ADX(14) for trend filter
-    # Calculate True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean()
-    
-    # Calculate +DM and -DM
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = pd.Series(df_1d['low']).diff().abs()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth +DM, -DM, and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean()
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean()
-    atr_smooth = atr.ewm(span=14, adjust=False, min_periods=14).mean()
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / atr_smooth)
-    minus_di = 100 * (minus_dm_smooth / atr_smooth)
-    
-    # Calculate DX and ADX
-    dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di))
-    adx = dx.ewm(span=14, adjust=False, min_periods=14).mean()
-    adx_values = adx.values
-    
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for Williams %R and ADX calculation
+    start_idx = 100  # warmup for EMA34 and Alligator calculation
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 6h timeframe
+        # Session filter: trade all sessions for 12h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -78,33 +53,47 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_vol = volume[i]
-        curr_adx_1d = adx_1d_aligned[i]
+        curr_ema_34_1d = ema_34_1d_aligned[i]
         
-        # Calculate Williams %R(14)
-        if i < 14 + start_idx:
+        # Calculate Williams Alligator from previous 12h bars (need 13 periods for SMMA)
+        if i < 13 + start_idx:
             signals[i] = 0.0
             continue
             
-        highest_high = np.max(high[i-13:i+1])  # 14-period high including current
-        lowest_low = np.min(low[i-13:i+1])    # 14-period low including current
+        # Williams Alligator: three smoothed moving averages
+        # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+        # Teeth (red): 8-period SMMA, shifted 5 bars forward  
+        # Lips (green): 5-period SMMA, shifted 3 bars forward
+        # SMMA = smoothed moving average (similar to EMA but with different smoothing)
         
-        if highest_high == lowest_low:
-            williams_r = -50  # avoid division by zero
-        else:
-            williams_r = -100 * (highest_high - curr_close) / (highest_high - lowest_low)
+        # Calculate SMMA for close prices
+        def smma(source, period):
+            if len(source) < period:
+                return np.full_like(source, np.nan)
+            result = np.full_like(source, np.nan)
+            # First value is simple SMA
+            result[period-1] = np.mean(source[:period])
+            # Subsequent values: SMMA = (PREV_SMMA*(period-1) + PRICE) / period
+            for j in range(period, len(source)):
+                result[j] = (result[j-1] * (period-1) + source[j]) / period
+            return result
         
-        # Calculate Williams %R previous value for crossover detection
-        if i-1 < 14 + start_idx:
-            prev_williams_r = -50
-        else:
-            prev_highest_high = np.max(high[i-14:i])  # 14-period high excluding current
-            prev_lowest_low = np.min(low[i-14:i])     # 14-period low excluding current
-            if prev_highest_high == prev_lowest_low:
-                prev_williams_r = -50
-            else:
-                prev_williams_r = -100 * (prev_highest_high - close[i-1]) / (prev_highest_high - prev_lowest_low)
+        # Calculate SMMA series
+        smma_close = smma(close[:i+1], 1)  # dummy call to get array
+        jaw_raw = smma(close[:i+1], 13)
+        teeth_raw = smma(close[:i+1], 8)
+        lips_raw = smma(close[:i+1], 5)
         
-        # Volume confirmation: current 6h volume > 1.5x 20-bar average
+        if len(jaw_raw) < 13 or len(teeth_raw) < 8 or len(lips_raw) < 5:
+            signals[i] = 0.0
+            continue
+            
+        # Get latest values (already shifted in calculation)
+        jaw = jaw_raw[-1] if not np.isnan(jaw_raw[-1]) else 0
+        teeth = teeth_raw[-1] if not np.isnan(teeth_raw[-1]) else 0
+        lips = lips_raw[-1] if not np.isnan(lips_raw[-1]) else 0
+        
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -117,15 +106,17 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R crosses above -80 from below AND ADX > 25 AND volume confirmation
-            if (prev_williams_r <= -80 and williams_r > -80 and 
-                curr_adx_1d > 25 and 
+            # Long: bullish Alligator alignment (Jaw > Teeth > Lips) AND price > Jaw AND EMA34 uptrend AND volume confirmation
+            if (jaw > teeth and teeth > lips and 
+                curr_close > jaw and 
+                curr_close > curr_ema_34_1d and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from above AND ADX > 25 AND volume confirmation
-            elif (prev_williams_r >= -20 and williams_r < -20 and 
-                  curr_adx_1d > 25 and 
+            # Short: bearish Alligator alignment (Jaw < Teeth < Lips) AND price < Jaw AND EMA34 downtrend AND volume confirmation
+            elif (jaw < teeth and teeth < lips and 
+                  curr_close < jaw and 
+                  curr_close < curr_ema_34_1d and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -133,18 +124,20 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses above -20 (overbought) OR ADX < 20 (trend weakening)
-            if (williams_r >= -20 or 
-                curr_adx_1d < 20):
+            # Exit: bearish Alligator alignment (Jaw < Teeth < Lips) OR price < Jaw (trend violation) OR EMA34 downtrend
+            if (jaw < teeth and teeth < lips) or \
+               (curr_close < jaw) or \
+               (curr_close < curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -80 (oversold) OR ADX < 20 (trend weakening)
-            if (williams_r <= -80 or 
-                curr_adx_1d < 20):
+            # Exit: bullish Alligator alignment (Jaw > Teeth > Lips) OR price > Jaw (trend violation) OR EMA34 uptrend
+            if (jaw > teeth and teeth > lips) or \
+               (curr_close > jaw) or \
+               (curr_close > curr_ema_34_1d):
                 signals[i] = 0.0
                 position = 0
             else:
