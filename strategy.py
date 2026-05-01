@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator (JAW/TEETH/LIPS) with 1d trend filter and volume confirmation.
-# Uses Alligator to identify trendless markets (all lines intertwined) vs trending (lines separated).
-# Long: LIPS > TEETH > JAW AND price > 1d EMA50 AND volume > 1.5x 20-bar average.
-# Short: LIPS < TEETH < JAW AND price < 1d EMA50 AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Session filter 08-20 UTC.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h Bollinger Band breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper BB AND price > 1d EMA50 AND volume > 1.5x 20-bar average.
+# Short when price breaks below lower BB AND price < 1d EMA50 AND volume > 1.5x 20-bar average.
+# Uses Bollinger Bands (20, 2.0) for adaptive volatility-based breakout levels.
+# Discrete sizing 0.25 to manage drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
+# Volume threshold set to 1.5x to balance trade frequency and signal quality.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "6h_WilliamsAlligator_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Bollinger_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,44 +43,21 @@ def generate_signals(prices):
     price_above_ema = close > ema_50_aligned
     price_below_ema = close < ema_50_aligned
     
-    # Williams Alligator calculation (6h timeframe)
-    # JAW: Blue line - 13-period SMMA smoothed by 8 bars
-    # TEETH: Red line - 8-period SMMA smoothed by 5 bars  
-    # LIPS: Green line - 5-period SMMA smoothed by 3 bars
-    def smma(source, period):
-        """Smoothed Moving Average"""
-        if len(source) < period:
-            return np.full_like(source, np.nan)
-        result = np.full_like(source, np.nan)
-        sma = pd.Series(source).rolling(window=period, min_periods=period).mean().values
-        result[period-1] = sma[period-1]
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
-        return result
+    # Bollinger Bands (20, 2.0) on 12h data
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_stddev * bb_std)
+    lower_band = sma - (bb_stddev * bb_std)
     
-    jaw = smma(close, 13)
-    jaw = smma(jaw, 8)  # SMMA of JAW smoothed by 8
-    teeth = smma(close, 8)
-    teeth = smma(teeth, 5)  # SMMA of TEETH smoothed by 5
-    lips = smma(close, 5)
-    lips = smma(lips, 3)  # SMMA of LIPS smoothed by 3
-    
-    # Alligator conditions: trend when lines are separated
-    # All lines intertwined (no trend): JAW ≈ TEETH ≈ LIPS
-    # Strong uptrend: LIPS > TEETH > JAW
-    # Strong downtrend: LIPS < TEETH < JAW
-    lips_above_teeth = lips > teeth
-    teeth_above_jaw = teeth > jaw
-    lips_below_teeth = lips < teeth
-    teeth_below_jaw = teeth < jaw
-    
-    # Volume confirmation: current 6h volume > 1.5x 20-bar average
+    # Volume confirmation: current 12h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Alligator and volume MA
+    start_idx = 50  # warmup for EMA, Bollinger Bands, and volume MA
     
     for i in range(start_idx, n):
         # Session filter: trade only 08-20 UTC
@@ -88,8 +66,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(sma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -103,22 +80,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume confirmation threshold
         
-        # Alligator trend conditions
-        strong_uptrend = lips_above_teeth[i] and teeth_above_jaw[i]
-        strong_downtrend = lips_below_teeth[i] and teeth_below_jaw[i]
+        # Bollinger Band breakout signals
+        breakout_up = curr_high > upper_band[i]  # break above upper BB
+        breakout_down = curr_low < lower_band[i]  # break below lower BB
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: strong uptrend AND price > 1d EMA50 AND volume confirmation
-            if (strong_uptrend and 
+            # Long: breakout above upper BB AND price > 1d EMA50 AND volume confirmation
+            if (breakout_up and 
                 price_above_ema[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: strong downtrend AND price < 1d EMA50 AND volume confirmation
-            elif (strong_downtrend and 
+            # Short: breakout below lower BB AND price < 1d EMA50 AND volume confirmation
+            elif (breakout_down and 
                   price_below_ema[i] and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -127,8 +104,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: trend weakens (lines intertwine) OR price < 1d EMA50 (trend change)
-            if (not (lips_above_teeth[i] and teeth_above_jaw[i]) or 
+            # Exit: price crosses below lower BB (stoploss) OR price < 1d EMA50 (trend change)
+            if (curr_low < lower_band[i] or 
                 not price_above_ema[i]):
                 signals[i] = 0.0
                 position = 0
@@ -136,8 +113,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: trend weakens (lines intertwine) OR price > 1d EMA50 (trend change)
-            if (not (lips_below_teeth[i] and teeth_below_jaw[i]) or 
+            # Exit: price crosses above upper BB (stoploss) OR price > 1d EMA50 (trend change)
+            if (curr_high > upper_band[i] or 
                 not price_below_ema[i]):
                 signals[i] = 0.0
                 position = 0
