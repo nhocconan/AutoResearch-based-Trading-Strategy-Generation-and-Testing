@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
-# Uses Donchian channel breakouts for entry, volume spike (>2.0x 20-bar MA) for confirmation,
-# and ATR(14) trailing stop for risk control. Designed for 4h timeframe to achieve
-# 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.30).
-# Works in both bull and bear markets via volatility-based breakouts and tight entry conditions.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses Camarilla pivot levels from daily timeframe for structure, breaks above R3 or below S3 for entry,
+# confirmed by 1d EMA34 trend and volume spike (>2.0x 20-bar MA). Designed for 6h timeframe to achieve
+# 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25). Works in both bull and bear
+# markets via volatility-based breakouts and tight entry conditions requiring confluence of structure,
+# trend, and volume.
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,32 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Daily HTF data for Camarilla pivots and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla equations
+    R3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    S3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    R4 = prev_close + 1.1 * (prev_high - prev_low)
+    S4 = prev_close - 1.1 * (prev_high - prev_low)
+    
+    # Align daily levels to 6h timeframe (wait for completed daily bar)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 2.0)
     
-    # ATR(14) for stoploss and position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    atr_stop = 0.0
     
     # Start after warmup for all indicators
-    start_idx = max(lookback, 20, 14) + 1  # 21
+    start_idx = 35  # Need 34 for EMA + 1 for Camarilla shift
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(atr[i]):
+        if np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(ema_34_6h[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -59,47 +73,37 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Donchian breakout conditions
-        breakout_up = curr_high > highest_high[i-1]  # Break above previous period's high
-        breakdown_down = curr_low < lowest_low[i-1]  # Break below previous period's low
-        
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND volume confirmation
-            if breakout_up and vol_confirm:
-                signals[i] = 0.30
+            # Long: Price breaks above R3, above daily EMA34, and volume confirmation
+            if curr_high > R3_6h[i] and curr_close > ema_34_6h[i] and vol_confirm:
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                atr_stop = entry_price - 2.5 * atr[i]  # 2.5x ATR stoploss
-            # Short: Donchian breakdown down AND volume confirmation
-            elif breakdown_down and vol_confirm:
-                signals[i] = -0.30
+            # Short: Price breaks below S3, below daily EMA34, and volume confirmation
+            elif curr_low < S3_6h[i] and curr_close < ema_34_6h[i] and vol_confirm:
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                atr_stop = entry_price + 2.5 * atr[i]  # 2.5x ATR stoploss
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update ATR trailing stop (only move up)
-            atr_stop = max(atr_stop, curr_close - 2.5 * atr[i])
-            # Exit on stoploss hit
-            if curr_low <= atr_stop:
+            # Exit on close below R3 (failed breakout) or below daily EMA34
+            if curr_close < R3_6h[i] or curr_close < ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update ATR trailing stop (only move down)
-            atr_stop = min(atr_stop, curr_close + 2.5 * atr[i])
-            # Exit on stoploss hit
-            if curr_high >= atr_stop:
+            # Exit on close above S3 (failed breakdown) or above daily EMA34
+            if curr_close > S3_6h[i] or curr_close > ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
