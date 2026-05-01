@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Camarilla R3/S3 levels for balanced breakout sensitivity.
-# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
-# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 12h timeframe to reduce trade frequency and fee drag. Camarilla R3/S3 levels provide
+# strong support/resistance. Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 20-period median.
+# Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 20-period median.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
-# Works in bull markets (trend continuation) and bear markets (sharp reversals on volume spikes at key levels).
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# Works in bull markets (trend continuation at key levels) and bear markets (sharp reversals on volume spikes).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
