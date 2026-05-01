@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 AND 4h EMA50 uptrend AND volume > 2.0x 20-period median.
-# Short when price breaks below Camarilla S3 AND 4h EMA50 downtrend AND volume > 2.0x 20-period median.
-# Uses ATR-based stoploss: exit long if price < highest_high_since_entry - 2.0*ATR(14),
-# exit short if price > lowest_low_since_entry + 2.0*ATR(14).
-# Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years).
-# Uses session filter (08-20 UTC) to reduce noise trades.
-# Position size: 0.20 (20% of capital) to manage drawdown in bear markets.
+# Hypothesis: 6h Williams Alligator + Elder Ray combination with 1w trend filter.
+# Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price.
+# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when: Alligator aligned bullish (Lips > Teeth > Jaw) AND Bull Power > 0 AND 1w close > 1w EMA21.
+# Short when: Alligator aligned bearish (Lips < Teeth < Jaw) AND Bear Power > 0 AND 1w close < 1w EMA21.
+# Uses ATR-based trailing stop: exit long if price < highest_since_entry - 2.0*ATR(20),
+# exit short if price > lowest_since_entry + 2.0*ATR(20).
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Volume_ATR_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,50 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid per-bar datetime operations
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 4h EMA50 for trend filter (loaded ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1w EMA21 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate 1d Camarilla pivot points (R3, S3) - loaded ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Williams Alligator components on median price
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Camarilla levels: based on previous day's OHLC
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Elder Ray components
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Calculate Camarilla R3 and S3
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # Align Camarilla levels to 1h timeframe (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 14-period ATR for stoploss
+    # ATR for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 20-period volume median for volume confirmation
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,52 +57,46 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA, ATR, and volume median
-    start_idx = 100
+    # Start after warmup for Alligator (max shift 8), EMA13, ATR
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if outside trading session (08-20 UTC)
-        if not in_session[i]:
-            signals[i] = 0.0
-            if position != 0:
-                position = 0
-            continue
-        
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_median_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_atr = atr[i]
         
-        # Trend filter: 4h EMA50 direction
-        uptrend = curr_close > ema_50_4h_aligned[i]
-        downtrend = curr_close < ema_50_4h_aligned[i]
+        # Williams Alligator alignment
+        bullish_aligned = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_aligned = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period volume median
-        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
-            volume_confirm = False
-        else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
+        # Elder Ray signals
+        bull_strong = bull_power[i] > 0
+        bear_strong = bear_power[i] > 0
+        
+        # 1w trend filter
+        uptrend_1w = curr_close > ema_21_1w_aligned[i]
+        downtrend_1w = curr_close < ema_21_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 AND uptrend AND volume spike AND in session
-            if curr_close > camarilla_r3_aligned[i] and uptrend and volume_confirm:
-                signals[i] = 0.20
+            # Long: Bullish Alligator + Bull Power > 0 + 1w uptrend
+            if bullish_aligned and bull_strong and uptrend_1w:
+                signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below Camarilla S3 AND downtrend AND volume spike AND in session
-            elif curr_close < camarilla_s3_aligned[i] and downtrend and volume_confirm:
-                signals[i] = -0.20
+            # Short: Bearish Alligator + Bear Power > 0 + 1w downtrend
+            elif bearish_aligned and bear_strong and downtrend_1w:
+                signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
                 highest_since_entry = curr_close
@@ -133,25 +109,29 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Camarilla S3 break OR trend reversal
+            # Exit conditions: ATR stoploss OR Alligator reversal OR Elder Ray weakening
             stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or curr_close < camarilla_s3_aligned[i] or not uptrend:
+            if (curr_close < stop_price or 
+                not bullish_aligned or 
+                bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Update lowest low since entry
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Camarilla R3 break OR trend reversal
+            # Exit conditions: ATR stoploss OR Alligator reversal OR Elder Ray weakening
             stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or curr_close > camarilla_r3_aligned[i] or not downtrend:
+            if (curr_close > stop_price or 
+                not bearish_aligned or 
+                bear_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
