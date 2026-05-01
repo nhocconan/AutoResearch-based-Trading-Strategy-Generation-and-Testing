@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
-# Uses 1d EMA34 as trend filter and 1d ATR for volatility-based stoploss.
-# Works in bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
-# Discrete position sizing 0.25 balances return and drawdown. Target: 50-150 trades over 4 years (12-37/year).
+# Hypothesis: 4h Camarilla R4/S4 breakout with 12h EMA50 trend filter and volume confirmation.
+# Uses tighter Camarilla levels (R4/S4) for stronger breakouts, 12h EMA50 for trend, and volume spike for confirmation.
+# Designed for lower trade frequency (<150/year) to avoid fee drift, works in both bull and bear via trend alignment.
+# Discrete position sizing 0.25 to balance return and drawdown.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d ATR for volatility-based stoploss (optional, can add later)
-    tr1 = pd.Series(df_1d['high']).shift(0) - pd.Series(df_1d['low']).shift(0)
-    tr2 = abs(pd.Series(df_1d['high']).shift(0) - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']).shift(0) - pd.Series(df_1d['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 1d Camarilla pivot levels (R3, S3) - strong breakout levels
+    # Calculate 1d Camarilla pivot levels (R4, S4) - stronger breakout levels
     # Camarilla: based on previous day's high, low, close
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    prev_daily_high = df_1d['high'].shift(1).values
-    prev_daily_low = df_1d['low'].shift(1).values
-    prev_daily_close = df_1d['close'].shift(1).values
+    # R4 = close + (high - low) * 1.1/2
+    # S4 = close - (high - low) * 1.1/2
+    prev_daily_high = df_12h['high'].shift(1).values
+    prev_daily_low = df_12h['low'].shift(1).values
+    prev_daily_close = df_12h['close'].shift(1).values
     
-    camarilla_r3 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 4
-    camarilla_s3 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 4
+    camarilla_r4 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 2
+    camarilla_s4 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 2
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
     
-    # 12h Camarilla pivot levels (R3, S3) for breakout
-    # Based on previous 12h bar's high, low, close
+    # 4h Camarilla pivot levels (R4, S4) for breakout
+    # Based on previous 4h bar's high, low, close
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -62,25 +54,25 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    camarilla_r3_12h = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3_12h = prev_close - (prev_high - prev_low) * 1.1 / 4
+    camarilla_r4_4h = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s4_4h = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume on 12h
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.5)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(34, 20) + 1  # 35 (for EMA34 and volume MA)
+    start_idx = max(50, 20) + 1  # 51 (for EMA50 and volume MA)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_r3_12h[i]) or
-            np.isnan(camarilla_s3_12h[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(camarilla_r4_4h[i]) or
+            np.isnan(camarilla_s4_4h[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             if position != 0:
@@ -92,44 +84,44 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 12h EMA50 direction
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 12h Camarilla breakout conditions
-        breakout_r3 = curr_high > camarilla_r3_12h[i]  # Break above 12h R3
-        breakdown_s3 = curr_low < camarilla_s3_12h[i]  # Break below 12h S3
+        # 4h Camarilla R4/S4 breakout conditions
+        breakout_r4 = curr_high > camarilla_r4_4h[i]  # Break above 4h R4
+        breakdown_s4 = curr_low < camarilla_s4_4h[i]  # Break below 4h S4
         
-        # Daily Camarilla R3/S3 confirmation
-        confirm_r3 = curr_close > camarilla_r3_aligned[i]  # Confirm above daily R3
-        confirm_s3 = curr_close < camarilla_s3_aligned[i]  # Confirm below daily S3
+        # Daily Camarilla R4/S4 confirmation
+        confirm_r4 = curr_close > camarilla_r4_aligned[i]  # Confirm above daily R4
+        confirm_s4 = curr_close < camarilla_s4_aligned[i]  # Confirm below daily S4
         
         if position == 0:  # Flat - look for new entries
-            # Long: 12h R3 breakout AND daily R3 confirmation AND uptrend AND volume confirmation
-            if breakout_r3 and confirm_r3 and uptrend and vol_confirm:
+            # Long: 4h R4 breakout AND daily R4 confirmation AND uptrend AND volume confirmation
+            if breakout_r4 and confirm_r4 and uptrend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: 12h S3 breakdown AND daily S3 confirmation AND downtrend AND volume confirmation
-            elif breakdown_s3 and confirm_s3 and downtrend and vol_confirm:
+            # Short: 4h S4 breakdown AND daily S4 confirmation AND downtrend AND volume confirmation
+            elif breakdown_s4 and confirm_s4 and downtrend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on 12h S3 breakdown (reversal signal)
-            if curr_low < camarilla_s3_12h[i]:
+            # Exit on 4h S4 breakdown (reversal signal)
+            if curr_low < camarilla_s4_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on 12h R3 breakout (reversal signal)
-            if curr_high > camarilla_r3_12h[i]:
+            # Exit on 4h R4 breakout (reversal signal)
+            if curr_high > camarilla_r4_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
