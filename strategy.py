@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter.
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range).
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average AND chop > 61.8.
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 20-50 trades/year.
-# Donchian breakout captures momentum, volume spike confirms institutional interest, chop filter avoids whipsaws in strong trends.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) by requiring both conditions.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Uses 1w EMA50 for primary trend direction to avoid counter-trend trades.
+# Long when: price breaks above Donchian(20) high AND price > 1w EMA50 AND volume > 1.5x 20-period average volume.
+# Short when: price breaks below Donchian(20) low AND price < 1w EMA50 AND volume > 1.5x 20-period average volume.
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 15-25 trades/year.
+# Donchian channels provide structural breakout signals; 1w EMA50 ensures alignment with higher timeframe trend.
+# Volume confirmation filters false breakouts. Works in bull (trend following) and bear (avoiding false signals in ranging markets).
 
-name = "4h_Donchian20_1dVolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,48 +28,33 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for volume and chop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d volume spike: current volume > 1.5x 20-period average
-    vol_20ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (1.5 * vol_20ma)
+    # Calculate 1w EMA50
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d chopiness index: CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(N)
-    # Simplified: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) channels
+    lookback = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    for i in range(lookback-1, n):
+        donchian_high[i] = np.max(high[i-lookback+1:i+1])
+        donchian_low[i] = np.min(low[i-lookback+1:i+1])
     
-    atr_1 = pd.Series(tr).rolling(window=1, min_periods=1).sum().values  # sum of ATR(1) over period
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high - min_low
-    
-    chop = 100 * np.log10(atr_1 / range_14) / np.log10(14)
-    chop = np.where(range_14 == 0, 100, chop)  # avoid division by zero
-    
-    # Align 1d indicators to 4h
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate 4h Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period average volume for confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(19, n):
+        avg_volume[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = max(lookback-1, 49, 19)  # warmup for Donchian, EMA, and volume
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -85,54 +71,53 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_high_20 = high_20[i]
-        curr_low_20 = low_20[i]
-        curr_volume_spike = volume_spike_aligned[i] > 0.5  # boolean
-        curr_chop = chop_aligned[i]
+        curr_volume = volume[i]
+        curr_donchian_high = donchian_high[i]
+        curr_donchian_low = donchian_low[i]
+        curr_ema_50 = ema_50_1w_aligned[i]
+        curr_avg_volume = avg_volume[i]
         
-        # Chop regime: only trade in range markets (CHOP > 61.8)
-        in_range = curr_chop > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = curr_volume > (1.5 * curr_avg_volume)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high AND volume spike AND in range
-            if (curr_close > curr_high_20 and 
-                curr_volume_spike and 
-                in_range):
+            # Long: price breaks above Donchian high AND price > 1w EMA50 AND volume confirmed
+            if (curr_close > curr_donchian_high and 
+                curr_close > curr_ema_50 and 
+                volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND volume spike AND in range
-            elif (curr_close < curr_low_20 and 
-                  curr_volume_spike and 
-                  in_range):
+            # Short: price breaks below Donchian low AND price < 1w EMA50 AND volume confirmed
+            elif (curr_close < curr_donchian_low and 
+                  curr_close < curr_ema_50 and 
+                  volume_confirmed):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR loss of volume spike OR chop < 38.2 (trend)
-            if (curr_close < curr_low_20 or 
-                not curr_volume_spike or 
-                curr_chop < 38.2):
+            # Exit: price breaks below Donchian low (stoploss) OR price < 1w EMA50 (trend change)
+            if (curr_close < curr_donchian_low or 
+                curr_close < curr_ema_50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR loss of volume spike OR chop < 38.2 (trend)
-            if (curr_close > curr_high_20 or 
-                not curr_volume_spike or 
-                curr_chop < 38.2):
+            # Exit: price breaks above Donchian high (stoploss) OR price > 1w EMA50 (trend change)
+            if (curr_close > curr_donchian_high or 
+                curr_close > curr_ema_50):
                 signals[i] = 0.0
                 position = 0
             else:
