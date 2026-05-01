@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-# Donchian breakouts capture medium-term trends. 1d ADX > 25 ensures we trade only in trending markets.
-# Volume confirmation filters false breakouts. Works in bull (buy upside breakouts) and bear (sell downside breakouts).
-# Discrete sizing 0.25 minimizes fee churn. Target: 12-37 trades/year on 12h timeframe.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian upper channel AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian lower channel AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture medium-term trends.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via ADX filter.
 
-name = "12h_Donchian20_1dADX_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -79,11 +80,12 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high_values = donchian_high.values
-    donchian_low_values = donchian_low.values
+    # Donchian Channel (20-period) on 4h data
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min()
+    
+    upper_values = upper_channel.values
+    lower_values = lower_channel.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,10 +93,10 @@ def generate_signals(prices):
     start_idx = 50  # warmup for Donchian and ADX
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 12h timeframe
+        # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_values[i]) or np.isnan(donchian_low_values[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(upper_values[i]) or np.isnan(lower_values[i]):
             signals[i] = 0.0
             continue
         
@@ -103,10 +105,10 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_donchian_high = donchian_high_values[i]
-        curr_donchian_low = donchian_low_values[i]
+        curr_upper = upper_values[i]
+        curr_lower = lower_values[i]
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -118,19 +120,21 @@ def generate_signals(prices):
         volume_confirm = curr_vol > (vol_ma * 1.5)
         
         # Donchian breakout signals
-        upside_breakout = curr_high > curr_donchian_high
-        downside_breakout = curr_low < curr_donchian_low
+        # Long: price breaks above upper channel
+        # Short: price breaks below lower channel
+        breakout_up = curr_high > curr_upper
+        breakout_down = curr_low < curr_lower
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: upside Donchian breakout AND ADX > 25 AND volume confirmation
-            if (upside_breakout and 
+            # Long: breakout up AND ADX > 25 AND volume confirmation
+            if (breakout_up and 
                 curr_adx > 25 and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: downside Donchian breakout AND ADX > 25 AND volume confirmation
-            elif (downside_breakout and 
+            # Short: breakout down AND ADX > 25 AND volume confirmation
+            elif (breakout_down and 
                   curr_adx > 25 and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -139,8 +143,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: downside Donchian breakout (trend change) OR ADX < 20 (trend weakening)
-            if (downside_breakout or 
+            # Exit: price crosses below lower channel (mean reversion) OR ADX < 20 (trend weakening)
+            if (curr_close < curr_lower or 
                 curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
@@ -148,8 +152,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: upside Donchian breakout (trend change) OR ADX < 20 (trend weakening)
-            if (upside_breakout or 
+            # Exit: price crosses above upper channel (mean reversion) OR ADX < 20 (trend weakening)
+            if (curr_close > curr_upper or 
                 curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
