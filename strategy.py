@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper band AND 1d close > EMA50 AND volume > 1.8x 20-bar average.
-# Short when price breaks below lower band AND 1d close < EMA50 AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Volume spike threshold set to 1.8x to reduce false breakouts and improve signal quality.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1d close > EMA50 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1d close < EMA50 AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
 # Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 12h, HTF: 1d for trend filter.
+# Primary timeframe: 4h, HTF: 1d for trend filter.
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,11 +38,26 @@ def generate_signals(prices):
     # Calculate 1d close aligned for trend bias
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate Donchian channels (20-period) from 12h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous day (using 1d data)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: current 12h volume > 1.8x 20-bar average
+    # Previous day's high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # shift(1) to use previous completed day
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla levels: R3/S3
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: current 4h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -52,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(ema_aligned[i]) or np.isnan(close_1d_aligned[i]) or \
-           np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma[i]):
+           np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -66,11 +81,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Donchian breakout signals
-        breakout_up = curr_high > high_20[i]  # break above upper band
-        breakout_down = curr_low < low_20[i]  # break below lower band
+        # Camarilla breakout signals
+        breakout_up = curr_high > r3_aligned[i]  # break above R3
+        breakout_down = curr_low < s3_aligned[i]  # break below S3
         
         # Trend filter: use 1d close vs its EMA50 for bias
         bullish_bias = close_1d_aligned[i] > ema_aligned[i]  # 1d close above its EMA50 = bullish
@@ -78,13 +93,13 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper band AND bullish bias AND volume confirmation
+            # Long: breakout above R3 AND bullish bias AND volume confirmation
             if (breakout_up and 
                 bullish_bias and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band AND bearish bias AND volume confirmation
+            # Short: breakout below S3 AND bearish bias AND volume confirmation
             elif (breakout_down and 
                   bearish_bias and 
                   volume_confirm):
@@ -94,8 +109,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower band (stoploss) OR bearish bias (trend change)
-            if (curr_low < low_20[i] or 
+            # Exit: price crosses below S3 (stoploss) OR bearish bias (trend change)
+            if (curr_low < s3_aligned[i] or 
                 bearish_bias):
                 signals[i] = 0.0
                 position = 0
@@ -103,8 +118,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band (stoploss) OR bullish bias (trend change)
-            if (curr_high > high_20[i] or 
+            # Exit: price crosses above R3 (stoploss) OR bullish bias (trend change)
+            if (curr_high > r3_aligned[i] or 
                 bullish_bias):
                 signals[i] = 0.0
                 position = 0
