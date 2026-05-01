@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2x 20-bar average.
-# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to balance trade frequency and edge.
-# Camarilla pivots provide mathematically derived support/resistance levels that work well in crypto.
-# 1d EMA34 trend filter ensures alignment with daily momentum.
-# Volume spike requirement (2x average) reduces false breakouts and improves signal quality.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian band AND 1d EMA34 rising AND volume > 1.5x 20-bar average.
+# Short when price breaks below lower Donchian band AND 1d EMA34 falling AND volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture swings.
+# Donchian channels adapt to volatility and provide objective breakout levels.
+# 1d EMA34 trend filter ensures alignment with higher timeframe momentum.
+# Volume spike requirement reduces false breakouts and improves signal quality.
 # Target: 75-200 total trades over 4 years (19-50/year) for BTC/ETH/SOL.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,7 +32,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA34 calculation
@@ -45,35 +45,23 @@ def generate_signals(prices):
     ema_34_rising = ema_34_slope > 0
     ema_34_falling = ema_34_slope < 0
     
-    # Calculate Camarilla levels for each 4h bar using prior 1d OHLC
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # We need prior 1d close, high, low for each 4h bar
-    close_1d_shifted = np.roll(close_1d, 1)  # previous day close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align prior 1d OHLC to 4h timeframe
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    
-    # Calculate Camarilla R3 and S3
-    camarilla_r3 = close_1d_aligned + (high_1d_aligned - low_1d_aligned) * 1.1 / 2
-    camarilla_s3 = close_1d_aligned - (high_1d_aligned - low_1d_aligned) * 1.1 / 2
-    
-    # Volume confirmation: current 4h volume > 2x 20-bar average
+    # Volume confirmation: current 4h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and indicator calculation
+    start_idx = 50  # warmup for EMA and Donchian calculation
     
     for i in range(start_idx, n):
         # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -87,21 +75,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3[i]  # break above R3
-        breakout_down = curr_low < camarilla_s3[i]   # break below S3
+        # Donchian breakout signals
+        breakout_up = curr_high > highest_high[i]  # break above upper band
+        breakout_down = curr_low < lowest_low[i]   # break below lower band
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND 1d EMA34 rising AND volume confirmation
+            # Long: breakout above upper band AND 1d EMA34 rising AND volume confirmation
             if (breakout_up and 
                 ema_34_rising[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 AND 1d EMA34 falling AND volume confirmation
+            # Short: breakout below lower band AND 1d EMA34 falling AND volume confirmation
             elif (breakout_down and 
                   ema_34_falling[i] and 
                   volume_confirm):
@@ -111,8 +99,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR 1d EMA34 falls (trend change)
-            if (curr_low < camarilla_s3[i] or 
+            # Exit: price crosses below lower band (stoploss) OR 1d EMA34 falls (trend change)
+            if (curr_low < lowest_low[i] or 
                 ema_34_falling[i]):
                 signals[i] = 0.0
                 position = 0
@@ -120,8 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR 1d EMA34 rises (trend change)
-            if (curr_high > camarilla_r3[i] or 
+            # Exit: price crosses above upper band (stoploss) OR 1d EMA34 rises (trend change)
+            if (curr_high > highest_high[i] or 
                 ema_34_rising[i]):
                 signals[i] = 0.0
                 position = 0
