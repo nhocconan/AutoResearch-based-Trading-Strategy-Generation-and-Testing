@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend + volume confirmation.
-# Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 1.5x 12h volume average.
-# Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 1.5x 12h volume average.
+# Hypothesis: 4h Camarilla R3/S3 breakout + 12h EMA50 trend + volume spike filter.
+# Long when price breaks above Camarilla R3 AND price > 12h EMA50 AND volume > 1.5x 4h volume average.
+# Short when price breaks below Camarilla S3 AND price < 12h EMA50 AND volume > 1.5x 4h volume average.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Combines pivot-based price structure with daily trend filter and volume spike for momentum confirmation.
+# Combines proven Camarilla pivot structure with intermediate trend and volume confirmation.
 # Works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend).
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,40 +33,41 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h Camarilla levels (based on previous 12h bar)
+    # Calculate Camarilla levels (based on previous period's range)
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using previous bar's OHLC to avoid look-ahead
-    prev_close = np.concatenate([[close[0]], close[:-1]])
+    # Using previous bar's high/low/close for forward-looking safety
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2.0
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2.0
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    camarilla_range = prev_high - prev_low
+    camarilla_r3 = prev_close + 1.1 * camarilla_range / 2.0
+    camarilla_s3 = prev_close - 1.1 * camarilla_range / 2.0
     
-    # Load 1d data ONCE before loop for EMA34 (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop for EMA50 (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 12h volume average (20-period)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, and volume
+    # Start after warmup for Camarilla, ATR, EMA, and volume
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_12h[i]) or
-            np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i])):
+        if (np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -75,19 +76,19 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 12h volume average
-        if vol_ma_12h[i] <= 0 or np.isnan(vol_ma_12h[i]):
+        # Volume confirmation: current volume > 1.5x 4h volume average
+        if vol_ma_4h[i] <= 0 or np.isnan(vol_ma_4h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma_12h[i] * 1.5)
+            volume_confirm = curr_volume > (vol_ma_4h[i] * 1.5)
         
         # Camarilla breakout conditions
         bullish_breakout = curr_high > camarilla_r3[i]  # break above R3
         bearish_breakout = curr_low < camarilla_s3[i]   # break below S3
         
-        # Trend filter: price vs 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price vs 12h EMA50
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Bullish breakout AND uptrend AND volume confirmation
