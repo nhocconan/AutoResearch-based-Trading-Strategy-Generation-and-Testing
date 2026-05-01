@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
-# Long when price breaks above 20-period high AND 12h HMA21 uptrend AND volume > 1.8x 20-period median.
-# Short when price breaks below 20-period low AND 12h HMA21 downtrend AND volume > 1.8x 20-period median.
-# Uses ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5*ATR(14),
-# exit short if price > lowest_low_since_entry + 2.5*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year on 4h timeframe.
+# Hypothesis: 1d Donchian(20) breakout with 1w HMA21 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND 1w HMA21 uptrend AND volume > 2.0x 20-period median.
+# Short when price breaks below 20-period low AND 1w HMA21 downtrend AND volume > 2.0x 20-period median.
+# Uses ATR-based stoploss: exit long if price < highest_high_since_entry - 2.0*ATR(14),
+# exit short if price > lowest_low_since_entry + 2.0*ATR(14).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-25 trades/year on 1d timeframe.
 # HMA is smoother than EMA with less lag, improving trend reliability in both bull and bear markets.
-# Using 12h HTF instead of 1d for faster trend adaptation while avoiding noise.
+# Using 1w HTF for stronger trend filter to avoid whipsaws in ranging markets.
 
-name = "4h_Donchian20_Breakout_12hHMA21_VolumeSpike_ATR_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wHMA21_VolumeSpike_ATR_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +26,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h HMA21 for trend filter (loaded once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Calculate 1w HMA21 for trend filter (loaded once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
     # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half = df_12h['close'].rolling(window=21//2, min_periods=21//2).mean()
-    full = df_12h['close'].rolling(window=21, min_periods=21).mean()
+    half = df_1w['close'].rolling(window=21//2, min_periods=21//2).mean()
+    full = df_1w['close'].rolling(window=21, min_periods=21).mean()
     raw_hma = 2 * half - full
-    hma_21_12h = raw_hma.rolling(window=int(np.sqrt(21)), min_periods=int(np.sqrt(21))).mean().values
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
+    hma_21_1w = raw_hma.rolling(window=int(np.sqrt(21)), min_periods=int(np.sqrt(21))).mean().values
+    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -62,7 +62,7 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(hma_21_12h_aligned[i]) or 
+        if (np.isnan(hma_21_1w_aligned[i]) or 
             np.isnan(high_20[i]) or 
             np.isnan(low_20[i]) or 
             np.isnan(vol_median_20[i]) or 
@@ -76,15 +76,15 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 12h HMA21 direction
-        uptrend = curr_close > hma_21_12h_aligned[i]
-        downtrend = curr_close < hma_21_12h_aligned[i]
+        # Trend filter: 1w HMA21 direction
+        uptrend = curr_close > hma_21_1w_aligned[i]
+        downtrend = curr_close < hma_21_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period volume median
+        # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
+            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
         
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above 20-period high AND uptrend AND volume spike
@@ -110,7 +110,7 @@ def generate_signals(prices):
                 highest_since_entry = curr_close
             
             # Exit conditions: ATR stoploss OR Donchian break OR trend reversal
-            stop_price = highest_since_entry - 2.5 * curr_atr
+            stop_price = highest_since_entry - 2.0 * curr_atr
             if curr_close < stop_price or curr_close < low_20[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
@@ -123,7 +123,7 @@ def generate_signals(prices):
                 lowest_since_entry = curr_close
             
             # Exit conditions: ATR stoploss OR Donchian break OR trend reversal
-            stop_price = lowest_since_entry + 2.5 * curr_atr
+            stop_price = lowest_since_entry + 2.0 * curr_atr
             if curr_close > stop_price or curr_close > high_20[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
