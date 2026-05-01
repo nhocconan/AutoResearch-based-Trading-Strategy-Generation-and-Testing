@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses Donchian channel for breakout detection, filtered by 1d EMA34 trend and volume > 1.8x 20-period median.
 # Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
 # Discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Timeframe: 12h as specified in experiment #114092.
 
-name = "6h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
