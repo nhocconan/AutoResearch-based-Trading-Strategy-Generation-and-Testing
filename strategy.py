@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume spike (>2.0x 20-bar avg), and ATR(14) stoploss (2.0x).
-# Uses 4h for signal generation and structure (Donchian channels from last 20 closed 4h bars).
-# 12h EMA50 for trend filter to avoid counter-trend trades in ranging/bear markets.
-# Long when price breaks above Donchian upper channel with 12h EMA50 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below Donchian lower channel with 12h EMA50 downtrend and volume confirmation.
+# Hypothesis: 1d KAMA direction + RSI(14) + Choppiness Index regime filter.
+# Uses 1d timeframe for signal generation.
+# KAMA(10,2,30) for adaptive trend direction to avoid whipsaws in ranging markets.
+# RSI(14) for momentum confirmation (long when RSI>50, short when RSI<50).
+# Choppiness Index(14) > 61.8 for ranging regime (mean reversion at Bollinger Bands),
+# < 38.2 for trending regime (trend following with KAMA).
+# Volume confirmation: current volume > 1.3x 20-bar average.
 # Discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
 # Session filter: 08-20 UTC to reduce noise trades.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag.
+# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag.
 
-name = "4h_Donchian_20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,15 +31,6 @@ def generate_signals(prices):
     # Pre-compute session hours for 08-20 UTC filter
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -45,18 +38,40 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) using closed 4h bars only
-    # Upper channel: highest high of last 20 closed bars (exclude current forming bar)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate KAMA(10,2,30) for trend direction
+    close_s = pd.Series(close)
+    direction = np.abs(close_s.diff(10))
+    volatility = close_s.diff(1).abs().rolling(window=10, min_periods=10).sum()
+    er = direction / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate RSI(14) for momentum
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # Calculate Choppiness Index(14) for regime filter
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max()
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 50  # warmup for 12h EMA50 and Donchian(20)
+    start_idx = 30  # warmup for KAMA and RSI
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -64,44 +79,68 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
+        if (np.isnan(kama[i]) or np.isnan(atr[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-bar average
+        # Volume confirmation: current volume > 1.3x 20-bar average
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         if vol_ma <= 0:
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma * 2.0)
+            volume_confirm = curr_volume > (vol_ma * 1.3)
         
-        # Donchian breakout conditions (using closed-bar channels)
-        breakout_up = curr_close > donchian_upper[i]  # break above upper channel
-        breakout_down = curr_close < donchian_lower[i]  # break below lower channel
+        # Regime filter based on Choppiness Index
+        chop_value = chop[i]
+        ranging_regime = chop_value > 61.8
+        trending_regime = chop_value < 38.2
         
-        # 12h EMA50 trend filter: price above EMA = uptrend, below = downtrend
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # KAMA direction: price above KAMA = uptrend, below = downtrend
+        uptrend = close[i] > kama[i]
+        downtrend = close[i] < kama[i]
+        
+        # RSI momentum: >50 bullish, <50 bearish
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND uptrend AND volume confirmation
-            if (breakout_up and 
-                uptrend and 
-                volume_confirm):
+            # Long: KAMA uptrend AND RSI bullish AND volume confirmation
+            # In trending regime: follow KAMA+RSI
+            # In ranging regime: mean reversion at extremes (RSI<30 for long, RSI>70 for short)
+            if (uptrend and 
+                rsi_bullish and 
+                volume_confirm and
+                trending_regime):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Donchian breakout down AND downtrend AND volume confirmation
-            elif (breakout_down and 
-                  downtrend and 
-                  volume_confirm):
+            # Short: KAMA downtrend AND RSI bearish AND volume confirmation
+            elif (downtrend and 
+                  rsi_bearish and 
+                  volume_confirm and
+                  trending_regime):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
+            # Ranging regime: mean reversion at Bollinger Band-like extremes
+            elif (ranging_regime and
+                  volume_confirm):
+                # Long when oversold (RSI<30) and price near recent low
+                if (rsi[i] < 30 and 
+                    curr_close <= ll[i] * 1.02):  # within 2% of recent low
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = curr_close
+                # Short when overbought (RSI>70) and price near recent high
+                elif (rsi[i] > 70 and 
+                      curr_close >= hh[i] * 0.98):  # within 2% of recent high
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = curr_close
             else:
                 signals[i] = 0.0
         
@@ -111,9 +150,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR trend changes to downtrend
-            elif (curr_close < donchian_upper[i] and curr_close > donchian_lower[i]) or \
-                 not uptrend:
+            # Exit: trend changes to downtrend OR RSI becomes bearish
+            elif not uptrend or not rsi_bullish:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -126,9 +164,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR trend changes to uptrend
-            elif (curr_close < donchian_upper[i] and curr_close > donchian_lower[i]) or \
-                 not downtrend:
+            # Exit: trend changes to uptrend OR RSI becomes bullish
+            elif not downtrend or not rsi_bearish:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
