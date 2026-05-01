@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray (Bull/Bear Power) with 12h trend filter.
-# Long when: Alligator jaws (13) < teeth (8) < lips (5) (bullish alignment) AND Elder Bull Power > 0 AND 12h close > 12h EMA34
-# Short when: Alligator jaws > teeth > lips (bearish alignment) AND Elder Bear Power < 0 AND 12h close < 12h EMA34
-# Exit when: Alligator alignment breaks OR Elder Power reverses OR 12h trend changes.
-# Williams Alligator identifies trend via SMAs (5,8,13). Elder Power measures bull/bear strength relative to EMA13.
-# Combines trend confirmation (Alligator) with momentum (Elder Power) and HTF trend filter (12h EMA34).
-# Target: 12-37 trades/year on 6h. Discrete sizing 0.25 to balance return and fee drag.
-# Works in bull (Alligator bullish + Elder Bull Power > 0) and bear (Alligator bearish + Elder Bear Power < 0).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when: price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND 4h volume > 2.0x 20-period average
+# Short when: price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND 4h volume > 2.0x 20-period average
+# Uses Camarilla pivots from 1d for structure, 1d EMA34 for trend alignment, volume spike for conviction.
+# Target: 20-50 trades/year on 4h. Discrete sizing 0.30 to balance return and fee drag.
+# Works in bull (breakouts with trend) and bear (breakdowns with trend) by trading with aligned 1d trend.
 
-name = "6h_Alligator_ElderPower_12hEMA34_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,53 +22,55 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 6h data ONCE before loop for price action and Elder Power calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 34:
+    # Load 4h data ONCE before loop for volume calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for Alligator and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 12h: SMAs of median price
-    # Median price = (high + low) / 2
-    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2.0
+    # Calculate 1d Camarilla levels (R3, S3) from previous day's OHLC
+    # Camarilla: R3 = H + 1.1*(H-L)/2, S3 = L - 1.1*(H-L)/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator Lips: SMA(5) of median price
-    lips_12h = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().values
-    # Alligator Teeth: SMA(8) of median price
-    teeth_12h = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().values
-    # Alligator Jaws: SMA(13) of median price
-    jaws_12h = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().values
+    # Calculate Camarilla levels using previous bar's OHLC (to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan  # First bar has no previous
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align Alligator lines to 6h primary timeframe
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws_12h)
+    camarilla_hi = prev_high + 1.1 * (prev_high - prev_low) / 2.0  # R3
+    camarilla_lo = prev_low - 1.1 * (prev_high - prev_low) / 2.0   # S3
     
-    # 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align Camarilla levels to 4h primary timeframe
+    camarilla_hi_aligned = align_htf_to_ltf(prices, df_1d, camarilla_hi)
+    camarilla_lo_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lo)
     
-    # Calculate Elder Power on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13_6h = pd.Series(df_6h['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_6h = df_6h['high'].values - ema_13_6h
-    bear_power_6h = df_6h['low'].values - ema_13_6h
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Elder Power to 6h (already on 6h, but align for consistency and proper timing)
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power_6h)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power_6h)
+    # 4h volume average (20-period) for volume confirmation
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for Alligator and EMAs
+    start_idx = 35  # warmup for 1d EMA34 and Camarilla calculation
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -87,68 +87,60 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaws_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(camarilla_hi_aligned[i]) or np.isnan(camarilla_lo_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_lips = lips_aligned[i]
-        curr_teeth = teeth_aligned[i]
-        curr_jaws = jaws_aligned[i]
+        curr_vol = volume[i]
+        curr_vol_ma = vol_ma_4h_aligned[i]
+        curr_camarilla_hi = camarilla_hi_aligned[i]
+        curr_camarilla_lo = camarilla_lo_aligned[i]
         curr_ema_34 = ema_34_aligned[i]
-        curr_bull_power = bull_power_aligned[i]
-        curr_bear_power = bear_power_aligned[i]
         
-        # Alligator alignment conditions
-        alligator_bullish = (curr_jaws < curr_teeth) and (curr_teeth < curr_lips)  # Jaws < Teeth < Lips
-        alligator_bearish = (curr_jaws > curr_teeth) and (curr_teeth > curr_lips)  # Jaws > Teeth > Lips
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
-        # Elder Power conditions
-        bull_power_positive = curr_bull_power > 0
-        bear_power_negative = curr_bear_power < 0
-        
-        # 12h trend filter
-        uptrend_12h = curr_close > curr_ema_34
-        downtrend_12h = curr_close < curr_ema_34
+        # 1d trend filter
+        uptrend_1d = curr_close > curr_ema_34
+        downtrend_1d = curr_close < curr_ema_34
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Alligator bullish AND Bull Power > 0 AND 12h uptrend
-            if (alligator_bullish and 
-                bull_power_positive and 
-                uptrend_12h):
-                signals[i] = 0.25
+            # Long: break above Camarilla R3 AND 1d uptrend AND volume confirmation
+            if (curr_high > curr_camarilla_hi and 
+                uptrend_1d and 
+                volume_confirm):
+                signals[i] = 0.30
                 position = 1
-            # Short: Alligator bearish AND Bear Power < 0 AND 12h downtrend
-            elif (alligator_bearish and 
-                  bear_power_negative and 
-                  downtrend_12h):
-                signals[i] = -0.25
+            # Short: break below Camarilla S3 AND 1d downtrend AND volume confirmation
+            elif (curr_low < curr_camarilla_lo and 
+                  downtrend_1d and 
+                  volume_confirm):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator alignment breaks OR Bull Power <= 0 OR 12h trend turns down
-            if (not alligator_bullish or 
-                not bull_power_positive or 
-                not uptrend_12h):
+            # Exit: price closes below Camarilla R3 (breakdown) OR 1d trend turns down
+            if (curr_close < curr_camarilla_hi or 
+                not uptrend_1d):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Alligator alignment breaks OR Bear Power >= 0 OR 12h trend turns up
-            if (not alligator_bearish or 
-                not bear_power_negative or 
-                not downtrend_12h):
+            # Exit: price closes above Camarilla S3 (breakout) OR 1d trend turns up
+            if (curr_close > curr_camarilla_lo or 
+                not downtrend_1d):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
