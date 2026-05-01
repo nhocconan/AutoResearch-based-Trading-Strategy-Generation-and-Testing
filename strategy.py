@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and chop regime filter.
-# Uses 1d Camarilla pivot levels for structure, 1d volume spike for confirmation,
-# and 1d choppiness index to avoid ranging markets. Long when price breaks above R3
-# with volume spike and chop < 61.8 (trending). Short when price breaks below S3
-# with volume spike and chop < 61.8. Discrete sizing 0.25. Target: 25-40 trades/year.
-# Camarilla levels provide institutional support/resistance, volume confirms institutional
-# participation, chop filter ensures we trade in trending environments where breakouts work.
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1w ADX regime filter.
+# Long when: price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average AND 1w ADX > 25 (trending).
+# Short when: price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average AND 1w ADX > 25 (trending).
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 12-37 trades/year.
+# Donchian channels provide clear structure, volume confirms breakout validity, ADX ensures we only trade in trending regimes.
+# Works in bull markets (trend continuation) and bear markets (trend continuation) by aligning with higher timeframe trend strength.
 
-name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_VolumeConfirm_1wADXTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,56 +27,76 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for pivot, volume, and chop
+    # Load 1d data ONCE before loop for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (using prior day OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Prior day OHLC for current day's pivot
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 1w ADX for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    pivot_1d = (prev_high + prev_low + prev_close) / 3.0
-    range_1d = prev_high - prev_low
-    r3_1d = prev_close + (range_1d * 1.1 / 4)
-    s3_1d = prev_close - (range_1d * 1.1 / 4)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 1d levels to 4h
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # 1d volume spike: volume > 1.5 * 20-period EMA of volume
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = df_1d['volume'].values > (1.5 * vol_ema_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # 1d Choppiness Index: CHOP(14) = 100 * log10(sum(ATR(14)) / (log10(n) * (highest_high - lowest_low)))
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    # We'll use a simplified version: CHOP = 100 * (ATR(14) / (HH(14) - LL(14)))
-    # Then normalize to 0-100 scale where >61.8 = choppy/ranging
-    tr1 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum()
-    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    chop_raw = 100 * (tr1 / (hh14 - ll14))
-    # Avoid division by zero and extreme values
-    chop_raw = chop_raw.replace([np.inf, -np.inf], np.nan)
-    chop_values = chop_raw.fillna(50).values  # neutral when undefined
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        """Wilder's smoothing (similar to EMA with alpha=1/period)"""
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        result = np.full_like(values, np.nan)
+        result[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    period = 14
+    atr_1w = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align 1d volume average and 1w ADX to 12h
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate Donchian(20) on 12h
+    donchian_window = 20
+    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for indicators
+    start_idx = max(donchian_window, 30)  # warmup
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -94,52 +113,58 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(vol_spike_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_r3 = r3_1d_aligned[i]
-        curr_s3 = s3_1d_aligned[i]
-        curr_vol_spike = vol_spike_aligned[i] > 0.5  # boolean
-        curr_chop = chop_aligned[i]
+        curr_volume = volume[i]
+        curr_donchian_high = highest_high[i]
+        curr_donchian_low = lowest_low[i]
+        curr_vol_avg = vol_avg_20_aligned[i]
+        curr_adx = adx_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = curr_volume > (1.5 * curr_vol_avg)
+        
+        # Regime filter: ADX > 25 indicates trending market
+        trending_regime = curr_adx > 25
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 with volume spike and trending market (chop < 61.8)
-            if (curr_close > curr_r3 and 
-                curr_vol_spike and 
-                curr_chop < 61.8):
+            # Long: price breaks above Donchian high AND volume confirmation AND trending regime
+            if (curr_close > curr_donchian_high and 
+                volume_confirm and 
+                trending_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike and trending market (chop < 61.8)
-            elif (curr_close < curr_s3 and 
-                  curr_vol_spike and 
-                  curr_chop < 61.8):
+            # Short: price breaks below Donchian low AND volume confirmation AND trending regime
+            elif (curr_close < curr_donchian_low and 
+                  volume_confirm and 
+                  trending_regime):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below pivot OR volume dries up OR chop becomes too high (ranging)
-            if (curr_close < pivot_1d_aligned[i] or 
-                not curr_vol_spike or 
-                curr_chop > 61.8):
+            # Exit: price breaks below Donchian low (opposite side) OR loss of volume confirmation OR loss of trend
+            if (curr_close < curr_donchian_low or 
+                not volume_confirm or 
+                not trending_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above pivot OR volume dries up OR chop becomes too high (ranging)
-            if (curr_close > pivot_1d_aligned[i] or 
-                not curr_vol_spike or 
-                curr_chop > 61.8):
+            # Exit: price breaks above Donchian high (opposite side) OR loss of volume confirmation OR loss of trend
+            if (curr_close > curr_donchian_high or 
+                not volume_confirm or 
+                not trending_regime):
                 signals[i] = 0.0
                 position = 0
             else:
