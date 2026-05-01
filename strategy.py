@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when: price breaks above Camarilla R3 level AND price > 1d EMA34 AND volume > 2.0x 20-bar average
 # Short when: price breaks below Camarilla S3 level AND price < 1d EMA34 AND volume > 2.0x 20-bar average
 # Exit when: price crosses 10-period EMA (dynamic stop) OR opposite Camarilla breakout occurs
