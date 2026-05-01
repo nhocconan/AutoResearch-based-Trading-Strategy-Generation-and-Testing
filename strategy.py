@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > SMA50) and volume confirmation.
-# Long when price breaks above Donchian high(20) AND price > 1d SMA50 AND volume > 2.0x 96-bar average.
-# Short when price breaks below Donchian low(20) AND price < 1d SMA50 AND volume > 2.0x 96-bar average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (price > SMA50) and volume confirmation.
+# Long when price breaks above R3 AND price > 1d SMA50 AND volume > 2.0x 24-bar average.
+# Short when price breaks below S3 AND price < 1d SMA50 AND volume > 2.0x 24-bar average.
 # Uses discrete sizing 0.25 to limit drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 # 1d SMA50 provides robust trend alignment that works in both bull (price above SMA) and bear (price below SMA).
-# Donchian(20) offers reliable breakout points with proven edge on SOLUSDT.
+# Camarilla R3/S3 levels offer reliable breakout points with lower noise than R4/S4.
 # Volume confirmation (2.0x average) ensures only high-conviction breakouts are traded.
 
-name = "4h_Donchian20_1dSMA50_Trend_VolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dSMA50_Trend_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,7 +30,7 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 1d data ONCE before loop for SMA50 trend filter
+    # Load 1d data ONCE before loop for SMA50 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -40,21 +40,47 @@ def generate_signals(prices):
     sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
     
-    # 1d trend: price above/below SMA50
+    # Calculate Camarilla levels (based on previous day's range)
+    df_1d_copy = df_1d.copy()
+    df_1d_copy['date'] = pd.to_datetime(df_1d_copy['open_time']).dt.date
+    daily = df_1d_copy.groupby('date').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
+    
+    if len(daily) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each day
+    # Camarilla R3 = close + (high - low) * 1.1/4
+    # Camarilla S3 = close - (high - low) * 1.1/4
+    daily['camarilla_r3'] = daily['close'] + (daily['high'] - daily['low']) * 1.1 / 4
+    daily['camarilla_s3'] = daily['close'] - (daily['high'] - daily['low']) * 1.1 / 4
+    
+    # Map daily levels to 4h bars
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    
+    for i in range(n):
+        date = prices.iloc[i]['open_time'].date()
+        day_row = daily[daily['date'] == date]
+        if len(day_row) > 0:
+            camarilla_r3[i] = day_row.iloc[0]['camarilla_r3']
+            camarilla_s3[i] = day_row.iloc[0]['camarilla_s3']
+    
+    # Volume confirmation: current 4h volume > 2.0x 24-bar average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # Now set trend flags properly (using aligned SMA and current close)
     price_above_sma = close > sma_50_aligned
     price_below_sma = close < sma_50_aligned
-    
-    # Donchian(20) on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current 4h volume > 2.0x 96-bar average (approx 16d on 4h)
-    vol_ma = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for Donchian and volume MA
+    start_idx = 50  # warmup for SMA and volume MA
     
     for i in range(start_idx, n):
         # Session filter: trade only 08-20 UTC
@@ -63,7 +89,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(sma_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(sma_50_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -79,19 +105,19 @@ def generate_signals(prices):
             
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
-        # Donchian breakout signals
-        breakout_up = curr_high > donchian_high[i-1]  # break above previous Donchian high
-        breakout_down = curr_low < donchian_low[i-1]  # break below previous Donchian low
+        # Camarilla breakout signals
+        breakout_up = curr_high > camarilla_r3[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above Donchian high AND price > 1d SMA50 AND volume confirmation
+            # Long: breakout above R3 AND price > 1d SMA50 AND volume confirmation
             if (breakout_up and 
                 price_above_sma[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low AND price < 1d SMA50 AND volume confirmation
+            # Short: breakout below S3 AND price < 1d SMA50 AND volume confirmation
             elif (breakout_down and 
                   price_below_sma[i] and 
                   volume_confirm):
@@ -101,8 +127,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below Donchian low (stoploss) OR price < 1d SMA50 (trend change)
-            if (curr_low < donchian_low[i] or 
+            # Exit: price crosses below S3 (stoploss) OR price < 1d SMA50 (trend change)
+            if (curr_low < camarilla_s3[i] or 
                 not price_above_sma[i]):
                 signals[i] = 0.0
                 position = 0
@@ -110,8 +136,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian high (stoploss) OR price > 1d SMA50 (trend change)
-            if (curr_high > donchian_high[i] or 
+            # Exit: price crosses above R3 (stoploss) OR price > 1d SMA50 (trend change)
+            if (curr_high > camarilla_r3[i] or 
                 not price_below_sma[i]):
                 signals[i] = 0.0
                 position = 0
