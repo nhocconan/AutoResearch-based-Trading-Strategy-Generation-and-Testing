@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses tighter Camarilla levels (R3/S3) for stronger breakout signals, reducing trade frequency.
-# 1d EMA34 provides responsive trend filter. Volume spike (>2x 20-bar average) confirms participation.
-# Designed to generate 75-200 trades over 4 years (19-50/year) with discrete sizing (0.25).
-# Works in bull markets (buy R3 breakout with uptrend) and bear markets (sell S3 breakdown with downtrend).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels from 1d timeframe to identify key support/resistance.
+# Breakouts above R3 or below S3 are traded in the direction of 1d EMA34 trend.
+# Volume confirmation requires current volume > 2.0 * 24-period average volume (12h * 2 = 1d).
+# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
+# Works in both bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
+# Discrete position sizing (0.25) balances return and drawdown.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +27,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -46,21 +48,22 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume on 4h
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 2.0)
+    # Volume confirmation: current volume > 2.0 * 24-period average volume on 12h
+    # 24 periods of 12h = 24*12h = 288h = 12 days, but we use 24 for reasonable lookback
+    volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (volume_ma_24 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(40, 20) + 1  # 41 (for EMA34 and volume MA20)
+    start_idx = max(35, 24) + 1  # 36 (for EMA34 and volume MA24)
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_ma_20[i])):
+            np.isnan(volume_ma_24[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
