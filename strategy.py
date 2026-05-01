@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + 1d Volume Spike + Chop Regime Filter
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend presence and direction.
-# Combined with 1d volume spike for institutional confirmation and chop filter to avoid ranging markets.
-# Designed to capture strong trends in both bull and bear markets while minimizing false signals.
-# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses Donchian channel from 1d for significant breakout levels, filtered by 1w EMA trend.
+# Volume spike ensures institutional participation. Designed for low-frequency, high-conviction trades.
+# Target: 15-25 trades/year to minimize fee drag while capturing strong trends in both bull and bear markets.
 
-name = "4h_WilliamsAlligator_1dVolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,112 +22,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume spike calculation
+    # 1d HTF data for Donchian(20) breakout levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d volume spike: current 1d volume > 2.0 * 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_20_1d * 2.0)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Calculate Donchian levels from previous 20 1d bars
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Chop regime filter: CHOP(14) > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
-    # True Range calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Donchian upper = max(high of last 20 days), lower = min(low of last 20 days)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) for chop calculation
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align Donchian levels to 1d timeframe (using previous day's levels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Highest high and lowest low over last 14 periods
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # 1w HTF data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Chop calculation: 100 * log10(sum(ATR14)/ (HH14-LL14)) / log10(14)
-    chop = np.zeros_like(close)
-    for i in range(14, n):
-        if atr_14[i] > 0 and (hh_14[i] - ll_14[i]) > 0:
-            chop[i] = 100 * np.log10(atr_14[i] * 14) / np.log10(hh_14[i] - ll_14[i])
-        else:
-            chop[i] = 50  # Neutral when undefined
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    chop_filter = chop < 50  # Favor trending markets (chop < 50)
-    
-    # Williams Alligator: SMAs of median price with offsets
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2.0
-    
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
-    
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
-    
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 30  # Need sufficient history for Alligator and other indicators
+    start_idx = 60  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator conditions: 
-        # Uptrend: Lips > Teeth > Jaw (all aligned and pointing up)
-        # Downtrend: Lips < Teeth < Jaw (all aligned and pointing down)
-        lips_val = lips[i]
-        teeth_val = teeth[i]
-        jaw_val = jaw[i]
+        curr_close = close[i]
         
-        uptrend = lips_val > teeth_val and teeth_val > jaw_val
-        downtrend = lips_val < teeth_val and teeth_val < jaw_val
+        # Trend filter: price above/below 1w EMA50
+        uptrend = curr_close > ema_50_1w_aligned[i]
+        downtrend = curr_close < ema_50_1w_aligned[i]
         
-        # Volume spike and chop filter
-        vol_spike = vol_spike_1d_aligned[i] > 0.5  # Convert back to boolean
-        trend_regime = chop_filter[i]
+        # Donchian breakout conditions (using previous bar's levels to avoid look-ahead)
+        breakout_up = curr_close > donchian_high_aligned[i]  # Break above upper channel
+        breakout_down = curr_close < donchian_low_aligned[i]  # Break below lower channel
+        
+        # Volume confirmation
+        vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Alligator uptrend, volume spike, trending regime
-            if uptrend and vol_spike and trend_regime:
+            # Long: breakout above upper channel, volume spike, uptrend
+            if breakout_up and vol_spike and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator downtrend, volume spike, trending regime
-            elif downtrend and vol_spike and trend_regime:
+            # Short: breakout below lower channel, volume spike, downtrend
+            elif breakout_down and vol_spike and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Alligator trend reversal (Lips < Teeth)
-            if lips_val < teeth_val:
+            # Exit on break below lower channel or trend reversal
+            if curr_close < donchian_low_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Alligator trend reversal (Lips > Teeth)
-            if lips_val > teeth_val:
+            # Exit on break above upper channel or trend reversal
+            if curr_close > donchian_high_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
