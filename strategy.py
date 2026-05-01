@@ -3,15 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d chop regime filter.
-# Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND chop > 61.8 (range regime).
-# Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND chop > 61.8.
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 20-50 trades/year.
-# Donchian channels provide structural breakout signals; volume confirms conviction; chop filter avoids whipsaws in strong trends.
-# Works in bull (breakouts continue) and bear (breakdowns continue) by trading with momentum in range regimes.
+# Hypothesis: 1d KAMA trend direction with 1w RSI regime filter and volume confirmation.
+# Uses 1d Kaufman Adaptive Moving Average (KAMA) for trend identification.
+# Uses 1w RSI to filter regime: only take longs when 1w RSI > 50 (bullish regime),
+# only shorts when 1w RSI < 50 (bearish regime).
+# Adds volume confirmation: current volume > 1.5 * 20-period average volume.
+# Discrete sizing 0.25 to balance return and drawdown. Target: 10-20 trades/year.
+# KAMA adapts to market noise, reducing false signals in choppy markets.
+# 1w RSI regime filter ensures we trade with the higher timeframe momentum.
+# Volume confirmation ensures trades occur with participation.
+# Works in bull markets (follow KAMA up when 1w RSI > 50) and bear markets
+# (follow KAMA down when 1w RSI < 50) by aligning with weekly structure.
 
-name = "4h_Donchian20_VolumeConfirm_ChopRegime_v1"
-timeframe = "4h"
+name = "1d_KAMA_1wRSI_Regime_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,68 +32,105 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1d data for KAMA calculation (same timeframe as prices)
+    df_1d = prices  # prices is already 1d data
+    
+    # Load 1w data ONCE before loop for RSI regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 1d Chopiness Index (CHOP)
-    # CHOP = 100 * log10(sum(ATR(1), n) / (log10(n) * (max(high,n) - min(low,n))))
-    # Simplified: CHOP = 100 * log10(ATR_sum / (log10(n) * range))
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d KAMA (Kaufman Adaptive Moving Average)
+    # ER = Efficiency Ratio = |close - close[10]| / sum(|close - close[-1]|) over 10 periods
+    # Smoothest = 2/(2+1) = 0.666..., Fastest = 2/(30+1) = 0.0645
+    # SC = [ER * (fastest - smoothest) + smoothest]^2
+    # KAMA = prev_KAMA + SC * (price - prev_KAMA)
     
-    # True Range for 1d
-    tr1 = np.zeros(len(high_1d))
-    tr1[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr1[i] = max(high_1d[i] - low_1d[i], 
-                     abs(high_1d[i] - close_1d[i-1]), 
-                     abs(low_1d[i] - close_1d[i-1]))
+    def calculate_kama(close_prices, period=10, fast=2, slow=30):
+        """Calculate Kaufman Adaptive Moving Average"""
+        if len(close_prices) < period + 1:
+            return np.full_like(close_prices, np.nan)
+        
+        # Calculate directional change
+        directional_change = np.abs(close_prices[period:] - close_prices[:-period])
+        
+        # Calculate total absolute price change
+        abs_price_changes = np.abs(np.diff(close_prices))
+        total_change = np.zeros_like(close_prices)
+        for i in range(period, len(close_prices)):
+            total_change[i] = np.sum(abs_price_changes[i-period:i])
+        
+        # Avoid division by zero
+        efficiency_ratio = np.zeros_like(close_prices)
+        mask = total_change[period:] != 0
+        efficiency_ratio[period:] = np.where(
+            mask,
+            directional_change / total_change[period:],
+            0
+        )
+        
+        # Calculate smoothing constant
+        fastest_sc = 2.0 / (fast + 1)
+        slowest_sc = 2.0 / (slow + 1)
+        sc = (efficiency_ratio * (fastest_sc - slowest_sc) + slowest_sc) ** 2
+        
+        # Calculate KAMA
+        kama = np.full_like(close_prices, np.nan)
+        kama[period] = close_prices[period]  # Start with first available close
+        
+        for i in range(period + 1, len(close_prices)):
+            if not np.isnan(kama[i-1]):
+                kama[i] = kama[i-1] + sc[i] * (close_prices[i] - kama[i-1])
+            else:
+                kama[i] = close_prices[i]
+        
+        return kama
     
-    # ATR(14) for 1d
-    atr_1d = np.zeros(len(tr1))
-    atr_1d[13] = np.mean(tr1[:14])  # seed
-    for i in range(14, len(tr1)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr1[i]) / 14
+    # Calculate 1d KAMA
+    kama_1d = calculate_kama(close, period=10, fast=2, slow=30)
     
-    # Chopiness Index (14)
-    chop_1d = np.full_like(close_1d, np.nan)
-    lookback = 14
-    for i in range(lookback, len(chop_1d)):
-        atr_sum = np.sum(atr_1d[i-lookback+1:i+1])
-        max_high = np.max(high_1d[i-lookback+1:i+1])
-        min_low = np.min(low_1d[i-lookback+1:i+1])
-        range_val = max_high - min_low
-        if range_val > 0 and atr_sum > 0:
-            chop_1d[i] = 100 * np.log10(atr_sum / (np.log10(lookback) * range_val))
-        else:
-            chop_1d[i] = 50.0  # neutral
+    # Calculate 1w RSI for regime filter
+    close_1w = df_1w['close'].values
+    if len(close_1w) < 14:
+        rsi_1w = np.full_like(close_1w, np.nan)
+    else:
+        # Calculate RSI using Wilder's smoothing
+        delta = np.diff(close_1w)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing (alpha = 1/period)
+        avg_gain = np.full_like(close_1w, np.nan)
+        avg_loss = np.full_like(close_1w, np.nan)
+        
+        # First average is simple average
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        
+        # Subsequent values using Wilder's smoothing
+        for i in range(14, len(close_1w)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        # Calculate RSI
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_1w = 100 - (100 / (1 + rs))
+        # Set first 13 values to NaN
+        rsi_1w[:13] = np.nan
     
-    # Align 1d chop to 4h
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Align 1w RSI to 1d
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Donchian(20) on 4h
-    lookback_dc = 20
-    donchian_high = np.full_like(close, np.nan)
-    donchian_low = np.full_like(close, np.nan)
-    
-    for i in range(lookback_dc-1, len(close)):
-        donchian_high[i] = np.max(high[i-lookback_dc+1:i+1])
-        donchian_low[i] = np.min(low[i-lookback_dc+1:i+1])
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
-    vol_lookback = 20
-    for i in range(vol_lookback-1, len(volume)):
-        vol_ma[i] = np.mean(volume[i-vol_lookback+1:i+1])
-    volume_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # Calculate volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = np.zeros_like(volume)
+    mask = vol_ma_20 > 0
+    volume_ratio[mask] = volume[mask] / vol_ma_20[mask]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback_dc, vol_lookback, 30)  # warmup
+    start_idx = max(30, 20)  # warmup for KAMA and volume MA
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -105,50 +147,46 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama_1d[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume_ratio = volume_ratio[i]
-        curr_chop = chop_1d_aligned[i]
-        
-        # Regime filter: only trade in range markets (chop > 61.8)
-        in_range = curr_chop > 61.8
+        curr_kama = kama_1d[i]
+        curr_rsi = rsi_1w_aligned[i]
+        curr_vol_ratio = volume_ratio[i]
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high AND volume confirmation AND range regime
-            if (curr_close > donchian_high[i] and 
-                curr_volume_ratio > 1.5 and 
-                in_range):
+            # Long: Price above KAMA AND 1w RSI > 50 (bullish regime) AND volume confirmation
+            if (curr_close > curr_kama and 
+                curr_rsi > 50 and 
+                curr_vol_ratio > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND volume confirmation AND range regime
-            elif (curr_close < donchian_low[i] and 
-                  curr_volume_ratio > 1.5 and 
-                  in_range):
+            # Short: Price below KAMA AND 1w RSI < 50 (bearish regime) AND volume confirmation
+            elif (curr_close < curr_kama and 
+                  curr_rsi < 50 and 
+                  curr_vol_ratio > 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR chop drops below 38.2 (trend regime)
-            if (curr_close < donchian_low[i] or 
-                curr_chop < 38.2):
+            # Exit: Price breaks below KAMA OR 1w RSI < 40 (regime change to bearish)
+            if (curr_close < curr_kama or 
+                curr_rsi < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR chop drops below 38.2 (trend regime)
-            if (curr_close > donchian_high[i] or 
-                curr_chop < 38.2):
+            # Exit: Price breaks above KAMA OR 1w RSI > 60 (regime change to bullish)
+            if (curr_close > curr_kama or 
+                curr_rsi > 60):
                 signals[i] = 0.0
                 position = 0
             else:
