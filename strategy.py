@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and volume confirmation.
-# Uses Camarilla pivot levels from 4h timeframe to identify key intraday support/resistance.
-# Breakouts above R1 or below S1 are traded in the direction of 4h EMA20 trend.
-# Volume confirmation ensures breakouts have sufficient participation.
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
-# Discrete position sizing (0.20) balances return and drawdown. Target: 60-150 trades over 4 years.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Uses weekly EMA200 for trend filter to capture major market regime.
+# Breakouts above/below 20-period Donchian channel are traded in direction of weekly trend.
+# Volume confirmation ensures breakouts have institutional participation.
+# Works in bull markets (buy breakouts with weekly uptrend) and bear markets (sell breakdowns with weekly downtrend).
+# Discrete position sizing (0.25) limits drawdown. Target: 50-150 trades over 4 years.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v1"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate weekly EMA200 for trend filter
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate 4h Camarilla pivot levels
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    prev_close = df_4h['close'].shift(1).values
+    # Calculate 6h Donchian channel (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.125 / 4
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.125 / 4
-    
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average volume on 1h
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 6h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.5)
-    
-    # Session filter: 08-20 UTC (precomputed for performance)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(21, 20) + 1  # 22 (for EMA20 and volume MA20)
+    start_idx = max(200, 20) + 1  # 201 (for weekly EMA200 and Donchian)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            if position != 0:
-                position = 0
-            continue
-        
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(highest_high_20[i]) or
+            np.isnan(lowest_low_20[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             if position != 0:
@@ -78,43 +60,43 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: 4h EMA20 direction
-        uptrend = curr_close > ema_20_4h_aligned[i]
-        downtrend = curr_close < ema_20_4h_aligned[i]
+        # Trend filter: weekly EMA200 direction
+        uptrend = curr_close > ema_200_1w_aligned[i]
+        downtrend = curr_close < ema_200_1w_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Camarilla breakout conditions
-        breakout_r1 = curr_close > camarilla_r1_aligned[i]  # Break above R1
-        breakdown_s1 = curr_close < camarilla_s1_aligned[i]  # Break below S1
+        # Donchian breakout conditions
+        breakout_upper = curr_close > highest_high_20[i]  # Break above upper channel
+        breakdown_lower = curr_close < lowest_low_20[i]   # Break below lower channel
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R1 AND uptrend AND volume confirmation
-            if breakout_r1 and uptrend and vol_confirm:
-                signals[i] = 0.20
+            # Long: Breakout above upper channel AND weekly uptrend AND volume confirmation
+            if breakout_upper and uptrend and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 AND downtrend AND volume confirmation
-            elif breakdown_s1 and downtrend and vol_confirm:
-                signals[i] = -0.20
+            # Short: Breakdown below lower channel AND weekly downtrend AND volume confirmation
+            elif breakdown_lower and downtrend and vol_confirm:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on breakdown below S1 (reversal signal)
-            if curr_close < camarilla_s1_aligned[i]:
+            # Exit on breakdown below lower channel (reversal signal)
+            if curr_close < lowest_low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on breakout above R1 (reversal signal)
-            if curr_close > camarilla_r1_aligned[i]:
+            # Exit on breakout above upper channel (reversal signal)
+            if curr_close > highest_high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
