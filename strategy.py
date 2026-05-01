@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-bar volume MA)
-# Uses 1d HTF EMA50 for stronger trend alignment, reducing whipsaws in ranging/choppy markets.
-# Volume confirmation requires >2.0x 20-bar average volume to ensure strong institutional participation.
-# Discrete position sizing (0.25) minimizes fee churn. Tight entry conditions target 20-50 trades/year.
-# Designed to work in both bull (breakouts with volume) and bear (mean reversion at extremes) regimes.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation (>1.5x 20-bar MA)
+# Uses 1d HTF for stronger trend alignment than 4h, reducing whipsaws in ranging markets.
+# Camarilla breakouts capture strong momentum moves after range-bound periods.
+# Volume confirmation ensures institutional participation. Discrete sizing (0.25) minimizes fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year) with strong BTC/ETH performance.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Volume2xConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,6 +35,7 @@ def generate_signals(prices):
     ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     # Calculate Camarilla pivot levels from previous 1d bar
+    # Need high, low, close from previous 1d bar
     prev_1d_high = df_1d['high'].shift(1).values
     prev_1d_low = df_1d['low'].shift(1).values
     prev_1d_close = df_1d['close'].shift(1).values
@@ -47,9 +48,9 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 2.0)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
