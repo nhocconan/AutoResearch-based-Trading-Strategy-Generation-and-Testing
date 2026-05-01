@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX > 25 regime filter
-# Uses Donchian channel breakouts for clear trend signals with defined risk
-# Volume spike > 2.0x 20-period EMA reduces false breakouts
-# 1w ADX > 25 ensures strong trending market regime (avoids chop/whipsaw)
-# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and 1w ADX > 25 regime filter
+# Uses tighter Camarilla levels (H3/L3) for higher-probability breakouts
+# Volume spike > 2.0x 20-period EMA reduces false signals
+# 1w ADX > 25 ensures strong trending regime (avoids chop, improves win rate)
+# Designed for optimal trade frequency: ~15-25 trades/year per symbol with 0.25 sizing
 # Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
 
-name = "4h_Donchian20_Volume_1wADX_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolumeSpike_1wADX_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume confirmation
+    # 1d HTF data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # 1w HTF data for regime filter (ADX)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Donchian(20) channels - upper/lower bounds
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1*(high - low)/6
+    # L3 = close - 1.1*(high - low)/6
+    camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
+    camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tight for low trade frequency)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
+    
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for fewer trades)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
     
-    # 1w ADX(14) for regime filter (using standard Wilder's smoothing)
+    # 1w ADX(14) for regime filter (using standard period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -65,7 +69,7 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Wilder's smoothing function
+    # Wilder's smoothing
     def wilders_smoothing(x, period):
         result = np.full_like(x, np.nan)
         if len(x) >= period:
@@ -94,10 +98,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(30, 20)  # Need ADX and Donchian channels
+    start_idx = max(27, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
@@ -107,30 +111,30 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Break above Donchian upper with volume spike
-                if close[i] > donchian_upper[i] and volume_spike[i]:
+                # Long: Break above Camarilla H3 with volume spike
+                if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Break below Donchian lower with volume spike
-                elif close[i] < donchian_lower[i] and volume_spike[i]:
+                # Short: Break below Camarilla L3 with volume spike
+                elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid ranging/weak trend markets
+                signals[i] = 0.0  # Avoid ranging/choppy markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian lower or opposite breakout
-            if close[i] <= donchian_lower[i] or (close[i] < donchian_lower[i] and volume_spike[i]):
+            # Exit: price returns to Camarilla L3 or opposite breakout with volume
+            if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian upper or opposite breakout
-            if close[i] >= donchian_upper[i] or (close[i] > donchian_upper[i] and volume_spike[i]):
+            # Exit: price returns to Camarilla H3 or opposite breakout with volume
+            if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
