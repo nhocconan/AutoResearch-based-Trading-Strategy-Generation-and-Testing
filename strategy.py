@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d EMA34 trend filter and volume spike confirmation.
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume > 1.8x 20-period volume median.
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume > 1.8x 20-period volume median.
-# Williams %R captures mean-reversion extremes; 1d EMA34 ensures alignment with higher-timeframe trend; volume spike confirms reversal conviction.
-# Works in ranging markets (mean reversion at extremes) and trending markets (pullbacks in trend).
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
+# Hypothesis: 12h Williams %R extreme reversal with 1d EMA34 trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume > 1.5x 20-period volume median.
+# Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume > 1.5x 20-period volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Williams %R identifies overextended moves; 1d EMA34 ensures alignment with daily trend; volume confirms conviction.
+# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 
-name = "6h_WilliamsR_Extreme_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,11 +37,13 @@ def generate_signals(prices):
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # Calculate Williams %R (14-period) using prior bar's data to avoid look-ahead
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          -100 * (highest_high - close) / (highest_high - lowest_low),
-                          -50)
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
+    highest_high = pd.Series(prev_high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(prev_low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate 1d EMA34 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -54,8 +57,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, Williams %R, and volume
-    start_idx = 50
+    # Start after warmup for ATR, EMA, volume, and Williams %R
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
@@ -72,11 +75,11 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period volume median
+        # Volume confirmation: current volume > 1.5x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
             # Long: Williams %R < -80 (oversold) AND uptrend AND volume spike
