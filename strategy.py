@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter.
 # Uses 1d ADX > 25 to identify strong trends, reducing whipsaws in ranging markets.
-# Long when price breaks above upper Donchian channel AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
-# Short when price breaks below lower Donchian channel AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
+# Long when price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
+# Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years.
-# Volume spike threshold set to 2.0x to reduce trade frequency and improve signal quality.
+# Volume spike threshold set to 2.0x to reduce overtrading while maintaining edge.
 # Designed to work in both bull (trend continuation) and bear (trend reversal on strong moves) markets.
 
-name = "12h_Donchian20_1dADX25_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX25_VolumeSpike_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX trend filter
+    # Load 1d data ONCE before loop for ADX and volume filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
@@ -69,66 +69,60 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    # Upper channel: highest high of last 20 periods
-    # Lower channel: lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    # 1d trend: ADX > 25 indicates strong trend
+    strong_trend = adx_aligned > 25
     
-    # Volume confirmation: current 12h volume > 2.0x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volume confirmation: current 1d volume > 2.0x 20-bar average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Donchian(20) channels on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for ADX and Donchian channels
+    start_idx = 50  # warmup for ADX, volume MA, and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_spike_aligned[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_vol = volume[i]
-        curr_vol_ma = vol_ma[i]
-        
-        if curr_vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-            
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
         # Donchian breakout signals
-        breakout_up = curr_high > upper_channel[i]  # break above upper channel
-        breakout_down = curr_low < lower_channel[i]  # break below lower channel
+        breakout_up = curr_high > donchian_high[i]  # break above upper band
+        breakout_down = curr_low < donchian_low[i]  # break below lower band
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper channel AND 1d ADX > 25 AND volume confirmation
+            # Long: breakout above Donchian high AND 1d ADX > 25 AND volume spike
             if (breakout_up and 
-                adx_aligned[i] > 25 and 
-                volume_confirm):
+                strong_trend[i] and 
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower channel AND 1d ADX > 25 AND volume confirmation
+            # Short: breakout below Donchian low AND 1d ADX > 25 AND volume spike
             elif (breakout_down and 
-                  adx_aligned[i] > 25 and 
-                  volume_confirm):
+                  strong_trend[i] and 
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower channel (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_low < lower_channel[i] or 
+            # Exit: price crosses below Donchian low (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_low < donchian_low[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
@@ -136,8 +130,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper channel (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_high > upper_channel[i] or 
+            # Exit: price crosses above Donchian high (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_high > donchian_high[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
