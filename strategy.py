@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation
-# Trades breakouts at Camarilla H3 (resistance) for longs and L3 (support) for shorts
-# Only trades in direction of 1w EMA50 trend to avoid counter-trend whipsaws
-# Volume confirmation > 1.8x 20-period EMA ensures institutional participation
-# Designed for very low trade frequency: ~8-15 trades/year per symbol with 0.30 sizing
-# Works in bull/bear markets by following the 1w trend direction via EMA50
+# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R < -80 (oversold) and 12h trend is up, short when %R > -20 (overbought) and 12h trend is down
+# Volume confirmation > 1.3x 20-period EMA reduces false signals
+# Designed for low trade frequency: ~10-20 trades/year per symbol with 0.25 sizing
+# Works in bull/bear markets by fading extremes in the direction of the 12h trend
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_12hTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,70 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # 12h HTF data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    
+    # Volume confirmation: volume > 1.3 * 20-period EMA
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.3 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for calculations)
-    start_idx = 60
+    # Start after warmup
+    start_idx = max(60, 14, 20)  # Need 12h EMA50, Williams %R, volume EMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_aligned[i]):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels for today (using yesterday's OHLC)
-        if i == 0:
-            signals[i] = 0.0
-            continue
-            
-        # Yesterday's OHLC for Camarilla calculation
-        y_high = high[i-1]
-        y_low = low[i-1]
-        y_close = close[i-1]
-        
-        # Camarilla levels
-        rng = y_high - y_low
-        if rng <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # H3 and L3 levels (most important for breakouts)
-        h3 = y_close + (rng * 1.1 / 4)
-        l3 = y_close - (rng * 1.1 / 4)
-        
-        # Volume confirmation: volume > 1.8 * 20-period EMA
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-            volume_spike = volume[i] > (1.8 * vol_ma_20)
-        else:
-            volume_spike = False
-        
-        # Trend filter: only trade in direction of 1w EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Trend filter: only trade in direction of 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if uptrend:
-                # Long: price breaks above H3 with volume spike
-                if close[i] > h3 and volume_spike:
-                    signals[i] = 0.30
+                # Long: Williams %R oversold (< -80) with volume spike
+                if williams_r[i] < -80 and volume_spike[i]:
+                    signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.0
             elif downtrend:
-                # Short: price breaks below L3 with volume spike
-                if close[i] < l3 and volume_spike:
-                    signals[i] = -0.30
+                # Short: Williams %R overbought (> -20) with volume spike
+                if williams_r[i] > -20 and volume_spike[i]:
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -95,19 +79,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid sideways markets
         
         elif position == 1:  # Long position
-            # Exit: price closes below yesterday's close (mean reversion)
-            if close[i] < y_close:
+            # Exit: Williams %R rises above -50 (exiting oversold) or trend changes
+            if williams_r[i] > -50 or close[i] <= ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above yesterday's close (mean reversion)
-            if close[i] > y_close:
+            # Exit: Williams %R falls below -50 (exiting overbought) or trend changes
+            if williams_r[i] < -50 or close[i] >= ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
