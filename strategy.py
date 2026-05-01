@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper(20) AND 1d EMA34 uptrend AND volume > 2.0x 20-period median.
-# Short when price breaks below Donchian lower(20) AND 1d EMA34 downtrend AND volume > 2.0x 20-period median.
-# Donchian channels capture price structure and volatility; 1d EMA34 filters for higher-timeframe trend alignment; 
-# volume spike confirms breakout conviction. Works in bull markets (buy breakouts in uptrend) and bear markets 
-# (sell breakdowns in downtrend). Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h Donchian channel breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper (20) AND 1d EMA34 uptrend AND volume > 2.0x 20-period median.
+# Short when price breaks below Donchian lower (20) AND 1d EMA34 downtrend AND volume > 2.0x 20-period median.
+# Donchian channels capture price structure; 1d EMA34 filters for higher-timeframe trend; volume spike confirms breakout conviction.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag.
 
 name = "4h_Donchian20_Breakout_1dEMA34_Volume_v1"
 timeframe = "4h"
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian Channel (20)
+    # Calculate Donchian channels (20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price re-enters Donchian Channel (mean reversion) OR trend turns down
+            # Exit: price re-enters Donchian channel (mean reversion) OR trend turns down
             if curr_close < donchian_middle[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
@@ -94,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price re-enters Donchian Channel (mean reversion) OR trend turns up
+            # Exit: price re-enters Donchian channel (mean reversion) OR trend turns up
             if curr_close > donchian_middle[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
