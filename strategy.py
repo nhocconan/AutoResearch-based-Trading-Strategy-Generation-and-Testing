@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and ATR volatility filter.
-# Long when price breaks above Donchian upper band AND 1d EMA50 rising AND ATR(14) > 0.5 * ATR(50) (volatility expansion).
-# Short when price breaks below Donchian lower band AND 1d EMA50 falling AND ATR(14) > 0.5 * ATR(50).
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to capture medium-term trends with volatility confirmation.
-# Donchian channels provide clear breakout levels that work in both trending and volatile markets.
-# 1d EMA50 trend filter ensures alignment with higher timeframe momentum.
-# ATR volatility filter ensures we only trade during periods of sufficient market movement, reducing false breakouts in chop.
+# Hypothesis: 1h EMA crossover with 4h Donchian trend filter and volume confirmation.
+# Long when 1h EMA20 crosses above EMA50 AND price > 4h Donchian upper channel AND volume > 1.5x 20-bar avg.
+# Short when 1h EMA20 crosses below EMA50 AND price < 4h Donchian lower channel AND volume > 1.5x 20-bar avg.
+# Uses 1h timeframe with strict filters to target 15-30 trades/year.
+# 4h Donchian provides medium-term trend structure to avoid counter-trend whipsaws.
+# Volume confirmation reduces false breakouts. Session filter (08-20 UTC) avoids low-liquidity hours.
+# Discrete sizing 0.20 minimizes fee churn while maintaining sufficient exposure.
 
-name = "12h_Donchian20_1dEMA50_ATR_VolFilter_v1"
-timeframe = "12h"
+name = "1h_EMA20_50_4hDonchian_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,92 +26,100 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session hours for efficiency
+    # Pre-compute session hours for efficiency (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data ONCE before loop for Donchian trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 calculation
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 1d EMA50 slope (rising/falling)
-    ema_50_slope = np.diff(ema_50_aligned, prepend=ema_50_aligned[0])
-    ema_50_rising = ema_50_slope > 0
-    ema_50_falling = ema_50_slope < 0
+    # Calculate rolling max/min for Donchian channels
+    dh_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    dl_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR(14) and ATR(50) for volatility filter on 12h timeframe
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align 4h Donchian channels to 1h timeframe
+    dh_20_aligned = align_htf_to_ltf(prices, df_4h, dh_20)
+    dl_20_aligned = align_htf_to_ltf(prices, df_4h, dl_20)
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / np.where(atr_50 == 0, np.nan, atr_50)  # Avoid division by zero
-    vol_expansion = atr_ratio > 0.5  # ATR(14) > 0.5 * ATR(50)
+    # 1h EMA20 and EMA50 for crossover signals
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian channels (20-period) on 12h timeframe
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # EMA crossover signals
+    ema_cross_up = (ema_20 > ema_50) & (np.roll(ema_20, 1) <= np.roll(ema_50, 1))
+    ema_cross_down = (ema_20 < ema_50) & (np.roll(ema_20, 1) >= np.roll(ema_50, 1))
+    
+    # Volume confirmation: current volume > 1.5x 20-bar average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for Donchian, ATR and EMA calculations
+    start_idx = 50  # warmup for EMA and Donchian calculations
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 12h timeframe
+        # Session filter: trade only 08-20 UTC
         hour = hours[i]
-        
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(atr_ratio[i]):
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
+        # Skip if any required data is NaN
+        if (np.isnan(dh_20_aligned[i]) or np.isnan(dl_20_aligned[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        if vol_ma[i] <= 0:
+            signals[i] = 0.0
+            continue
+            
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_vol = volume[i]
+        curr_vol_ma = vol_ma[i]
+        
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above Donchian high AND 1d EMA50 rising AND volatility expansion
-            if (curr_high > donchian_high[i] and 
-                ema_50_rising[i] and 
-                vol_expansion[i]):
-                signals[i] = 0.25
+            # Long: EMA20 crosses above EMA50 AND price > 4h Donchian upper AND volume confirmation
+            if (ema_cross_up[i] and 
+                curr_close > dh_20_aligned[i] and 
+                volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below Donchian low AND 1d EMA50 falling AND volatility expansion
-            elif (curr_low < donchian_low[i] and 
-                  ema_50_falling[i] and 
-                  vol_expansion[i]):
-                signals[i] = -0.25
+            # Short: EMA20 crosses below EMA50 AND price < 4h Donchian lower AND volume confirmation
+            elif (ema_cross_down[i] and 
+                  curr_close < dl_20_aligned[i] and 
+                  volume_confirm):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below Donchian low (stoploss) OR 1d EMA50 falls (trend change)
-            if (curr_low < donchian_low[i] or 
-                ema_50_falling[i]):
+            # Exit: EMA20 crosses below EMA50 OR price < 4h Donchian lower (trend change)
+            if (ema_cross_down[i] or 
+                curr_low < dl_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian high (stoploss) OR 1d EMA50 rises (trend change)
-            if (curr_high > donchian_high[i] or 
-                ema_50_rising[i]):
+            # Exit: EMA20 crosses above EMA50 OR price > 4h Donchian upper (trend change)
+            if (ema_cross_up[i] or 
+                curr_high > dh_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
