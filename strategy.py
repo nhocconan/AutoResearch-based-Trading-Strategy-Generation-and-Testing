@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below S3 with 1d EMA34 downtrend and volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian with 1w EMA34 uptrend and volume > 2.0x 20-bar average.
+# Short when price breaks below lower Donchian with 1w EMA34 downtrend and volume confirmation.
 # Uses discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
-# Primary timeframe: 4h, HTF: 1d for EMA trend filter.
-# Target: 60-150 total trades over 4 years (15-38/year) to reduce fee drag.
-# Session filter: 08-20 UTC to avoid low-liquidity periods.
+# Primary timeframe: 1d, HTF: 1w for EMA trend filter.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# No session filter to capture 24/7 crypto moves.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,17 +25,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours for 08-20 UTC filter
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 1w EMA34 trend filter
+    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -44,44 +41,23 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (R3, S3) from previous day's OHLC
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Donchian channels (20-period) from price data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_r3 = np.zeros_like(daily_close)
-    camarilla_s3 = np.zeros_like(daily_close)
-    
-    for i in range(len(daily_close)):
-        if i == 0:
-            camarilla_r3[i] = daily_close[i]  # fallback for first day
-            camarilla_s3[i] = daily_close[i]
-        else:
-            prev_close = daily_close[i-1]
-            prev_high = daily_high[i-1]
-            prev_low = daily_low[i-1]
-            camarilla_r3[i] = prev_close + 1.1 * (prev_high - prev_low) / 4
-            camarilla_s3[i] = prev_close - 1.1 * (prev_high - prev_low) / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Volume confirmation: current volume > 2.0x 20-bar average (balanced to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 34  # warmup for EMA34 and ATR
+    start_idx = 34  # warmup for EMA34 and Donchian
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
         if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -90,30 +66,26 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-bar average (stricter to reduce trades)
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
-        if vol_ma <= 0:
-            volume_confirm = False
-        else:
-            volume_confirm = curr_volume > (vol_ma * 2.0)
+        # Volume confirmation: current volume > 2.0x 20-bar average
+        volume_confirm = curr_volume > (vol_ma[i] * 2.0)
         
-        # Camarilla breakout conditions
-        breakout_long = curr_high > camarilla_r3_aligned[i]  # price breaks above R3
-        breakout_short = curr_low < camarilla_s3_aligned[i]  # price breaks below S3
+        # Donchian breakout conditions
+        breakout_long = curr_high > donchian_high[i]  # price breaks above upper band
+        breakout_short = curr_low < donchian_low[i]   # price breaks below lower band
         
         # Trend filter: bullish if close > EMA34, bearish if close < EMA34
         bullish_trend = curr_close > ema_34_aligned[i]
         bearish_trend = curr_close < ema_34_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R3 AND bullish trend AND volume confirmation
+            # Long: Breakout above upper band AND bullish trend AND volume confirmation
             if (breakout_long and 
                 bullish_trend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Breakout below S3 AND bearish trend AND volume confirmation
+            # Short: Breakout below lower band AND bearish trend AND volume confirmation
             elif (breakout_short and 
                   bearish_trend and 
                   volume_confirm):
@@ -129,8 +101,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below S3 OR trend turns bearish
-            elif (curr_low < camarilla_s3_aligned[i] or 
+            # Exit: price breaks below lower Donchian OR trend turns bearish
+            elif (curr_low < donchian_low[i] or 
                   bearish_trend):
                 signals[i] = 0.0
                 position = 0
@@ -144,8 +116,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above R3 OR trend turns bullish
-            elif (curr_high > camarilla_r3_aligned[i] or 
+            # Exit: price breaks above upper Donchian OR trend turns bullish
+            elif (curr_high > donchian_high[i] or 
                   bullish_trend):
                 signals[i] = 0.0
                 position = 0
