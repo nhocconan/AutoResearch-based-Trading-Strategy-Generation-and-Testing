@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and volume spike confirmation.
-# Long when RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) AND volume > 1.5x 20-bar average.
-# Short when RSI > 70 (overbought) AND price < 4h EMA50 (downtrend) AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.20 to minimize fee churn. Designed for 1h timeframe to capture mean reversion in ranging markets while respecting higher timeframe trend.
-# 4h EMA50 ensures we only trade in the direction of the intermediate trend, reducing false signals in strong trends.
-# Volume spike requirement confirms momentum behind the move, filtering low-conviction entries.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1w trend filter and volume spike confirmation.
+# Long when price breaks above R3 AND 1w close > 1w open (bullish weekly candle) AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1w close < 1w open (bearish weekly candle) AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture medium-term trends with low trade frequency.
+# Camarilla levels provide mathematical support/resistance that work in both bull and bear markets.
+# 1w candle direction ensures alignment with higher timeframe momentum.
+# Volume spike requirement reduces false breakouts and improves signal quality.
 
-name = "1h_RSI14_4hEMA50_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,49 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours for efficiency (08-20 UTC)
+    # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 4h EMA50 calculation
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # 1w bullish/bearish candle direction
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Camarilla levels from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: current 1h volume > 1.5x 20-period average
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = []
+    camarilla_s3 = []
+    for i in range(len(close_1d)):
+        if i == 0:
+            # For first bar, use same high/low/close
+            rng = high_1d[i] - low_1d[i]
+            camarilla_r3.append(close_1d[i] + 1.1 * rng / 6)
+            camarilla_s3.append(close_1d[i] - 1.1 * rng / 6)
+        else:
+            rng = high_1d[i-1] - low_1d[i-1]
+            camarilla_r3.append(close_1d[i-1] + 1.1 * rng / 6)
+            camarilla_s3.append(close_1d[i-1] - 1.1 * rng / 6)
+    
+    camarilla_r3 = np.array(camarilla_r3)
+    camarilla_s3 = np.array(camarilla_s3)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: current 6h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for RSI and EMA calculation
+    start_idx = 50  # warmup for calculations
     
     for i in range(start_idx, n):
-        # Session filter: trade only during 08-20 UTC
+        # Session filter: trade all sessions for 6h timeframe
         hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
         
-        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -75,49 +97,45 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
-        # RSI conditions
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
-        
-        # Trend filter: price vs 4h EMA50
-        price_above_ema = curr_close > ema_50_aligned[i]
-        price_below_ema = curr_close < ema_50_aligned[i]
+        # Camarilla breakout signals
+        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: RSI oversold AND price above 4h EMA50 AND volume confirmation
-            if (rsi_oversold and 
-                price_above_ema and 
+            # Long: breakout above R3 AND weekly bullish candle AND volume confirmation
+            if (breakout_up and 
+                weekly_bullish_aligned[i] > 0.5 and 
                 volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought AND price below 4h EMA50 AND volume confirmation
-            elif (rsi_overbought and 
-                  price_below_ema and 
+            # Short: breakout below S3 AND weekly bearish candle AND volume confirmation
+            elif (breakout_down and 
+                  weekly_bearish_aligned[i] > 0.5 and 
                   volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: RSI crosses above 50 (mean reversion complete) OR price breaks below 4h EMA50 (trend change)
-            if (rsi_values[i] > 50 or 
-                curr_close < ema_50_aligned[i]):
+            # Exit: price crosses below S3 (stoploss) OR weekly bearish candle (trend change)
+            if (curr_low < camarilla_s3_aligned[i] or 
+                weekly_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (mean reversion complete) OR price breaks above 4h EMA50 (trend change)
-            if (rsi_values[i] < 50 or 
-                curr_close > ema_50_aligned[i]):
+            # Exit: price crosses above R3 (stoploss) OR weekly bullish candle (trend change)
+            if (curr_high > camarilla_r3_aligned[i] or 
+                weekly_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
