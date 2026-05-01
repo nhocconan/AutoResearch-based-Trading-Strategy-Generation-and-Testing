@@ -4,14 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d close > EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below S3 AND 1d close < EMA50 AND volume > 2.0x 20-bar average.
+# Long when price breaks above R3 AND 1d close > EMA50 AND volume > 1.8x 20-bar average.
+# Short when price breaks below S3 AND 1d close < EMA50 AND volume > 1.8x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
+# Volume spike threshold set to 1.8x to reduce false breakouts and improve signal quality.
 # Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
 # Primary timeframe: 4h, HTF: 1d for trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter and Camarilla pivots
+    # Load 1d data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
@@ -38,8 +38,12 @@ def generate_signals(prices):
     # Calculate 1d close aligned for trend bias
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Previous day's high, low, close for Camarilla calculation (use shift(1) for completed day)
-    prev_high = df_1d['high'].shift(1).values
+    # Calculate Camarilla pivot levels from previous day (using 1d data)
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # shift(1) to use previous completed day
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
@@ -53,7 +57,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average
+    # Volume confirmation: current 4h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -77,7 +81,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
         
         # Camarilla breakout signals
         breakout_up = curr_high > r3_aligned[i]  # break above R3
