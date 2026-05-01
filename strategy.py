@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 12h volume median.
-# Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 12h volume median.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Camarilla pivots provide precise intraday support/resistance levels. Breakouts with volume
-# indicate strong momentum. 1d EMA34 filters for higher-timeframe trend alignment.
-# Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to minimize fee drag.
-# Works in bull markets via long breakouts and in bear markets via short breakdowns.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 AND close > 12h EMA50 AND volume > 1.5x 4h volume median.
+# Short when price breaks below S3 AND close < 12h EMA50 AND volume > 1.5x 4h volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Camarilla pivot levels provide intraday support/resistance based on prior day's range.
+# 12h EMA50 filters for higher-timeframe trend alignment. Volume confirmation ensures momentum.
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakout entries and in bear markets via short alignments with volume confirmation.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,63 +34,76 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h Camarilla levels (based on previous bar)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # avoid NaN on first bar
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Calculate 4h volume median (20-period for stability)
+    vol_median_4h = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    range_hl = prev_high - prev_low
-    camarilla_multiplier = 1.1 * range_hl / 4.0  # for R3/S3
-    r3 = prev_close + camarilla_multiplier
-    s3 = prev_close - camarilla_multiplier
-    
-    # Calculate 1d EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 12h EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 12h volume median (30-period for stability)
-    vol_median_12h = pd.Series(volume).rolling(window=30, min_periods=30).median().values
+    # Calculate prior day's high, low, close for Camarilla levels
+    # We need to get daily data to calculate the prior day's OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Extract prior day's OHLC (shifted by 1 to avoid look-ahead)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels for each day
+    # R3 = prior_close + (prior_high - prior_low) * 1.1/2
+    # S3 = prior_close - (prior_high - prior_low) * 1.1/2
+    camarilla_range = prior_high - prior_low
+    r3 = prior_close + camarilla_range * 1.1 / 2
+    s3 = prior_close - camarilla_range * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, volume median
-    start_idx = 50
+    # Start after warmup for ATR, EMA, and volume
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_median_12h[i])):
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_median_4h[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 12h volume median
-        if vol_median_12h[i] <= 0 or np.isnan(vol_median_12h[i]):
+        # Trend filter: price vs 12h EMA50
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 4h volume median
+        if vol_median_4h[i] <= 0 or np.isnan(vol_median_4h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_12h[i] * 2.0)
+            volume_confirm = curr_volume > (vol_median_4h[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
             # Long: price breaks above R3 AND uptrend AND volume spike
-            if curr_close > r3[i] and curr_close > ema_34_1d_aligned[i] and volume_confirm:
+            if curr_close > r3_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             # Short: price breaks below S3 AND downtrend AND volume spike
-            elif curr_close < s3[i] and curr_close < ema_34_1d_aligned[i] and volume_confirm:
+            elif curr_close < s3_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -98,13 +111,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below S3 (failed breakout) OR trend turns down
-            elif curr_close < s3[i] or curr_close < ema_34_1d_aligned[i]:
+            # Exit: price breaks below S3 OR trend turns down
+            elif curr_close < s3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -112,13 +125,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close > entry_price + 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above R3 (failed breakdown) OR trend turns up
-            elif curr_close > r3[i] or curr_close > ema_34_1d_aligned[i]:
+            # Exit: price breaks above R3 OR trend turns up
+            elif curr_close > r3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
