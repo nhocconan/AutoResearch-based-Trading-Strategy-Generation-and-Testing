@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and choppiness regime filter
-# Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average AND 1d chop > 61.8 (range regime)
-# Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average AND 1d chop > 61.8 (range regime)
-# Exit when price returns to Donchian(20) midpoint OR chop < 38.2 (trend regime)
-# Designed for low frequency (50-150 trades over 4 years) with clear structure and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX(14) regime filter + volume confirmation
+# In trending regime (ADX>25): trade Donchian breakouts in direction of trend
+# In ranging regime (ADX<20): fade Donchian breakouts (mean reversion)
+# Uses 1d ADX for regime, 4h Donchian channels for entries, 4h volume spike for confirmation
+# Designed for low frequency (20-50 trades/year) with clear bull/bear logic that works in both regimes
 
-name = "12h_Donchian20_1dVolumeChop_Breakout_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_Regime_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +23,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for regime and volume filters
+    # 1d HTF data for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / np.where(vol_ma_20 > 0, vol_ma_20, 1)  # Avoid division by zero
-    
-    # 1d choppiness index (CHOP)
+    # 1d ADX(14) calculation for regime detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -45,76 +40,117 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = np.full_like(tr, np.nan)
-    for i in range(14, len(tr)):
-        if not np.isnan(tr[i-13:i+1]).any():
-            atr_14[i] = np.nansum(tr[i-13:i+1])
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = np.full_like(high_1d, np.nan)
-    ll_14 = np.full_like(low_1d, np.nan)
-    for i in range(14, len(high_1d)):
-        hh_14[i] = np.nanmax(high_1d[i-13:i+1])
-        ll_14[i] = np.nanmin(low_1d[i-13:i+1])
+    # Wilder's smoothing
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            first_val = np.nansum(x[1:period+1])
+            result[period] = first_val
+            for i in range(period+1, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    chop = np.full_like(close_1d, np.nan)
-    for i in range(14, len(close_1d)):
-        if not np.isnan(atr_14[i]) and hh_14[i] > ll_14[i]:
-            chop[i] = 100 * np.log10(atr_14[i] / (hh_14[i] - ll_14[i])) / np.log10(14)
+    tr_period = 14
+    tr_smoothed = wilders_smoothing(tr, tr_period)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
+    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
     
-    # 12h Donchian channels (20-period)
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, tr_period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # 4h volume confirmation (volume > 1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(donchian_window, 20)
+    start_idx = max(34, 20)  # Need ADX and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(chop_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(donchian_mid[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime and volume filters
-        range_regime = chop_aligned[i] > 61.8  # Chop > 61.8 = ranging market
-        volume_spike = vol_ratio_aligned[i] > 1.5  # Volume > 1.5x average
+        # Regime filters
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
-            # Only trade in range regime with volume spike
-            if range_regime and volume_spike:
-                # Long: price breaks above Donchian high
-                if close[i] > highest_high[i]:
+            # Volume confirmation required
+            if not volume_spike[i]:
+                signals[i] = 0.0
+                continue
+            
+            # Breakout conditions
+            breakout_up = close[i] > highest_high[i-1]  # Use previous bar's channel
+            breakout_down = close[i] < lowest_low[i-1]
+            
+            if trending:
+                # In trending regime: trade breakouts in direction of trend
+                if breakout_up:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below Donchian low
-                elif close[i] < lowest_low[i]:
+                elif breakout_down:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
+            elif ranging:
+                # In ranging regime: fade breakouts (mean reversion)
+                if breakout_up:
+                    signals[i] = -0.25  # Short the breakout
+                    position = -1
+                elif breakout_down:
+                    signals[i] = 0.25   # Long the breakout
+                    position = 1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0  # No volume spike or not ranging - stay flat
+                signals[i] = 0.0  # Transition regime (ADX 20-25) - stay flat
         
         elif position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price returns to Donchian midpoint
-            if close[i] >= donchian_mid[i]:
-                exit_long = True
-            # Exit when market trends (chop < 38.2) - avoid false breakouts in trends
-            elif chop_aligned[i] < 38.2:
-                exit_long = True
+            if trending:
+                # Exit trending long when price breaks below Donchian low
+                if close[i] < lowest_low[i-1]:
+                    exit_long = True
+            elif ranging:
+                # Exit ranging long when price reaches Donchian midpoint (mean reversion target)
+                midpoint = (highest_high[i-1] + lowest_low[i-1]) / 2
+                if close[i] >= midpoint:
+                    exit_long = True
+            else:
+                # Transition regime - exit on any breakout in opposite direction
+                if close[i] < lowest_low[i-1]:
+                    exit_long = True
             
             if exit_long:
                 signals[i] = 0.0
@@ -125,12 +161,19 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price returns to Donchian midpoint
-            if close[i] <= donchian_mid[i]:
-                exit_short = True
-            # Exit when market trends (chop < 38.2) - avoid false breakouts in trends
-            elif chop_aligned[i] < 38.2:
-                exit_short = True
+            if trending:
+                # Exit trending short when price breaks above Donchian high
+                if close[i] > highest_high[i-1]:
+                    exit_short = True
+            elif ranging:
+                # Exit ranging short when price reaches Donchian midpoint (mean reversion target)
+                midpoint = (highest_high[i-1] + lowest_low[i-1]) / 2
+                if close[i] <= midpoint:
+                    exit_short = True
+            else:
+                # Transition regime - exit on any breakout in opposite direction
+                if close[i] > highest_high[i-1]:
+                    exit_short = True
             
             if exit_short:
                 signals[i] = 0.0
