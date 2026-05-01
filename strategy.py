@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 25 regime filter
-# Uses mid-range Camarilla levels (H3/L3) for balanced breakout sensitivity
-# Volume spike > 2.0x 20-period EMA filters low-quality breakouts
-# 1w ADX > 25 ensures strong trending regime to avoid choppy markets
-# Designed for optimal trade frequency: ~15-25 trades/year per symbol with 0.25 sizing
-# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 20 regime filter
+# Uses inner Camarilla levels (H3/L3) for higher-probability breakouts with tighter stops
+# Volume spike > 1.5x 20-period EMA filters low-quality breakouts
+# 1w ADX > 20 ensures trending market regime (avoids ranging markets)
+# Designed for 4h timeframe with ~20-35 trades/year per symbol (80-140 total over 4 years)
+# Works in bull/bear: ADX filter avoids chop, volume confirms institutional participation
 
-name = "12h_Camarilla_H3L3_Breakout_1dVolume_1wADX_StrongTrend_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dVolume_1wADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,16 +40,16 @@ def generate_signals(prices):
     camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
     camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
     camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for better quality)
+    # 1d volume spike filter: volume > 1.5 * 20-period EMA
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_spike = volume > (1.5 * vol_ema_20)
     
-    # 1w ADX(14) for regime filter (strong trend only)
+    # 1w ADX(14) for regime filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -106,23 +106,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in strong trending markets (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Regime filter: only trade in trending markets (ADX > 20)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
-            if strong_trend:
+            if trending:
                 # Long: Break above Camarilla H3 with volume spike
                 if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                 # Short: Break below Camarilla L3 with volume spike
                 elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid weak/choppy markets
+                signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
             # Exit: price returns to Camarilla L3 or opposite breakout
@@ -130,7 +130,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Exit: price returns to Camarilla H3 or opposite breakout
@@ -138,6 +138,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
