@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d weekly pivot direction and volume confirmation
-# Uses Williams fractals from 1d to identify significant swing points, filtered by 1d weekly pivot bias.
-# Volume spike ensures institutional participation. Designed to capture strong momentum moves 
-# while avoiding chop. Target: 12-37 trades/year on 6h timeframe to minimize fee drag.
-# Works in both bull and bear markets by using fractal breakouts with HTF directional filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels (R3/S3) from 1d for significant support/resistance, filtered by 1d EMA trend.
+# Volume spike ensures institutional participation. Designed to capture strong momentum moves while avoiding chop.
+# Target: 12-37 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+# BTC/ETH focus with proven Camarilla structure + volume confirmation + trend filter.
 
-name = "6h_WilliamsFractal_Breakout_WeeklyPivot_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,98 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Williams fractals and weekly pivot
+    # 1d HTF data for Camarilla pivots (R3, S3)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Williams fractals on 1d data
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R3 = H + 1.1*(H-L)/2, S3 = L - 1.1*(H-L)/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Fractal: bearish (sell) fractal = high[i] is highest of [i-2, i-1, i, i+1, i+2]
-    # bullish (buy) fractal = low[i] is lowest of [i-2, i-1, i, i+1, i+2]
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    camarilla_r3 = high_1d + 1.1 * (high_1d - low_1d) / 2.0
+    camarilla_s3 = low_1d - 1.1 * (high_1d - low_1d) / 2.0
     
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Williams fractals need 2 extra bars for confirmation (completed fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # 1d HTF data for EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d weekly pivot (using prior week's OHLC)
-    # For simplicity, we use prior 1d bar's OHLC to approximate weekly bias
-    # In practice, weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-    # We'll use prior 1d bar as proxy for weekly direction
-    weekly_pivot = (df_1d['high'].shift(1) + df_1d['low'].shift(1) + df_1d['close'].shift(1)) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
-    
-    # Weekly pivot bias: price above pivot = bullish bias, below = bearish bias
-    # We need prior bar's pivot to avoid look-ahead
-    weekly_pivot_bias_bullish = close > weekly_pivot_aligned  # Will be shifted in alignment
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.8 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    volume_spike = volume > (volume_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need sufficient history for indicators
+    start_idx = 40  # Need sufficient history for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         
-        # Weekly pivot bias from prior bar (already aligned and shifted)
-        pivot_bullish = weekly_pivot_aligned[i]  # This is already the prior bar's value due to alignment
-        pivot_bias_bullish = curr_close > pivot_bullish
-        pivot_bias_bearish = curr_close < pivot_bullish
+        # Trend filter: price above/below 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Fractal breakout conditions
-        # Bullish fractal breakout: price breaks above recent bullish fractal (support)
-        bullish_fractal_breakout = curr_close > bullish_fractal_aligned[i] and not np.isnan(bullish_fractal_aligned[i])
-        # Bearish fractal breakout: price breaks below recent bearish fractal (resistance)
-        bearish_fractal_breakout = curr_close < bearish_fractal_aligned[i] and not np.isnan(bearish_fractal_aligned[i])
+        # Camarilla breakout conditions (using current bar's levels)
+        breakout_up = curr_close > camarilla_r3_aligned[i]  # Break above R3
+        breakout_down = curr_close < camarilla_s3_aligned[i]  # Break below S3
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: bullish fractal breakout, volume spike, bullish pivot bias
-            if bullish_fractal_breakout and vol_spike and pivot_bias_bullish:
+            # Long: breakout above R3, volume spike, uptrend
+            if breakout_up and vol_spike and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal breakout, volume spike, bearish pivot bias
-            elif bearish_fractal_breakout and vol_spike and pivot_bias_bearish:
+            # Short: breakout below S3, volume spike, downtrend
+            elif breakout_down and vol_spike and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on bearish fractal breakout or pivot bias turns bearish
-            if bearish_fractal_breakout or not pivot_bias_bullish:
+            # Exit on break below S3 or trend reversal
+            if curr_close < camarilla_s3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on bullish fractal breakout or pivot bias turns bullish
-            if bullish_fractal_breakout or not pivot_bias_bearish:
+            # Exit on break above R3 or trend reversal
+            if curr_close > camarilla_r3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
