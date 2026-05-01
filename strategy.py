@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 (1d Camarilla) AND 1d EMA50 uptrend AND volume > 1.8x 20-period median.
-# Short when price breaks below S3 (1d Camarilla) AND 1d EMA50 downtrend AND volume > 1.8x 20-period median.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 (1d Camarilla) AND 1d EMA50 uptrend AND volume > 1.5x 24-period median.
+# Short when price breaks below S3 (1d Camarilla) AND 1d EMA50 downtrend AND volume > 1.5x 24-period median.
 # Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year on 4h timeframe.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h timeframe.
 # Camarilla levels from higher timeframe (1d) provide institutional pivot points that work in both bull and bear markets.
 # Volume confirmation ensures breakouts have participation, reducing false signals.
 # ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATR_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,7 +52,7 @@ def generate_signals(prices):
     r4 = pivot + (range_hl * 1.1 / 2.0)
     s4 = pivot - (range_hl * 1.1 / 2.0)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -65,8 +65,8 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 20-period volume median for volume confirmation
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Calculate 24-period volume median for volume confirmation (2*12h = 1d)
+    vol_median_24 = pd.Series(volume).rolling(window=24, min_periods=24).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,7 +83,7 @@ def generate_signals(prices):
             np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_median_20[i]) or 
+            np.isnan(vol_median_24[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             if position != 0:
@@ -98,11 +98,11 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_1d_aligned[i]
         downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period volume median
-        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
+        # Volume confirmation: current volume > 1.5x 24-period volume median
+        if vol_median_24[i] <= 0 or np.isnan(vol_median_24[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
+            volume_confirm = curr_volume > (vol_median_24[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above R3 AND uptrend AND volume spike
