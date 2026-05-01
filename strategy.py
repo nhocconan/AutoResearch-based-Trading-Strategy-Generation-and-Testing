@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Breakouts above upper Donchian channel or below lower channel are traded in the direction of 1d EMA50 trend.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
+# Uses Camarilla pivot levels from 1w timeframe to identify key weekly support/resistance.
+# Breakouts above R3 or below S3 are traded in the direction of 1w EMA34 trend.
 # Volume confirmation ensures breakouts have sufficient participation.
-# Works in both bull (buy upper breakout with uptrend) and bear (sell lower breakdown with downtrend).
-# Discrete position sizing (0.25) balances return and drawdown. Target: 75-200 trades over 4 years.
+# Works in both bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
+# Discrete position sizing (0.25) balances return and drawdown. Target: 30-100 trades over 4 years.
 
-name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 55:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_channel = high_roll
-    lower_channel = low_roll
+    # Calculate 1w ATR(14) for volatility
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume on 4h
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    
+    # Calculate 1w Camarilla pivot levels (R3, S3)
+    # Camarilla: based on previous week's high, low, close
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
+    
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume on 1d
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 1.5)
     
@@ -46,12 +69,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(55, 20) + 1  # 56 (for EMA50 and Donchian)
+    start_idx = max(35, 20) + 1  # 36 (for EMA34 and volume MA20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(upper_channel[i]) or
-            np.isnan(lower_channel[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             if position != 0:
@@ -61,40 +84,40 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: 1d EMA50 direction
-        uptrend = curr_close > ema_50_1d_aligned[i]
-        downtrend = curr_close < ema_50_1d_aligned[i]
+        # Trend filter: 1w EMA34 direction
+        uptrend = curr_close > ema_34_1w_aligned[i]
+        downtrend = curr_close < ema_34_1w_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Donchian breakout conditions
-        breakout_upper = curr_close > upper_channel[i]  # Break above upper channel
-        breakdown_lower = curr_close < lower_channel[i]  # Break below lower channel
+        # Camarilla breakout conditions
+        breakout_r3 = curr_close > camarilla_r3_aligned[i]  # Break above R3
+        breakdown_s3 = curr_close < camarilla_s3_aligned[i]  # Break below S3
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above upper channel AND uptrend AND volume confirmation
-            if breakout_upper and uptrend and vol_confirm:
+            # Long: Breakout above R3 AND uptrend AND volume confirmation
+            if breakout_r3 and uptrend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below lower channel AND downtrend AND volume confirmation
-            elif breakdown_lower and downtrend and vol_confirm:
+            # Short: Breakdown below S3 AND downtrend AND volume confirmation
+            elif breakdown_s3 and downtrend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on breakdown below lower channel (reversal signal)
-            if curr_close < lower_channel[i]:
+            # Exit on breakdown below S3 (reversal signal)
+            if curr_close < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on breakout above upper channel (reversal signal)
-            if curr_close > upper_channel[i]:
+            # Exit on breakout above R3 (reversal signal)
+            if curr_close > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
