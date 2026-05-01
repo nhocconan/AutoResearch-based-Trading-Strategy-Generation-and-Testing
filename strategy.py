@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter and volume confirmation.
-# Uses 1d for signal direction and structure (Camarilla levels from previous day).
-# 1w EMA34 for trend filter to avoid counter-trend trades in bear markets.
-# Long when price breaks above Camarilla R1 with 1w EMA34 uptrend and volume > 1.5x 20-bar average.
-# Short when price breaks below Camarilla S1 with 1w EMA34 downtrend and volume confirmation.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Uses 6h for primary signals (balances trade frequency and noise reduction).
+# Camarilla R3/S3 levels from 1d for significant breakout/breakdown zones.
+# 12h EMA50 for trend filter to avoid counter-trend trades.
+# Volume > 1.3x 20-bar average confirms breakout strength.
 # Discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
 # Session filter: 08-20 UTC to reduce noise trades.
-# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
-name = "1d_Camarilla_R1S1_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,14 +29,14 @@ def generate_signals(prices):
     # Pre-compute session hours for 08-20 UTC filter
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -57,19 +57,19 @@ def generate_signals(prices):
     
     # Pivot point (PP)
     pp = (prev_high + prev_low + prev_close) / 3.0
-    # Resistance and Support levels (R1 and S1)
-    r1 = pp + (prev_high - prev_low) * 1.1 / 2.0
-    s1 = pp - (prev_high - prev_low) * 1.1 / 2.0
+    # Resistance and Support levels (R3 and S3)
+    r3 = pp + (prev_high - prev_low) * 1.1 / 4.0
+    s3 = pp - (prev_high - prev_low) * 1.1 / 4.0
     
     # Align Camarilla levels to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 34  # warmup for 1w EMA34
+    start_idx = 50  # warmup for 12h EMA50
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -77,28 +77,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-bar average
+        # Volume confirmation: current volume > 1.3x 20-bar average
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         if vol_ma <= 0:
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma * 1.5)
+            volume_confirm = curr_volume > (vol_ma * 1.3)
         
         # Camarilla breakout conditions (using current bar's levels)
-        breakout_up = curr_close > r1_aligned[i]  # break above R1
-        breakout_down = curr_close < s1_aligned[i]  # break below S1
+        breakout_up = curr_close > r3_aligned[i]  # break above R3
+        breakout_down = curr_close < s3_aligned[i]  # break below S3
         
-        # 1w EMA34 trend filter: price above EMA = uptrend, below = downtrend
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # 12h EMA50 trend filter: price above EMA = uptrend, below = downtrend
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Camarilla breakout up AND uptrend AND volume confirmation
@@ -125,7 +125,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             # Exit: price re-enters Camarilla range OR trend changes to downtrend
-            elif (curr_close < r1_aligned[i] and curr_close > s1_aligned[i]) or \
+            elif (curr_close < r3_aligned[i] and curr_close > s3_aligned[i]) or \
                  not uptrend:
                 signals[i] = 0.0
                 position = 0
@@ -140,7 +140,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             # Exit: price re-enters Camarilla range OR trend changes to uptrend
-            elif (curr_close < r1_aligned[i] and curr_close > s1_aligned[i]) or \
+            elif (curr_close < r3_aligned[i] and curr_close > s3_aligned[i]) or \
                  not downtrend:
                 signals[i] = 0.0
                 position = 0
