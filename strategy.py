@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivots identify key intraday support/resistance levels; breakouts at R3/S3 with volume
-# indicate institutional participation. 1d EMA34 ensures higher timeframe trend alignment.
-# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag and avoid overtrading.
-# Works in bull/bear markets by trading with the 1d trend direction and using volume confirmation
-# to filter false breakouts.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+# Williams Alligator identifies trend phases via three SMAs (Jaw/Teeth/Lips); trades only when aligned
+# 1d EMA50 ensures higher timeframe trend alignment; volume spike confirms institutional participation
+# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag and avoid overtrading
+# Works in both bull/bear markets by trading with the 1d trend direction
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter
+    # 1d HTF data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla pivot levels from previous day
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use previous day's high, low, close to calculate today's levels
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan  # First bar has no previous day
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
-    camarilla_r4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_s4 = prev_close - 1.5 * (prev_high - prev_low)
+    # Williams Alligator components: SMAs of median price (typical price)
+    typical_price = (high + low + close) / 3.0
+    jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
+    teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().values    # 8-period SMA
+    lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().values     # 5-period SMA
     
     # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,44 +47,48 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(34, 20, 1)  # Need sufficient history for 1d EMA, volume MA, and pivot calculation
+    start_idx = max(50, 20, 13)  # Need sufficient history for 1d EMA, volume MA, and Alligator
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Williams Alligator signals: aligned (bullish) or reversed (bearish)
+        bullish_aligned = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])  # Lips > Teeth > Jaw
+        bearish_aligned = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])  # Lips < Teeth < Jaw
+        
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Break above R3 with volume spike and uptrend
-            if close[i] > camarilla_r3[i] and vol_spike and uptrend:
+            # Long: Bullish Alligator alignment, volume spike, uptrend
+            if bullish_aligned and vol_spike and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume spike and downtrend
-            elif close[i] < camarilla_s3[i] and vol_spike and downtrend:
+            # Short: Bearish Alligator alignment, volume spike, downtrend
+            elif bearish_aligned and vol_spike and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on break below R4 (failed breakout) or trend reversal
-            if close[i] < camarilla_r4[i] or not uptrend:
+            # Exit on bearish alignment or trend reversal
+            if bearish_aligned or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on break above S4 (failed breakout) or trend reversal
-            if close[i] > camarilla_s4[i] or not downtrend:
+            # Exit on bullish alignment or trend reversal
+            if bullish_aligned or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
