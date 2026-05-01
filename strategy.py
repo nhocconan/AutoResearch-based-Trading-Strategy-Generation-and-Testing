@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d EMA34 for trend alignment (HTF direction), requires volume > 1.5x 20-bar average for confirmation.
-# Long when price breaks above R3 and above 1d EMA34 with volume confirmation; short when breaks below S3 and below 1d EMA34 with volume confirmation.
-# Exit on opposite Camarilla level break. Session filter (08-20 UTC) reduces noise. Discrete sizing 0.25 minimizes fee churn.
-# Target: 20-40 trades/year by using 1d for signal direction and 4h only for entry timing.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR-based trailing stop.
+# Uses 1w EMA50 for trend alignment (HTF direction) and ATR(10) for dynamic stoploss.
+# Long when price breaks above upper Donchian channel and above 1w EMA50.
+# Short when price breaks below lower Donchian channel and below 1w EMA50.
+# Exit on opposite Donchian band break or ATR trailing stop (1.5x ATR from extreme).
+# Session filter (08-20 UTC) reduces noise. Discrete sizing 0.25 minimizes fee churn.
+# Target: 15-25 trades/year by using 1w for signal direction and 1d only for entry timing.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_Session_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_ATRTrail_Session_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,22 +28,33 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d data
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1w data
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 20-bar volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ATR(10) for 1d timeframe trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate Donchian channels (20-period) for 1d timeframe
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    long_stop = 0.0
+    short_stop = 0.0
     
-    start_idx = 100  # warmup for EMA and volume MA
+    start_idx = 50  # warmup for EMA, ATR, Donchian
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -60,83 +73,46 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_34_aligned[i]
-        curr_volume = volume[i]
-        curr_volume_ma = volume_ma[i]
-        
-        # Skip if volume data not ready
-        if np.isnan(curr_volume_ma):
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume > 1.5x 20-bar average
-        volume_confirmed = curr_volume > 1.5 * curr_volume_ma
-        
-        # Calculate Camarilla levels for current day using previous day's OHLC
-        if i >= 6:  # Need at least 6 bars (1.5 days) of 4h data for previous day
-            # Get timestamp of current bar
-            curr_time = prices.iloc[i]["open_time"]
-            # Get start of current day (00:00 UTC)
-            curr_day_start = curr_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            # Get start of previous day
-            prev_day_start = curr_day_start - pd.Timedelta(days=1)
-            # Get end of previous day (23:59:59.999 UTC)
-            prev_day_end = curr_day_start - pd.Timedelta(microseconds=1)
-            
-            # Filter prices for previous day
-            mask = (prices["open_time"] >= prev_day_start) & (prices["open_time"] <= prev_day_end)
-            if mask.any():
-                prev_day_data = prices.loc[mask]
-                if len(prev_day_data) > 0:
-                    prev_high = prev_day_data["high"].max()
-                    prev_low = prev_day_data["low"].min()
-                    prev_close = prev_day_data["close"].iloc[-1]
-                    
-                    # Calculate Camarilla levels
-                    range_val = prev_high - prev_low
-                    if range_val > 0:
-                        camarilla_r3 = prev_close + (range_val * 1.1 / 4)  # R3 level
-                        camarilla_s3 = prev_close - (range_val * 1.1 / 4)  # S3 level
-                    else:
-                        camarilla_r3 = curr_close
-                        camarilla_s3 = curr_close
-                else:
-                    camarilla_r3 = curr_close
-                    camarilla_s3 = curr_close
-            else:
-                camarilla_r3 = curr_close
-                camarilla_s3 = curr_close
-        else:
-            camarilla_r3 = curr_close
-            camarilla_s3 = curr_close
+        curr_upper = upper_channel[i]
+        curr_lower = lower_channel[i]
+        curr_ema = ema_50_aligned[i]
+        curr_atr = atr[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA34, volume confirmed
-            if (curr_close > camarilla_r3 and 
-                curr_close > curr_ema and
-                volume_confirmed):
+            # Long: price breaks above upper Donchian channel, price above 1w EMA50
+            if (curr_close > curr_upper and 
+                curr_close > curr_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3, price below 1d EMA34, volume confirmed
-            elif (curr_close < camarilla_s3 and 
-                  curr_close < curr_ema and
-                  volume_confirmed):
+                entry_price = curr_close
+                long_stop = curr_low - 1.5 * curr_atr  # initial stop below entry
+            # Short: price breaks below lower Donchian channel, price below 1w EMA50
+            elif (curr_close < curr_lower and 
+                  curr_close < curr_ema):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
+                short_stop = curr_high + 1.5 * curr_atr  # initial stop above entry
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Camarilla S3
-            if curr_close < camarilla_s3:
+            # Update trailing stop: move stop up to highest low minus 1.5*ATR
+            long_stop = max(long_stop, curr_low - 1.5 * curr_atr)
+            # Exit conditions: price breaks below lower Donchian channel OR stoploss hit
+            if (curr_close < curr_lower or 
+                curr_close < long_stop):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Camarilla R3
-            if curr_close > camarilla_r3:
+            # Update trailing stop: move stop down to highest high plus 1.5*ATR
+            short_stop = min(short_stop, curr_high + 1.5 * curr_atr)
+            # Exit conditions: price breaks above upper Donchian channel OR stoploss hit
+            if (curr_close > curr_upper or 
+                curr_close > short_stop):
                 signals[i] = 0.0
                 position = 0
             else:
