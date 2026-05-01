@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses 1d EMA34 for strong trend alignment to reduce whipsaws in bear markets.
 # Volume > 2.0x 20-period average confirms strong momentum breakout.
 # ATR-based stoploss (2.0x) manages risk.
-# Target: 20-30 trades/year by tightening entry conditions (volume 2.0x, 1d EMA34 filter).
+# Target: 12-37 trades/year by tightening entry conditions (volume 2.0x, 1d EMA34 filter).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 4h timeframe stoploss
+    # Calculate ATR(14) for 12h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -76,7 +76,7 @@ def generate_signals(prices):
             volume_confirm = False
         
         # Calculate Camarilla levels for current day using previous day's OHLC
-        if i >= 6:  # Need at least 6 bars (1.5 days) of 4h data for previous day
+        if i >= 2:  # Need at least 2 bars (1 day) of 12h data for previous day
             # Get timestamp of current bar
             curr_time = prices.iloc[i]["open_time"]
             # Get start of current day (00:00 UTC)
