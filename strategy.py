@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with volume > 2.0x 20-bar average and weekly close > weekly open (bullish week).
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1w trend filter.
+# Long when price breaks above Donchian(20) high with volume > 1.5x 20-bar average and weekly close > weekly open (bullish week).
 # Short when price breaks below Donchian(20) low with volume confirmation and weekly close < weekly open (bearish week).
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Weekly trend calculated from prior completed 1w bar (OHLC). Target: 12-37 trades/year on 12h timeframe.
-# Volume spike filters low-momentum breakouts. Weekly trend provides structural bias from higher timeframe.
-# Works in bull (breakouts with bullish weekly trend) and bear (breakouts with bearish weekly trend) regimes.
+# Target: 12-37 trades/year on 12h timeframe. Works in bull (breakouts with bullish weekly trend) and bear (breakouts with bearish weekly trend).
 
-name = "12h_Donchian_20_WeeklyTrend_Volume_v1"
+name = "12h_Donchian_20_WeeklyTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -48,6 +46,31 @@ def generate_signals(prices):
     weekly_trend_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bullish.astype(float))
     weekly_trend_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bearish.astype(float))
     
+    # Load 1d data ONCE before loop for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 20-day average volume for volume confirmation
+    vol_ma_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20d)
+    
+    # Load 12h data ONCE before loop for Donchian levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian(20) for each 12h bar (using previous 20 completed bars)
+    highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (shift by 1 to use previous completed bar's levels)
+    highest_high_20_aligned = align_htf_to_ltf(prices, df_12h, highest_high_20)
+    lowest_low_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
@@ -58,7 +81,10 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
             np.isnan(weekly_trend_bullish_aligned[i]) or 
-            np.isnan(weekly_trend_bearish_aligned[i])):
+            np.isnan(weekly_trend_bearish_aligned[i]) or
+            np.isnan(vol_ma_20d_aligned[i]) or
+            np.isnan(highest_high_20_aligned[i]) or
+            np.isnan(lowest_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,29 +93,12 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-bar average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
-        if vol_ma <= 0 or np.isnan(vol_ma):
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_ma = vol_ma_20d_aligned[i]
+        if vol_ma <= 0:
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma * 2.0)
-        
-        # Load 12h data ONCE before loop for Donchian levels
-        df_12h = get_htf_data(prices, '12h')
-        if len(df_12h) < 20:
-            signals[i] = 0.0
-            continue
-        
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        
-        # Calculate Donchian(20) for each 12h bar (using previous 20 completed bars)
-        highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-        lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-        
-        # Align to 12h timeframe (shift by 1 to use previous completed bar's levels)
-        highest_high_20_aligned = align_htf_to_ltf(prices, df_12h, highest_high_20)
-        lowest_low_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_20)
+            volume_confirm = curr_volume > (vol_ma * 1.5)
         
         # Use previous bar's Donchian levels (already shifted by align_htf_to_ltf)
         upper_channel = highest_high_20_aligned[i]
