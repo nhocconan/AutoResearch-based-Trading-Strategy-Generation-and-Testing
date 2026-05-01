@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 25 regime filter
-# Uses inner Camarilla levels (H3/L3) for high-probability breakouts in trending markets
-# Volume spike > 2.0x 20-period EMA filters low-quality breakouts
-# 1w ADX > 25 ensures strong trending regime (avoids chop, works in bull/bear)
-# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.30 sizing
-# Inner levels (H3/L3) provide tighter stops and better risk/reward than outer levels
+# Uses inner Camarilla levels (H3/L3) for higher-probability breakouts than H4/L4
+# Volume spike > 2.0x 20-period EMA reduces false breakouts significantly
+# 1w ADX > 25 ensures strong trending market regime (avoids chop/range)
+# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
+# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
 
-name = "4h_Camarilla_H3L3_Breakout_1dVolume_1wADX_Regime_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dVolume_1wADX_StrongTrend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,7 +31,7 @@ def generate_signals(prices):
     
     # 1w HTF data for regime filter (ADX)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar
@@ -44,12 +44,12 @@ def generate_signals(prices):
     camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
     camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tighter for better quality)
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tighter for fewer false signals)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
     
-    # 1w ADX(14) for regime filter (standard period)
+    # 1w ADX(14) for regime filter (using standard period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -98,7 +98,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(27, 20)  # Need ADX and volume EMA
+    start_idx = max(30, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
@@ -113,31 +113,31 @@ def generate_signals(prices):
             if trending:
                 # Long: Break above Camarilla H3 with volume spike
                 if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                     position = 1
                 # Short: Break below Camarilla L3 with volume spike
                 elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid ranging/choppy markets
+                signals[i] = 0.0  # Avoid ranging/weak trend markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Camarilla L3 or opposite breakout
+            # Exit: price returns to Camarilla L3 or opposite breakout with volume
             if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Camarilla H3 or opposite breakout
+            # Exit: price returns to Camarilla H3 or opposite breakout with volume
             if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
