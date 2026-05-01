@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume spike confirmation.
-# Long when Bull Power > 0 AND 12h EMA50 rising AND volume > 2.0x 20-bar average.
-# Short when Bear Power < 0 AND 12h EMA50 falling AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture medium-term trends.
-# Elder Ray measures bull/bear power relative to EMA13, providing early momentum signals.
-# 12h EMA50 trend filter ensures alignment with higher timeframe momentum.
-# Volume spike requirement reduces false breakouts and improves signal quality.
-# Works in both bull and bear markets by adapting to trend direction via higher timeframe filter.
+# Hypothesis: 4h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND 1d ADX < 25 (range/weak trend) AND volume > 1.5x 20-bar average.
+# Short when Williams %R > -20 (overbought) AND 1d ADX < 25 AND volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture reversals in ranging markets.
+# Williams %R identifies overextended moves likely to revert. 1d ADX filter avoids whipsaws in strong trends.
+# Volume confirmation ensures participation. Works in both bull and bear markets by fading extremes during consolidation.
 
-name = "6h_ElderRay_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_1dADX_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,40 +28,72 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 12h EMA50 calculation
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # 1d ADX calculation (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 slope (rising/falling)
-    ema_50_slope = np.diff(ema_50_aligned, prepend=ema_50_aligned[0])
-    ema_50_rising = ema_50_slope > 0
-    ema_50_falling = ema_50_slope < 0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first bar
     
-    # Calculate Elder Ray components: EMA13, Bull Power, Bear Power
-    # EMA13 on 6h close
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Volume confirmation: current 6h volume > 2.0x 20-bar average
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr_1d = WilderSmooth(tr, 14)
+    plus_di_1d = 100 * WilderSmooth(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * WilderSmooth(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = WilderSmooth(dx_1d, 14)
+    
+    # Align 1d ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_low = adx_1d_aligned < 25  # range/weak trend regime
+    
+    # Williams %R calculation (14-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Volume confirmation: current 4h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and volume MA calculation
+    start_idx = 50  # warmup for Williams %R, volume MA, and ADX calculation
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 6h timeframe
+        # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(ema_50_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -77,23 +107,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
-        # Elder Ray signals
-        bull_cond = bull_power[i] > 0  # Bull Power > 0
-        bear_cond = bear_power[i] < 0  # Bear Power < 0
+        # Williams %R signals
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND 12h EMA50 rising AND volume confirmation
-            if (bull_cond and 
-                ema_50_rising[i] and 
+            # Long: oversold AND low ADX regime AND volume confirmation
+            if (oversold and 
+                adx_low[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND 12h EMA50 falling AND volume confirmation
-            elif (bear_cond and 
-                  ema_50_falling[i] and 
+            # Short: overbought AND low ADX regime AND volume confirmation
+            elif (overbought and 
+                  adx_low[i] and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -101,18 +131,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bear Power < 0 OR 12h EMA50 falls (trend change)
-            if (bear_power[i] < 0 or 
-                ema_50_falling[i]):
+            # Exit: Williams %R crosses above -50 (mean reversion complete) OR ADX rises above 30 (trend strengthening)
+            if (williams_r[i] > -50 or 
+                adx_1d_aligned[i] > 30):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bull Power > 0 OR 12h EMA50 rises (trend change)
-            if (bull_power[i] > 0 or 
-                ema_50_rising[i]):
+            # Exit: Williams %R crosses below -50 (mean reversion complete) OR ADX rises above 30 (trend strengthening)
+            if (williams_r[i] < -50 or 
+                adx_1d_aligned[i] > 30):
                 signals[i] = 0.0
                 position = 0
             else:
