@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses proven Camarilla structure with tighter R3/S3 levels for higher-quality breakouts.
-# Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# Discrete position sizing (0.25) to minimize fee churn.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (price > 1d EMA34 for long, < for short) and volume confirmation.
+# Uses proven Camarilla R3/S3 levels (tighter than R4/S4) for fewer, higher-quality breakouts.
+# Trend filter ensures trades align with higher timeframe momentum.
+# Volume confirmation adds conviction to breakouts.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure.
+# Works in bull markets (buy breakouts with uptrend) and bear markets (sell breakdowns with downtrend).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +27,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -45,11 +47,11 @@ def generate_signals(prices):
     prev_low = df_1d_ohlc['low'].shift(1).values
     prev_close = df_1d_ohlc['close'].shift(1).values
     
-    # Camarilla R3 and S3 levels (breakout continuation zones)
+    # Camarilla R3 and S3 levels (proven breakout/continuation zones)
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.0714
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.0714
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_s3)
     
@@ -57,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for EMA34 and volume median
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
