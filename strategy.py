@@ -63,6 +63,22 @@ def generate_signals(prices):
     # Align 1d chop to 12h
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
+    # Load 12h data ONCE before loop for Donchian levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian(20) for each 12h bar (using previous 20 completed bars)
+    highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (shift by 1 to use previous completed bar's levels)
+    highest_high_20_aligned = align_htf_to_ltf(prices, df_12h, highest_high_20)
+    lowest_low_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
@@ -71,7 +87,8 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(atr[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(highest_high_20_aligned[i]) or np.isnan(lowest_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -87,30 +104,9 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_ma * 1.5)
         
-        # Load 12h data ONCE before loop for Donchian levels
-        df_12h = get_htf_data(prices, '12h')
-        if len(df_12h) < 20:
-            signals[i] = 0.0
-            continue
-        
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        
-        # Calculate Donchian(20) for each 12h bar (using previous 20 completed bars)
-        highest_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-        lowest_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-        
-        # Align to 12h timeframe (shift by 1 to use previous completed bar's levels)
-        highest_high_20_aligned = align_htf_to_ltf(prices, df_12h, highest_high_20)
-        lowest_low_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_20)
-        
         # Use previous bar's Donchian levels (already shifted by align_htf_to_ltf)
         upper_channel = highest_high_20_aligned[i]
         lower_channel = lowest_low_20_aligned[i]
-        
-        if np.isnan(upper_channel) or np.isnan(lower_channel):
-            signals[i] = 0.0
-            continue
         
         # Donchian breakout conditions
         breakout_up = curr_high > upper_channel  # break above upper channel
