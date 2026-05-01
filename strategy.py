@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX regime filter.
-# Uses 1w ADX > 20 to identify strong trends, reducing whipsaws in ranging markets.
-# Long when price breaks above Donchian upper AND 1w ADX > 20 AND volume > 2.5x 20-bar average.
-# Short when price breaks below Donchian lower AND 1w ADX > 20 AND volume > 2.5x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years.
-# Volume spike threshold set to 2.5x to balance signal quality and trade frequency.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w volume spike and 1w ADX regime filter.
+# Uses 1w ADX > 25 to identify strong weekly trends, reducing whipsaws in ranging markets.
+# Long when price breaks above R3 AND 1w ADX > 25 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1w ADX > 25 AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 30-100 total trades over 4 years.
+# Volume spike threshold set to 2.0x to balance signal quality and trade frequency.
 
-name = "4h_Donchian20_1wADX20_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wADX25_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for ADX trend filter
+    # Load 1w data ONCE before loop for ADX trend filter and volume
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
@@ -68,27 +68,35 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align 1w ADX to 4h timeframe
+    # Align 1w ADX to 1d timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # 1w trend: ADX > 20 indicates strong trend
-    strong_trend = adx_aligned > 20
+    # 1w trend: ADX > 25 indicates strong trend
+    strong_trend = adx_aligned > 25
     
-    # Donchian channels (20-period)
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla levels (based on previous 1w bar's range)
+    # We need the previous completed 1w bar for each 1d bar
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume confirmation: current 4h volume > 2.5x 20-bar average
+    camarilla_r3_1w = weekly_close + (weekly_high - weekly_low) * 1.1 / 4
+    camarilla_s3_1w = weekly_close - (weekly_high - weekly_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 1d timeframe (use previous week's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    
+    # Volume confirmation: current 1d volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20) + 14  # warmup for Donchian, volume MA, and ADX
+    start_idx = 50  # warmup for ADX and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -102,21 +110,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.5)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Donchian breakout signals
-        breakout_up = curr_high > upper[i]  # break above upper band
-        breakout_down = curr_low < lower[i]  # break below lower band
+        # Camarilla breakout signals
+        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper AND 1w ADX > 20 AND volume confirmation
+            # Long: breakout above R3 AND 1w ADX > 25 AND volume confirmation
             if (breakout_up and 
                 strong_trend[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower AND 1w ADX > 20 AND volume confirmation
+            # Short: breakout below S3 AND 1w ADX > 25 AND volume confirmation
             elif (breakout_down and 
                   strong_trend[i] and 
                   volume_confirm):
@@ -126,18 +134,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower (stoploss) OR ADX < 15 (trend weakening)
-            if (curr_low < lower[i] or 
-                adx_aligned[i] < 15):
+            # Exit: price crosses below S3 (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_low < camarilla_s3_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper (stoploss) OR ADX < 15 (trend weakening)
-            if (curr_high > upper[i] or 
-                adx_aligned[i] < 15):
+            # Exit: price crosses above R3 (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_high > camarilla_r3_aligned[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
