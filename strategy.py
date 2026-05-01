@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses Donchian channel for breakout detection, filtered by 1d EMA50 trend and volume > 2.0x 20-period median.
-# Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
-# Discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels from 1d for breakout detection, filtered by 1d EMA50 trend and volume > 1.8x 20-period median.
+# Works in bull (buy R3 breakouts with uptrend) and bear (sell S3 breakdowns with downtrend).
+# Discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,23 +31,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    rang = high_1d - low_1d
+    r3 = pivot + rang * 1.1 / 2
+    s3 = pivot - rang * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    
-    # Calculate Donchian(20) from previous period OHLC (no look-ahead)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA50, Donchian, and volume median
+    # Start after warmup for EMA50 and volume median
     start_idx = max(50, 20) + 1  # 51
     
     for i in range(start_idx, n):
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             if position != 0:
@@ -61,22 +70,22 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_1d_aligned[i]
         downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period volume median
+        # Volume confirmation: current volume > 1.8x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
         
-        # Donchian breakout conditions (using previous period's channel)
-        breakout_up = curr_close > high_20[i]   # break above upper channel
-        breakout_down = curr_close < low_20[i]  # break below lower channel
+        # Camarilla breakout conditions
+        breakout_up = curr_close > r3_aligned[i]   # break above R3
+        breakout_down = curr_close < s3_aligned[i]  # break below S3
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout up AND uptrend AND volume confirmation
+            # Long: Breakout above R3 AND uptrend AND volume confirmation
             if breakout_up and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout down AND downtrend AND volume confirmation
+            # Short: Breakdown below S3 AND downtrend AND volume confirmation
             elif breakout_down and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
@@ -84,7 +93,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakdown (reversal signal)
+            # Exit on breakdown below S3 (reversal signal)
             if breakout_down:
                 signals[i] = 0.0
                 position = 0
@@ -92,7 +101,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout up (reversal signal)
+            # Exit on breakout above R3 (reversal signal)
             if breakout_up:
                 signals[i] = 0.0
                 position = 0
