@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d EMA34 uptrend AND volume > 2.0x 20-period median.
-# Short when price breaks below S3 AND 1d EMA34 downtrend AND volume > 2.0x 20-period median.
-# ATR-based stoploss: exit if price moves against position by 2.5*ATR(20) from extreme.
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
-# Uses proven Camarilla pivot structure with volume and trend filters to reduce fee drag.
-# Works in both bull and bear markets via trend filter and strict entry conditions.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND 1d EMA50 uptrend AND volume > 2.0x 20-period median.
+# Short when price breaks below 20-period low AND 1d EMA50 downtrend AND volume > 2.0x 20-period median.
+# Uses ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5*ATR(20),
+# exit short if price < lowest_low_since_entry + 2.5*ATR(20).
+# Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to avoid overtrading.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_ATR_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Volume_ATR_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,13 +24,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
+    # Calculate 1d EMA50 for trend filter (MTF - call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -40,29 +39,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla pivot levels from 1d OHLC (using prior 1d bar)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Prior 1d OHLC for Camarilla calculation
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Typical price for pivot: (H+L+C)/3
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla width: (H-L)/1.1
-    camarilla_width = (high_1d - low_1d) / 1.1
-    
-    # R3 = C + (H-L)*1.1/4 = typical_price + camarilla_width * 1.1
-    # S3 = C - (H-L)*1.1/4 = typical_price - camarilla_width * 1.1
-    r3 = typical_price + camarilla_width * 1.1
-    s3 = typical_price - camarilla_width * 1.1
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 20-period Donchian channels (using lookback of 20 periods, excluding current)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -73,13 +52,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA, ATR, volume, and Camarilla
+    # Start after warmup for EMA, Donchian, volume, and ATR
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
             np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -91,26 +70,26 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period volume median
+        # Volume confirmation: current volume > 2.0x 20-period volume median (stricter threshold)
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
             volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above R3 AND uptrend AND volume spike
-            if curr_close > r3_aligned[i] and uptrend and volume_confirm:
+            # Long: Price breaks above 20-period high AND uptrend AND volume spike
+            if curr_close > high_20[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below S3 AND downtrend AND volume spike
-            elif curr_close < s3_aligned[i] and downtrend and volume_confirm:
+            # Short: Price breaks below 20-period low AND downtrend AND volume spike
+            elif curr_close < low_20[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -124,9 +103,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Camarilla S3 break OR trend reversal
+            # Exit conditions: ATR stoploss OR Donchian break OR trend reversal
             stop_price = highest_since_entry - 2.5 * curr_atr
-            if curr_close < stop_price or curr_close < s3_aligned[i] or not uptrend:
+            if curr_close < stop_price or curr_close < low_20[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,9 +116,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Camarilla R3 break OR trend reversal
+            # Exit conditions: ATR stoploss OR Donchian break OR trend reversal
             stop_price = lowest_since_entry + 2.5 * curr_atr
-            if curr_close > stop_price or curr_close > r3_aligned[i] or not downtrend:
+            if curr_close > stop_price or curr_close > high_20[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
