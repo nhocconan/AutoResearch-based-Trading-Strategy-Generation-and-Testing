@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + Elder Ray + Volume Spike
-# Uses 1d timeframe with weekly trend filter (1w EMA50) to avoid counter-trend trades
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength
-# Elder Ray (Bull/Bear Power) confirms momentum with EMA13
-# Volume spike filters false breakouts
-# Designed for very low frequency (<30 trades/year) to minimize fee drag
-# Works in bull/bear via trend filter + momentum confirmation
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX) and volume confirmation
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Regime filter: ADX(14) > 25 for trending, < 20 for ranging (hysteresis)
+# In trending regime (ADX > 25): follow Elder Ray signals (long if Bull Power > 0, short if Bear Power < 0)
+# In ranging regime (ADX < 20): mean revert at extremes (long if Bear Power < -std, short if Bull Power > +std)
+# Volume confirmation: current volume > 1.5 * 20-period average volume
+# Designed for low frequency (50-150 trades over 4 years) to minimize fee drag
+# Works in bull/bear via regime adaptation: trend follow in trends, mean revert in ranges
 
-name = "1d_WilliamsAlligator_ElderRay_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Williams Alligator and Elder Ray
+    # 1d HTF data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w HTF data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate ADX(14) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA50 for trend filter (major trend direction)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
     
-    # Williams Alligator: SMAs of median price
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars
-    # Lips: 5-period SMMA shifted 3 bars
-    median_price = (high + low) / 2.0
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate SMMA (Smoothed Moving Average) - similar to Wilder's smoothing
-    def smma(source, period):
-        if len(source) < period:
-            return np.full_like(source, np.nan)
-        result = np.full_like(source, np.nan)
-        # First value is SMA
-        result[period-1] = np.mean(source[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT) / PERIOD
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
+    # Smoothed TR, DM+ (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    # Alligator lines
-    jaw = smma(median_price, 13)  # Jaw (Blue)
-    teeth = smma(median_price, 8)  # Teeth (Red)
-    lips = smma(median_price, 5)   # Lips (Green)
+    atr_1d = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Shift Alligator lines (Jaw: 8, Teeth: 5, Lips: 3)
-    jaw_shifted = np.concatenate([[np.nan]*8, jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
-    teeth_shifted = np.concatenate([[np.nan]*5, teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
-    lips_shifted = np.concatenate([[np.nan]*3, lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, dm_plus_smooth / atr_1d * 100, 0)
+    di_minus = np.where(atr_1d != 0, dm_minus_smooth / atr_1d * 100, 0)
     
-    # Align Alligator to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = wilders_smoothing(dx, 14)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Align ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate EMA13 on 6h data for Elder Ray
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = low - ema_13   # Low - EMA13
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,55 +94,120 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(50, 34, 20)  # Need 1w EMA50, Alligator, EMA13, volume MA20
+    start_idx = max(30, 20, 13)  # Need ADX(14) with smoothing, volume MA20, EMA13
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13[i]) or 
             np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator trend conditions
-        # Uptrend: Lips > Teeth > Jaw (Green > Red > Blue)
-        alligator_uptrend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        # Downtrend: Lips < Teeth < Jaw (Green < Red < Blue)
-        alligator_downtrend = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Elder Ray conditions
-        strong_bull = bull_power[i] > 0 and bull_power[i] > np.mean(bull_power[max(0, i-10):i+1])  # Above average
-        strong_bear = bear_power[i] < 0 and bear_power[i] < np.mean(bear_power[max(0, i-10):i+1])  # Below average
-        
-        # Volume confirmation
+        adx = adx_1d_aligned[i]
         vol_spike = volume_spike[i]
         
-        if position == 0:  # Flat - look for new entries
-            # Long: Alligator uptrend + strong bull power + volume spike
-            if alligator_uptrend and strong_bull and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Short: Alligator downtrend + strong bear power + volume spike
-            elif alligator_downtrend and strong_bear and vol_spike:
-                signals[i] = -0.25
-                position = -1
+        # Regime definition with hysteresis
+        # Trending: ADX > 25
+        # Ranging: ADX < 20
+        # Transition: 20 <= ADX <= 25 (hold previous regime)
+        
+        if i == start_idx:
+            # Initialize regime based on current ADX
+            if adx > 25:
+                regime = 'trending'
+            elif adx < 20:
+                regime = 'ranging'
             else:
+                regime = 'transition'
+        else:
+            # Propagate previous regime with hysteresis
+            prev_regime = regime
+            if adx > 25:
+                regime = 'trending'
+            elif adx < 20:
+                regime = 'ranging'
+            else:
+                regime = prev_regime  # hold in transition zone
+        
+        if position == 0:  # Flat - look for new entries
+            if regime == 'trending':
+                # In trending regime: follow Elder Ray signals
+                if bull_power[i] > 0 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif bear_power[i] < 0 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif regime == 'ranging':
+                # In ranging regime: mean revert at extremes
+                # Calculate volatility-based thresholds
+                if i >= 20:
+                    # Use recent 20-bar std of Elder Ray power
+                    bp_std = np.nanstd(bull_power[max(0, i-20):i+1])
+                    br_std = np.nanstd(-bear_power[max(0, i-20):i+1])  # Bear power is negative, so -bear_power for magnitude
+                    threshold = max(bp_std, br_std) * 1.5  # 1.5 standard deviations
+                    
+                    if bear_power[i] < -threshold and vol_spike:  # Strong bear power = oversold
+                        signals[i] = 0.25
+                        position = 1
+                    elif bull_power[i] > threshold and vol_spike:  # Strong bull power = overbought
+                        signals[i] = -0.25
+                        position = -1
+                    else:
+                        signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
+            else:  # transition regime - stay flat
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Alligator trend reversal or weak bull power
-            if not alligator_uptrend or bull_power[i] <= 0:
+            # Exit conditions
+            if regime == 'trending':
+                # Exit when bull power turns negative (trend weakness)
+                if bull_power[i] <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif regime == 'ranging':
+                # Exit when mean reversion occurs (power returns to neutral)
+                if i >= 20:
+                    bp_std = np.nanstd(bull_power[max(0, i-20):i+1])
+                    if bull_power[i] < bp_std * 0.5:  # Return to half std deviation
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
+                else:
+                    signals[i] = 0.25
+            else:  # transition
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Alligator trend reversal or weak bear power
-            if not alligator_downtrend or bear_power[i] >= 0:
+            # Exit conditions
+            if regime == 'trending':
+                # Exit when bear power turns positive (trend weakness)
+                if bear_power[i] >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            elif regime == 'ranging':
+                # Exit when mean reversion occurs
+                if i >= 20:
+                    br_std = np.nanstd(-bear_power[max(0, i-20):i+1])
+                    if -bear_power[i] < br_std * 0.5:  # Return to half std deviation
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
+                else:
+                    signals[i] = -0.25
+            else:  # transition
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
