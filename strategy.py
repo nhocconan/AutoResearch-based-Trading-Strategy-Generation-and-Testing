@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation (>1.5x 20-bar volume MA) and 1d ADX(14) trend filter (ADX > 20)
-# Donchian channels provide robust price channels for breakout trading. Volume spike confirms institutional participation.
-# 1d ADX > 20 ensures we only trade in trending markets, reducing false breakouts in ranging conditions.
-# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull (breakouts with volume) and bear (trend continuation after pullbacks to channel).
+# Hypothesis: 4h Williams Alligator + Elder Ray + volume confirmation
+# Williams Alligator (jaw=13, teeth=8, lips=5) identifies trend direction and strength.
+# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear momentum.
+# Volume spike (>2.0x 20-bar MA) confirms institutional participation.
+# Works in bull (Alligator rising + Bull Power > 0) and bear (Alligator falling + Bear Power > 0).
+# Discrete sizing (0.30) balances profit potential and drawdown control.
+# Target: 100-180 total trades over 4 years (25-45/year).
 
-name = "12h_Donchian20_Breakout_VolumeSpike_1dADX20_Trend_v1"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,111 +25,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ADX calculation
+    # 1d HTF data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d ADX(14) calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA(34) for higher timeframe trend
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Williams Alligator on 4h data
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Alligator lines (smoothed with future shift)
+    jaw = pd.Series(close).ewm(span=jaw_period, adjust=False, min_periods=jaw_period).mean().shift(jaw_period//2).values
+    teeth = pd.Series(close).ewm(span=teeth_period, adjust=False, min_periods=teeth_period).mean().shift(teeth_period//2).values
+    lips = pd.Series(close).ewm(span=lips_period, adjust=False, min_periods=lips_period).mean().shift(lips_period//2).values
     
-    # Smoothed values
-    def _wilder_smooth(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(x[1:period])
-        # Subsequent values are Wilder smoothing
-        for i in range(period, len(x)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + x[i]) / period
-        return result
+    # Elder Ray on 4h data
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    atr_1d = _wilder_smooth(tr, 14)
-    plus_di_1d = 100 * _wilder_smooth(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * _wilder_smooth(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = _wilder_smooth(dx_1d, 14)
-    
-    # Align 1d ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Donchian(20) channels on 12h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need 14*3 for ADX + 20 for Donchian + volume MA
+    start_idx = max(jaw_period, teeth_period, lips_period, 13, 20) + 10
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
+        # Williams Alligator trend conditions
+        alligator_rising = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])  # Mouth open upward
+        alligator_falling = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])  # Mouth open downward
         
-        # Donchian breakout conditions (using prior bar channels to avoid look-ahead)
-        breakout_up = curr_close > donchian_high[i-1]  # Break above upper channel
-        breakout_down = curr_close < donchian_low[i-1]  # Break below lower channel
+        # Elder Ray power conditions
+        bull_strong = bull_power[i] > 0
+        bear_strong = bear_power[i] > 0
         
-        # Volume confirmation and trend filter
+        # Volume confirmation and 1d trend filter
         vol_spike = volume_spike[i]
-        strong_trend = adx_1d_aligned[i] > 20
+        uptrend_1d = close[i] > ema_34_1d_aligned[i]
+        downtrend_1d = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up, volume spike, strong trend
-            if breakout_up and vol_spike and strong_trend:
-                signals[i] = 0.25
+            # Long: Alligator rising + Bull Power > 0 + volume spike + 1d uptrend
+            if alligator_rising and bull_strong and vol_spike and uptrend_1d:
+                signals[i] = 0.30
                 position = 1
-            # Short: Donchian breakout down, volume spike, strong trend
-            elif breakout_down and vol_spike and strong_trend:
-                signals[i] = -0.25
+            # Short: Alligator falling + Bear Power > 0 + volume spike + 1d downtrend
+            elif alligator_falling and bear_strong and vol_spike and downtrend_1d:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakdown or weak trend
-            if curr_close < donchian_low[i] or adx_1d_aligned[i] < 15:
+            # Exit on Alligator weakening or Bear Power taking over
+            if not alligator_rising or bear_strong:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout or weak trend
-            if curr_close > donchian_high[i] or adx_1d_aligned[i] < 15:
+            # Exit on Alligator weakening or Bull Power taking over
+            if not alligator_falling or bull_strong:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
