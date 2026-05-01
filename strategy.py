@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 (1w Camarilla) AND 1w EMA50 uptrend AND volume > 2.0x 20-period median.
-# Short when price breaks below S3 (1w Camarilla) AND 1w EMA50 downtrend AND volume > 2.0x 20-period median.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 (1d Camarilla) AND 1d EMA34 uptrend AND volume > 2.0x 20-period median.
+# Short when price breaks below S3 (1d Camarilla) AND 1d EMA34 downtrend AND volume > 2.0x 20-period median.
 # Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-25 trades/year on 12h timeframe.
-# Camarilla levels from higher timeframe (1w) provide institutional pivot points that work in both bull and bear markets.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year on 4h timeframe.
+# Camarilla levels from higher timeframe (1d) provide institutional pivot points that work in both bull and bear markets.
 # Volume confirmation ensures breakouts have participation, reducing false signals.
 # ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATR_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +26,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA34 for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1w close
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate EMA34 on 1d close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1w Camarilla pivot levels (R3, S3, R4, S4) - using previous week's OHLC
+    # Calculate 1d Camarilla pivot levels (R3, S3, R4, S4) - using previous day's OHLC
     # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # where C = (H+L+C)/3 (typical price), but for intraday we use previous week's values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    # where C = (H+L+C)/3 (typical price), but for intraday we use previous day's values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
     # Typical price for pivot calculation
     pivot = (prev_high + prev_low + prev_close) / 3.0
@@ -52,11 +52,11 @@ def generate_signals(prices):
     r4 = pivot + (range_hl * 1.1 / 2.0)
     s4 = pivot - (range_hl * 1.1 / 2.0)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -78,7 +78,7 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or 
@@ -94,9 +94,9 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1w EMA50 direction
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: 1d EMA34 direction
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
