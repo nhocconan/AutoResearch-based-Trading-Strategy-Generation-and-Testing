@@ -8,9 +8,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Volume > 2.0x 20-period EMA confirms institutional participation
 # Designed for low trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
 # Works in bull/bear: ADX filter avoids chop, volume confirms breakout validity in both directions
-# Uses proper Wilder's smoothing for ADX and discrete position sizing to minimize fee churn
 
-name = "4h_Donchian20_VolumeConfirm_1dADX_Regime_v2"
+name = "4h_Donchian20_VolumeConfirm_1dADX_Regime_v3"
 timeframe = "4h"
 leverage = 1.0
 
