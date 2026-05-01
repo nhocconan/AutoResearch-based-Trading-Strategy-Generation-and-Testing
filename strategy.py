@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX20 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d ADX > 20 (trending) AND volume > 1.8x 20-bar average.
-# Short when price breaks below S3 AND 1d ADX > 20 (trending) AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Volume spike threshold set to 1.8x to reduce false breakouts and improve signal quality.
-# Works in trending markets (both bull and bear) by requiring ADX > 20 for trend strength.
-# Primary timeframe: 4h, HTF: 1d for trend filter (ADX).
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 4h close > EMA50 AND volume > 1.8x 20-bar average.
+# Short when price breaks below S3 AND 4h close < EMA50 AND volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.20 to manage drawdown. Target: 60-150 total trades over 4 years (15-37/year).
+# Primary timeframe: 1h, HTF: 4h for trend filter and Camarilla levels (from 1d).
+# Session filter: 08-20 UTC to reduce noise trades.
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX20_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,49 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    
+    # Load 4h data ONCE before loop for EMA trend filter and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
     
-    # 1d ADX calculation (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA50 calculation
+    close_4h = df_4h['close'].values
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 4h close aligned for trend bias
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
     
     # Calculate Camarilla pivot levels from previous day (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     # Previous day's high, low, close for Camarilla calculation
     prev_high = df_1d['high'].shift(1).values  # shift(1) to use previous completed day
     prev_low = df_1d['low'].shift(1).values
@@ -79,20 +56,28 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current 4h volume > 1.8x 20-bar average
+    # Volume confirmation: current 1h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for ADX and indicators
+    start_idx = 50  # warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(adx_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if any required data is NaN
+        if np.isnan(ema_aligned[i]) or np.isnan(close_4h_aligned[i]) or \
+           np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade between 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -107,45 +92,48 @@ def generate_signals(prices):
             continue
             
         volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
-        strong_trend = adx_aligned[i] > 20  # ADX > 20 indicates trending market
         
         # Camarilla breakout signals
         breakout_up = curr_high > r3_aligned[i]  # break above R3
         breakout_down = curr_low < s3_aligned[i]  # break below S3
         
+        # Trend filter: use 4h close vs its EMA50 for bias
+        bullish_bias = close_4h_aligned[i] > ema_aligned[i]  # 4h close above its EMA50 = bullish
+        bearish_bias = close_4h_aligned[i] < ema_aligned[i]  # 4h close below its EMA50 = bearish
+        
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND strong trend AND volume confirmation
+            # Long: breakout above R3 AND bullish bias AND volume confirmation
             if (breakout_up and 
-                strong_trend and 
+                bullish_bias and 
                 volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below S3 AND strong trend AND volume confirmation
+            # Short: breakout below S3 AND bearish bias AND volume confirmation
             elif (breakout_down and 
-                  strong_trend and 
+                  bearish_bias and 
                   volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR trend weakens (ADX < 20)
+            # Exit: price crosses below S3 (stoploss) OR bearish bias (trend change)
             if (curr_low < s3_aligned[i] or 
-                adx_aligned[i] < 20):
+                bearish_bias):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR trend weakens (ADX < 20)
+            # Exit: price crosses above R3 (stoploss) OR bullish bias (trend change)
             if (curr_high > r3_aligned[i] or 
-                adx_aligned[i] < 20):
+                bullish_bias):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
