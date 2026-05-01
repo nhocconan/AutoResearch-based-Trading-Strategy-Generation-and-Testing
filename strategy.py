@@ -3,21 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND 1d EMA50 rising AND volume > 2.0x 20-bar average.
-# Short when price breaks below Donchian lower band AND 1d EMA50 falling AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Session filter 08-20 UTC.
-# Target: 80-150 total trades over 4 years (20-38/year) for BTC/ETH/SOL.
-# Donchian(20) provides clear price channel structure proven on SOLUSDT test Sharpe 1.10-1.38.
-# 1d EMA50 offers robust daily trend filter. Higher volume threshold (2.0x) ensures only significant breakouts.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above Donchian upper band AND 1d EMA50 rising AND volume > 2.0x 48-bar average.
+# Short when price breaks below Donchian lower band AND 1d EMA50 falling AND volume > 2.0x 48-bar average.
+# Uses discrete sizing 0.25 to balance profit potential and drawdown control.
+# Session filter 08-20 UTC to avoid low-liquidity periods.
+# Target: 50-150 total trades over 4 years (12-37/year) for BTC/ETH/SOL.
+# Donchian(20) provides clear structure-based breakouts.
+# 1d EMA50 offers robust daily trend alignment.
+# Higher volume threshold (2.0x) ensures only significant breakouts are traded.
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,18 +46,17 @@ def generate_signals(prices):
     ema_50_rising = ema_50_slope > 0
     ema_50_falling = ema_50_slope < 0
     
-    # Calculate Donchian(20) channels
-    donchian_period = 20
-    upper = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate Donchian channels (20-period) on 12h data
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current 12h volume > 2.0x 48-bar average
+    vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, donchian_period)  # warmup for indicators
+    start_idx = 100  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Session filter: trade only 08-20 UTC
@@ -64,7 +65,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -81,8 +82,8 @@ def generate_signals(prices):
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
         # Donchian breakout signals
-        breakout_up = curr_high > upper[i]  # break above upper band
-        breakout_down = curr_low < lower[i]  # break below lower band
+        breakout_up = curr_high > high_ma[i]  # break above upper band
+        breakout_down = curr_low < low_ma[i]  # break below lower band
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
@@ -103,7 +104,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: price crosses below lower band (stoploss) OR 1d EMA50 falls (trend change)
-            if (curr_low < lower[i] or 
+            if (curr_low < low_ma[i] or 
                 ema_50_falling[i]):
                 signals[i] = 0.0
                 position = 0
@@ -112,7 +113,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: price crosses above upper band (stoploss) OR 1d EMA50 rises (trend change)
-            if (curr_high > upper[i] or 
+            if (curr_high > high_ma[i] or 
                 ema_50_rising[i]):
                 signals[i] = 0.0
                 position = 0
