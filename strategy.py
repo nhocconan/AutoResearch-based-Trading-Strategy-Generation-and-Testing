@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses Donchian channel from weekly timeframe for structural breakout levels
-# 1w EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume spike confirmation (>2.0 * 20-period EMA) filters low-conviction moves
-# Designed for low trade frequency: ~7-25 trades/year per symbol with 0.25 sizing
-# Works in bull markets via breakout continuation and bear markets via trend-following alignment
-# BTC/ETH focused: requires volume spike and HTF trend alignment to avoid SOL-only bias
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter
+# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
+# 1d ADX > 25 confirms trending regime to avoid whipsaws in ranging markets
+# Volume spike (>1.5 * 20 EMA) confirms conviction on Elder Ray signals
+# Long when Bull Power > 0 and rising, Short when Bear Power > 0 and rising
+# Designed for low trade frequency: ~15-30 trades/year per symbol with 0.25 sizing
+# Works in bull markets via trend continuation and bear markets via short-side alignment
+# BTC/ETH focused: requires ADX trend filter and volume confirmation to avoid SOL-only bias
 
-name = "1d_Donchian20_1wEMA50_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX25_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,79 +26,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for Donchian channels and EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # 1d HTF data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ADX for trend regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Upper channel: highest high over past 20 weekly bars
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower channel: lowest low over past 20 weekly bars
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align Donchian levels to 1d timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])  # First value is simple average
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (strict filter)
+    period = 14
+    atr_1d = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, (dm_plus_smooth / atr_1d) * 100, 0)
+    di_minus = np.where(atr_1d != 0, (dm_minus_smooth / atr_1d) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = wilders_smoothing(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 6h EMA13 for Elder Ray calculation
+    close_series = pd.Series(close)
+    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = ema_13 - low   # EMA13 - Low
+    
+    # Volume confirmation: volume > 1.5 * 20-period EMA
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_spike = volume > (1.5 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need sufficient 1w data
-    start_idx = 60
+    # Start after warmup: need sufficient 1d and 6h data
+    start_idx = max(40, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1w EMA50
-        bullish_bias = close[i] > ema_50_1w_aligned[i]
-        bearish_bias = close[i] < ema_50_1w_aligned[i]
+        # Determine trend regime from 1d ADX
+        trending_regime = adx_1d_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            if bullish_bias:
-                # Long: price breaks above 1w Donchian upper channel with volume spike
-                if close[i] > upper_20_aligned[i-1] and volume_spike[i]:
+            if trending_regime:
+                # Long: Bull Power > 0 and rising (bullish momentum)
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                else:
-                    signals[i] = 0.0
-            elif bearish_bias:
-                # Short: price breaks below 1w Donchian lower channel with volume spike
-                if close[i] < lower_20_aligned[i-1] and volume_spike[i]:
+                # Short: Bear Power > 0 and rising (bearish momentum)
+                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid chop around EMA50
+                signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price breaks below 1w Donchian lower channel or price below 1w EMA50
-            if close[i] < lower_20_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: Bull Power <= 0 or ADX < 20 (trend weakening)
+            if bull_power[i] <= 0 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above 1w Donchian upper channel or price above 1w EMA50
-            if close[i] > upper_20_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: Bear Power <= 0 or ADX < 20 (trend weakening)
+            if bear_power[i] <= 0 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
