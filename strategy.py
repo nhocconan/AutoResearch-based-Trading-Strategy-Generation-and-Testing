@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme Reversal + 1d Volume Spike + 1w ADX Regime Filter
-# Uses Williams %R(14) from 1d for extreme oversold/overbought conditions
-# Long when %R < -80 (oversold) with volume spike in trending regime (ADX>25)
-# Short when %R > -20 (overbought) with volume spike in trending regime
-# Volume spike defined as current volume > 1.5 * 20-period EMA
-# Designed for low frequency (50-150 trades over 4 years) with clear structure
-# Williams %R works well in both bull and bear markets by catching reversals at extremes
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d ADX regime filter
+# Uses 1d ADX(14) to filter regime: ADX>25 = trending (trade breakouts), ADX<20 = range (avoid)
+# Donchian(20) from 4h acts as dynamic support/resistance
+# Breakout above upper band with volume spike = long, breakdown below lower band = short
+# Volume spike defined as current volume > 1.8 * 20-period EMA
+# Designed for low frequency (75-200 trades over 4 years) with clear structure
+# Works in both bull and bear markets via regime filter and symmetric long/short logic
 
-name = "12h_WilliamsR_1dVolume_1wADX_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_1dADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,51 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Williams %R and volume average
+    # 1d HTF data for regime filter (ADX) and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w HTF data for regime filter (ADX)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 4h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_band = high_roll.values
+    lower_band = low_roll.values
     
-    # Calculate 1d Williams %R(14)
+    # 1d ADX(14) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          ((highest_high - close_1d) / (highest_high - lowest_low)) * -100, -50)
-    
-    # Align 1d Williams %R to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # 1d volume spike filter: volume > 1.5 * 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
-    
-    # 1w ADX(20) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -83,7 +66,7 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 20
+    tr_period = 14
     tr_smoothed = wilders_smoothing(tr, tr_period)
     dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
     dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
@@ -96,17 +79,22 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 1d volume spike filter: volume > 1.8 * 20-period EMA (using 4h volume aggregated to 1d)
+    # Since we don't have 1d volume directly, we'll use 4h volume with a longer EMA
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and EMA20
+    start_idx = max(34, 20)  # Need ADX and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
@@ -117,12 +105,12 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Only trade in trending regime (ADX>25) - avoid ranging markets
             if trending:
-                # Long: Williams %R < -80 (oversold) with volume spike
-                if williams_r_aligned[i] < -80 and volume_spike[i]:
+                # Long: Break above upper band with volume spike
+                if close[i] > upper_band[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R > -20 (overbought) with volume spike
-                elif williams_r_aligned[i] > -20 and volume_spike[i]:
+                # Short: Break below lower band with volume spike
+                elif close[i] < lower_band[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -131,11 +119,12 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging and transition regimes
         
         elif position == 1:  # Long position
-            # Exit conditions: Williams %R returns to -50 (midline) or opposite extreme
+            # Exit conditions: price returns to midpoint or opposite breakout
+            midpoint = (upper_band[i] + lower_band[i]) / 2.0
             exit_long = False
-            if williams_r_aligned[i] >= -50:  # Return to midline
+            if close[i] <= midpoint:  # Return to midpoint
                 exit_long = True
-            elif williams_r_aligned[i] > -20 and volume_spike[i]:  # Reverse to overbought
+            elif close[i] < lower_band[i] and volume_spike[i]:  # Reverse breakout
                 exit_long = True
             
             if exit_long:
@@ -145,11 +134,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions: Williams %R returns to -50 (midline) or opposite extreme
+            # Exit conditions: price returns to midpoint or opposite breakout
+            midpoint = (upper_band[i] + lower_band[i]) / 2.0
             exit_short = False
-            if williams_r_aligned[i] <= -50:  # Return to midline
+            if close[i] >= midpoint:  # Return to midpoint
                 exit_short = True
-            elif williams_r_aligned[i] < -80 and volume_spike[i]:  # Reverse to oversold
+            elif close[i] > upper_band[i] and volume_spike[i]:  # Reverse breakout
                 exit_short = True
             
             if exit_short:
