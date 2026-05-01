@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d volume spike and chop regime filter
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trends when lines are aligned and separated.
-# Long when Lips > Teeth > Jaw (bullish alignment), Short when Lips < Teeth < Jaw (bearish alignment).
-# 1d volume spike confirms breakout strength. Chop regime filter avoids whipsaws in ranging markets.
-# Designed for 12h timeframe to target 12-37 trades/year with discrete position sizing.
-# Works in both bull (trend following) and bear (mean reversion via chop filter) markets.
+# Hypothesis: 4h TRIX(9) zero-line cross with 1d volume spike confirmation and chop regime filter
+# TRIX is a triple-smoothed EMA momentum oscillator that filters noise and identifies trend changes
+# Zero-line cross provides clean entry signals with low lag
+# 1d volume spike confirms institutional participation in the breakout
+# Choppiness index regime filter ensures we only trade in trending markets (CHOP < 38.2) or mean-revert in range (CHOP > 61.8)
+# Designed for low trade frequency (20-40/year) with high edge to overcome fee drag
+# Works in both bull and bear markets by adapting to regime
 
-name = "12h_WilliamsAlligator_1dVolumeSpike_ChopFilter_v2"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_1dVolumeSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,105 +27,99 @@ def generate_signals(prices):
     
     # 1d HTF data for volume spike and chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d volume spike: current volume > 2.0 * 20-period average volume
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (volume_ma_20_1d * 2.0)
+    # 1d volume spike: current volume > 2.0 * 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = vol_1d > (vol_ma_20 * 2.0)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # 1d chop regime: Chopiness Index > 61.8 = ranging (mean revert), < 38.2 = trending
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d Choppiness Index: CHOP > 61.8 = range, CHOP < 38.2 = trend
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    atr_1d = np.zeros(len(df_1d))
+    tr_1d = np.maximum(df_1d['high'].values, np.roll(df_1d['close'].values, 1))
+    tr_1d = np.maximum(tr_1d, np.roll(df_1d['low'].values, 1)) - np.minimum(df_1d['low'].values, np.roll(df_1d['close'].values, 1))
+    tr_1d = np.maximum(tr_1d, np.roll(df_1d['high'].values, 1)) - np.minimum(df_1d['low'].values, np.roll(df_1d['high'].values, 1))
+    tr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first TR
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop_denom = highest_high_14 - lowest_low_14
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
+    chop_1d = 100 * np.log10(sum_atr_14 / chop_denom) / np.log10(14)
+    chop_1d = np.where(np.isnan(chop_1d), 50.0, chop_1d)  # fill NaN with neutral
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    chop_regime_trending = chop_1d < 38.2   # trending regime
+    chop_regime_ranging = chop_1d > 61.8    # ranging regime
+    chop_regime_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_trending)
+    chop_regime_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_ranging)
     
-    # Chopiness Index(14) = 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(14))
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = (max_high_14 - min_low_14) * np.sqrt(14)
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid division by zero
-    chop = 100 * np.log10(sum_atr_14 / chop_denominator)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # TRIX(9) on 4h close: triple EMA, then percent change
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = pd.Series(ema3).pct_change(periods=1) * 100  # percent change
+    trix = np.nan_to_num(trix, nan=0.0)
     
-    # Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA (smoothed moving average) of median price
-    # Teeth: 8-period SMMA of median price
-    # Lips: 5-period SMMA of median price
-    median_price = (high + low) / 2
-    
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        sma = np.mean(arr[:period])
-        result[period-1] = sma
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    # TRIX zero-line cross signals
+    trix_cross_up = (trix > 0) & (np.roll(trix, 1) <= 0)   # crossed above zero
+    trix_cross_down = (trix < 0) & (np.roll(trix, 1) >= 0) # crossed below zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(30, 13)  # need 30 for 1d indicators, 13 for Alligator jaw
+    start_idx = max(30, 20)  # TRIX needs ~30 bars for stability, plus 1d indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
+        if (np.isnan(trix[i]) or np.isnan(volume_spike_1d_aligned[i]) or 
+            np.isnan(chop_regime_trending_aligned[i]) or np.isnan(chop_regime_ranging_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when chop < 50 (avoid strong ranging markets)
-        regime_ok = chop_aligned[i] < 50
-        
-        # Volume confirmation
         vol_spike = volume_spike_1d_aligned[i]
-        
-        # Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        chop_trend = chop_regime_trending_aligned[i]
+        chop_range = chop_regime_ranging_aligned[i]
+        trix_up = trix_cross_up[i]
+        trix_down = trix_cross_down[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: bullish alignment, volume spike, regime OK
-            if bullish_alignment and vol_spike and regime_ok:
+            # Long: TRIX crosses above zero, volume spike, trending regime
+            if trix_up and vol_spike and chop_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment, volume spike, regime OK
-            elif bearish_alignment and vol_spike and regime_ok:
+            # Short: TRIX crosses below zero, volume spike, trending regime
+            elif trix_down and vol_spike and chop_trend:
                 signals[i] = -0.25
                 position = -1
+            # Mean reversion in ranging regime: TRIX extremes
+            elif chop_range:
+                if trix < -2.0 and vol_spike:  # oversold, mean reversion long
+                    signals[i] = 0.20
+                    position = 1
+                elif trix > 2.0 and vol_spike:  # overbought, mean reversion short
+                    signals[i] = -0.20
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on bearish alignment or loss of regime/volume conditions
-            if bearish_alignment or not regime_ok or not vol_spike:
+            # Exit on TRIX cross below zero or loss of momentum
+            if trix_down or (chop_range and trix > 0.5):  # exit ranging long on mean reversion
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on bullish alignment or loss of regime/volume conditions
-            if bullish_alignment or not regime_ok or not vol_spike:
+            # Exit on TRIX cross above zero or loss of momentum
+            if trix_up or (chop_range and trix < -0.5):  # exit ranging short on mean reversion
                 signals[i] = 0.0
                 position = 0
             else:
