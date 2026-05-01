@@ -3,122 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel AND 1w close > EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below lower Donchian channel AND 1w close < EMA50 AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 30-100 total trades over 4 years (7-25/year).
-# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
-# Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 1d, HTF: 1w for trend filter.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d regime filter.
+# Bull Power = high - EMA13(close); Bear Power = EMA13(close) - low.
+# Long when Bull Power > 0 AND 1d close > 1d EMA50 (bull regime).
+# Short when Bear Power > 0 AND 1d close < 1d EMA50 (bear regime).
+# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets (trend following via Bull Power) and bear markets (trend following via Bear Power).
+# Primary timeframe: 6h, HTF: 1d for regime filter.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA50_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Load 1w data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA50 calculation
-        return np.zeros(n)
+    # Calculate EMA13 for Elder Ray (primary timeframe)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 1w EMA50 calculation
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Bull Power = high - EMA13
+    bull_power = high - ema13
+    # Bear Power = EMA13 - low
+    bear_power = ema13 - low
     
-    # Calculate 1w close aligned for trend bias
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    
-    # Calculate Donchian(20) channels from previous day (using 1d data)
+    # Load 1d data ONCE before loop for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for Donchian calculation
+    if len(df_1d) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA50 calculation
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Upper channel: 20-period high
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower channel: 20-period low
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 1d timeframe (shift by 1 to use previous completed day)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # Volume confirmation: current 1d volume > 2.0x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d close aligned for regime bias
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and indicators
+    start_idx = 50  # warmup for EMA13 and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_aligned[i]) or np.isnan(close_1w_aligned[i]) or \
-           np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(ema50_1d_aligned[i]) or np.isnan(close_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_vol = volume[i]
-        curr_vol_ma = vol_ma[i]
-        
-        if curr_vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-            
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
-        
-        # Donchian breakout signals
-        breakout_up = curr_high > upper_aligned[i]  # break above upper channel
-        breakout_down = curr_low < lower_aligned[i]  # break below lower channel
-        
-        # Trend filter: use 1w close vs its EMA50 for bias
-        bullish_bias = close_1w_aligned[i] > ema_aligned[i]  # 1w close above its EMA50 = bullish
-        bearish_bias = close_1w_aligned[i] < ema_aligned[i]  # 1w close below its EMA50 = bearish
+        # Regime filter: 1d close vs its EMA50
+        bull_regime = close_1d_aligned[i] > ema50_1d_aligned[i]  # 1d close above EMA50 = bull regime
+        bear_regime = close_1d_aligned[i] < ema50_1d_aligned[i]  # 1d close below EMA50 = bear regime
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper channel AND bullish bias AND volume confirmation
-            if (breakout_up and 
-                bullish_bias and 
-                volume_confirm):
+            # Long: Bull Power positive AND bull regime
+            if bull_power[i] > 0 and bull_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower channel AND bearish bias AND volume confirmation
-            elif (breakout_down and 
-                  bearish_bias and 
-                  volume_confirm):
+            # Short: Bear Power positive AND bear regime
+            elif bear_power[i] > 0 and bear_regime:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower channel (stoploss) OR bearish bias (trend change)
-            if (curr_low < lower_aligned[i] or 
-                bearish_bias):
+            # Exit: Bull Power turns negative OR regime turns bearish
+            if bull_power[i] <= 0 or bear_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper channel (stoploss) OR bullish bias (trend change)
-            if (curr_high > upper_aligned[i] or 
-                bullish_bias):
+            # Exit: Bear Power turns negative OR regime turns bullish
+            if bear_power[i] <= 0 or bull_regime:
                 signals[i] = 0.0
                 position = 0
             else:
