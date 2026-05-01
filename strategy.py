@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 1d ADX regime filter + volume confirmation
-# Uses 1d ADX(14) to define regime: ADX>25 = trending (trade breakouts), ADX<20 = range (fade to mean)
-# Donchian(20) breakout provides clean entry/exit with low trade frequency
-# Volume confirmation (1.5x average) filters weak breakouts
-# Designed for low frequency (75-200 trades over 4 years) with clear bull/bear logic
+# Hypothesis: 1d Camarilla Pivot Breakout with 1w Volume Confirmation and ADX Regime Filter
+# Uses weekly ADX to define regime: ADX>25 = trending (trade Camarilla breakouts), ADX<20 = range (fade to pivots)
+# Camarilla levels calculated from prior 1d OHLC: H4/L4 = primary breakout levels
+# Entry: Long when close > H4 with volume > 1.5x 20-period average in trending regime OR when close < L4 with volume confirmation in ranging regime
+# Exit: Opposite signal or price returns to pivot point (PP)
+# Designed for low frequency (30-100 trades over 4 years) with clear bull/bear logic
 
-name = "4h_Donchian20_1dADX_Regime_Volume_v3"
-timeframe = "4h"
+name = "1d_Camarilla_1wADX_Regime_Volume_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 1w HTF data for regime filter and volume average
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # 1d ADX(14) calculation for regime detection
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1w ADX(14) calculation for regime detection
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -71,25 +72,34 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 1w 20-period volume average for confirmation
+    vol_20_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_20_1w)
     
-    # Volume confirmation (1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Camarilla levels from prior day OHLC
+    # Camarilla: PP = (H+L+C)/3, Range = H-L
+    # H4 = PP + 1.1 * Range / 2, L4 = PP - 1.1 * Range / 2
+    prior_high = np.concatenate([[np.nan], high[:-1]])
+    prior_low = np.concatenate([[np.nan], low[:-1]])
+    prior_close = np.concatenate([[np.nan], close[:-1]])
+    
+    camarilla_pp = (prior_high + prior_low + prior_close) / 3
+    camarilla_range = prior_high - prior_low
+    camarilla_h4 = camarilla_pp + 1.1 * camarilla_range / 2
+    camarilla_l4 = camarilla_pp - 1.1 * camarilla_range / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(lookback, 34)  # Need Donchian and ADX
+    start_idx = 34  # Need ADX and volume average
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_20_1w_aligned[i]) or 
+            np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or
+            np.isnan(camarilla_pp[i])):
             signals[i] = 0.0
             continue
         
@@ -97,55 +107,51 @@ def generate_signals(prices):
         trending = adx_aligned[i] > 25
         ranging = adx_aligned[i] < 20
         
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_20_1w_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Volume confirmation
-            vol_confirmed = volume[i] > 1.5 * vol_ma[i]
-            
-            if vol_confirmed:
-                # Trending regime: Donchian breakout
-                if trending:
-                    # Long: price breaks above upper Donchian channel
-                    if close[i] > highest_high[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: price breaks below lower Donchian channel
-                    elif close[i] < lowest_low[i-1]:
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
-                # Ranging regime: fade Donchian extremes (mean reversion)
-                elif ranging:
-                    # Long: price touches or breaks below lower Donchian channel
-                    if close[i] <= lowest_low[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: price touches or breaks above upper Donchian channel
-                    elif close[i] >= highest_high[i-1]:
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
+            # Trending regime: Camarilla breakout
+            if trending and volume_confirmed:
+                # Long: Close breaks above H4
+                if close[i] > camarilla_h4[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Close breaks below L4
+                elif close[i] < camarilla_l4[i]:
+                    signals[i] = -0.25
+                    position = -1
                 else:
-                    signals[i] = 0.0  # Transition regime (ADX 20-25) - stay flat
+                    signals[i] = 0.0
+            # Ranging regime: Camarilla mean reversion (fade extremes)
+            elif ranging and volume_confirmed:
+                # Long: Close below L4 (oversold) - mean reversion long
+                if close[i] < camarilla_l4[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Close above H4 (overbought) - mean reversion short
+                elif close[i] > camarilla_h4[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0  # No volume confirmation
+                signals[i] = 0.0  # No volume confirmation or transition regime
         
         elif position == 1:  # Long position
             # Exit conditions
             exit_long = False
             if trending:
-                # Exit trending long when price breaks below lower Donchian channel
-                if close[i] < lowest_low[i-1]:
+                # Exit trending long when price returns to PP (mean reversion)
+                if close[i] <= camarilla_pp[i]:
                     exit_long = True
             elif ranging:
-                # Exit ranging long when price reaches upper Donchian channel (mean reversion target)
-                if close[i] >= highest_high[i-1]:
+                # Exit ranging long when price reaches H4 (overbought)
+                if close[i] >= camarilla_h4[i]:
                     exit_long = True
             else:
-                # Transition regime - exit on Donchian middle line
-                middle = (highest_high[i-1] + lowest_low[i-1]) / 2
-                if close[i] <= middle:
+                # Transition regime - exit on any adverse move
+                if close[i] <= camarilla_pp[i]:
                     exit_long = True
             
             if exit_long:
@@ -158,17 +164,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_short = False
             if trending:
-                # Exit trending short when price breaks above upper Donchian channel
-                if close[i] > highest_high[i-1]:
+                # Exit trending short when price returns to PP (mean reversion)
+                if close[i] >= camarilla_pp[i]:
                     exit_short = True
             elif ranging:
-                # Exit ranging short when price reaches lower Donchian channel (mean reversion target)
-                if close[i] <= lowest_low[i-1]:
+                # Exit ranging short when price reaches L4 (oversold)
+                if close[i] <= camarilla_l4[i]:
                     exit_short = True
             else:
-                # Transition regime - exit on Donchian middle line
-                middle = (highest_high[i-1] + lowest_low[i-1]) / 2
-                if close[i] >= middle:
+                # Transition regime - exit on any adverse move
+                if close[i] >= camarilla_pp[i]:
                     exit_short = True
             
             if exit_short:
