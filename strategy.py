@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation (>2.0x 20-bar volume MA) and 1d ADX(14) trend filter
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-bar volume MA) and 1d ADX(14) trend filter
 # Donchian channels provide robust price channels for breakout trading. Volume spike confirms institutional participation.
 # 1d ADX > 25 ensures we only trade in trending markets, reducing false breakouts in ranging conditions.
-# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 # Works in bull (breakouts with volume) and bear (trend continuation after pullbacks to channel).
 
-name = "12h_Donchian20_Breakout_VolumeSpike_1dADX25_Trend_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeSpike_1dADX25_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -69,16 +69,16 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
     adx_1d = _wilder_smooth(dx_1d, 14)
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Donchian(20) channels on 12h data
+    # Donchian(20) channels on 4h data
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    volume_spike = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
