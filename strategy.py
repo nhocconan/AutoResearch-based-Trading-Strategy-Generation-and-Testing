@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme Reversal with 1d volume confirmation and 1w ADX > 20 regime filter
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal potential reversals
-# Volume confirmation ensures participation, reducing false signals
-# 1w ADX > 20 ensures trending market regime for higher probability reversals in the direction of trend
-# Designed for 6h timeframe with target of ~12-30 trades/year per symbol (50-120 total over 4 years)
-# Works in bull/bear markets: ADX filter avoids strong ranging markets, volume confirms genuine reversal attempts
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 25 regime filter
+# Uses mid-range Camarilla levels (H3/L3) for balanced breakout sensitivity
+# Volume spike > 2.0x 20-period EMA filters low-quality breakouts
+# 1w ADX > 25 ensures strong trending regime to avoid choppy markets
+# Designed for optimal trade frequency: ~15-25 trades/year per symbol with 0.25 sizing
+# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
 
-name = "6h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolume_1wADX_StrongTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Williams %R and volume
+    # 1d HTF data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # 1w HTF data for regime filter (ADX)
@@ -34,23 +34,22 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R(14) from 1d data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1*(high - low)/6
+    # L3 = close - 1.1*(high - low)/6
+    camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
+    camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
     
-    # Align Williams %R to 6h timeframe (wait for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
     
-    # 1d volume spike filter: volume > 1.8 * 20-period EMA
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for better quality)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ema_20)
+    volume_spike = volume > (2.0 * vol_ema_20)
     
-    # 1w ADX(14) for regime filter
+    # 1w ADX(14) for regime filter (strong trend only)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -102,40 +101,40 @@ def generate_signals(prices):
     start_idx = max(27, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 20)
-        trending = adx_aligned[i] > 20
+        # Regime filter: only trade in strong trending markets (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            if trending:
-                # Long: Williams %R extremely oversold (< -90) with volume spike
-                if williams_r_aligned[i] < -90 and volume_spike[i]:
+            if strong_trend:
+                # Long: Break above Camarilla H3 with volume spike
+                if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R extremely overbought (> -10) with volume spike
-                elif williams_r_aligned[i] > -10 and volume_spike[i]:
+                # Short: Break below Camarilla L3 with volume spike
+                elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid ranging markets
+                signals[i] = 0.0  # Avoid weak/choppy markets
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns to neutral territory (> -50) or opposite extreme
-            if williams_r_aligned[i] > -50 or williams_r_aligned[i] > -10:
+            # Exit: price returns to Camarilla L3 or opposite breakout
+            if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral territory (< -50) or opposite extreme
-            if williams_r_aligned[i] < -50 or williams_r_aligned[i] < -90:
+            # Exit: price returns to Camarilla H3 or opposite breakout
+            if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
