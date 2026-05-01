@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses 1d EMA50 for trend alignment (HTF direction) and 1h volume spike for entry timing.
-# Long when price breaks above R3 and above 1d EMA50 with volume > 1.5x 20-period average.
-# Short when price breaks below S3 and below 1d EMA50 with volume > 1.5x 20-period average.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
+# Uses 4h EMA50 for trend alignment (HTF direction) and 1h volume spike for entry timing.
+# Long when price breaks above R3 and above 4h EMA50 with volume > 1.5x 20-period average.
+# Short when price breaks below S3 and below 4h EMA50 with volume > 1.5x 20-period average.
 # Exit on opposite Camarilla level (R1/S1) break for tighter risk control.
 # Session filter (08-20 UTC) reduces noise. Discrete sizing 0.20 minimizes fee churn.
-# Target: 15-30 trades/year by using 1d for signal direction and 1h only for entry timing.
+# Target: 15-30 trades/year by using 4h for signal direction and 1h only for entry timing.
+# 4h EMA50 is more responsive than 1d EMA50, better for 1h strategy timing while still filtering noise.
 
-name = "1h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_Session_v1"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeConfirm_Session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -28,14 +29,14 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d data
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA50 on 4h data
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate 1h volume average (20-period) for volume spike filter
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -123,13 +124,13 @@ def generate_signals(prices):
             camarilla_s1 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA50, volume confirmation
+            # Long: price breaks above Camarilla R3, price above 4h EMA50, volume confirmation
             if (curr_close > camarilla_r3 and 
                 curr_close > curr_ema and 
                 volume_confirm):
                 signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Camarilla S3, price below 1d EMA50, volume confirmation
+            # Short: price breaks below Camarilla S3, price below 4h EMA50, volume confirmation
             elif (curr_close < camarilla_s3 and 
                   curr_close < curr_ema and 
                   volume_confirm):
