@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 1.8x 20-bar average.
-# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to capture medium-term trends.
-# Camarilla levels provide robust intraday support/resistance based on prior day's range.
-# 1d EMA34 trend filter ensures alignment with daily momentum.
-# Volume spike requirement reduces false breakouts and improves signal quality.
-# Target: 50-150 total trades over 4 years (12-37/year) for BTC/ETH/SOL.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe.
+# Camarilla levels provide high-probability reversal/breakout zones.
+# 1d EMA34 ensures alignment with daily trend.
+# Volume spike requirement (2.0x) reduces false breakouts significantly.
+# Target: 75-200 total trades over 4 years (19-50/year) for BTC/ETH/SOL.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,33 +45,31 @@ def generate_signals(prices):
     ema_34_rising = ema_34_slope > 0
     ema_34_falling = ema_34_slope < 0
     
-    # Calculate Camarilla levels (based on prior day's high/low/close)
-    # Need to shift by 1 to avoid look-ahead (use prior day's data)
-    roll_high = pd.Series(high).shift(1)
-    roll_low = pd.Series(low).shift(1)
-    roll_close = pd.Series(close).shift(1)
+    # Calculate Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We need previous day's OHLC - since we're on 4h timeframe, we use 1d data shifted
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla R3/S3 calculation
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    camarilla_range = (roll_high - roll_low) * 1.1
-    camarilla_r3 = roll_close + camarilla_range / 4
-    camarilla_s3 = roll_close - camarilla_range / 4
+    # Calculate Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe (already aligned via shift)
-    camarilla_r3_aligned = camarilla_r3.values
-    camarilla_s3_aligned = camarilla_s3.values
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current 12h volume > 1.8x 20-bar average
+    # Volume confirmation: current 4h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and Camarilla calculation
+    start_idx = 50  # warmup for EMA and volume MA calculation
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 12h timeframe
+        # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
         if np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]):
@@ -88,7 +86,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.8)
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
         # Camarilla breakout signals
         breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
