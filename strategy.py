@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter.
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending market).
-# Short when Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 (trending market).
-# Uses EMA13 for power calculation. Discrete sizing 0.25 to limit drawdown.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-# Elder Ray measures bull/bear strength via EMA; ADX ensures we only trade in trending regimes.
-# Works in bull (long signals when bulls dominate) and bear (short signals when bears dominate).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (price > EMA50) and volume confirmation.
+# Long when price breaks above R3 AND price > 1d EMA50 AND volume > 2.0x 24-bar average.
+# Short when price breaks below S3 AND price < 1d EMA50 AND volume > 2.0x 24-bar average.
+# Uses discrete sizing 0.25 to limit drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# 1d EMA50 provides robust trend alignment that works in both bull (price above EMA) and bear (price below EMA).
+# Camarilla R3/S3 levels offer reliable breakout points with lower noise than R4/S4.
+# Volume confirmation (2.0x average) ensures only high-conviction breakouts are traded.
 
-name = "6h_ElderRay_1dADX_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,86 +24,121 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Load 1d data ONCE before loop for ADX calculation
+    # Pre-compute session hours for efficiency (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Load 1d data ONCE before loop for EMA50 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX calculation (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA50 calculation
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate Camarilla levels (based on previous day's range)
+    df_1d_copy = df_1d.copy()
+    df_1d_copy['date'] = pd.to_datetime(df_1d_copy['open_time']).dt.date
+    daily = df_1d_copy.groupby('date').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).reset_index()
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
+    if len(daily) < 2:
+        return np.zeros(n)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate Camarilla levels for each day
+    # Camarilla R3 = close + (high - low) * 1.1/4
+    # Camarilla S3 = close - (high - low) * 1.1/4
+    daily['camarilla_r3'] = daily['close'] + (daily['high'] - daily['low']) * 1.1 / 4
+    daily['camarilla_s3'] = daily['close'] - (daily['high'] - daily['low']) * 1.1 / 4
     
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    # Map daily levels to 12h bars
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    for i in range(n):
+        date = prices.iloc[i]['open_time'].date()
+        day_row = daily[daily['date'] == date]
+        if len(day_row) > 0:
+            camarilla_r3[i] = day_row.iloc[0]['camarilla_r3']
+            camarilla_s3[i] = day_row.iloc[0]['camarilla_s3']
     
-    # 6h EMA13 for Elder Ray power calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    # Volume confirmation: current 12h volume > 2.0x 24-bar average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Elder Ray Power
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Trend flags (using aligned EMA and current close)
+    price_above_ema = close > ema_50_aligned
+    price_below_ema = close < ema_50_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for ADX and EMA
+    start_idx = 50  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(adx_aligned[i]) or np.isnan(ema13[i]):
+        # Session filter: trade only 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when ADX > 25 (strong trend)
-        if adx_aligned[i] <= 25:
+        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_vol = volume[i]
+        curr_vol_ma = vol_ma[i]
+        
+        if curr_vol_ma <= 0:
+            signals[i] = 0.0
+            continue
+            
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
+        
+        # Camarilla breakout signals
+        breakout_up = curr_high > camarilla_r3[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND Bear Power < 0 (bulls in control)
-            if bull_power[i] > 0 and bear_power[i] < 0:
+            # Long: breakout above R3 AND price > 1d EMA50 AND volume confirmation
+            if (breakout_up and 
+                price_above_ema[i] and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power > 0 (bears in control)
-            elif bear_power[i] < 0 and bull_power[i] > 0:
+            # Short: breakout below S3 AND price < 1d EMA50 AND volume confirmation
+            elif (breakout_down and 
+                  price_below_ema[i] and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bull Power <= 0 OR Bear Power >= 0 (trend weakening)
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Exit: price crosses below S3 (stoploss) OR price < 1d EMA50 (trend change)
+            if (curr_low < camarilla_s3[i] or 
+                not price_above_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bear Power >= 0 OR Bull Power <= 0 (trend weakening)
-            if bear_power[i] >= 0 or bull_power[i] <= 0:
+            # Exit: price crosses above R3 (stoploss) OR price > 1d EMA50 (trend change)
+            if (curr_high > camarilla_r3[i] or 
+                not price_below_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
