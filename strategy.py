@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume spike and 1d trend filter (EMA50 > EMA200).
-# Uses 1d EMA crossover for bull/bear regime, 4h volume spike for momentum confirmation,
-# and 1h Camarilla breakout for precise entry. Designed for low trade frequency (15-30/year)
-# to minimize fee drag while capturing strong intraday moves in trending markets.
-# Works in bull (long bias) and bear (short bias) via 1d regime filter.
+# Hypothesis: 6h Williams %R reversal with 1w EMA trend filter and volume confirmation.
+# Uses weekly EMA50 to identify primary trend direction, reducing counter-trend trades.
+# Long when Williams %R crosses above -80 (oversold reversal) AND price > weekly EMA50 AND volume > 1.5x 20-bar average.
+# Short when Williams %R crosses below -20 (overbought reversal) AND price < weekly EMA50 AND volume > 1.5x 20-bar average.
+# Williams %R is calculated on 6h data with 14-period lookback.
+# Designed to capture mean reversals within the prevailing weekly trend, working in both bull and bear markets.
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "1h_Camarilla_R3S3_Breakout_4hVolumeSpike_1dEMA50_200_Trend"
-timeframe = "1h"
+name = "6h_WilliamsR_Reversal_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,102 +25,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    # 1d EMAs for trend regime
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    # Bull regime: EMA50 > EMA200, Bear regime: EMA50 < EMA200
-    bull_regime = ema50_1d > ema200_1d
-    bear_regime = ema50_1d < ema200_1d
+    # Weekly EMA50 calculation
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 1d regime to 1h timeframe
-    bull_regime_aligned = align_htf_to_ltf(prices, df_1d, bull_regime)
-    bear_regime_aligned = align_htf_to_ltf(prices, df_1d, bear_regime)
+    # Williams %R calculation on 6h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Load 4h data ONCE before loop for volume spike filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # 4h volume average (20-period)
-    vol_ma_4h = pd.Series(df_4h['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = df_4h['volume'].values > (vol_ma_4h * 2.0)  # 2x volume spike
-    
-    # Align 4h volume spike to 1h timeframe
-    vol_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_spike_4h)
-    
-    # Calculate Camarilla levels (based on previous 1h bar's range)
-    # We need the previous completed 1h bar for each 1h bar
-    # Shift by 1 to avoid look-ahead: use prior bar's high/low/close
-    camarilla_r3_1h = pd.Series(close).shift(1) + (pd.Series(high).shift(1) - pd.Series(low).shift(1)) * 1.1 / 4
-    camarilla_s3_1h = pd.Series(close).shift(1) - (pd.Series(high).shift(1) - pd.Series(low).shift(1)) * 1.1 / 4
-    
-    # Volume confirmation: current 1h volume > 1.5x 20-bar average
-    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current 6h volume > 1.5x 20-bar average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 50  # warmup for Williams %R and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_1h[i]) or np.isnan(camarilla_s3_1h[i]) or np.isnan(vol_ma_1h[i]) or np.isnan(vol_spike_4h_aligned[i]):
+        if np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_vol = volume[i]
-        curr_vol_ma = vol_ma_1h[i]
+        curr_vol_ma = vol_ma[i]
         
         if curr_vol_ma <= 0:
             signals[i] = 0.0
             continue
             
-        volume_confirm_1h = curr_vol > (curr_vol_ma * 1.5)  # 1.5x volume spike
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume spike threshold
         
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3_1h[i]  # break above R3
-        breakout_down = curr_low < camarilla_s3_1h[i]  # break below S3
+        # Williams %R reversal signals
+        wr_cross_up = williams_r[i] > -80 and williams_r[i-1] <= -80  # cross above -80 (oversold)
+        wr_cross_down = williams_r[i] < -20 and williams_r[i-1] >= -20  # cross below -20 (overbought)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND bull regime AND (1h vol spike OR 4h vol spike)
-            if (breakout_up and 
-                bull_regime_aligned[i] and 
-                (volume_confirm_1h or vol_spike_4h_aligned[i])):
-                signals[i] = 0.20
+            # Long: Williams %R crosses above -80 AND price > weekly EMA50 AND volume confirmation
+            if (wr_cross_up and 
+                curr_close > ema_50_1w_aligned[i] and 
+                volume_confirm):
+                signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 AND bear regime AND (1h vol spike OR 4h vol spike)
-            elif (breakout_down and 
-                  bear_regime_aligned[i] and 
-                  (volume_confirm_1h or vol_spike_4h_aligned[i])):
-                signals[i] = -0.20
+            # Short: Williams %R crosses below -20 AND price < weekly EMA50 AND volume confirmation
+            elif (wr_cross_down and 
+                  curr_close < ema_50_1w_aligned[i] and 
+                  volume_confirm):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR regime change to bear
-            if (curr_low < camarilla_s3_1h[i] or 
-                bear_regime_aligned[i]):  # exit if bear regime starts
+            # Exit: Williams %R crosses above -20 (overbought) OR price crosses below weekly EMA50
+            if (williams_r[i] > -20 and williams_r[i-1] <= -20) or \
+               (curr_close < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR regime change to bull
-            if (curr_high > camarilla_r3_1h[i] or 
-                bull_regime_aligned[i]):  # exit if bull regime starts
+            # Exit: Williams %R crosses below -80 (oversold) OR price crosses above weekly EMA50
+            if (williams_r[i] < -80 and williams_r[i-1] >= -80) or \
+               (curr_close > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
