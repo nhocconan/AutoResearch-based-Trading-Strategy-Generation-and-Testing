@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume spike confirmation.
-# Uses 4h EMA50 for trend direction and 1h volume > 2.0 * 20-period average for confirmation.
-# Enters long when RSI < 30 in uptrend, short when RSI > 70 in downtrend.
-# Exits when RSI crosses 50 (mean reversion completion).
-# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
-# Discrete position sizing 0.20 to balance return and drawdown.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Hypothesis: 6h Williams %R extreme reversal with 1d trend filter and volume spike confirmation.
+# Williams %R(14) < -80 = oversold (long signal), > -20 = overbought (short signal).
+# Only trade in direction of 1d EMA34 trend with volume > 2.0 * 20-period average.
+# Uses discrete position sizing 0.25 to balance return and drawdown.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Works in bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend).
 
-name = "1h_RSI14_MeanReversion_4hEMA50_Trend_VolumeSpike_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,92 +23,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Williams %R(14) on 6h data
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # 1h volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 6h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(14, 20, 50) + 1  # 51 (for RSI14, volume MA20, and EMA50)
+    start_idx = max(34, 14, 20) + 1  # 35 (for EMA34, Williams %R, and volume MA)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi_values[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or
+            np.isnan(highest_high_14[i]) or
+            np.isnan(lowest_low_14[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            if position != 0:
-                position = 0
-            continue
-        
-        curr_rsi = rsi_values[i]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         
-        # Trend filter: 4h EMA50 direction
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Trend filter: 1d EMA34 direction
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
+        
+        # Williams %R extreme levels
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
         # Volume confirmation
-        vol_confirm = volume_spike[i]
+        vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: RSI < 30 (oversold) AND uptrend AND volume confirmation
-            if curr_rsi < 30 and uptrend and vol_confirm:
-                signals[i] = 0.20
+            # Long: Williams %R oversold AND uptrend AND volume confirmation
+            if oversold and uptrend and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) AND downtrend AND volume confirmation
-            elif curr_rsi > 70 and downtrend and vol_confirm:
-                signals[i] = -0.20
+            # Short: Williams %R overbought AND downtrend AND volume confirmation
+            elif overbought and downtrend and vol_confirm:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on RSI crossing above 50 (mean reversion complete)
-            if curr_rsi > 50:
+            # Exit when Williams %R returns above -50 (momentum fading)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on RSI crossing below 50 (mean reversion complete)
-            if curr_rsi < 50:
+            # Exit when Williams %R returns below -50 (momentum fading)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
