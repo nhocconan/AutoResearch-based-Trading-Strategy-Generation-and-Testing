@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion + 1w EMA200 trend filter + volume confirmation.
-# Long when Williams %R < -80 (oversold) AND price > 1w EMA200 (bullish bias) AND volume > 1.5x 20-day average.
-# Short when Williams %R > -20 (overbought) AND price < 1w EMA200 (bearish bias) AND volume > 1.5x 20-day average.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Williams %R identifies exhaustion points in ranging/bear markets; weekly trend filter avoids counter-trend trades.
-# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h ADX regime filter + volume confirmation.
+# Long when Bull Power > 0 AND 12h ADX > 25 (trending) AND volume > 1.5x 6h volume average.
+# Short when Bear Power < 0 AND 12h ADX > 25 (trending) AND volume > 1.5x 6h volume average.
+# Uses Elder Power = Close - EMA13 (Bull) and EMA13 - Close (Bear) for trend strength.
+# ADX filter ensures we only trade in trending markets, reducing whipsaw in ranges.
+# Volume confirmation adds momentum validity to breakouts.
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
+# Discrete sizing: 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
 
-name = "1d_WilliamsR_Overextended_1wEMA200_Volume_v1"
-timeframe = "1d"
+name = "6h_ElderRay_12hADX_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,36 +34,57 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d Williams %R(14)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high_14 - lowest_low_14) != 0,
-                          -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14),
-                          -50)  # neutral when range is zero
-    
-    # Calculate 1w EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 12h ADX(14) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # need enough for ADX calculation
         return np.zeros(n)
     
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 20-day volume average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ADX calculation
+    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    tr_12h = np.maximum(np.maximum(high_12h[1:] - low_12h[1:], 
+                                   np.abs(high_12h[1:] - close_12h[:-1])), 
+                        np.abs(low_12h[1:] - close_12h[:-1]))
+    tr_12h = np.concatenate([[np.max([high_12h[0] - low_12h[0], 
+                                     np.abs(high_12h[0] - close_12h[0]), 
+                                     np.abs(low_12h[0] - close_12h[0])])], tr_12h])
+    
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_12h
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_12h
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = Close - EMA13, Bear Power = EMA13 - Close
+    bull_power = close - ema_13
+    bear_power = ema_13 - close
+    
+    # Calculate 6h volume average (20-period)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for Williams %R, EMA, and volume
-    start_idx = 200  # EMA200 requires 200 periods
+    # Start after warmup for ATR, EMA, ADX, and volume
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -70,27 +93,26 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        if vol_ma_20[i] <= 0 or np.isnan(vol_ma_20[i]):
+        # Volume confirmation: current volume > 1.5x 6h volume average
+        if vol_ma_6h[i] <= 0 or np.isnan(vol_ma_6h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma_20[i] * 1.5)
+            volume_confirm = curr_volume > (vol_ma_6h[i] * 1.5)
         
-        # Trend filter: price vs 1w EMA200
-        uptrend_bias = curr_close > ema_200_1w_aligned[i]
-        downtrend_bias = curr_close < ema_200_1w_aligned[i]
+        # Trend filter: 12h ADX > 25 indicates trending market
+        trending = adx_12h_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R < -80 (oversold) AND uptrend bias AND volume confirmation
-            if (williams_r[i] < -80 and 
-                uptrend_bias and 
+            # Long: Bull Power > 0 AND trending AND volume confirmation
+            if (bull_power[i] > 0 and 
+                trending and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Williams %R > -20 (overbought) AND downtrend bias AND volume confirmation
-            elif (williams_r[i] > -20 and 
-                  downtrend_bias and 
+            # Short: Bear Power > 0 AND trending AND volume confirmation
+            elif (bear_power[i] > 0 and 
+                  trending and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -99,13 +121,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R > -50 (exiting oversold) OR trend bias turns down
-            elif (williams_r[i] > -50) or (not uptrend_bias):
+            # Exit: Bull Power turns negative OR ADX drops below 20 (range)
+            elif (bull_power[i] <= 0) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -113,13 +135,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close > entry_price + 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R < -50 (exiting overbought) OR trend bias turns up
-            elif (williams_r[i] < -50) or (not downtrend_bias):
+            # Exit: Bear Power turns negative OR ADX drops below 20 (range)
+            elif (bear_power[i] <= 0) or (adx_12h_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
