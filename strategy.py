@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d ADX regime filter and volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
 # Uses 1d ADX > 25 to identify strong trends, reducing whipsaws in ranging markets.
-# Long when Williams %R(14) crosses above -80 (oversold) AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
-# Short when Williams %R(14) crosses below -20 (overbought) AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
+# Long when price breaks above 20-period high AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
+# Short when price breaks below 20-period low AND 1d ADX > 25 AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years.
-# Volume spike threshold set to 1.8x to balance signal quality and trade frequency.
-# Williams %R is effective in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Volume spike threshold set to 2.0x to reduce trade frequency and avoid fee drag.
+# Designed to work in both bull (trend continuation) and bear (trend reversal on strong moves) markets.
 
-name = "6h_WilliamsR_ADX25_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -69,50 +69,56 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 1d trend: ADX > 25 indicates strong trend
     strong_trend = adx_aligned > 25
     
-    # Williams %R calculation (14-period) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Donchian channels (20-period)
+    # For each 12h bar, we need the highest high and lowest low of the last 20 12h bars
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Williams %R signals: cross above -80 (long), cross below -20 (short)
-    williams_r_long = (williams_r > -80) & (np.roll(williams_r, 1) <= -80)
-    williams_r_short = (williams_r < -20) & (np.roll(williams_r, 1) >= -20)
-    
-    # Volume confirmation: current 6h volume > 1.8x 20-bar average
+    # Volume confirmation: current 12h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Williams %R, ADX and volume MA
+    start_idx = 40  # warmup for Donchian, ADX and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        if vol_ma[i] <= 0:
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_vol = volume[i]
+        curr_vol_ma = vol_ma[i]
+        
+        if curr_vol_ma <= 0:
             signals[i] = 0.0
             continue
             
-        volume_confirm = volume[i] > (vol_ma[i] * 1.8)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
+        
+        # Donchian breakout signals
+        breakout_up = curr_high > highest_high[i]  # break above 20-period high
+        breakout_down = curr_low < lowest_low[i]   # break below 20-period low
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R crosses above -80 AND 1d ADX > 25 AND volume confirmation
-            if (williams_r_long[i] and 
+            # Long: breakout above 20-period high AND 1d ADX > 25 AND volume confirmation
+            if (breakout_up and 
                 strong_trend[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 AND 1d ADX > 25 AND volume confirmation
-            elif (williams_r_short[i] and 
+            # Short: breakout below 20-period low AND 1d ADX > 25 AND volume confirmation
+            elif (breakout_down and 
                   strong_trend[i] and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -121,18 +127,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses below -50 (momentum loss) OR ADX < 20 (trend weakening)
-            if (williams_r[i] < -50 and np.roll(williams_r, 1)[i] >= -50) or \
-               adx_aligned[i] < 20:
+            # Exit: price crosses below 20-period low (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_low < lowest_low[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses above -50 (momentum loss) OR ADX < 20 (trend weakening)
-            if (williams_r[i] > -50 and np.roll(williams_r, 1)[i] <= -50) or \
-               adx_aligned[i] < 20:
+            # Exit: price crosses above 20-period high (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_high > highest_high[i] or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
