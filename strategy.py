@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d close > EMA50 AND volume > 1.5x 20-bar average.
-# Short when price breaks below S3 AND 1d close < EMA50 AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Volume spike threshold set to 1.5x to reduce false breakouts and improve signal quality.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1d close > EMA34 AND volume > 1.8x 20-bar average.
+# Short when price breaks below S3 AND 1d close < EMA34 AND volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Volume spike threshold set to 1.8x to reduce false breakouts and improve signal quality.
 # Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 4h, HTF: 1d for trend filter.
+# Primary timeframe: 6h, HTF: 1d for trend filter and Camarilla levels.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,15 +25,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for EMA trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50 calculation
+    if len(df_1d) < 34:  # Need enough for EMA34 calculation
         return np.zeros(n)
     
-    # 1d EMA50 calculation
+    # 1d EMA34 calculation
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate 1d close aligned for trend bias
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
@@ -53,11 +53,11 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current 4h volume > 1.5x 20-bar average
+    # Volume confirmation: current 6h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -81,15 +81,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
         
         # Camarilla breakout signals
         breakout_up = curr_high > r3_aligned[i]  # break above R3
         breakout_down = curr_low < s3_aligned[i]  # break below S3
         
-        # Trend filter: use 1d close vs its EMA50 for bias
-        bullish_bias = close_1d_aligned[i] > ema_aligned[i]  # 1d close above its EMA50 = bullish
-        bearish_bias = close_1d_aligned[i] < ema_aligned[i]  # 1d close below its EMA50 = bearish
+        # Trend filter: use 1d close vs its EMA34 for bias
+        bullish_bias = close_1d_aligned[i] > ema_aligned[i]  # 1d close above its EMA34 = bullish
+        bearish_bias = close_1d_aligned[i] < ema_aligned[i]  # 1d close below its EMA34 = bearish
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
