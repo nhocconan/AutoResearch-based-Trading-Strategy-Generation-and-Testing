@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width Regime + 1d RSI Divergence for mean reversion in range markets.
-# Uses Bollinger Band Width percentile to detect range (CHOP > 61.8) and trend (CHOP < 38.2) regimes.
-# In range: fade extreme RSI(14) from 1d timeframe with divergence confirmation.
-# In trend: follow 6h EMA(21) pullbacks to EMA(50) with volume confirmation.
-# 1d RSI provides higher timeframe momentum context to avoid counter-trend traps.
-# Designed for low trade frequency (12-25/year) with discrete sizing 0.25 to manage drawdown.
-# Works in bull/bear by adapting to regime: mean revert in range, trend follow in trend.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when: price breaks above Donchian(20) high AND close > 1d EMA34 AND volume > 1.5x 20-period average volume.
+# Short when: price breaks below Donchian(20) low AND close < 1d EMA34 AND volume > 1.5x 20-period average volume.
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 12-37 trades/year.
+# Donchian channels provide clear structure; 1d EMA34 filters for higher timeframe trend alignment;
+# volume confirmation ensures breakouts have conviction. Works in bull (breakouts with trend) and bear
+# (breakouts against trend filtered by 1d EMA) by requiring volume spike and trend alignment.
 
-name = "6h_BBWRegime_RSIDivergence_1dContext_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,54 +28,27 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for RSI and trend context
+    # Load 1d data ONCE before loop for EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14)
-    close_1d = pd.Series(df_1d['close'])
-    delta_1d = close_1d.diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0)
-    loss_1d = (-delta_1d).where(delta_1d < 0, 0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_values = rsi_1d.values
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d RSI to 6h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    # Calculate Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate Bollinger Bands on 6h for regime detection
-    # BB(20,2) - 20 period, 2 std dev
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean()
-    dev = close_s.rolling(window=20, min_periods=20).std() * 2
-    upper_bb = basis + dev
-    lower_bb = basis - dev
-    bb_width = (upper_bb - lower_bb) / basis * 100  # Percent
-    
-    # BB Width percentile lookback 50 periods (~6-7 days of 6h data)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
-    
-    # Regime thresholds
-    chop_threshold_high = 61.8  # Range when BB Width percentile > 61.8 (low volatility)
-    chop_threshold_low = 38.2   # Trend when BB Width percentile < 38.2 (high volatility)
-    
-    # 6h EMAs for trend following
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume for confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for BB width percentile and EMAs
+    start_idx = 20  # warmup for Donchian and volume average
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -92,104 +65,56 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(ema_21[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_rsi_1d = rsi_1d_aligned[i]
-        curr_bb_width_percentile = bb_width_percentile[i]
-        curr_ema_21 = ema_21[i]
-        curr_ema_50 = ema_50[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        curr_vol_ma = vol_ma[i]
+        curr_highest_high = highest_high[i]
+        curr_lowest_low = lowest_low[i]
+        curr_ema_34 = ema_34_1d_aligned[i]
+        curr_avg_volume = avg_volume[i]
         
-        # Determine regime
-        is_range = curr_bb_width_percentile > chop_threshold_high
-        is_trend = curr_bb_width_percentile < chop_threshold_low
-        is_neutral = not (is_range or is_trend)
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = curr_volume > 1.5 * curr_avg_volume
         
+        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            if is_range:
-                # Range regime: mean reversion at RSI extremes with divergence
-                # Long: RSI < 30 (oversold) AND price near lower BB (within 0.5*)
-                # Short: RSI > 70 (overbought) AND price near upper BB (within 0.5*)
-                bb_position = (curr_close - lower_bb[i]) / (upper_bb[i] - lower_bb[i]) if (upper_bb[i] - lower_bb[i]) > 0 else 0.5
-                if (curr_rsi_1d < 30 and bb_position < 0.3):  # Oversold and near lower BB
-                    signals[i] = 0.25
-                    position = 1
-                elif (curr_rsi_1d > 70 and bb_position > 0.7):  # Overbought and near upper BB
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif is_trend:
-                # Trend regime: follow 6h EMA(21) pullbacks to EMA(50) with volume
-                # Long: price > EMA21 > EMA50 AND pullback to EMA21 with volume
-                # Short: price < EMA21 < EMA50 AND pullback to EMA21 with volume
-                if (curr_close > curr_ema_21 and curr_ema_21 > curr_ema_50 and
-                    curr_close <= curr_ema_21 * 1.005 and  # Within 0.5% of EMA21
-                    curr_volume > curr_vol_ma * 1.2):  # Volume confirmation
-                    signals[i] = 0.25
-                    position = 1
-                elif (curr_close < curr_ema_21 and curr_ema_21 < curr_ema_50 and
-                      curr_close >= curr_ema_21 * 0.995 and  # Within 0.5% of EMA21
-                      curr_volume > curr_vol_ma * 1.2):  # Volume confirmation
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: break above Donchian high AND close > 1d EMA34 AND volume confirmed
+            if (curr_close > curr_highest_high and 
+                curr_close > curr_ema_34 and 
+                volume_confirmed):
+                signals[i] = 0.25
+                position = 1
+            # Short: break below Donchian low AND close < 1d EMA34 AND volume confirmed
+            elif (curr_close < curr_lowest_low and 
+                  curr_close < curr_ema_34 and 
+                  volume_confirmed):
+                signals[i] = -0.25
+                position = -1
             else:
-                # Neutral regime: no clear signal
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions
-            if is_range:
-                # Exit range long: RSI > 50 (mean reversion complete) OR price > upper BB
-                if curr_rsi_1d > 50 or bb_position > 0.95:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif is_trend:
-                # Exit trend long: EMA21 < EMA50 (trend change) OR price < EMA50
-                if curr_ema_21 < curr_ema_50 or curr_close < curr_ema_50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: close below Donchian low OR close < 1d EMA34
+            if (curr_close < curr_lowest_low or 
+                curr_close < curr_ema_34):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Neutral: exit on mean reversion
-                if 40 < curr_rsi_1d < 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
-            if is_range:
-                # Exit range short: RSI < 50 (mean reversion complete) OR price < lower BB
-                if curr_rsi_1d < 50 or bb_position < 0.05:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif is_trend:
-                # Exit trend short: EMA21 > EMA50 (trend change) OR price > EMA50
-                if curr_ema_21 > curr_ema_50 or curr_close > curr_ema_50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: close above Donchian high OR close > 1d EMA34
+            if (curr_close > curr_highest_high or 
+                curr_close > curr_ema_34):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Neutral: exit on mean reversion
-                if 40 < curr_rsi_1d < 60:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
