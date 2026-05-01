@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Uses 1w EMA50 for major trend direction (bull/bear) to avoid counter-trend trades.
-# Long when: price breaks above R3 (1.1/4) AND 1w EMA50 uptrend AND volume > 1.5x 20-period average.
-# Short when: price breaks below S3 (1.1/4) AND 1w EMA50 downtrend AND volume > 1.5x 20-period average.
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 12-25 trades/year.
-# Camarilla levels provide precise institutional support/resistance; EMA50 filters regime; volume confirms conviction.
-# Works in bull (trend following breaks) and bear (avoids false breaks in wrong regime) by aligning with higher timeframe structure.
+# Hypothesis: 6h EHLERS FISHER TRANSFORM + 1d VOLUME REGIME + 1w PIVOT DIRECTION
+# Fisher Transform identifies extreme price reversals with leading signals.
+# Volume regime filter (high/low volume) confirms participation.
+# 1w pivot direction provides structural bias to avoid counter-trend extremes in strong trends.
+# Long: Fisher < -1.5 AND volume regime = high AND price > 1w pivot point
+# Short: Fisher > +1.5 AND volume regime = high AND price < 1w pivot point
+# Works in bull/bear by aligning reversals with higher timeframe structure and volume confirmation.
+# Target: 15-30 trades/year (60-120 total over 4 years) with discrete sizing 0.25.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "12h"
+name = "6h_EhlersFisher_1dVolumeRegime_1wPivotDir_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,50 +29,71 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate 1d Camarilla pivot levels (using prior day OHLC)
+    # Load 1d data ONCE before loop for volume regime and Fisher
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data ONCE before loop for pivot direction
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    # Prior day OHLC for current day's pivot
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # === 1d Ehlers Fisher Transform (period=10) ===
+    hl2_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
+    max_hl2 = pd.Series(hl2_1d).rolling(window=10, min_periods=10).max().values
+    min_hl2 = pd.Series(hl2_1d).rolling(window=10, min_periods=10).min().values
+    range_hl2 = max_hl2 - min_hl2
+    # Avoid division by zero
+    range_hl2 = np.where(range_hl2 == 0, 1e-10, range_hl2)
+    value_1d = 0.66 * ((hl2_1d - min_hl2) / range_hl2 - 0.5) + 0.67 * np.roll(0.66 * ((hl2_1d - min_hl2) / range_hl2 - 0.5) + 0.67 * np.roll(np.zeros_like(hl2_1d), 1), 1)
+    # Initialize first value
+    value_1d[0] = 0
+    # Calculate Fisher Transform recursively
+    fish_1d = np.zeros_like(hl2_1d)
+    for i in range(1, len(hl2_1d)):
+        fish_1d[i] = 0.5 * np.log((1 + value_1d[i]) / (1 - value_1d[i] + 1e-10)) + 0.5 * fish_1d[i-1]
+    # Align Fisher to 6h
+    fish_1d_aligned = align_htf_to_ltf(prices, df_1d, fish_1d)
+    
+    # === 1d Volume Regime (High/Low) ===
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.where(vol_ma_1d > 0, volume / vol_ma_1d, 1.0)
+    # Volume regime: 1 = high volume (>1.5x MA), 0 = normal/low
+    vol_regime_1d = (vol_ratio_1d > 1.5).astype(float)
+    vol_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_1d)
+    
+    # === 1w Camarilla Pivot Points (using prior week OHLC) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Prior week OHLC for current week's pivot
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    pivot_1d = (prev_high + prev_low + prev_close) / 3.0
-    range_1d = prev_high - prev_low
-    r3_1d = prev_close + (range_1d * 1.1 / 4)
-    s3_1d = prev_close - (range_1d * 1.1 / 4)
+    pivot_1w = (prev_high + prev_low + prev_close) / 3.0
+    range_1w = prev_high - prev_low
+    r1_1w = prev_close + (range_1w * 1.1 / 12)
+    s1_1w = prev_close - (range_1w * 1.1 / 12)
+    r3_1w = prev_close + (range_1w * 1.1 / 4)
+    s3_1w = prev_close - (range_1w * 1.1 / 4)
     
-    # Align 1d levels to 12h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume spike: > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 1.5)
+    # Align 1w levels to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50 and volume MA
+    start_idx = 30  # warmup for indicators
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -88,56 +110,51 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(fish_1d_aligned[i]) or np.isnan(vol_regime_1d_aligned[i]) or
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_ema_50 = ema_50_1w_aligned[i]
-        curr_r3 = r3_1d_aligned[i]
-        curr_s3 = s3_1d_aligned[i]
-        curr_volume_spike = volume_spike[i]
-        
-        # Trend filter: 1w EMA50 slope (uptrend/downtrend)
-        ema_50_prev = ema_50_1w_aligned[i-1] if i > 0 else curr_ema_50
-        ema_50_uptrend = curr_ema_50 > ema_50_prev
-        ema_50_downtrend = curr_ema_50 < ema_50_prev
+        curr_fish = fish_1d_aligned[i]
+        curr_vol_regime = vol_regime_1d_aligned[i]
+        curr_pivot = pivot_1w_aligned[i]
+        curr_r3 = r3_1w_aligned[i]
+        curr_s3 = s3_1w_aligned[i]
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 AND 1w EMA50 uptrend AND volume spike
-            if (curr_high > curr_r3 and 
-                ema_50_uptrend and 
-                curr_volume_spike):
+            # Long: Fisher < -1.5 (extreme low) AND high volume AND price above weekly pivot
+            if (curr_fish < -1.5 and 
+                curr_vol_regime > 0.5 and 
+                curr_close > curr_pivot):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND 1w EMA50 downtrend AND volume spike
-            elif (curr_low < curr_s3 and 
-                  ema_50_downtrend and 
-                  curr_volume_spike):
+            # Short: Fisher > +1.5 (extreme high) AND high volume AND price below weekly pivot
+            elif (curr_fish > 1.5 and 
+                  curr_vol_regime > 0.5 and 
+                  curr_close < curr_pivot):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3 OR 1w EMA50 turns downtrend
-            if (curr_low < curr_s3 or 
-                not ema_50_uptrend):
+            # Exit: Fisher > 0 (reversal signal) OR volume drops low OR price breaks below weekly S1
+            if (curr_fish > 0 or 
+                curr_vol_regime < 0.5 or 
+                curr_close < s1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 OR 1w EMA50 turns uptrend
-            if (curr_high > curr_r3 or 
-                not ema_50_downtrend):
+            # Exit: Fisher < 0 (reversal signal) OR volume drops low OR price breaks above weekly R1
+            if (curr_fish < 0 or 
+                curr_vol_regime < 0.5 or 
+                curr_close > r1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
