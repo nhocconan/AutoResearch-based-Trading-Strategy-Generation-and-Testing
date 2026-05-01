@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar MA)
-# Uses 1d HTF for stronger trend alignment than 12h, reducing whipsaws in ranging markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar MA)
+# Uses 1d HTF for stronger trend alignment than 4h, reducing whipsaws in ranging markets.
 # Camarilla breakouts capture strong momentum moves after range-bound periods.
 # Volume confirmation ensures institutional participation. Discrete sizing (0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) with strong BTC/ETH performance.
+# Target: 75-200 total trades over 4 years (19-50/year) with strong BTC/ETH performance.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     # 1d EMA(34) on 1d close
     ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
     # Calculate Camarilla pivot levels from previous 1d bar
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_1d_close + (prev_1d_high - prev_1d_low) * 1.1 / 4
     camarilla_s3 = prev_1d_close - (prev_1d_high - prev_1d_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
