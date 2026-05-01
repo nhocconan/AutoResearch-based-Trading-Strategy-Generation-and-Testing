@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX regime filter
-# Donchian breakouts provide clear structural edges in crypto markets
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1w ADX regime filter
+# Designed for low frequency (50-150 trades over 4 years) with discrete sizing
+# Donchian breakout provides clear structure with proven edge in crypto
 # Volume spike confirms institutional participation, reducing false breakouts
 # 1w ADX > 25 filters for trending regimes, avoiding whipsaws in ranging markets
-# Designed for low frequency (target: 75-200 trades over 4 years) with discrete sizing
 # Works in both bull and bear: ADX regime filter avoids ranging markets, volume confirms legitimacy
-# Entry/exit logic avoids excessive trading by requiring confluence of multiple filters
 
-name = "4h_Donchian20_1dVolume_1wADX_Regime_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolume_1wADX_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +34,7 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Donchian channels (20-period) on 4h data
+    # Donchian channels (20-period) on 12h data
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
