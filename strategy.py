@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX > 25 regime filter
-# Donchian breakouts capture strong momentum moves, proven to work on SOLUSDT
-# Volume spike > 2.0x 20-period EMA reduces false breakouts
-# 1d ADX > 25 ensures trending market regime (avoids whipsaws in ranging markets)
-# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.30 sizing (4h timeframe)
-# Works in bull/bear: ADX filter avoids false signals in ranging markets, volume confirms participation
+# Hypothesis: 6h Williams %R Extreme Reversal with 1d volume confirmation and 1w ADX > 20 regime filter
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal potential reversals
+# Volume confirmation ensures participation, reducing false signals
+# 1w ADX > 20 ensures trending market regime for higher probability reversals in the direction of trend
+# Designed for 6h timeframe with target of ~12-30 trades/year per symbol (50-120 total over 4 years)
+# Works in bull/bear markets: ADX filter avoids strong ranging markets, volume confirms genuine reversal attempts
 
-name = "4h_Donchian20_Volume_1dADX_Regime_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume confirmation and regime filter (ADX)
+    # 1d HTF data for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 1w HTF data for regime filter (ADX)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tight for trade frequency control)
-    vol_series_1d = pd.Series(df_1d['volume'].values)
-    vol_ema_20_1d = vol_series_1d.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_ema_20_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Calculate Williams %R(14) from 1d data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # 1d ADX(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align Williams %R to 6h timeframe (wait for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # 1d volume spike filter: volume > 1.8 * 20-period EMA
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ema_20)
+    
+    # 1w ADX(14) for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -83,32 +93,32 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(lookback, tr_period + 5)  # Need Donchian and ADX
+    start_idx = max(27, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending = adx_aligned[i] > 25
+        # Regime filter: only trade in trending markets (ADX > 20)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Break above Donchian upper band with volume spike
-                if close[i] > highest_high[i] and volume_spike_aligned[i]:
-                    signals[i] = 0.30
+                # Long: Williams %R extremely oversold (< -90) with volume spike
+                if williams_r_aligned[i] < -90 and volume_spike[i]:
+                    signals[i] = 0.25
                     position = 1
-                # Short: Break below Donchian lower band with volume spike
-                elif close[i] < lowest_low[i] and volume_spike_aligned[i]:
-                    signals[i] = -0.30
+                # Short: Williams %R extremely overbought (> -10) with volume spike
+                elif williams_r_aligned[i] > -10 and volume_spike[i]:
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -116,19 +126,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian lower band or opposite breakout
-            if close[i] <= lowest_low[i] or (close[i] < lowest_low[i] and volume_spike_aligned[i]):
+            # Exit: Williams %R returns to neutral territory (> -50) or opposite extreme
+            if williams_r_aligned[i] > -50 or williams_r_aligned[i] > -10:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian upper band or opposite breakout
-            if close[i] >= highest_high[i] or (close[i] > highest_high[i] and volume_spike_aligned[i]):
+            # Exit: Williams %R returns to neutral territory (< -50) or opposite extreme
+            if williams_r_aligned[i] < -50 or williams_r_aligned[i] < -90:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
