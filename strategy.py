@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ATR-based volume spike and 1w chop regime filter.
-# Long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and 1w chop > 61.8 (range).
+# Hypothesis: 1d Donchian(20) breakout with volume spike and 1w chop regime filter.
+# Long when price breaks above Donchian(20) high with volume > 2.0x 20-bar average and 1w chop > 61.8 (range).
 # Short when price breaks below Donchian(20) low with volume confirmation and 1w chop > 61.8.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
 # Donchian levels derived from prior 20 completed 1d bars. 1d timeframe targets 7-25 trades/year.
 # Volume spike filters low-momentum breakouts. Chop regime ensures mean-reversion edge in ranging markets.
 # Works in bull (breakouts with volume) and bear (mean reversion in chop) regimes.
 
-name = "1d_Donchian_20_Volume_1wChop_v1"
+name = "1d_Donchian_20_Volume_1wChop_v2"
 timeframe = "1d"
 leverage = 1.0
 
@@ -80,12 +80,12 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.8x 20-bar average
+        # Volume confirmation: current volume > 2.0x 20-bar average
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         if vol_ma <= 0 or np.isnan(vol_ma):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma * 1.8)
+            volume_confirm = curr_volume > (vol_ma * 2.0)
         
         # Calculate Donchian levels from prior 20 completed 1d bars
         # Need 1d OHLC from previous completed 1d bars
@@ -140,8 +140,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -155,8 +155,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
