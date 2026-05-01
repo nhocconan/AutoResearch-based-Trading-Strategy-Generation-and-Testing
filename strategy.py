@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 18 regime filter
-# Uses inner Camarilla levels (H3/L3) for breakouts with better risk/reward
-# Volume spike > 2.0x 20-period EMA reduces false breakouts significantly
-# 1w ADX > 18 ensures trending market regime (optimized for trade frequency and edge)
-# Designed for optimal trade frequency: ~15-25 trades/year per symbol with 0.25 sizing (12h timeframe)
-# Works in bull/bear: ADX filter avoids strong ranging markets, volume confirms participation
-# Inner levels (H3/L3) provide tighter stops and higher win rate vs outer levels
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX > 20 regime filter
+# Uses Donchian channel breakouts for trend following with volume confirmation
+# 1w ADX > 20 ensures trending market regime to avoid whipsaws in ranging markets
+# Volume spike > 2.0x 20-period EMA filters low-probability breakouts
+# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.30 sizing
+# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
 
-name = "12h_Camarilla_H3L3_Breakout_1dVolume_1wADX_Regime_v2"
-timeframe = "12h"
+name = "4h_Donchian20_1dVolume_1wADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla levels and volume
+    # 1d HTF data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # 1w HTF data for regime filter (ADX)
@@ -35,27 +34,28 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # H3 = close + 1.1*(high - low)/6
-    # L3 = close - 1.1*(high - low)/6
-    camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
-    camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
+    # Donchian(20) channels from primary timeframe (4h)
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
-    
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for fewer, better trades)
-    vol_series = pd.Series(volume)
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tight for optimal frequency)
+    vol_1d = df_1d['volume'].values
+    vol_series = pd.Series(vol_1d)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_spike_1d = vol_1d > (2.0 * vol_ema_20)
+    
+    # Align 1d volume spike to 4h timeframe (wait for 1d bar to close)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     # 1w ADX(14) for regime filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
+    # True Range calculation
     tr1 = np.abs(high_1w[1:] - low_1w[1:])
     tr2 = np.abs(high_1w[1:] - close_1w[:-1])
     tr3 = np.abs(low_1w[1:] - close_1w[:-1])
@@ -70,7 +70,7 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Wilder's smoothing
+    # Wilder's smoothing function
     def wilders_smoothing(x, period):
         result = np.full_like(x, np.nan)
         if len(x) >= period:
@@ -99,26 +99,26 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(27, 20)  # Need ADX and volume EMA
+    start_idx = max(20, 27)  # Need Donchian(20), ADX, and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 18)
-        trending = adx_aligned[i] > 18
+        # Regime filter: only trade in trending markets (ADX > 20)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Break above Camarilla H3 with volume spike
-                if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
+                # Long: Break above Donchian upper with volume spike
+                if close[i] > donchian_upper[i] and volume_spike_aligned[i]:
+                    signals[i] = 0.30
                     position = 1
-                # Short: Break below Camarilla L3 with volume spike
-                elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                # Short: Break below Donchian lower with volume spike
+                elif close[i] < donchian_lower[i] and volume_spike_aligned[i]:
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -126,19 +126,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Camarilla L3 or opposite breakout
-            if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
+            # Exit: price returns to Donchian lower or opposite breakout
+            if close[i] <= donchian_lower[i] or (close[i] < donchian_lower[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: price returns to Camarilla H3 or opposite breakout
-            if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
+            # Exit: price returns to Donchian upper or opposite breakout
+            if close[i] >= donchian_upper[i] or (close[i] > donchian_upper[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
