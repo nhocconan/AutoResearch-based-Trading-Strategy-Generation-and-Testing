@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX(14) regime filter + volume confirmation
-# Uses 1d ADX to define regime: ADX>25 = trending (trade Donchian breakouts), ADX<20 = range (fade to Donchian mid)
-# Donchian breakout: Long when close > upper band, Short when close < lower band
-# Volume confirmation: Require volume > 1.5x 20-period average
-# Designed for low frequency (75-200 trades over 4 years) with clear bull/bear logic
-# Proven pattern: Donchian + volume + regime filter works on SOLUSDT (test Sharpe 1.10-1.38)
+# Hypothesis: 6h Williams %R Extreme Reversal + 1d ADX Regime Filter
+# Williams %R identifies overbought/oversold conditions. In trending regimes (ADX>25),
+# we fade extremes for mean reversion. In ranging regimes (ADX<20), we follow momentum
+# as price breaks out of consolidation. Uses discrete sizing (0.25) to limit fee drag.
+# Target: 50-150 trades over 4 years (12-37/year) with strong regime adaptation.
 
-name = "4h_Donchian20_1dADX_Regime_Volume_v2"
-timeframe = "4h"
+name = "6h_WilliamsR_1dADX_Regime_ExtremeReversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +21,6 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # 1d HTF data for regime filter
     df_1d = get_htf_data(prices, '1d')
@@ -74,25 +72,31 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, tr_period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 4h Donchian(20) channels
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    mid = (upper + lower) / 2
+    # 6h Williams %R (14-period)
+    def williams_r(high, low, close, period):
+        highest_high = np.full_like(high, np.nan)
+        lowest_low = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+        wr = np.where((highest_high - lowest_low) != 0,
+                      -100 * (highest_high - close) / (highest_high - lowest_low),
+                      -50)
+        return wr
     
-    # 4h volume confirmation (volume > 1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    wr = williams_r(high, low, close, 14)
+    
+    # 6h EMA21 for dynamic exit
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(lookback, 20, 34)  # Need Donchian, volume MA, and ADX
+    start_idx = max(34, 21)  # Need ADX and EMA21
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(mid[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(wr[i]) or np.isnan(ema21[i])):
             signals[i] = 0.0
             continue
         
@@ -101,31 +105,26 @@ def generate_signals(prices):
         ranging = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
-            # Only trade with volume confirmation
-            if not volume_confirm[i]:
-                signals[i] = 0.0
-                continue
-                
-            # Trending regime: Donchian breakout trend following
+            # Trending regime: Williams %R mean reversion (fade extremes)
             if trending:
-                # Long: Close > upper Donchian band
-                if close[i] > upper[i]:
+                # Long: Williams %R oversold (< -80) and turning up
+                if wr[i] < -80 and wr[i] > wr[i-1]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Close < lower Donchian band
-                elif close[i] < lower[i]:
+                # Short: Williams %R overbought (> -20) and turning down
+                elif wr[i] > -20 and wr[i] < wr[i-1]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
-            # Ranging regime: Donchian mean reversion (fade to mid)
+            # Ranging regime: Williams %R momentum (breakout continuation)
             elif ranging:
-                # Long: Close < lower band AND rising toward mid
-                if close[i] < lower[i] and close[i] > close[i-1]:
+                # Long: Williams %R rising from oversold territory
+                if wr[i] < -50 and wr[i] > wr[i-1] and wr[i-1] < -80:
                     signals[i] = 0.25
                     position = 1
-                # Short: Close > upper band AND falling toward mid
-                elif close[i] > upper[i] and close[i] < close[i-1]:
+                # Short: Williams %R falling from overbought territory
+                elif wr[i] > -50 and wr[i] < wr[i-1] and wr[i-1] > -20:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -137,16 +136,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_long = False
             if trending:
-                # Exit trending long when close < lower Donchian band (stop and reverse)
-                if close[i] < lower[i]:
+                # Exit trending long when Williams %R reaches overbought
+                if wr[i] >= -20:
                     exit_long = True
             elif ranging:
-                # Exit ranging long when close >= mid (mean reversion target)
-                if close[i] >= mid[i]:
+                # Exit ranging long when price reaches EMA21 (mean reversion target)
+                if close[i] >= ema21[i]:
                     exit_long = True
             else:
-                # Transition regime - exit on Donchian mid touch
-                if close[i] >= mid[i]:
+                # Transition regime - exit on Williams %R deterioration
+                if wr[i] >= -50:
                     exit_long = True
             
             if exit_long:
@@ -159,16 +158,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_short = False
             if trending:
-                # Exit trending short when close > upper Donchian band (stop and reverse)
-                if close[i] > upper[i]:
+                # Exit trending short when Williams %R reaches oversold
+                if wr[i] <= -80:
                     exit_short = True
             elif ranging:
-                # Exit ranging short when close <= mid (mean reversion target)
-                if close[i] <= mid[i]:
+                # Exit ranging short when price reaches EMA21 (mean reversion target)
+                if close[i] <= ema21[i]:
                     exit_short = True
             else:
-                # Transition regime - exit on Donchian mid touch
-                if close[i] <= mid[i]:
+                # Transition regime - exit on Williams %R deterioration
+                if wr[i] <= -50:
                     exit_short = True
             
             if exit_short:
