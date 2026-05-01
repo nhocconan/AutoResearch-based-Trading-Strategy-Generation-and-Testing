@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses Camarilla pivot levels from 1d timeframe to identify key support/resistance.
-# Breakouts above R1 or below S1 are traded in the direction of 1d EMA34 trend.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses Camarilla pivot levels from 1d timeframe to identify key intraday support/resistance.
+# Breakouts above R1 or below S1 are traded in the direction of 1d EMA50 trend.
 # Volume confirmation ensures breakouts have sufficient participation.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
 # Works in both bull (buy R1 breakout with uptrend) and bear (sell S1 breakdown with downtrend).
-# Discrete position sizing (0.25) minimizes fee churn while maintaining exposure.
+# Discrete position sizing (0.25) balances return and drawdown. Target: 75-200 trades over 4 years.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,12 +26,26 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:  # Need at least 34 for EMA + buffer
+    if len(df_1d) < 55:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 1d ATR(14) for volatility (optional, using volume instead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # Calculate 1d Camarilla pivot levels (R1, S1)
     # Camarilla: based on previous day's high, low, close
@@ -48,7 +61,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume on 12h
+    # Volume confirmation: current volume > 1.5 * 20-period average volume on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 1.5)
     
@@ -56,10 +69,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(40, 20) + 1  # 41 (for EMA34 and volume MA20)
+    start_idx = max(55, 20) + 1  # 56 (for EMA50 and volume MA20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(volume_ma_20[i])):
@@ -71,9 +84,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
