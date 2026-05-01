@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 AND price > 1d EMA50 AND volume > 2.5x 4h volume median.
-# Short when price breaks below Camarilla S3 AND price < 1d EMA50 AND volume > 2.5x 4h volume median.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# 1d EMA50 provides stronger trend filter than 12h EMA34, reducing false breakouts in chop.
-# Higher volume threshold (2.5x) and tighter ATR stop (2.0) reduce trade frequency to avoid overtrading.
-# Target: 20-30 trades/year on 4h timeframe (80-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d KAMA direction filter with weekly EMA50 trend and volume spike confirmation.
+# Long when KAMA(10,2,30) turns upward AND price > weekly EMA50 AND volume > 2.0x 20-day volume median.
+# Short when KAMA turns downward AND price < weekly EMA50 AND volume > 2.0x 20-day volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
+# KAMA adapts to market noise, weekly EMA50 provides strong trend filter, volume spike confirms momentum.
+# Target: 10-20 trades/year on 1d timeframe (40-80 total over 4 years) to minimize fee drag.
+# This combination has shown strong test performance in DB for SOL with proper filtering and should work on BTC/ETH.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Volume_v1"
-timeframe = "4h"
+name = "1d_KAMA_Direction_1wEMA50_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,49 +33,55 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h Camarilla pivot levels (R3, S3) from previous 4h bar
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Calculate KAMA(10,2,30) - Kaufman Adaptive Moving Average
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period sum of absolute changes
+    # Fix volatility calculation - need rolling sum
+    volatility = pd.Series(np.abs(np.diff(close, n=1))).rolling(window=10, min_periods=10).sum().values
+    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align lengths
+    er = np.where(volatility != 0, change / volatility, 0)
+    # SC = [ER * (fastest - slowest) + slowest]^2
+    fastest = 2.0 / (2 + 1)   # EMA(2)
+    slowest = 2.0 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # start at first available point
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Calculate KAMA direction (1 = upward, -1 = downward, 0 = flat)
+    kama_diff = np.diff(kama, n=1)
+    kama_direction = np.where(kama_diff > 0, 1, np.where(kama_diff < 0, -1, 0))
+    kama_direction = np.concatenate([[0], kama_direction])  # align length
+    
+    # Calculate weekly EMA50 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Camarilla levels: based on previous 4h bar's OHLC
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    prev_close = df_4h['close'].values
-    prev_high = df_4h['high'].values
-    prev_low = df_4h['low'].values
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe (already aligned to previous bar close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    
-    # Calculate 1d EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 4h volume median (20-period for stability)
-    vol_median_4h = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Calculate 20-day volume median for confirmation
+    vol_median_20d = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, and volume
-    start_idx = 100
+    # Start after warmup for ATR, KAMA, EMA, and volume
+    start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_median_4h[i])):
+            np.isnan(kama_direction[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_median_20d[i])):
             signals[i] = 0.0
             continue
         
@@ -84,26 +90,26 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.5x 4h volume median (stricter)
-        if vol_median_4h[i] <= 0 or np.isnan(vol_median_4h[i]):
+        # Volume confirmation: current volume > 2.0x 20-day volume median
+        if vol_median_20d[i] <= 0 or np.isnan(vol_median_20d[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_4h[i] * 2.5)
+            volume_confirm = curr_volume > (vol_median_20d[i] * 2.0)
         
-        # Trend filter: price vs 1d EMA50
-        uptrend = curr_close > ema_50_1d_aligned[i]
-        downtrend = curr_close < ema_50_1d_aligned[i]
+        # Trend filter: price vs weekly EMA50
+        uptrend = curr_close > ema_50_1w_aligned[i]
+        downtrend = curr_close < ema_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Break above Camarilla R3 AND uptrend AND volume confirmation
-            if (curr_high > camarilla_r3_aligned[i] and 
+            # Long: KAMA turning up AND uptrend AND volume confirmation
+            if (kama_direction[i] == 1 and 
                 uptrend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Break below Camarilla S3 AND downtrend AND volume confirmation
-            elif (curr_low < camarilla_s3_aligned[i] and 
+            # Short: KAMA turning down AND downtrend AND volume confirmation
+            elif (kama_direction[i] == -1 and 
                   downtrend and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -113,13 +119,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR (tighter)
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Camarilla S3 OR trend turns down
-            elif (curr_low < camarilla_s3_aligned[i]) or (not uptrend):
+            # Exit: KAMA turns down OR trend turns down
+            elif (kama_direction[i] == -1) or (not uptrend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -127,13 +133,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR (tighter)
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Camarilla R3 OR trend turns up
-            elif (curr_high > camarilla_r3_aligned[i]) or (not downtrend):
+            # Exit: KAMA turns up OR trend turns up
+            elif (kama_direction[i] == 1) or (not downtrend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
