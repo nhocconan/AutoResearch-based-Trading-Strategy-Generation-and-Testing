@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
-# Uses 1d EMA34 to filter trend direction: price > EMA34 = bullish bias (longs only), price < EMA34 = bearish bias (shorts only)
-# Donchian(20) breakout on 6f timeframe: long on break above 20-period high, short on break below 20-period low
-# Volume confirmation: current volume > 1.5 * 20-period EMA of volume
-# Designed for low frequency (50-150 trades over 4 years) with clear structure and trend alignment
+# Hypothesis: 12h Volume-Weighted Average Price (VWAP) Deviation + 1d ATR Regime Filter
+# Uses 1d ATR(14) to filter regime: ATR percentile > 0.7 = high volatility (trade mean reversion),
+# ATR percentile < 0.3 = low volatility (avoid). Price deviation from 12h VWAP acts as entry signal.
+# Long when price < VWAP - 1.5 * ATR and ATR regime favors mean reversion.
+# Short when price > VWAP + 1.5 * ATR and ATR regime favors mean reversion.
+# Designed for low frequency (50-150 trades over 4 years) with clear structure in both bull and bear markets.
 
-name = "6h_Donchian20_1dEMA34_VolumeTrend_v1"
-timeframe = "6h"
+name = "12h_VWAP_ATR_Regime_MeanReversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,63 +24,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter
+    # 1d HTF data for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 12-period VWAP for 12h timeframe
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
+    
+    # 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 6h Donchian(20) channels
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # 6h volume spike filter: volume > 1.5 * 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
+    # ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr_period = 14
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= atr_period:
+        # First ATR value is simple average of first 'atr_period' TR values
+        first_atr = np.nanmean(tr[1:atr_period+1])
+        atr[atr_period] = first_atr
+        # Subsequent values: ATR[t] = (ATR[t-1] * (period-1) + TR[t]) / period
+        for i in range(atr_period + 1, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate ATR percentile rank over 50-period lookback for regime classification
+    atr_percentile = np.full_like(atr, np.nan)
+    lookback = 50
+    for i in range(lookback, len(atr)):
+        window =atr[i-lookback:i+1]
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) >= 10:  # Minimum samples for meaningful percentile
+            current_atr = atr[i]
+            if not np.isnan(current_atr):
+                percentile = (np.sum(valid_window <= current_atr) / len(valid_window)) * 100
+                atr_percentile[i] = percentile
+    
+    # Align ATR percentile to 12h timeframe
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need EMA34 and Donchian20
+    start_idx = max(lookback, 20)  # Need ATR percentile and VWAP
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(atr_percentile_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA34
-        bullish_bias = close[i] > ema34_1d_aligned[i]
-        bearish_bias = close[i] < ema34_1d_aligned[i]
+        # Regime filters based on ATR percentile
+        high_vol_regime = atr_percentile_aligned[i] > 70  # ATR > 70th percentile = high volatility
+        low_vol_regime = atr_percentile_aligned[i] < 30   # ATR < 30th percentile = low volatility
+        mean_reversion_favorable = high_vol_regime  # Trade mean reversion in high volatility
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout above 20-period high + volume spike + bullish bias
-            if high[i] > high_max_20[i-1] and volume_spike[i] and bullish_bias:
-                signals[i] = 0.25
-                position = 1
-            # Short: Donchian breakout below 20-period low + volume spike + bearish bias
-            elif low[i] < low_min_20[i-1] and volume_spike[i] and bearish_bias:
-                signals[i] = -0.25
-                position = -1
+            # Only trade in high volatility regime where mean reversion is expected
+            if mean_reversion_favorable:
+                # Long: Price significantly below VWAP
+                if close[i] < vwap[i] - (1.5 * atr[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Price significantly above VWAP
+                elif close[i] > vwap[i] + (1.5 * atr[i]):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                signals[i] = 0.0  # Avoid low volatility and transition regimes
         
         elif position == 1:  # Long position
-            # Exit: Donchian breakdown below 20-period low OR loss of bullish bias
-            if low[i] < low_min_20[i-1] or not bullish_bias:
+            # Exit conditions: price returns to VWAP or opposite extreme
+            exit_long = False
+            if close[i] >= vwap[i]:  # Return to VWAP
+                exit_long = True
+            elif close[i] > vwap[i] + (1.5 * atr[i]):  # Opposite extreme
+                exit_long = True
+            
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Donchian breakout above 20-period high OR loss of bearish bias
-            if high[i] > high_max_20[i-1] or not bearish_bias:
+            # Exit conditions: price returns to VWAP or opposite extreme
+            exit_short = False
+            if close[i] <= vwap[i]:  # Return to VWAP
+                exit_short = True
+            elif close[i] < vwap[i] - (1.5 * atr[i]):  # Opposite extreme
+                exit_short = True
+            
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
