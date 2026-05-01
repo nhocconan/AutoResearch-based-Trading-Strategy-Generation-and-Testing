@@ -35,6 +35,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # Pre-compute 4h volume MA for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -55,7 +63,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -64,9 +72,10 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_vol = volume[i]
         curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_vol_ma = vol_ma_4h_aligned[i]
         
         # Williams %R(14) calculation on 4h data (requires 14 periods of high/low/close)
-        if i < 14 + start_idx:  # need extra warmup for Williams %R
+        if i < 14:  # need minimum 14 periods for Williams %R
             signals[i] = 0.0
             continue
             
@@ -78,12 +87,7 @@ def generate_signals(prices):
         else:
             williams_r = ((highest_high - curr_close) / (highest_high - lowest_low)) * -100
         
-        # Volume confirmation: current 4h volume > 2.0x 20-period average from 4h HTF data
-        df_4h = get_htf_data(prices, '4h')
-        vol_4h = df_4h['volume'].values
-        vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-        vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-        curr_vol_ma = vol_ma_4h_aligned[i]
+        # Volume confirmation: current 4h volume > 2.0x 20-period average
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
         # Entry conditions
