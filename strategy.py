@@ -4,9 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses Donchian channel breakouts for trend capture, 1d EMA34 for higher timeframe trend alignment,
-# and volume spike for confirmation. Designed for lower trade frequency (target 150-250 total over 4 years)
-# to avoid fee drift, works in both bull and bear markets via trend filter alignment.
+# Uses price channel breakouts for strong directional moves, 1d EMA34 for trend alignment,
+# and volume spike for confirmation. Designed for lower trade frequency (<100/year) to avoid fee drag.
+# Works in both bull and bear markets via trend filter - only trades in direction of 1d EMA34.
 # Discrete position sizing 0.25 to balance return and drawdown.
 
 name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
@@ -32,17 +32,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Donchian(20) channels
-    # Upper band: highest high of last 20 periods (including current)
-    # Lower band: lowest low of last 20 periods (including current)
+    # Calculate 4h Donchian channels (20-period)
+    # Upper channel = highest high of last 20 periods
+    # Lower channel = lowest low of last 20 periods
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.5)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,9 +72,9 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Donchian breakout conditions
-        breakout_upper = curr_high > donchian_upper[i]  # Break above upper band
-        breakdown_lower = curr_low < donchian_lower[i]  # Break below lower band
+        # 4h Donchian breakout conditions
+        breakout_upper = curr_high > donchian_upper[i]  # Break above upper channel
+        breakdown_lower = curr_low < donchian_lower[i]  # Break below lower channel
         
         if position == 0:  # Flat - look for new entries
             # Long: Donchian upper breakout AND uptrend AND volume confirmation
