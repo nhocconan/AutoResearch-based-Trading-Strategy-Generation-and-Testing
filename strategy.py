@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with weekly pivot direction and volume confirmation
-# Williams Fractals identify potential turning points. Weekly pivot provides HTF bias.
-# Volume spike confirms breakout validity. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull (breakouts with weekly pivot alignment) and bear (fade at extremes with confirmation).
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation (>1.5x 20-bar volume MA) and 1d ADX(14) trend filter (ADX > 20)
+# Donchian channels provide robust price channels for breakout trading. Volume spike confirms institutional participation.
+# 1d ADX > 20 ensures we only trade in trending markets, reducing false breakouts in ranging conditions.
+# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull (breakouts with volume) and bear (trend continuation after pullbacks to channel).
 
-name = "6h_WilliamsFractal_Breakout_WeeklyPivot_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_VolumeSpike_1dADX20_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,53 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly HTF data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # 1d HTF data for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Weekly pivot points (using prior completed weekly bar)
-    # Pivot = (H + L + C) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # 1d ADX(14) calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate pivot for each weekly bar (using prior bar to avoid look-ahead)
-    weekly_pivot = np.full(len(weekly_close), np.nan)
-    for i in range(1, len(weekly_close)):
-        weekly_pivot[i] = (weekly_high[i-1] + weekly_low[i-1] + weekly_close[i-1]) / 3.0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align weekly pivot to 6h timeframe (waits for weekly bar close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Williams Fractals on 6h data (requires 2 extra bars for confirmation)
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n+1] > high[n+2]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n+1] < low[n+2]
-    bearish_fractal = np.full(len(high), np.nan)
-    bullish_fractal = np.full(len(low), np.nan)
+    # Smoothed values
+    def _wilder_smooth(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(x[1:period])
+        # Subsequent values are Wilder smoothing
+        for i in range(period, len(x)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + x[i]) / period
+        return result
     
-    for i in range(2, len(high)-2):
-        # Bearish fractal (peak)
-        if (high[i-2] < high[i-1] and 
-            high[i-1] < high[i] and 
-            high[i] > high[i+1] and 
-            high[i+1] > high[i+2]):
-            bearish_fractal[i] = high[i]
-        
-        # Bullish fractal (trough)
-        if (low[i-2] > low[i-1] and 
-            low[i-1] > low[i] and 
-            low[i] < low[i+1] and 
-            low[i+1] < low[i+2]):
-            bullish_fractal[i] = low[i]
+    atr_1d = _wilder_smooth(tr, 14)
+    plus_di_1d = 100 * _wilder_smooth(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * _wilder_smooth(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = _wilder_smooth(dx_1d, 14)
     
-    # Align fractals with additional 2-bar delay for confirmation (as per Rule 2b)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, prices, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, prices, bullish_fractal, additional_delay_bars=2
-    )
+    # Align 1d ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Donchian(20) channels on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,51 +84,47 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need 20 for volume MA + extra for fractals
+    start_idx = 50  # Need 14*3 for ADX + 20 for Donchian + volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        weekly_pivot = weekly_pivot_aligned[i]
         
-        # Volume confirmation
+        # Donchian breakout conditions (using prior bar channels to avoid look-ahead)
+        breakout_up = curr_close > donchian_high[i-1]  # Break above upper channel
+        breakout_down = curr_close < donchian_low[i-1]  # Break below lower channel
+        
+        # Volume confirmation and trend filter
         vol_spike = volume_spike[i]
+        strong_trend = adx_1d_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish fractal break above weekly pivot with volume spike
-            if (not np.isnan(bullish_fractal_aligned[i]) and 
-                curr_close > weekly_pivot and 
-                curr_low <= bullish_fractal_aligned[i] and  # Price touched fractal level
-                vol_spike):
+            # Long: Donchian breakout up, volume spike, strong trend
+            if breakout_up and vol_spike and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish fractal break below weekly pivot with volume spike
-            elif (not np.isnan(bearish_fractal_aligned[i]) and 
-                  curr_close < weekly_pivot and 
-                  curr_high >= bearish_fractal_aligned[i] and  # Price touched fractal level
-                  vol_spike):
+            # Short: Donchian breakout down, volume spike, strong trend
+            elif breakout_down and vol_spike and strong_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below weekly pivot or opposite fractal
-            if curr_close < weekly_pivot or not np.isnan(bearish_fractal_aligned[i]):
+            # Exit on Donchian breakdown or weak trend
+            if curr_close < donchian_low[i] or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above weekly pivot or opposite fractal
-            if curr_close > weekly_pivot or not np.isnan(bullish_fractal_aligned[i]):
+            # Exit on Donchian breakout or weak trend
+            if curr_close > donchian_high[i] or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
