@@ -3,119 +3,111 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h Supertrend trend filter and volume spike confirmation.
-# Uses 4h Supertrend for trend alignment (HTF direction) to capture major bull/bear regimes and 1h volume spike for precise entry timing.
-# Long when price breaks above R3, Supertrend is bullish, and volume > 2.0x 20-period average (strict confirmation).
-# Short when price breaks below S3, Supertrend is bearish, and volume > 2.0x 20-period average.
-# Exit on opposite Camarilla level (R1/S1) break for tighter risk control.
-# Session filter (08-20 UTC) reduces noise. Discrete sizing 0.20 minimizes fee churn.
-# Target: 15-30 trades/year by using 4h for signal direction (less frequent than 1h) and 1h only for entry timing.
-# 4h Supertrend adapts to volatility and works in both bull (trend following) and bear (counter-trend at extremes) markets.
+# Hypothesis: 6h Williams Alligator + Elder Ray Power with 1w pivot direction filter.
+# Uses 1w Camarilla pivot for trend direction (bull/bear/range) to capture major regimes.
+# Long when: Alligator bullish (jaw < teeth < lips) AND Elder Bull Power > 0 AND price above 1w pivot point.
+# Short when: Alligator bearish (jaw > teeth > lips) AND Elder Bear Power < 0 AND price below 1w pivot point.
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 12-25 trades/year.
+# Williams Alligator identifies trend via smoothed medians; Elder Ray measures bull/bear power behind moves.
+# 1w pivot provides structural regime filter to avoid counter-trend trades in strong markets.
+# Works in bull (trend following) and bear (counter-trend at extremes) by aligning with higher timeframe structure.
 
-name = "1h_Camarilla_R3S3_Breakout_4hSupertrend_VolumeConfirm_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wPivotDir_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 4h data ONCE before loop for Supertrend trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Load 1w data ONCE before loop for pivot direction
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate Supertrend on 4h data
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate 1w Camarilla pivot points (using prior week OHLC)
+    # We'll calculate pivot from prior week's OHLC for current week's bias
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = pd.Series(df_4h['high']).diff()
-    tr2 = pd.Series(df_4h['high']).sub(df_4h['shift_close']).abs()
-    tr3 = pd.Series(df_4h['low']).diff()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1, skipna=False)
-    # Fix for first row
-    tr.iloc[0] = df_4h['high'].iloc[0] - df_4h['low'].iloc[0]
+    # Prior week OHLC for current week's pivot
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Shift close for previous close
-    df_4h = df_4h.copy()
-    df_4h['shift_close'] = df_4h['close'].shift(1)
+    pivot_1w = (prev_high + prev_low + prev_close) / 3.0
+    # Camarilla-style levels from prior week
+    range_1w = prev_high - prev_low
+    r1_1w = prev_close + (range_1w * 1.1 / 12)
+    s1_1w = prev_close - (range_1w * 1.1 / 12)
+    r3_1w = prev_close + (range_1w * 1.1 / 4)
+    s3_1w = prev_close - (range_1w * 1.1 / 4)
     
-    # Recalculate TR with shift_close
-    tr1 = (df_4h['high'] - df_4h['low']).abs()
-    tr2 = (df_4h['high'] - df_4h['shift_close']).abs()
-    tr3 = (df_4h['low'] - df_4h['shift_close']).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr.iloc[0] = tr1.iloc[0]  # First row
+    # Align 1w levels to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
+    # Williams Alligator: SMMA (Smoothed Moving Average) of median price
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2.0
     
-    # Basic Upper and Lower Bands
-    basic_ub = (df_4h['high'] + df_4h['low']) / 2 + multiplier * atr
-    basic_lb = (df_4h['high'] + df_4h['low']) / 2 - multiplier * atr
+    # Smoothed Moving Average (SMMA) - similar to EMA but with different smoothing
+    # Jaw: SMMA(13, 8) - 13-period smoothed, shifted 8 bars
+    # Teeth: SMMA(8, 5) - 8-period smoothed, shifted 5 bars
+    # Lips: SMMA(5, 3) - 5-period smoothed, shifted 3 bars
     
-    # Final Upper and Lower Bands
-    final_ub = pd.Series(index=df_4h.index, dtype='float64')
-    final_lb = pd.Series(index=df_4h.index, dtype='float64')
-    supertrend = pd.Series(index=df_4h.index, dtype='float64')
-    direction = pd.Series(index=df_4h.index, dtype='float64')
-    
-    for i in range(len(df_4h)):
-        if i == 0:
-            final_ub.iloc[i] = basic_ub.iloc[i]
-            final_lb.iloc[i] = basic_lb.iloc[i]
-        else:
-            if basic_ub.iloc[i] < final_ub.iloc[i-1] or df_4h['close'].iloc[i-1] > final_ub.iloc[i-1]:
-                final_ub.iloc[i] = basic_ub.iloc[i]
+    def smma(values, period, shift):
+        """Calculate Smoothed Moving Average with shift"""
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        # First value is simple average
+        smma_vals = np.full_like(values, np.nan)
+        smma_vals[period-1] = np.nanmean(values[:period])
+        # Subsequent values: SMMA = (prev_smma * (period-1) + current_value) / period
+        for i in range(period, len(values)):
+            if not np.isnan(smma_vals[i-1]):
+                smma_vals[i] = (smma_vals[i-1] * (period-1) + values[i]) / period
             else:
-                final_ub.iloc[i] = final_ub.iloc[i-1]
-                
-            if basic_lb.iloc[i] > final_lb.iloc[i-1] or df_4h['close'].iloc[i-1] < final_lb.iloc[i-1]:
-                final_lb.iloc[i] = basic_lb.iloc[i]
-            else:
-                final_lb.iloc[i] = final_lb.iloc[i-1]
-        
-        if i == 0:
-            supertrend.iloc[i] = final_ub.iloc[i]
-            direction.iloc[i] = 1
-        else:
-            if supertrend.iloc[i-1] == final_ub.iloc[i-1]:
-                if df_4h['close'].iloc[i] <= final_ub.iloc[i]:
-                    supertrend.iloc[i] = final_ub.iloc[i]
-                    direction.iloc[i] = -1
-                else:
-                    supertrend.iloc[i] = final_lb.iloc[i]
-                    direction.iloc[i] = 1
-            else:
-                if df_4h['close'].iloc[i] >= final_lb.iloc[i]:
-                    supertrend.iloc[i] = final_lb.iloc[i]
-                    direction.iloc[i] = 1
-                else:
-                    supertrend.iloc[i] = final_ub.iloc[i]
-                    direction.iloc[i] = -1
+                smma_vals[i] = np.nan
+        # Apply shift
+        shifted = np.full_like(smma_vals, np.nan)
+        if shift < len(values):
+            shifted[shift:] = smma_vals[:-shift]
+        return shifted
     
-    # Align Supertrend direction to 1h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction.values)
+    jaw = smma(median_price, 13, 8)
+    teeth = smma(median_price, 8, 5)
+    lips = smma(median_price, 5, 3)
     
-    # Calculate 1h volume average (20-period) for volume spike filter
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Elder Ray Power
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for volume average
+    start_idx = 30  # warmup for Alligator and Elder Ray
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
+        # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
         hour = hours[i]
         in_session = (8 <= hour <= 20)
         
@@ -128,99 +120,65 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_direction = supertrend_direction_aligned[i]
-        curr_volume = volume[i]
-        curr_volume_avg = volume_avg[i]
-        
-        # Skip if volume data not ready
-        if np.isnan(curr_volume_avg):
+        # Skip if any data not ready
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict)
-        volume_confirm = curr_volume > (2.0 * curr_volume_avg)
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_jaw = jaw[i]
+        curr_teeth = teeth[i]
+        curr_lips = lips[i]
+        curr_pivot = pivot_1w_aligned[i]
+        curr_r3 = r3_1w_aligned[i]
+        curr_s3 = s3_1w_aligned[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         
-        # Calculate Camarilla levels for current day using previous day's OHLC
-        if i >= 24:  # Need at least 24 bars (1 day) of 1h data for previous day
-            # Get timestamp of current bar
-            curr_time = prices.iloc[i]["open_time"]
-            # Get start of current day (00:00 UTC)
-            curr_day_start = curr_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            # Get start of previous day
-            prev_day_start = curr_day_start - pd.Timedelta(days=1)
-            # Get end of previous day (23:59:59.999 UTC)
-            prev_day_end = curr_day_start - pd.Timedelta(microseconds=1)
-            
-            # Filter prices for previous day
-            mask = (prices["open_time"] >= prev_day_start) & (prices["open_time"] <= prev_day_end)
-            if mask.any():
-                prev_day_data = prices.loc[mask]
-                if len(prev_day_data) > 0:
-                    prev_high = prev_day_data["high"].max()
-                    prev_low = prev_day_data["low"].min()
-                    prev_close = prev_day_data["close"].iloc[-1]
-                    
-                    # Calculate Camarilla levels
-                    range_val = prev_high - prev_low
-                    if range_val > 0:
-                        camarilla_r3 = prev_close + (range_val * 1.1 / 4)   # R3 level
-                        camarilla_s3 = prev_close - (range_val * 1.1 / 4)   # S3 level
-                        camarilla_r1 = prev_close + (range_val * 1.1 / 12)  # R1 level (exit)
-                        camarilla_s1 = prev_close - (range_val * 1.1 / 12)  # S1 level (exit)
-                    else:
-                        camarilla_r3 = curr_close
-                        camarilla_s3 = curr_close
-                        camarilla_r1 = curr_close
-                        camarilla_s1 = curr_close
-                else:
-                    camarilla_r3 = curr_close
-                    camarilla_s3 = curr_close
-                    camarilla_r1 = curr_close
-                    camarilla_s1 = curr_close
-            else:
-                camarilla_r3 = curr_close
-                camarilla_s3 = curr_close
-                camarilla_r1 = curr_close
-                camarilla_s1 = curr_close
-        else:
-            camarilla_r3 = curr_close
-            camarilla_s3 = curr_close
-            camarilla_r1 = curr_close
-            camarilla_s1 = curr_close
+        # Williams Alligator conditions
+        alligator_bullish = (curr_jaw < curr_teeth) and (curr_teeth < curr_lips)
+        alligator_bearish = (curr_jaw > curr_teeth) and (curr_teeth > curr_lips)
         
+        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, Supertrend bullish (direction=1), volume confirmation
-            if (curr_close > camarilla_r3 and 
-                curr_direction == 1 and 
-                volume_confirm):
-                signals[i] = 0.20
+            # Long: Alligator bullish AND Bull Power > 0 AND price above weekly pivot
+            if (alligator_bullish and 
+                curr_bull_power > 0 and 
+                curr_close > curr_pivot):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3, Supertrend bearish (direction=-1), volume confirmation
-            elif (curr_close < camarilla_s3 and 
-                  curr_direction == -1 and 
-                  volume_confirm):
-                signals[i] = -0.20
+            # Short: Alligator bearish AND Bear Power < 0 AND price below weekly pivot
+            elif (alligator_bearish and 
+                  curr_bear_power < 0 and 
+                  curr_close < curr_pivot):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Camarilla S1 (tighter stop)
-            if curr_close < camarilla_s1:
+            # Exit: Alligator turns bearish OR Bear Power < 0 OR price breaks below weekly S1
+            if (not alligator_bullish or 
+                curr_bear_power < 0 or 
+                curr_close < s1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Camarilla R1 (tighter stop)
-            if curr_close > camarilla_r1:
+            # Exit: Alligator turns bullish OR Bull Power > 0 OR price breaks above weekly R1
+            if (not alligator_bearish or 
+                curr_bull_power > 0 or 
+                curr_close > r1_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
