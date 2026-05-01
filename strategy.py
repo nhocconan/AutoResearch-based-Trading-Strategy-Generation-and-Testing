@@ -5,8 +5,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
 # Uses 1d ADX > 25 to identify strong trends, reducing whipsaws in ranging markets.
-# Long when price breaks above Donchian upper AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
-# Short when price breaks below Donchian lower AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
+# Long when price breaks above Donchian upper band AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
+# Short when price breaks below Donchian lower band AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years.
 # Volume spike threshold set to 1.8x to balance signal quality and trade frequency.
 # Designed to work in both bull (trend continuation) and bear (trend reversal on strong moves) markets.
@@ -75,9 +75,9 @@ def generate_signals(prices):
     # 1d trend: ADX > 25 indicates strong trend
     strong_trend = adx_aligned > 25
     
-    # Calculate Donchian(20) channels on 4h timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 4h timeframe
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current 4h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,10 +85,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for ADX and volume MA
+    start_idx = 50  # warmup for ADX and Donchian channels
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -105,18 +105,18 @@ def generate_signals(prices):
         volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
         
         # Donchian breakout signals
-        breakout_up = curr_high > highest_high[i]  # break above upper band
-        breakout_down = curr_low < lowest_low[i]  # break below lower band
+        breakout_up = curr_high > donchian_upper[i]  # break above upper band
+        breakout_down = curr_low < donchian_lower[i]  # break below lower band
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper AND 1d ADX > 25 AND volume confirmation
+            # Long: breakout above upper band AND 1d ADX > 25 AND volume confirmation
             if (breakout_up and 
                 strong_trend[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower AND 1d ADX > 25 AND volume confirmation
+            # Short: breakout below lower band AND 1d ADX > 25 AND volume confirmation
             elif (breakout_down and 
                   strong_trend[i] and 
                   volume_confirm):
@@ -127,7 +127,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: price crosses below lower band (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_low < lowest_low[i] or 
+            if (curr_low < donchian_lower[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
@@ -136,7 +136,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: price crosses above upper band (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_high > highest_high[i] or 
+            if (curr_high > donchian_upper[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
