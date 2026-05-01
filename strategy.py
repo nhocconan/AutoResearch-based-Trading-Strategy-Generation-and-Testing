@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above 20-period high AND 1d EMA34 uptrend AND volume > 1.8x 20-period median.
-# Short when price breaks below 20-period low AND 1d EMA34 downtrend AND volume > 1.8x 20-period median.
+# Hypothesis: 4h Donchian(20) breakout with 1d HMA34 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND 1d HMA34 uptrend AND volume > 2.0x 20-period median.
+# Short when price breaks below 20-period low AND 1d HMA34 downtrend AND volume > 2.0x 20-period median.
 # Uses ATR-based stoploss: exit long if price < highest_high_since_entry - 2.5*ATR(14),
 # exit short if price > lowest_low_since_entry + 2.5*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h timeframe.
-# EMA34 on 1d provides smooth trend filter that adapts to both bull and bear markets.
-# Using 12h primary timeframe reduces noise and overtrading while capturing medium-term moves.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year on 4h timeframe.
+# HMA is smoother than EMA with less lag, improving trend reliability in both bull and bear markets.
+# Using 1d HTF for stable trend adaptation while avoiding noise.
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_ATR_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dHMA34_VolumeSpike_ATR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,14 +26,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (loaded once before loop)
+    # Calculate 1d HMA34 for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA: close.ewm(span=34, adjust=False, min_periods=34).mean()
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half = df_1d['close'].rolling(window=34//2, min_periods=34//2).mean()
+    full = df_1d['close'].rolling(window=34, min_periods=34).mean()
+    raw_hma = 2 * half - full
+    hma_34_1d = raw_hma.rolling(window=int(np.sqrt(34)), min_periods=int(np.sqrt(34))).mean().values
+    hma_34_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_34_1d)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -55,11 +58,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA, Donchian, volume, and ATR
+    # Start after warmup for HMA, Donchian, volume, and ATR
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(hma_34_1d_aligned[i]) or 
             np.isnan(high_20[i]) or 
             np.isnan(low_20[i]) or 
             np.isnan(vol_median_20[i]) or 
@@ -73,15 +76,15 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 1d HMA34 direction
+        uptrend = curr_close > hma_34_1d_aligned[i]
+        downtrend = curr_close < hma_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period volume median
+        # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
+            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
         
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above 20-period high AND uptrend AND volume spike
