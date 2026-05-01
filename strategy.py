@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-# Long when: price breaks above Donchian(20) high AND ATR(14) > ATR(50) AND volume > 1.5 * volume MA(20)
-# Short when: price breaks below Donchian(20) low AND ATR(14) > ATR(50) AND volume > 1.5 * volume MA(20)
-# Uses discrete sizing 0.25. ATR regime filter ensures we only trade in sufficient volatility conditions.
-# Volume confirmation adds conviction to breakouts. Designed for 12h timeframe to target 12-37 trades/year.
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume confirmation.
+# Long when: price breaks above Donchian(20) high AND 12h EMA50 rising AND volume > 1.5x 20-period average.
+# Short when: price breaks below Donchian(20) low AND 12h EMA50 falling AND volume > 1.5x 20-period average.
+# Uses discrete sizing 0.25. Target: 20-50 trades/year on 4h.
+# Donchian channels provide objective structure, 12h EMA filters counter-trend trades, volume confirms conviction.
+# Works in bull (breakouts with trend) and bear (breakdowns with trend) by aligning with higher timeframe direction.
 
-name = "12h_Donchian20_ATRRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,47 +27,39 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ATR regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Rising if current > previous, falling if current < previous
+    ema_50_rising = np.roll(ema_50_12h, 1) < ema_50_12h
+    ema_50_falling = np.roll(ema_50_12h, 1) > ema_50_12h
+    # Handle first value
+    ema_50_rising[0] = False
+    ema_50_falling[0] = False
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align 12h EMA50 and trend to 4h
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_50_rising.astype(float))
+    ema_50_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_50_falling.astype(float))
     
-    # ATR(14) and ATR(50)
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d ATR values to 12h
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Donchian(20) on 12h data
+    # Donchian(20) on 4h
     lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
-    
-    # Volume confirmation: volume > 1.5 * 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * vol_ma_20
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup for ATR and Donchian
+    start_idx = 50  # warmup for Donchian and EMA
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -84,57 +77,51 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or
-            np.isnan(volume_threshold[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_50_rising_aligned[i]) or
+            np.isnan(ema_50_falling_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
-        curr_atr_14 = atr_14_1d_aligned[i]
-        curr_atr_50 = atr_50_1d_aligned[i]
-        curr_vol_thresh = volume_threshold[i]
-        
-        # ATR regime filter: only trade when short-term ATR > long-term ATR (expanding volatility)
-        atr_regime = curr_atr_14 > curr_atr_50
-        
-        # Volume confirmation
-        volume_confirmed = curr_volume > curr_vol_thresh
+        curr_vol_spike = volume_spike[i]
+        curr_donchian_high = highest_high[i]
+        curr_donchian_low = lowest_low[i]
+        curr_ema_50 = ema_50_12h_aligned[i]
+        curr_ema_rising = bool(ema_50_rising_aligned[i])
+        curr_ema_falling = bool(ema_50_falling_aligned[i])
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high AND ATR regime AND volume confirmed
-            if (curr_close > curr_highest_high and 
-                atr_regime and 
-                volume_confirmed):
+            # Long: break above Donchian high AND EMA50 rising AND volume spike
+            if (curr_close > curr_donchian_high and 
+                curr_ema_rising and 
+                curr_vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND ATR regime AND volume confirmed
-            elif (curr_close < curr_lowest_low and 
-                  atr_regime and 
-                  volume_confirmed):
+            # Short: break below Donchian low AND EMA50 falling AND volume spike
+            elif (curr_close < curr_donchian_low and 
+                  curr_ema_falling and 
+                  curr_vol_spike):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR ATR regime changes
-            if (curr_close < curr_lowest_low or 
-                not atr_regime):
+            # Exit: price breaks below Donchian low OR EMA50 turns flat/falling
+            if (curr_close < curr_donchian_low or 
+                not curr_ema_rising):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR ATR regime changes
-            if (curr_close > curr_highest_high or 
-                not atr_regime):
+            # Exit: price breaks above Donchian high OR EMA50 turns flat/rising
+            if (curr_close > curr_donchian_high or 
+                not curr_ema_falling):
                 signals[i] = 0.0
                 position = 0
             else:
