@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX regime filter and volume confirmation.
 # Uses 1d ADX > 25 to identify strong trends, reducing whipsaws in ranging markets.
-# Long when price breaks above Donchian upper band AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
-# Short when price breaks below Donchian lower band AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years.
+# Long when price breaks above R3 AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
+# Short when price breaks below S3 AND 1d ADX > 25 AND volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years.
 # Volume spike threshold set to 1.8x to balance signal quality and trade frequency.
 # Designed to work in both bull (trend continuation) and bear (trend reversal on strong moves) markets.
 
-name = "4h_Donchian20_1dADX25_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -69,26 +69,36 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 1d trend: ADX > 25 indicates strong trend
     strong_trend = adx_aligned > 25
     
-    # Calculate Donchian channels (20-period) on 4h timeframe
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (based on previous 1d bar's range)
+    # We need the previous completed 1d bar for each 12h bar
+    # Since we're on 12h timeframe, we can use the 1d data directly with alignment
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Volume confirmation: current 4h volume > 1.8x 20-bar average
+    camarilla_r3_1d = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_s3_1d = daily_close - (daily_high - daily_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # Volume confirmation: current 12h volume > 1.8x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for ADX and Donchian channels
+    start_idx = 50  # warmup for ADX and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -104,19 +114,19 @@ def generate_signals(prices):
             
         volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
         
-        # Donchian breakout signals
-        breakout_up = curr_high > donchian_upper[i]  # break above upper band
-        breakout_down = curr_low < donchian_lower[i]  # break below lower band
+        # Camarilla breakout signals
+        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper band AND 1d ADX > 25 AND volume confirmation
+            # Long: breakout above R3 AND 1d ADX > 25 AND volume confirmation
             if (breakout_up and 
                 strong_trend[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band AND 1d ADX > 25 AND volume confirmation
+            # Short: breakout below S3 AND 1d ADX > 25 AND volume confirmation
             elif (breakout_down and 
                   strong_trend[i] and 
                   volume_confirm):
@@ -126,8 +136,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower band (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_low < donchian_lower[i] or 
+            # Exit: price crosses below S3 (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_low < camarilla_s3_aligned[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
@@ -135,8 +145,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band (stoploss) OR ADX < 20 (trend weakening)
-            if (curr_high > donchian_upper[i] or 
+            # Exit: price crosses above R3 (stoploss) OR ADX < 20 (trend weakening)
+            if (curr_high > camarilla_r3_aligned[i] or 
                 adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
