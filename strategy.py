@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses 1w EMA(50) as trend filter (price > EMA = uptrend, price < EMA = downtrend) 
-# Donchian breakout from prior day's 20-day high/low with volume spike (1.5x 20-period MA)
-# Designed for low frequency (30-100 trades over 4 years) on 1d timeframe to minimize fee drag
-# Works in bull/bear via trend filter - only trades in direction of weekly trend
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX(14) > 25 trend filter and volume confirmation (1.5x 20-bar MA)
+# Uses Camarilla levels from prior 4h bar (R3/S3) for tighter breakouts vs R4/S4 to reduce false signals
+# ADX > 25 ensures only strong trends are traded, avoiding choppy markets
+# Volume spike confirms institutional participation
+# Discrete position sizing (0.25) to minimize fee churn
+# Designed for low frequency (75-200 trades over 4 years) to overcome fee drag on 4h timeframe
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,23 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d HTF data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1w EMA(50) calculation
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # 1d ADX(14) calculation (trend filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channels (20-period) from prior day
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with indices
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            first_val = np.nansum(x[1:period+1])  # skip first NaN
+            result[period] = first_val
+            for i in range(period+1, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
+    
+    tr_period = 14
+    tr_smoothed = wilders_smoothing(tr, tr_period)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
+    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    
+    def wilders_smoothing_dx(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            first_val = np.nansum(x[1:period+1])
+            result[period] = first_val
+            for i in range(period+1, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
+    
+    adx = wilders_smoothing_dx(dx, tr_period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Camarilla levels from prior 4h bar (using prior bar's HLC)
     prior_high = np.concatenate([[np.nan], high[:-1]])
     prior_low = np.concatenate([[np.nan], low[:-1]])
+    prior_close = np.concatenate([[np.nan], close[:-1]])
     
-    # 20-period rolling max/min of prior high/low
-    high_ma_20 = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
+    hl_range = prior_high - prior_low
+    camarilla_r3 = prior_close + hl_range * 1.1 / 4
+    camarilla_s3 = prior_close - hl_range * 1.1 / 4
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,48 +101,47 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need EMA50 and Donchian20
+    start_idx = max(34, 20)  # Need ADX and volume MA20
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
+            np.isnan(prior_close[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trending market
+        trending = adx_aligned[i] > 25
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > high_ma_20[i]   # Price breaks above 20-day high
-        breakout_short = close[i] < low_ma_20[i]   # Price breaks below 20-day low
+        # Breakout conditions (using R3/S3 for tighter entries)
+        breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
+        breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above 20-day high with volume spike and weekly uptrend
-            if breakout_long and vol_spike and uptrend:
+            # Long: Breakout above R3 with volume spike and strong trend
+            if breakout_long and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below 20-day low with volume spike and weekly downtrend
-            elif breakout_short and vol_spike and downtrend:
+            # Short: Breakout below S3 with volume spike and strong trend
+            elif breakout_short and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below 20-day low or trend reversal (price < weekly EMA)
-            if close[i] < low_ma_20[i] or close[i] < ema_50_aligned[i]:
+            # Exit on close below prior bar's low or ADX weakening (<20)
+            if close[i] < prior_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above 20-day high or trend reversal (price > weekly EMA)
-            if close[i] > high_ma_20[i] or close[i] > ema_50_aligned[i]:
+            # Exit on close above prior bar's high or ADX weakening (<20)
+            if close[i] > prior_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
