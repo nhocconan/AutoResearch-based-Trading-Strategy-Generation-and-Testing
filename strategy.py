@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R4 level AND close > 1w EMA50 AND volume > 2.5x 20-period volume median.
-# Short when price breaks below Camarilla S4 level AND close < 1w EMA50 AND volume > 2.5x 20-period volume median.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Camarilla R4/S4 are stronger intraday levels than R3/S3, reducing false breakouts.
-# 1w EMA50 provides major trend filter to avoid counter-trend trades.
-# Volume spike at 2.5x median ensures breakout conviction.
-# Target: 15-40 trades/year on 4h timeframe (60-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d Williams %R mean reversion with 1w EMA50 trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND close > 1w EMA50 AND volume > 1.5x 20-period volume median.
+# Short when Williams %R > -20 (overbought) AND close < 1w EMA50 AND volume > 1.5x 20-period volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
+# Williams %R identifies extreme reversals; 1w EMA50 filters for higher timeframe trend alignment;
+# volume confirmation ensures breakout conviction. Designed to work in both bull (buy dips) and bear (sell rallies) markets.
+# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
 
-name = "4h_Camarilla_R4S4_Breakout_1wEMA50_Volume_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_MeanReversion_1wEMA50_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,13 +36,12 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Camarilla levels (using prior bar's OHLC to avoid look-ahead)
-    prev_close = np.concatenate([[close[0]], close[:-1]])
-    prev_high = np.concatenate([[high[0]], high[:-1]])
-    prev_low = np.concatenate([[low[0]], low[:-1]])
-    camarilla_range = prev_high - prev_low
-    camarilla_R4 = prev_close + 1.5 * camarilla_range
-    camarilla_S4 = prev_close - 1.5 * camarilla_range
+    # Calculate Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
     # Calculate 1w EMA50 trend filter (HTF)
     df_1w = get_htf_data(prices, '1w')
@@ -57,14 +55,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, volume, and Camarilla
+    # Start after warmup for Williams %R, EMA, ATR, and volume
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
             np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_R4[i]) or 
-            np.isnan(camarilla_S4[i]) or 
+            np.isnan(williams_r[i]) or 
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
@@ -76,20 +73,20 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_1w_aligned[i]
         downtrend = curr_close < ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 2.5x 20-period volume median
+        # Volume confirmation: current volume > 1.5x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 2.5)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
-            # Long: price > Camarilla R4 AND uptrend AND volume spike
-            if curr_close > camarilla_R4[i] and uptrend and volume_confirm:
+            # Long: Williams %R < -80 (oversold) AND uptrend AND volume spike
+            if williams_r[i] < -80 and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price < Camarilla S4 AND downtrend AND volume spike
-            elif curr_close < camarilla_S4[i] and downtrend and volume_confirm:
+            # Short: Williams %R > -20 (overbought) AND downtrend AND volume spike
+            elif williams_r[i] > -20 and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -97,13 +94,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Camarilla S4 OR trend turns down
-            elif curr_close < camarilla_S4[i] or not uptrend:
+            # Exit: Williams %R > -50 (exit oversold) OR trend turns down
+            elif williams_r[i] > -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -111,13 +108,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Camarilla R4 OR trend turns up
-            elif curr_close > camarilla_R4[i] or not downtrend:
+            # Exit: Williams %R < -50 (exit overbought) OR trend turns up
+            elif williams_r[i] < -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
