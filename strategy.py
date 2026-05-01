@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d Camarilla R3/S3 levels as stronger breakout confirmation to avoid false breakouts.
-# Trades only in direction of 1d EMA34 trend with volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+# Uses 1d EMA34 as trend filter and 1d ATR for volatility-based stoploss.
 # Works in bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
-# Discrete position sizing 0.25 balances return and drawdown. Target: 50-150 trades over 4 years.
+# Discrete position sizing 0.25 balances return and drawdown. Target: 75-200 trades over 4 years.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,26 +45,34 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 12h Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h Camarilla pivot levels (R3, S3) for breakout
+    # Based on previous 4h bar's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume on 12h
+    camarilla_r3_4h = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3_4h = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 2.0)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(34, 20) + 1  # 35 (for EMA34 and Donchian20)
+    start_idx = max(34, 20) + 1  # 35 (for EMA34 and volume MA)
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+            np.isnan(camarilla_r3_4h[i]) or
+            np.isnan(camarilla_s3_4h[i]) or
             np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             if position != 0:
@@ -84,37 +91,37 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 12h Donchian breakout conditions
-        breakout_up = curr_high > donchian_high[i]  # Break above upper Donchian
-        breakdown_down = curr_low < donchian_low[i]  # Break below lower Donchian
+        # 4h Camarilla breakout conditions
+        breakout_r3 = curr_high > camarilla_r3_4h[i]  # Break above 4h R3
+        breakdown_s3 = curr_low < camarilla_s3_4h[i]  # Break below 4h S3
         
         # Daily Camarilla R3/S3 confirmation
-        breakout_r3 = curr_close > camarilla_r3_aligned[i]  # Confirm above daily R3
-        breakdown_s3 = curr_close < camarilla_s3_aligned[i]  # Confirm below daily S3
+        confirm_r3 = curr_close > camarilla_r3_aligned[i]  # Confirm above daily R3
+        confirm_s3 = curr_close < camarilla_s3_aligned[i]  # Confirm below daily S3
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND daily R3 confirmation AND uptrend AND volume confirmation
-            if breakout_up and breakout_r3 and uptrend and vol_confirm:
+            # Long: 4h R3 breakout AND daily R3 confirmation AND uptrend AND volume confirmation
+            if breakout_r3 and confirm_r3 and uptrend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown down AND daily S3 confirmation AND downtrend AND volume confirmation
-            elif breakdown_down and breakdown_s3 and downtrend and vol_confirm:
+            # Short: 4h S3 breakdown AND daily S3 confirmation AND downtrend AND volume confirmation
+            elif breakdown_s3 and confirm_s3 and downtrend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakdown (reversal signal)
-            if curr_low < donchian_low[i]:
+            # Exit on 4h S3 breakdown (reversal signal)
+            if curr_low < camarilla_s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout (reversal signal)
-            if curr_high > donchian_high[i]:
+            # Exit on 4h R3 breakout (reversal signal)
+            if curr_high > camarilla_r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
