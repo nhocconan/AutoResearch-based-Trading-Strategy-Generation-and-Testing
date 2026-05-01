@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 25 regime filter
-# Uses inner Camarilla levels (H3/L3) for higher-probability breakouts than H4/L4
-# Volume spike > 2.0x 20-period EMA reduces false breakouts significantly
-# 1w ADX > 25 ensures strong trending market regime (avoids chop/range)
-# Designed for optimal trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
-# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 25 regime filter
+# Uses tighter Camarilla H3/L3 levels for higher-probability breakouts in trending markets
+# Volume spike > 2.0x 20-period EMA reduces false breakouts (more restrictive for optimal trade frequency)
+# 1w ADX > 25 ensures strong trending regime, avoiding choppy markets that cause whipsaws
+# Designed for 12-25 trades/year per symbol with 0.30 sizing, balancing profit potential and fee drag
+# Works in bull/bear markets: ADX filter adapts to trending conditions, volume confirms institutional participation
 
-name = "4h_Camarilla_H3L3_Breakout_1dVolume_1wADX_Regime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolume_1wADX_StrongTrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,11 +40,11 @@ def generate_signals(prices):
     camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
     camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
     camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tight for low trade frequency)
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (more restrictive for optimal trade frequency)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
@@ -113,31 +113,31 @@ def generate_signals(prices):
             if trending:
                 # Long: Break above Camarilla H3 with volume spike
                 if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                 # Short: Break below Camarilla L3 with volume spike
                 elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid ranging/choppy markets
+                signals[i] = 0.0  # Avoid ranging/weak trend markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Camarilla L3 or opposite breakout
+            # Exit: price returns to Camarilla L3 or opposite breakout with volume
             if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: price returns to Camarilla H3 or opposite breakout
+            # Exit: price returns to Camarilla H3 or opposite breakout with volume
             if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
