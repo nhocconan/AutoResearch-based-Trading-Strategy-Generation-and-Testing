@@ -3,32 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
-# Long when price > Alligator Jaw (13-period SMMA) AND 1d EMA50 uptrend AND volume > 1.5x 20-period volume median.
-# Short when price < Alligator Lips (8-period SMMA) AND 1d EMA50 downtrend AND volume > 1.5x 20-period volume median.
-# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.5*ATR(14), exit short if price > lowest_since_entry + 2.5*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h timeframe.
-# Williams Alligator identifies trend absence/presence via three smoothed moving averages (Jaw, Teeth, Lips).
-# In ranging markets, the lines intertwine; in trends, they diverge with Jaw (slowest) on one side, Lips (fastest) on the other.
-# This provides a strong trend filter that works in both bull and bear markets by identifying when a trend is established.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 (1w Camarilla) AND 1w EMA50 uptrend AND volume > 1.8x 20-period median.
+# Short when price breaks below S3 (1w Camarilla) AND 1w EMA50 downtrend AND volume > 1.8x 20-period median.
+# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year on 4h timeframe.
+# Weekly timeframe provides stronger trend filter that works in both bull and bear markets by avoiding noise.
 # Volume confirmation ensures breakouts have participation, reducing false signals.
 # ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike_ATR_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATR_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def smma(values, period):
-    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
-    if len(values) < period:
-        return np.full_like(values, np.nan, dtype=np.float64)
-    result = np.full_like(values, np.nan, dtype=np.float64)
-    # First value is simple SMA
-    result[period-1] = np.mean(values[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
-    for i in range(period, len(values)):
-        result[i] = (result[i-1] * (period-1) + values[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,34 +26,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (loaded once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w EMA50 for trend filter (loaded once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d close
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA50 on 1w close
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
-    # Teeth: 8-period SMMA of median price, shifted 5 bars forward  
-    # Lips: 5-period SMMA of median price, shifted 3 bars forward
-    median_price = (high + low) / 2.0
+    # Calculate 1w Camarilla pivot levels (R3, S3) - using previous week's OHLC
+    # Camarilla: R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # where C = (H+L+C)/3 (typical price), using previous week's values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    jaw_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
+    # Typical price for pivot calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Apply forward shifts (Alligator specific)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
+    # Camarilla levels
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
     
-    # Invalidate the shifted values at the beginning
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -85,14 +70,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for Alligator, EMA, volume, and ATR
-    start_idx = 50
+    # Start after warmup for EMA, Camarilla, volume, and ATR
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
             np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -104,26 +88,26 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1d EMA50 direction
-        uptrend = curr_close > ema_50_1d_aligned[i]
-        downtrend = curr_close < ema_50_1d_aligned[i]
+        # Trend filter: 1w EMA50 direction
+        uptrend = curr_close > ema_50_1w_aligned[i]
+        downtrend = curr_close < ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period volume median
+        # Volume confirmation: current volume > 1.8x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price > Jaw AND uptrend AND volume spike
-            if curr_close > jaw[i] and uptrend and volume_confirm:
+            # Long: Price breaks above R3 AND uptrend AND volume spike
+            if curr_close > r3_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price < Lips AND downtrend AND volume spike
-            elif curr_close < lips[i] and downtrend and volume_confirm:
+            # Short: Price breaks below S3 AND downtrend AND volume spike
+            elif curr_close < s3_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -137,9 +121,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break below Teeth (reversal) OR trend reversal
-            stop_price = highest_since_entry - 2.5 * curr_atr
-            if curr_close < stop_price or curr_close < teeth[i] or not uptrend:
+            # Exit conditions: ATR stoploss OR break below S3 (reversal) OR trend reversal
+            stop_price = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stop_price or curr_close < s3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -150,9 +134,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break above Teeth (reversal) OR trend reversal
-            stop_price = lowest_since_entry + 2.5 * curr_atr
-            if curr_close > stop_price or curr_close > teeth[i] or not downtrend:
+            # Exit conditions: ATR stoploss OR break above R3 (reversal) OR trend reversal
+            stop_price = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stop_price or curr_close > r3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
