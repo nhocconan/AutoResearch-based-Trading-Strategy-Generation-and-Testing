@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h volume confirmation and 1d ADX > 20 regime filter
-# Donchian breakouts capture momentum; 12h volume > 1.5x EMA confirms participation
-# 1d ADX > 20 ensures we trade in at least moderate trends, avoiding chop
-# Designed for low trade frequency: ~25-40 trades/year per symbol with 0.25 sizing
-# Works in bull/bear: ADX filter avoids whipsaw, volume confirms breakout validity
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX > 25 regime filter
+# Donchian breakouts capture strong momentum moves; 1d ADX > 25 ensures we only trade in strong trends
+# Volume > 2.0x 20-period EMA confirms institutional participation
+# Designed for low trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
+# Works in bull/bear: ADX filter avoids chop, volume confirms breakout validity in both directions
+# Uses proper Wilder's smoothing for ADX and discrete position sizing to minimize fee churn
 
-name = "6h_Donchian20_VolumeConfirm_1dADX_Regime_v1"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeConfirm_1dADX_Regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h HTF data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
     # 1d HTF data for regime filter (ADX)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian(20) channels from 6h data
+    # Donchian(20) channels from 4h data
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # 12h volume EMA(20) for confirmation
-    vol_12h = df_12h['volume'].values
-    vol_ema_20_12h = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_20_12h)
     
     # 1d ADX(14) for regime filter
     high_1d = df_1d['high'].values
@@ -88,6 +79,11 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, tr_period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
+    # Volume confirmation: volume > 2.0 * 20-period EMA
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ema_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -96,30 +92,23 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_12h_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in at least moderate trends (ADX > 20)
-        moderate_trend = adx_aligned[i] > 20
+        # Regime filter: only trade in strong trending markets (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            if moderate_trend:
-                # Volume confirmation: current 6h volume > 1.5 * 12h volume EMA
-                # Approximate current 12h volume as the aligned EMA value
-                volume_spike = volume[i] > (1.5 * vol_12h_aligned[i])
-                
-                if volume_spike:
-                    # Long: Break above Donchian upper band
-                    if close[i] > highest_high[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: Break below Donchian lower band
-                    elif close[i] < lowest_low[i]:
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
+            if strong_trend:
+                # Long: Break above Donchian upper band with volume spike
+                if close[i] > highest_high[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Break below Donchian lower band with volume spike
+                elif close[i] < lowest_low[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
                 else:
                     signals[i] = 0.0
             else:
