@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend + volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 2.0x 12h volume average.
-# Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 2.0x 12h volume average.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 1.8x 4h volume average.
+# Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 1.8x 4h volume average.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
+# Donchian channels provide clear structure, 1d EMA34 filters counter-trend breaks, volume confirms momentum.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
 
-name = "12h_Donchian20_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,8 +46,8 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h volume average (20-period)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +61,7 @@ def generate_signals(prices):
             np.isnan(lowest_low[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma_12h[i])):
+            np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -68,11 +70,11 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 12h volume average
-        if vol_ma_12h[i] <= 0 or np.isnan(vol_ma_12h[i]):
+        # Volume confirmation: current volume > 1.8x 4h volume average
+        if vol_ma_4h[i] <= 0 or np.isnan(vol_ma_4h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma_12h[i] * 2.0)
+            volume_confirm = curr_volume > (vol_ma_4h[i] * 1.8)
         
         # Donchian breakout conditions
         bullish_breakout = curr_high > highest_high[i-1]  # break above previous period's high
@@ -101,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -115,8 +117,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
