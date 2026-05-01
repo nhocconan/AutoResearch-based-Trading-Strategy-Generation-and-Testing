@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter.
-# Long when price breaks above R3 with 1d ADX > 20 and volume > 2x 20-bar average.
-# Short when price breaks below S3 with 1d ADX > 20 and volume > 2x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to capture medium-term trends with tight entries.
-# Works in bull (buy breakouts) and bear (sell breakdowns) via ADX filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation.
+# Long when price breaks above 20-period high AND 1d ADX > 25 AND volume > 2x 20-bar average.
+# Short when price breaks below 20-period low AND 1d ADX > 25 AND volume > 2x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture medium-term trends.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via ADX filter.
+# Includes ATR-based trailing stoploss: exit long if price < highest_high - 2*ATR, exit short if price > lowest_low + 2*ATR.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dADX_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,7 +27,7 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ADX and volume calculations
+    # Load 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -80,80 +81,106 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 1d typical price for Camarilla levels
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ATR calculation (14-period) for stoploss
+    def calculate_atr(high_arr, low_arr, close_arr, period=14):
+        # True Range
+        tr1 = np.abs(high_arr[1:] - low_arr[1:])
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align length
+        
+        # Wilder's smoothing
+        def wilders_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        atr = wilders_smoothing(tr, period)
+        return atr
     
-    # Camarilla levels (R3, S3) based on previous 1d bar
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    atr_14 = calculate_atr(high, low, close, 14)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d volume confirmation: current 1d volume > 2x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.zeros_like(vol_1d)
-    for i in range(len(vol_1d)):
-        if i < 20:
-            vol_ma_1d[i] = np.nan
-        else:
-            vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
-    vol_spike_1d = vol_1d > (vol_ma_1d * 2.0)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Volume spike: current volume > 2x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 50  # warmup for ADX and volume calculations
+    start_idx = 30  # warmup for Donchian and ADX
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 12h timeframe
+        # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr_14[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_r3 = camarilla_r3_aligned[i]
-        curr_s3 = camarilla_s3_aligned[i]
-        curr_vol_spike = vol_spike_1d_aligned[i] > 0.5  # convert back to boolean
+        curr_atr = atr_14[i]
+        vol_ma = volume_ma[i]
         
-        # Entry conditions
+        # Volume confirmation: current 4h volume > 2x 20-period average
+        if vol_ma <= 0:
+            volume_confirm = False
+        else:
+            volume_confirm = curr_vol > (vol_ma * 2.0)
+        
+        # Donchian breakout conditions
+        breakout_up = curr_close > highest_high[i-1]  # break above previous period's high
+        breakout_down = curr_close < lowest_low[i-1]   # break below previous period's low
+        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 AND ADX > 20 AND volume spike
-            if (curr_close > curr_r3 and 
-                curr_adx > 20 and 
-                curr_vol_spike):
+            # Long: bullish breakout AND ADX > 25 AND volume confirmation
+            if (breakout_up and 
+                curr_adx > 25 and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND ADX > 20 AND volume spike
-            elif (curr_close < curr_s3 and 
-                  curr_adx > 20 and 
-                  curr_vol_spike):
+                entry_price = curr_close
+            # Short: bearish breakout AND ADX > 25 AND volume confirmation
+            elif (breakout_down and 
+                  curr_adx > 25 and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3 (reversal) OR ADX < 15 (trend weakening)
-            if (curr_close < curr_s3 or 
-                curr_adx < 15):
+            # Update trailing stop: highest high since entry
+            # Exit: price < trailing stop OR ADX < 20 (trend weakening)
+            trailing_stop = highest_high[i] - (2.0 * curr_atr)
+            if (curr_close < trailing_stop or 
+                curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (reversal) OR ADX < 15 (trend weakening)
-            if (curr_close > curr_r3 or 
-                curr_adx < 15):
+            # Update trailing stop: lowest low since entry
+            # Exit: price > trailing stop OR ADX < 20 (trend weakening)
+            trailing_stop = lowest_low[i] + (2.0 * curr_atr)
+            if (curr_close > trailing_stop or 
+                curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
             else:
