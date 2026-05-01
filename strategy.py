@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout + 1d Volume Spike + 1w Regime Filter
-# Uses 1w ADX(20) to filter regime: ADX>25 = trending (trade breakouts), ADX<20 = range (avoid)
-# Camarilla pivot levels (R1, S1) from 1d OHLC act as intraday support/resistance
-# Breakout above R1 with volume spike = long, breakdown below S1 with volume spike = short
-# Volume spike defined as current volume > 1.5 * 20-period average
-# Designed for low frequency (50-150 trades over 4 years) with clear structure
+# Hypothesis: 1h 4h Donchian(20) breakout + 1d volume spike + session filter (08-20 UTC)
+# Uses 4h Donchian channels for trend structure and breakout signals
+# Volume spike on 1d confirms institutional participation
+# Session filter reduces noise during low-liquidity hours
+# Designed for 1h timeframe with tight entry conditions to limit trades to 60-150 over 4 years
+# Works in both bull and bear markets by trading breakouts in direction of 4h trend
 
-name = "12h_Camarilla_1dVolume_1wADX_Regime_v1"
-timeframe = "12h"
+name = "1h_Donchian20_1dVolume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,143 +23,88 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # 1d HTF data for Camarilla pivots and volume average
+    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # 4h HTF data for Donchian channels (trend structure)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # 1d HTF data for volume spike filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w HTF data for regime filter (ADX)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Upper channel = highest high over 20 periods
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower channel = lowest low over 20 periods
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = PP + 1.1 * (H - L) / 12
-    r1_1d = pp_1d + 1.1 * (high_1d - low_1d) / 12.0
-    # S1 = PP - 1.1 * (H - L) / 12
-    s1_1d = pp_1d - 1.1 * (high_1d - low_1d) / 12.0
-    
-    # Align 1d levels to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align 4h Donchian levels to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     # 1d volume spike filter: volume > 1.5 * 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
-    
-    # 1w ADX(20) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Wilder's smoothing
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            first_val = np.nansum(x[1:period+1])
-            result[period] = first_val
-            for i in range(period+1, len(x)):
-                result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
-    
-    tr_period = 20
-    tr_smoothed = wilders_smoothing(tr, tr_period)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
-    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike_1d = df_1d['volume'].values > (1.5 * vol_ema_20)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and EMA20
+    # Start after warmup for Donchian (20 periods)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
         
         if position == 0:  # Flat - look for new entries
-            # Only trade in trending regime (ADX>25) - avoid ranging markets
-            if trending:
-                # Long: Break above R1 with volume spike
-                if close[i] > r1_1d_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Break below S1 with volume spike
-                elif close[i] < s1_1d_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: Break above 4h Donchian upper channel with volume spike
+            if close[i] > donchian_high_aligned[i] and volume_spike_aligned[i]:
+                signals[i] = 0.20
+                position = 1
+            # Short: Break below 4h Donchian lower channel with volume spike
+            elif close[i] < donchian_low_aligned[i] and volume_spike_aligned[i]:
+                signals[i] = -0.20
+                position = -1
             else:
-                signals[i] = 0.0  # Avoid ranging and transition regimes
+                signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions: price returns to pivot point or opposite breakout
-            # Calculate 1d pivot point for exit
-            pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-            exit_long = False
-            if close[i] <= pp_1d_aligned[i]:  # Return to pivot point
-                exit_long = True
-            elif close[i] < s1_1d_aligned[i] and volume_spike[i]:  # Reverse breakout
-                exit_long = True
-            
-            if exit_long:
+            # Exit: price returns to midpoint of 4h Donchian channel
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+            if close[i] <= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit conditions: price returns to pivot point or opposite breakout
-            pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-            exit_short = False
-            if close[i] >= pp_1d_aligned[i]:  # Return to pivot point
-                exit_short = True
-            elif close[i] > r1_1d_aligned[i] and volume_spike[i]:  # Reverse breakout
-                exit_short = True
-            
-            if exit_short:
+            # Exit: price returns to midpoint of 4h Donchian channel
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+            if close[i] >= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
