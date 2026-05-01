@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x 24-bar average.
-# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x 24-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture medium-term trends.
-# Camarilla levels provide adaptive support/resistance based on prior day's range.
-# 1d EMA34 trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 1.8x 20-bar average.
+# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to capture medium-term trends.
+# Camarilla levels provide robust intraday support/resistance based on prior day's range.
+# 1d EMA34 trend filter ensures alignment with daily momentum.
 # Volume spike requirement reduces false breakouts and improves signal quality.
 # Target: 50-150 total trades over 4 years (12-37/year) for BTC/ETH/SOL.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,9 +30,9 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla levels
+    # Load 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA34 calculation
@@ -45,34 +45,36 @@ def generate_signals(prices):
     ema_34_rising = ema_34_slope > 0
     ema_34_falling = ema_34_slope < 0
     
-    # Calculate Camarilla levels from prior 1d bar (H1, L1, C1)
-    # Camarilla levels: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Calculate Camarilla levels (based on prior day's high/low/close)
+    # Need to shift by 1 to avoid look-ahead (use prior day's data)
+    roll_high = pd.Series(high).shift(1)
+    roll_low = pd.Series(low).shift(1)
+    roll_close = pd.Series(close).shift(1)
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_R3 = close_1d_arr + (high_1d - low_1d) * 1.1 / 4
-    camarilla_S3 = close_1d_arr - (high_1d - low_1d) * 1.1 / 4
+    # Camarilla R3/S3 calculation
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_range = (roll_high - roll_low) * 1.1
+    camarilla_r3 = roll_close + camarilla_range / 4
+    camarilla_s3 = roll_close - camarilla_range / 4
     
-    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Align Camarilla levels to 12h timeframe (already aligned via shift)
+    camarilla_r3_aligned = camarilla_r3.values
+    camarilla_s3_aligned = camarilla_s3.values
     
-    # Volume confirmation: current 6h volume > 2.0x 24-bar average (4d average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: current 12h volume > 1.8x 20-bar average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and volume MA calculation
+    start_idx = 50  # warmup for EMA and Camarilla calculation
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 6h timeframe
+        # Session filter: trade all sessions for 12h timeframe
         hour = hours[i]
         
-        if np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -86,11 +88,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
+        volume_confirm = curr_vol > (curr_vol_ma * 1.8)
         
         # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_R3_aligned[i]  # break above R3
-        breakout_down = curr_low < camarilla_S3_aligned[i]   # break below S3
+        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
@@ -111,7 +113,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: price crosses below S3 (stoploss) OR 1d EMA34 falls (trend change)
-            if (curr_low < camarilla_S3_aligned[i] or 
+            if (curr_low < camarilla_s3_aligned[i] or 
                 ema_34_falling[i]):
                 signals[i] = 0.0
                 position = 0
@@ -120,7 +122,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: price crosses above R3 (stoploss) OR 1d EMA34 rises (trend change)
-            if (curr_high > camarilla_R3_aligned[i] or 
+            if (curr_high > camarilla_r3_aligned[i] or 
                 ema_34_rising[i]):
                 signals[i] = 0.0
                 position = 0
