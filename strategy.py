@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band (20-bar high) AND 1w close > EMA50 (bullish trend) AND volume > 1.8x 20-bar average.
-# Short when price breaks below Donchian lower band (20-bar low) AND 1w close < EMA50 (bearish trend) AND volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 30-100 total trades over 4 years (7-25/year).
-# Donchian channels provide clear price channels, EMA50 on weekly filters major trend alignment, volume confirms momentum.
-# Primary timeframe: 1d, HTF: 1w for EMA trend filter.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above upper BB AND 1d ADX > 25 (trending) AND volume > 2.0x 20-bar average.
+# Short when price breaks below lower BB AND 1d ADX > 25 (trending) AND volume > 2.0x 20-bar average.
+# Uses Bollinger Band width percentile to detect squeeze (low volatility) before breakout.
+# Primary timeframe: 6h, HTF: 1d for ADX trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year). Discrete sizing 0.25 to manage drawdown and fee drag.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirmation_v1"
-timeframe = "1d"
+name = "6h_BB_Squeeze_Breakout_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-bar high/low) on 1d timeframe
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    close_s = pd.Series(close)
+    bb_ma = close_s.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_s.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_ma + (bb_std_dev * bb_std)
+    bb_lower = bb_ma - (bb_std_dev * bb_std)
+    bb_width = bb_upper - bb_lower
     
-    # 1w EMA50 trend filter
-    weekly_close = df_1w['close'].values
-    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Bollinger Band Width percentile (50 lookback) to detect squeeze
+    bb_width_s = pd.Series(bb_width)
+    bb_width_percentile = bb_width_s.rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Volume confirmation: current 1d volume > 1.8x 20-bar average
+    # 1d ADX calculation (14 period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean() / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean() / atr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        
+        # Handle division by zero and NaN
+        adx = np.where((plus_di + minus_di) == 0, 0, adx)
+        return np.nan_to_num(adx, nan=0.0)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Volume confirmation: current 6h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and Donchian
+    start_idx = 60  # warmup for BB and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
+           np.isnan(bb_width_percentile[i]) or np.isnan(adx_14_aligned[i]) or \
+           np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -64,27 +106,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.8)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
+        bb_squeeze = bb_width_percentile[i] < 20  # Low volatility squeeze (bottom 20%)
+        strong_trend = adx_14_aligned[i] > 25  # Strong trend filter
         
-        # Donchian breakout signals
-        breakout_up = curr_high > donchian_upper[i]  # break above upper band
-        breakout_down = curr_low < donchian_lower[i]  # break below lower band
-        
-        # Trend filter: bullish if close > EMA50, bearish if close < EMA50
-        bullish_trend = curr_close > ema_50_aligned[i]
-        bearish_trend = curr_close < ema_50_aligned[i]
+        # Bollinger Band breakout signals
+        breakout_up = curr_high > bb_upper[i]  # break above upper BB
+        breakout_down = curr_low < bb_lower[i]  # break below lower BB
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper band AND bullish trend AND volume confirmation
+            # Long: breakout above upper BB AND BB squeeze AND strong trend AND volume confirmation
             if (breakout_up and 
-                bullish_trend and 
+                bb_squeeze and 
+                strong_trend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band AND bearish trend AND volume confirmation
+            # Short: breakout below lower BB AND BB squeeze AND strong trend AND volume confirmation
             elif (breakout_down and 
-                  bearish_trend and 
+                  bb_squeeze and 
+                  strong_trend and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -92,18 +134,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower band (stoploss) OR trend turns bearish
-            if (curr_low < donchian_lower[i] or 
-                bearish_trend):
+            # Exit: price crosses below middle BB OR trend weakens (ADX < 20)
+            if (curr_close < bb_ma[i] or 
+                adx_14_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band (stoploss) OR trend turns bullish
-            if (curr_high > donchian_upper[i] or 
-                bullish_trend):
+            # Exit: price crosses above middle BB OR trend weakens (ADX < 20)
+            if (curr_close > bb_ma[i] or 
+                adx_14_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
