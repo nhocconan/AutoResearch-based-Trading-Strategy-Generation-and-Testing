@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 (1d Camarilla) AND 1d EMA34 uptrend AND volume > 2.0x 20-period median.
-# Short when price breaks below S3 (1d Camarilla) AND 1d EMA34 downtrend AND volume > 2.0x 20-period median.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA50 trend filter and volume confirmation.
+# Long when Bull Power > 0 AND Bear Power < 0 (bullish bias) AND 1d EMA50 uptrend AND volume > 1.5x 20-period median.
+# Short when Bull Power < 0 AND Bear Power > 0 (bearish bias) AND 1d EMA50 downtrend AND volume > 1.5x 20-period median.
 # Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year on 4h timeframe.
-# Camarilla levels from higher timeframe (1d) provide institutional pivot points that work in both bull and bear markets.
-# Volume confirmation ensures breakouts have participation, reducing false signals.
-# ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
+# Discrete position sizing (0.25) minimizes fee churn. Target: 12-37 trades/year on 6h timeframe.
+# Elder Ray measures bull/bear strength via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Works in both bull and bear markets by measuring underlying strength/weakness relative to trend.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATR_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeConfirm_ATR_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,37 +25,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (loaded once before loop)
+    # Calculate 1d EMA50 for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1d close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3, R4, S4) - using previous day's OHLC
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # where C = (H+L+C)/3 (typical price), but for intraday we use previous day's values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate EMA13 for Elder Ray (on 6h close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Typical price for pivot calculation
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 4.0)
-    s3 = pivot - (range_hl * 1.1 / 4.0)
-    r4 = pivot + (range_hl * 1.1 / 2.0)
-    s4 = pivot - (range_hl * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -74,46 +57,50 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA, Camarilla, volume, and ATR
-    start_idx = 100
+    # Start after warmup for EMA13, EMA50, ATR, and volume median
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_median_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period volume median
+        # Volume confirmation: current volume > 1.5x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+        
+        # Elder Ray signals
+        bullish_bias = bull_power[i] > 0 and bear_power[i] < 0  # Bull Power > 0 AND Bear Power < 0
+        bearish_bias = bull_power[i] < 0 and bear_power[i] > 0  # Bull Power < 0 AND Bear Power > 0
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above R3 AND uptrend AND volume spike
-            if curr_close > r3_aligned[i] and uptrend and volume_confirm:
+            # Long: Bullish bias AND uptrend AND volume spike
+            if bullish_bias and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below S3 AND downtrend AND volume spike
-            elif curr_close < s3_aligned[i] and downtrend and volume_confirm:
+            # Short: Bearish bias AND downtrend AND volume spike
+            elif bearish_bias and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -127,9 +114,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break below S3 (reversal) OR trend reversal
+            # Exit conditions: ATR stoploss OR bearish bias OR trend reversal
             stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or curr_close < s3_aligned[i] or not uptrend:
+            if curr_close < stop_price or bearish_bias or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,9 +127,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break above R3 (reversal) OR trend reversal
+            # Exit conditions: ATR stoploss OR bullish bias OR trend reversal
             stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or curr_close > r3_aligned[i] or not downtrend:
+            if curr_close > stop_price or bullish_bias or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
