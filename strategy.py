@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Camarilla Pivot Breakout + 1d EMA34 Trend + Volume Spike
-# Weekly Camarilla levels act as strong support/resistance. Breakouts above R4 or below S4
-# indicate strong momentum. Filtered by 1d EMA34 trend (long above, short below) and
-# volume confirmation (>2.0x 20-bar MA). Works in bull/bear via trend alignment.
+# Hypothesis: 12h Williams %R reversal + 1d EMA50 trend filter + volume confirmation.
+# Williams %R identifies overbought/oversold conditions. Long when %R crosses above -80 from below,
+# Short when %R crosses below -20 from above. Confirmed by 1d EMA50 trend and volume spike (>1.5x 20-bar MA).
+# Works in both bull and bear markets via mean-reversion in ranging markets and trend-following in strong trends.
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25).
 
-name = "6h_WeeklyCamarilla_R4S4_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Reversal_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly HTF data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels (using previous week's OHLC)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    camarilla_r4 = weekly_close + (weekly_high - weekly_low) * 1.50
-    camarilla_s4 = weekly_close - (weekly_high - weekly_low) * 1.50
-    
-    # Align weekly Camarilla levels to 6h timeframe (no additional delay needed for pivot levels)
-    camarilla_r4_6h = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_6h = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    
-    # Daily HTF data for EMA34 trend filter
+    # Daily HTF data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 2.0)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 20  # Need 20 for volume MA
+    start_idx = 20  # Need 20 for volume MA, 14 for Williams %R
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or np.isnan(ema_34_6h[i]) or np.isnan(volume_ma_20[i]):
+        if np.isnan(ema_50_12h[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close above weekly R4, above daily EMA34, and volume confirmation
-            if curr_close > camarilla_r4_6h[i] and curr_close > ema_34_6h[i] and vol_confirm:
+            # Long: Williams %R crosses above -80 from below, above daily EMA50, and volume confirmation
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and curr_close > ema_50_12h[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below weekly S4, below daily EMA34, and volume confirmation
-            elif curr_close < camarilla_s4_6h[i] and curr_close < ema_34_6h[i] and vol_confirm:
+            # Short: Williams %R crosses below -20 from above, below daily EMA50, and volume confirmation
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and curr_close < ema_50_12h[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below weekly R4 or below daily EMA34
-            if curr_close < camarilla_r4_6h[i] or curr_close < ema_34_6h[i]:
+            # Exit on Williams %R crossing above -20 (overbought) or below daily EMA50
+            if williams_r[i] >= -20 or curr_close < ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above weekly S4 or above daily EMA34
-            if curr_close > camarilla_s4_6h[i] or curr_close > ema_34_6h[i]:
+            # Exit on Williams %R crossing below -80 (oversold) or above daily EMA50
+            if williams_r[i] <= -80 or curr_close > ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
