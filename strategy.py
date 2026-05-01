@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout for direction, 1h for entry timing, with volume confirmation and session filter (08-20 UTC).
-# Uses discrete position sizing (0.20) to minimize fee churn. Target: 60-150 total trades over 4 years (15-37/year).
-# Works in bull markets via breakouts above 4h Donchian upper band, in bear markets via breakdowns below 4h Donchian lower band.
-# Volume confirmation (>1.5x 20-bar MA) ensures breakouts have conviction. Session filter reduces noise during low-liquidity hours.
+# Hypothesis: 6h Weekly Camarilla Pivot Breakout + 1d EMA34 Trend + Volume Spike
+# Weekly Camarilla levels act as strong support/resistance. Breakouts above R4 or below S4
+# indicate strong momentum. Filtered by 1d EMA34 trend (long above, short below) and
+# volume confirmation (>2.0x 20-bar MA). Works in bull/bear via trend alignment.
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25).
 
-name = "1h_DonchianBreakout_4hDir_VolumeConfirm_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_R4S4_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,82 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h HTF data for Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly HTF data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # 4h Donchian upper and lower bands (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_20_4h_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_20_4h_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Camarilla levels (using previous week's OHLC)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align 4h Donchian bands to 1h timeframe (waits for completed 4h bar)
-    donchian_4h_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_20_4h_high)
-    donchian_4h_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_20_4h_low)
+    camarilla_r4 = weekly_close + (weekly_high - weekly_low) * 1.50
+    camarilla_s4 = weekly_close - (weekly_high - weekly_low) * 1.50
     
-    # 1h volume confirmation: current volume > 1.5 * 20-period average volume
+    # Align weekly Camarilla levels to 6h timeframe (no additional delay needed for pivot levels)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Daily HTF data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.5)
-    
-    # Session filter: 08-20 UTC (pre-compute hour array)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for Donchian (20) and volume MA (20)
-    start_idx = 20
+    # Start after warmup for all indicators
+    start_idx = 20  # Need 20 for volume MA
     
     for i in range(start_idx, n):
-        # Skip if any indicator is NaN
-        if np.isnan(donchian_4h_high_aligned[i]) or np.isnan(donchian_4h_low_aligned[i]) or np.isnan(volume_ma_20[i]):
+        if np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or np.isnan(ema_34_6h[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
-            if position != 0:
-                position = 0
-            continue
-        
-        # Enforce session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0
-            if position != 0:
-                position = 0  # Force flat outside session
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_volume = volume[i]
+        
+        # Volume confirmation
+        vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above 4h Donchian upper band with volume confirmation
-            if curr_close > donchian_4h_high_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Long: Close above weekly R4, above daily EMA34, and volume confirmation
+            if curr_close > camarilla_r4_6h[i] and curr_close > ema_34_6h[i] and vol_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian lower band with volume confirmation
-            elif curr_close < donchian_4h_low_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Short: Close below weekly S4, below daily EMA34, and volume confirmation
+            elif curr_close < camarilla_s4_6h[i] and curr_close < ema_34_6h[i] and vol_confirm:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price retracing to 4h Donchian middle (mean of upper/lower) or opposite breakout
-            donchian_mid = (donchian_4h_high_aligned[i] + donchian_4h_low_aligned[i]) / 2.0
-            if curr_close < donchian_mid or curr_close < donchian_4h_low_aligned[i]:
+            # Exit on close below weekly R4 or below daily EMA34
+            if curr_close < camarilla_r4_6h[i] or curr_close < ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on price retracing to 4h Donchian middle or opposite breakout
-            donchian_mid = (donchian_4h_high_aligned[i] + donchian_4h_low_aligned[i]) / 2.0
-            if curr_close > donchian_mid or curr_close > donchian_4h_high_aligned[i]:
+            # Exit on close above weekly S4 or above daily EMA34
+            if curr_close > camarilla_s4_6h[i] or curr_close > ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
