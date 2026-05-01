@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation
-# Camarilla H3/L3 levels act as intraday support/resistance; breakouts with volume indicate institutional interest
-# 1w EMA50 ensures we trade with the weekly trend, reducing whipsaws in ranging markets
-# Volume spike > 2.0x 20-period EMA confirms strong participation
-# Designed for very low trade frequency: ~10-15 trades/year per symbol with 0.30 sizing
-# Works in bull/bear markets by following the 1w trend direction via EMA50
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h trend filter and volume confirmation
+# Bollinger Squeeze (BBWidth < 20th percentile) identifies low volatility primed for breakout
+# Breakout direction determined by 12h EMA50 trend: long in uptrend, short in downtrend
+# Volume spike (>2x 20-period EMA) confirms institutional participation
+# Designed for low trade frequency: ~10-20 trades/year per symbol with 0.25 sizing
+# Works in bull/bear markets by only trading breakouts in the direction of the 12h trend
 
-name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_BollingerSqueeze_Breakout_12hEMA50_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,87 +23,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # 1w HTF data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # 12h HTF data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Bollinger Bands (20, 2) on 6h
+    close_s = pd.Series(close)
+    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized BB width
+    
+    # BB Squeeze: BBWidth < 20th percentile (lookback 50 periods)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
+    
+    # Volume confirmation: volume > 2.0 * 20-period EMA
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need enough data for Camarilla calculation (uses previous day)
-    start_idx = 2  # Need at least 2 days for H3/L3 calculation
+    # Start after warmup
+    start_idx = max(60, 50, 20, 20)  # Need 12h EMA50, BB (20), volume EMA (20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_aligned[i]):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels for today using yesterday's OHLC
-        # H3 = Close + 1.1*(High - Low)/4
-        # L3 = Close - 1.1*(High - Low)/4
-        y_high = high[i-1]
-        y_low = low[i-1]
-        y_close = close[i-1]
-        
-        rang = y_high - y_low
-        if rang <= 0:
-            signals[i] = 0.0
-            continue
-            
-        h3 = y_close + 1.1 * rang / 4
-        l3 = y_close - 1.1 * rang / 4
-        
-        # Volume confirmation: volume > 2.0 * 20-period EMA
-        if i >= 20:
-            vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
-            volume_spike = volume[i] > (2.0 * vol_ema_20)
-        else:
-            volume_spike = False
-        
-        # Trend filter: only trade in direction of 1w EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Trend filter: only trade in direction of 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if uptrend:
-                # Long: price breaks above H3 with volume spike
-                if close[i] > h3 and volume_spike:
-                    signals[i] = 0.30
+            if uptrend and bb_squeeze[i]:
+                # Long: price breaks above upper BB with volume spike
+                if close[i] > upper_bb[i] and volume_spike[i]:
+                    signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.0
-            elif downtrend:
-                # Short: price breaks below L3 with volume spike
-                if close[i] < l3 and volume_spike:
-                    signals[i] = -0.30
+            elif downtrend and bb_squeeze[i]:
+                # Short: price breaks below lower BB with volume spike
+                if close[i] < lower_bb[i] and volume_spike[i]:
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid sideways markets
+                signals[i] = 0.0  # No squeeze or wrong direction
         
         elif position == 1:  # Long position
-            # Exit: price re-enters below H3 (failed breakout) or trend reversal
-            if close[i] < h3 or close[i] < ema_50_aligned[i]:
+            # Exit: price closes below middle BB (mean reversion) or loss of momentum
+            if close[i] < sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price re-enters above L3 (failed breakdown) or trend reversal
-            if close[i] > l3 or close[i] > ema_50_aligned[i]:
+            # Exit: price closes above middle BB (mean reversion) or loss of momentum
+            if close[i] > sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
