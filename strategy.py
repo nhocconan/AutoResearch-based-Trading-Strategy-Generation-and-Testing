@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level AND 1w EMA50 uptrend AND volume > 1.8x 30-period median.
-# Short when price breaks below Camarilla S3 level AND 1w EMA50 downtrend AND volume > 1.8x 30-period median.
-# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Discrete position sizing (0.25) minimizes fee churn. Target: 12-37 trades/year on 12h timeframe.
-# Camarilla levels from 1d provide strong support/resistance; volume confirms breakout validity; 1w EMA50 filters counter-trend noise.
-# This combination has shown strong test performance in ETH/SOL and should work on BTC/ETH in both bull and bear regimes.
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation + ATR(14) stoploss.
+# Long when price breaks above Donchian upper band AND 1d HMA uptrend AND volume > 1.5x 20-period median.
+# Short when price breaks below Donchian lower band AND 1d HMA downtrend AND volume > 1.5x 20-period median.
+# Uses ATR-based trailing stop: exit long if price < highest_since_entry - 2.0*ATR, exit short if price > lowest_since_entry + 2.0*ATR.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year on 4h timeframe.
+# Donchian provides objective structure, HMA filters noise with lag reduction, volume confirms breakout strength.
+# This combination avoids overtrading while capturing trending moves in both bull and bear markets via symmetric long/short logic.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike_ATR_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dHMA21_VolumeSpike_ATR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,14 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d HMA(21) for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1w close
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        
+        if len(wma_half) < half_period or len(wma_full) < period:
+            return np.full_like(arr, np.nan)
+        
+        # Align arrays: wma_half starts at index half_period-1, wma_full at index period-1
+        # We need to align them to the same index for subtraction
+        diff = 2 * wma_half[half_period-1:] - wma_full[period-1:]
+        # Pad diff to match original array length
+        diff_padded = np.full_like(arr, np.nan)
+        diff_padded[period-1:period-1+len(diff)] = diff
+        
+        # Final WMA of diff with sqrt_period
+        hma = wma(diff_padded, sqrt_period)
+        # HMA valid from index: period-1 + sqrt_period-1 onwards
+        hma_valid_start = period-1 + sqrt_period-1
+        if hma_valid_start < len(arr):
+            hma[:hma_valid_start] = np.nan
+            hma[hma_valid_start:] = hma[hma_valid_start:hma_valid_start+len(hma[hma_valid_start:])]
+        return hma
+    
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -41,27 +76,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 30-period volume median for volume confirmation
-    vol_median_30 = pd.Series(volume).rolling(window=30, min_periods=30).median().values
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla R3 = close + 1.1 * (high - low) / 2
-    # Camarilla S3 = close - 1.1 * (high - low) / 2
-    # Using previous 1d bar's OHLC to avoid look-ahead
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    df_1d_close = df_1d['close'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    
-    camarilla_r3_1d = df_1d_close + 1.1 * (df_1d_high - df_1d_low) / 2
-    camarilla_s3_1d = df_1d_close - 1.1 * (df_1d_high - df_1d_low) / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Calculate Donchian(20) channels from 4h data
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,15 +90,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA50, ATR, and volume median
-    start_idx = 50
+    # Start after warmup for HMA, ATR, Donchian, and volume median
+    start_idx = max(21, 20, 14, 20)  # 21
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(hma_21_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(vol_median_30[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(vol_median_20[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -89,19 +110,25 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1w EMA50 direction
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: 1d HMA21 direction (using slope approximation)
+        if i >= start_idx + 1:
+            hma_now = hma_21_1d_aligned[i]
+            hma_prev = hma_21_1d_aligned[i-1]
+            uptrend = hma_now > hma_prev
+            downtrend = hma_now < hma_prev
+        else:
+            uptrend = curr_close > hma_21_1d_aligned[i]
+            downtrend = curr_close < hma_21_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 30-period volume median
-        if vol_median_30[i] <= 0 or np.isnan(vol_median_30[i]):
+        # Volume confirmation: current volume > 1.5x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_30[i] * 1.8)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3_aligned[i-1]  # Using previous bar's R3 level
-        breakout_down = curr_low < camarilla_s3_aligned[i-1]  # Using previous bar's S3 level
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_upper[i-1]  # Using previous bar's upper band
+        breakout_down = curr_low < donchian_lower[i-1]  # Using previous bar's lower band
         
         if position == 0:  # Flat - look for new entries
             # Long: Breakout up AND uptrend AND volume spike
@@ -148,3 +175,501 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation + ATR(14) stoploss.
+# Long when price breaks above Donchian upper band AND 1d HMA uptrend AND volume > 1.5x 20-period median.
+# Short when price breaks below Donchian lower band AND 1d HMA downtrend AND volume > 1.5x 20-period median.
+# Uses ATR-based trailing stop: exit long if price < highest_since_entry - 2.0*ATR, exit short if price > lowest_since_entry + 2.0*ATR.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year on 4h timeframe.
+# Donchian provides objective structure, HMA filters noise with lag reduction, volume confirms breakout strength.
+# This combination avoids overtrading while capturing trending moves in both bull and bear markets via symmetric long/short logic.
+
+name = "4h_Donchian20_Breakout_1dHMA21_VolumeSpike_ATR_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Calculate 1d HMA(21) for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        return np.zeros(n)
+    
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        
+        if len(wma_half) < half_period or len(wma_full) < period:
+            return np.full_like(arr, np.nan)
+        
+        # Align arrays: wma_half starts at index half_period-1, wma_full at index period-1
+        # We need to align them to the same index for subtraction
+        diff = 2 * wma_half[half_period-1:] - wma_full[period-1:]
+        # Pad diff to match original array length
+        diff_padded = np.full_like(arr, np.nan)
+        diff_padded[period-1:period-1+len(diff)] = diff
+        
+        # Final WMA of diff with sqrt_period
+        hma = wma(diff_padded, sqrt_period)
+        # HMA valid from index: period-1 + sqrt_period-1 onwards
+        hma_valid_start = period-1 + sqrt_period-1
+        if hma_valid_start < len(arr):
+            hma[:hma_valid_start] = np.nan
+            hma[hma_valid_start:] = hma[hma_valid_start:hma_valid_start+len(hma[hma_valid_start:])]
+        return hma
+    
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    
+    # Calculate 14-period ATR for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    
+    # Calculate Donchian(20) channels from 4h data
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    # Start after warmup for HMA, ATR, Donchian, and volume median
+    start_idx = max(21, 20, 14, 20)  # 21
+    
+    for i in range(start_idx, n):
+        if (np.isnan(hma_21_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_median_20[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i])):
+            signals[i] = 0.0
+            if position != 0:
+                position = 0
+            continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_atr = atr[i]
+        
+        # Trend filter: 1d HMA21 direction (using slope approximation)
+        if i >= start_idx + 1:
+            hma_now = hma_21_1d_aligned[i]
+            hma_prev = hma_21_1d_aligned[i-1]
+            uptrend = hma_now > hma_prev
+            downtrend = hma_now < hma_prev
+        else:
+            uptrend = curr_close > hma_21_1d_aligned[i]
+            downtrend = curr_close < hma_21_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+        
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_upper[i-1]  # Using previous bar's upper band
+        breakout_down = curr_low < donchian_lower[i-1]  # Using previous bar's lower band
+        
+        if position == 0:  # Flat - look for new entries
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            # Short: Breakout down AND downtrend AND volume spike
+            elif breakout_down and downtrend and volume_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            else:
+                signals[i] = 0.0
+        
+        elif position == 1:  # Long position
+            # Update highest high since entry
+            if curr_close > highest_since_entry:
+                highest_since_entry = curr_close
+            
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stop_price or not uptrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:  # Short position
+            # Update lowest low since entry
+            if curr_close < lowest_since_entry:
+                lowest_since_entry = curr_close
+            
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stop_price or not downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation + ATR(14) stoploss.
+# Long when price breaks above Donchian upper band AND 1d HMA uptrend AND volume > 1.5x 20-period median.
+# Short when price breaks below Donchian lower band AND 1d HMA downtrend AND volume > 1.5x 20-period median.
+# Uses ATR-based trailing stop: exit long if price < highest_since_entry - 2.0*ATR, exit short if price > lowest_since_entry + 2.0*ATR.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year on 4h timeframe.
+# Donchian provides objective structure, HMA filters noise with lag reduction, volume confirms breakout strength.
+# This combination avoids overtrading while capturing trending moves in both bull and bear markets via symmetric long/short logic.
+
+name = "4h_Donchian20_Breakout_1dHMA21_VolumeSpike_ATR_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Calculate 1d HMA(21) for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        return np.zeros(n)
+    
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        
+        if len(wma_half) < half_period or len(wma_full) < period:
+            return np.full_like(arr, np.nan)
+        
+        # Align arrays: wma_half starts at index half_period-1, wma_full at index period-1
+        # We need to align them to the same index for subtraction
+        diff = 2 * wma_half[half_period-1:] - wma_full[period-1:]
+        # Pad diff to match original array length
+        diff_padded = np.full_like(arr, np.nan)
+        diff_padded[period-1:period-1+len(diff)] = diff
+        
+        # Final WMA of diff with sqrt_period
+        hma = wma(diff_padded, sqrt_period)
+        # HMA valid from index: period-1 + sqrt_period-1 onwards
+        hma_valid_start = period-1 + sqrt_period-1
+        if hma_valid_start < len(arr):
+            hma[:hma_valid_start] = np.nan
+            hma[hma_valid_start:] = hma[hma_valid_start:hma_valid_start+len(hma[hma_valid_start:])]
+        return hma
+    
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    
+    # Calculate 14-period ATR for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    
+    # Calculate Donchian(20) channels from 4h data
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    # Start after warmup for HMA, ATR, Donchian, and volume median
+    start_idx = max(21, 20, 14, 20)  # 21
+    
+    for i in range(start_idx, n):
+        if (np.isnan(hma_21_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_median_20[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i])):
+            signals[i] = 0.0
+            if position != 0:
+                position = 0
+            continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_atr = atr[i]
+        
+        # Trend filter: 1d HMA21 direction (using slope approximation)
+        if i >= start_idx + 1:
+            hma_now = hma_21_1d_aligned[i]
+            hma_prev = hma_21_1d_aligned[i-1]
+            uptrend = hma_now > hma_prev
+            downtrend = hma_now < hma_prev
+        else:
+            uptrend = curr_close > hma_21_1d_aligned[i]
+            downtrend = curr_close < hma_21_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+        
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_upper[i-1]  # Using previous bar's upper band
+        breakout_down = curr_low < donchian_lower[i-1]  # Using previous bar's lower band
+        
+        if position == 0:  # Flat - look for new entries
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            # Short: Breakout down AND downtrend AND volume spike
+            elif breakout_down and downtrend and volume_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            else:
+                signals[i] = 0.0
+        
+        elif position == 1:  # Long position
+            # Update highest high since entry
+            if curr_close > highest_since_entry:
+                highest_since_entry = curr_close
+            
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stop_price or not uptrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:  # Short position
+            # Update lowest low since entry
+            if curr_close < lowest_since_entry:
+                lowest_since_entry = curr_close
+            
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stop_price or not downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation + ATR(14) stoploss.
+# Long when price breaks above Donchian upper band AND 1d HMA uptrend AND volume > 1.5x 20-period median.
+# Short when price breaks below Donchian lower band AND 1d HMA downtrend AND volume > 1.5x 20-period median.
+# Uses ATR-based trailing stop: exit long if price < highest_since_entry - 2.0*ATR, exit short if price > lowest_since_entry + 2.0*ATR.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year on 4h timeframe.
+# Donchian provides objective structure, HMA filters noise with lag reduction, volume confirms breakout strength.
+# This combination avoids overtrading while capturing trending moves in both bull and bear markets via symmetric long/short logic.
+
+name = "4h_Donchian20_Breakout_1dHMA21_VolumeSpike_ATR_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Calculate 1d HMA(21) for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        return np.zeros(n)
+    
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        
+        if len(wma_half) < half_period or len(wma_full) < period:
+            return np.full_like(arr, np.nan)
+        
+        # Align arrays: wma_half starts at index half_period-1, wma_full at index period-1
+        # We need to align them to the same index for subtraction
+        diff = 2 * wma_half[half_period-1:] - wma_full[period-1:]
+        # Pad diff to match original array length
+        diff_padded = np.full_like(arr, np.nan)
+        diff_padded[period-1:period-1+len(diff)] = diff
+        
+        # Final WMA of diff with sqrt_period
+        hma = wma(diff_padded, sqrt_period)
+        # HMA valid from index: period-1 + sqrt_period-1 onwards
+        hma_valid_start = period-1 + sqrt_period-1
+        if hma_valid_start < len(arr):
+            hma[:hma_valid_start] = np.nan
+            hma[hma_valid_start:] = hma[hma_valid_start:hma_valid_start+len(hma[hma_valid_start:])]
+        return hma
+    
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    
+    # Calculate 14-period ATR for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    
+    # Calculate Donchian(20) channels from 4h data
+    # Upper band = 20-period high, Lower band = 20-period low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    # Start after warmup for HMA, ATR, Donchian, and volume median
+    start_idx = max(21, 20, 14, 20)  # 21
+    
+    for i in range(start_idx, n):
+        if (np.isnan(hma_21_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_median_20[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i])):
+            signals[i] = 0.0
+            if position != 0:
+                position = 0
+            continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_atr = atr[i]
+        
+        # Trend filter: 1d HMA21 direction (using slope approximation)
+        if i >= start_idx + 1:
+            hma_now = hma_21_1d_aligned[i]
+            hma_prev = hma_21_1d_aligned[i-1]
+            uptrend = hma_now > hma_prev
+            downtrend = hma_now < hma_prev
+        else:
+            uptrend = curr_close > hma_21_1d_aligned[i]
+            downtrend = curr_close < hma_21_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+        
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_upper[i-1]  # Using previous bar's upper band
+        breakout_down = curr_low < donchian_lower[i-1]  # Using previous bar's lower band
+        
+        if position == 0:  # Flat - look for new entries
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            # Short: Breakout down AND downtrend AND volume
