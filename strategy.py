@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and 1d volume confirmation.
-# Uses 1d EMA34 for trend alignment (HTF direction), 1d volume > 1.3x 20-period average for momentum.
-# ATR-based stoploss (2.0x) manages risk. Target: 12-37 trades/year by using 1d for signal direction
-# and 12h only for execution timing. Camarilla breakouts work in both bull (breakout continuation)
-# and bear (mean reversion from extremes). Discrete position sizing (0.25) minimizes fee churn.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and 1d volume confirmation.
+# Uses 1d EMA34 for trend alignment (HTF direction), 1d volume > 1.3x 20-period average for momentum,
+# and session filter (08-20 UTC) to reduce noise. ATR-based stoploss (1.5x) manages risk.
+# Target: 20-40 trades/year by using 1d for signal direction and 4h only for entry timing.
+# Camarilla breakouts work in both bull (breakout continuation) and bear (mean reversion from extremes).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours for efficiency (though less critical for 12h)
+    # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Load 1d data ONCE before loop for EMA34 trend filter and volume confirmation
@@ -39,7 +39,7 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate ATR(14) for 12h timeframe stoploss
+    # Calculate ATR(14) for 4h timeframe stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -53,7 +53,7 @@ def generate_signals(prices):
     start_idx = 100  # warmup for EMA, ATR, and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC (optional for 12h, but keeps consistency)
+        # Session filter: 08-20 UTC
         hour = hours[i]
         in_session = (8 <= hour <= 20)
         
@@ -78,19 +78,17 @@ def generate_signals(prices):
         volume_confirm = curr_volume > (1.3 * curr_vol_ma) if not np.isnan(curr_vol_ma) else False
         
         # Calculate Camarilla levels for current day using previous day's OHLC
-        if i >= 2:  # Need at least 2 bars (2 * 12h = 1 day) of 12h data for previous day
+        if i >= 6:  # Need at least 6 bars (1.5 days) of 4h data for previous day
             # Get timestamp of current bar
             curr_time = prices.iloc[i]["open_time"]
-            # Get start of current 12h period (simplified: use date)
-            curr_date = curr_time.date()
+            # Get start of current day (00:00 UTC)
+            curr_day_start = curr_time.replace(hour=0, minute=0, second=0, microsecond=0)
             # Get start of previous day
-            from datetime import timedelta
-            prev_date = curr_date - timedelta(days=1)
+            prev_day_start = curr_day_start - pd.Timedelta(days=1)
+            # Get end of previous day (23:59:59.999 UTC)
+            prev_day_end = curr_day_start - pd.Timedelta(microseconds=1)
             
-            # Filter prices for previous day (00:00 to 23:59 UTC)
-            prev_day_start = pd.Timestamp(prev_date)
-            prev_day_end = prev_day_start + timedelta(days=1) - pd.Timedelta(microseconds=1)
-            
+            # Filter prices for previous day
             mask = (prices["open_time"] >= prev_day_start) & (prices["open_time"] <= prev_day_end)
             if mask.any():
                 prev_day_data = prices.loc[mask]
@@ -138,7 +136,7 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
             if (curr_close < camarilla_s3 or 
-                curr_close < entry_price - 2.0 * curr_atr):
+                curr_close < entry_price - 1.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,7 +145,7 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
             if (curr_close > camarilla_r3 or 
-                curr_close > entry_price + 2.0 * curr_atr):
+                curr_close > entry_price + 1.5 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
