@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND 1d ADX < 25 (range/weak trend) AND volume > 1.5x 20-bar average.
-# Short when Williams %R > -20 (overbought) AND 1d ADX < 25 AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture reversals in ranging markets.
-# Williams %R identifies overextended moves likely to revert. 1d ADX filter avoids whipsaws in strong trends.
-# Volume confirmation ensures participation. Works in both bull and bear markets by fading extremes during consolidation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based volatility filter.
+# Long when price breaks above upper Donchian channel AND 1d EMA50 rising AND ATR(14) < ATR(50) (low volatility environment).
+# Short when price breaks below lower Donchian channel AND 1d EMA50 falling AND ATR(14) < ATR(50).
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture medium-term trends with volatility filter to avoid false breakouts in choppy markets.
+# Donchian channels provide clear breakout levels that work in both trending and ranging markets when combined with volatility filter.
+# 1d EMA50 trend filter ensures alignment with higher timeframe momentum to avoid counter-trend trades.
+# ATR ratio filter ensures we only trade in low volatility environments where breakouts are more likely to succeed.
 
-name = "4h_WilliamsR_1dADX_VolumeConfirm_v1"
+name = "4h_Donchian20_1dEMA50_ATRVolFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,121 +29,95 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 1d data ONCE before loop for ADX regime filter
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX calculation (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA50 calculation
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # 1d EMA50 slope (rising/falling)
+    ema_50_slope = np.diff(ema_50_aligned, prepend=ema_50_aligned[0])
+    ema_50_rising = ema_50_slope > 0
+    ema_50_falling = ema_50_slope < 0
+    
+    # Donchian(20) channels on 4h data
+    lookback = 20
+    upper_channel = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower_channel = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # ATR-based volatility filter: ATR(14) < ATR(50) indicates low volatility environment
+    atr_period_short = 14
+    atr_period_long = 50
+    
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar
+    tr2[0] = high[0] - close[0]  # First bar
+    tr3[0] = high[0] - low[0]  # First bar
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first bar
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr_1d = WilderSmooth(tr, 14)
-    plus_di_1d = 100 * WilderSmooth(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * WilderSmooth(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = WilderSmooth(dx_1d, 14)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    adx_low = adx_1d_aligned < 25  # range/weak trend regime
-    
-    # Williams %R calculation (14-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Volume confirmation: current 4h volume > 1.5x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).rolling(window=atr_period_short, min_periods=atr_period_short).mean().values
+    atr_50 = pd.Series(tr).rolling(window=atr_period_long, min_periods=atr_period_long).mean().values
+    atr_ratio = atr_14 / atr_50
+    low_volatility = atr_ratio < 1.0  # ATR(14) < ATR(50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Williams %R, volume MA, and ADX calculation
+    start_idx = max(lookback, atr_period_long) + 5  # warmup
     
     for i in range(start_idx, n):
         # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(atr_ratio[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_vol = volume[i]
-        curr_vol_ma = vol_ma[i]
         
-        if curr_vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-            
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
-        
-        # Williams %R signals
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Donchian breakout signals
+        breakout_up = curr_high > upper_channel[i]  # break above upper channel
+        breakout_down = curr_low < lower_channel[i]  # break below lower channel
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: oversold AND low ADX regime AND volume confirmation
-            if (oversold and 
-                adx_low[i] and 
-                volume_confirm):
+            # Long: breakout above upper channel AND 1d EMA50 rising AND low volatility
+            if (breakout_up and 
+                ema_50_rising[i] and 
+                low_volatility[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought AND low ADX regime AND volume confirmation
-            elif (overbought and 
-                  adx_low[i] and 
-                  volume_confirm):
+            # Short: breakout below lower channel AND 1d EMA50 falling AND low volatility
+            elif (breakout_down and 
+                  ema_50_falling[i] and 
+                  low_volatility[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (mean reversion complete) OR ADX rises above 30 (trend strengthening)
-            if (williams_r[i] > -50 or 
-                adx_1d_aligned[i] > 30):
+            # Exit: price crosses below lower channel (stoploss) OR 1d EMA50 falls (trend change)
+            if (curr_low < lower_channel[i] or 
+                ema_50_falling[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (mean reversion complete) OR ADX rises above 30 (trend strengthening)
-            if (williams_r[i] < -50 or 
-                adx_1d_aligned[i] > 30):
+            # Exit: price crosses above upper channel (stoploss) OR 1d EMA50 rises (trend change)
+            if (curr_high > upper_channel[i] or 
+                ema_50_rising[i]):
                 signals[i] = 0.0
                 position = 0
             else:
