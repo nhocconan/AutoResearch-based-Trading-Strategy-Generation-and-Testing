@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
-# Uses 4h EMA50 for robust trend alignment (works in both bull and bear markets).
-# Long when price breaks above R3 AND price > 4h EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below S3 AND price < 4h EMA50 AND volume > 2.0x 20-bar average.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses 1d EMA50 for robust long-term trend alignment (works in both bull and bear markets).
+# Long when price breaks above R3 AND price > 1d EMA50 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND price < 1d EMA50 AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.20 to manage drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
-# 4h timeframe reduces noise vs 1d while providing stable trend filter.
+# 1d timeframe provides stable trend filter less prone to whipsaw vs shorter HTF.
 # Volume confirmation ensures only high-conviction breakouts are traded.
 # Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeConfirm_v1"
+name = "1h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -30,46 +30,46 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 4h data ONCE before loop for EMA50 trend filter and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data ONCE before loop for EMA50 trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA50 calculation
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # 1d EMA50 calculation
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # 4h trend: price above/below EMA50
+    # 1d trend: price above/below EMA50
     price_above_ema = close > ema_50_aligned
     price_below_ema = close < ema_50_aligned
     
-    # Calculate Camarilla levels (based on previous 4h bar's range)
-    df_4h_copy = df_4h.copy()
-    df_4h_copy['date'] = pd.to_datetime(df_4h_copy['open_time']).dt.date
-    daily_4h = df_4h_copy.groupby('date').agg({
+    # Calculate Camarilla levels (based on previous 1d bar's range)
+    df_1d_copy = df_1d.copy()
+    df_1d_copy['date'] = pd.to_datetime(df_1d_copy['open_time']).dt.date
+    daily_1d = df_1d_copy.groupby('date').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
         'close': 'last'
     }).reset_index()
     
-    if len(daily_4h) < 2:
+    if len(daily_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 4h day
+    # Calculate Camarilla levels for each 1d day
     # Camarilla R3 = close + (high - low) * 1.1/4
     # Camarilla S3 = close - (high - low) * 1.1/4
-    daily_4h['camarilla_r3'] = daily_4h['close'] + (daily_4h['high'] - daily_4h['low']) * 1.1 / 4
-    daily_4h['camarilla_s3'] = daily_4h['close'] - (daily_4h['high'] - daily_4h['low']) * 1.1 / 4
+    daily_1d['camarilla_r3'] = daily_1d['close'] + (daily_1d['high'] - daily_1d['low']) * 1.1 / 4
+    daily_1d['camarilla_s3'] = daily_1d['close'] - (daily_1d['high'] - daily_1d['low']) * 1.1 / 4
     
-    # Map daily 4h levels to 1h bars
+    # Map daily 1d levels to 1h bars
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
     for i in range(n):
         date = prices.iloc[i]['open_time'].date()
-        day_row = daily_4h[daily_4h['date'] == date]
+        day_row = daily_1d[daily_1d['date'] == date]
         if len(day_row) > 0:
             camarilla_r3[i] = day_row.iloc[0]['camarilla_r3']
             camarilla_s3[i] = day_row.iloc[0]['camarilla_s3']
@@ -111,13 +111,13 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND price > 4h EMA50 AND volume confirmation
+            # Long: breakout above R3 AND price > 1d EMA50 AND volume confirmation
             if (breakout_up and 
                 price_above_ema[i] and 
                 volume_confirm):
                 signals[i] = 0.20
                 position = 1
-            # Short: breakout below S3 AND price < 4h EMA50 AND volume confirmation
+            # Short: breakout below S3 AND price < 1d EMA50 AND volume confirmation
             elif (breakout_down and 
                   price_below_ema[i] and 
                   volume_confirm):
@@ -127,7 +127,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR price < 4h EMA50 (trend change)
+            # Exit: price crosses below S3 (stoploss) OR price < 1d EMA50 (trend change)
             if (curr_low < camarilla_s3[i] or 
                 not price_above_ema[i]):
                 signals[i] = 0.0
@@ -136,7 +136,7 @@ def generate_signals(prices):
                 signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR price > 4h EMA50 (trend change)
+            # Exit: price crosses above R3 (stoploss) OR price > 1d EMA50 (trend change)
             if (curr_high > camarilla_r3[i] or 
                 not price_below_ema[i]):
                 signals[i] = 0.0
