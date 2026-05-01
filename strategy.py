@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX(14) > 25 trend filter and volume confirmation (1.5x 20-bar MA)
-# Uses Camarilla levels from prior 4h bar (R3/S3) for tighter breakouts vs R4/S4 to reduce false signals
-# ADX > 25 ensures only strong trends are traded, avoiding choppy markets
-# Volume spike confirms institutional participation
-# Discrete position sizing (0.25) to minimize fee churn
-# Designed for low frequency (75-200 trades over 4 years) to overcome fee drag on 4h timeframe
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume confirmation
+# Uses 1d ADX(14) > 25 as trend filter (strong trending market) + Camarilla breakout from prior 12h bar
+# Volume spike (2.0x 20-period MA) confirms participation
+# Designed for low frequency (50-150 trades over 4 years) on 12h timeframe to minimize fee drag
+# Works in bull/bear via trend filter - only trades in strong trends, avoids chop and whipsaws
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +25,7 @@ def generate_signals(prices):
     
     # 1d HTF data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:  # Need enough data for ADX calculation
         return np.zeros(n)
     
     # 1d ADX(14) calculation (trend filter)
@@ -84,7 +83,7 @@ def generate_signals(prices):
     adx = wilders_smoothing_dx(dx, tr_period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Camarilla levels from prior 4h bar (using prior bar's HLC)
+    # Calculate Camarilla levels from prior 12h bar (using prior bar's HLC)
     prior_high = np.concatenate([[np.nan], high[:-1]])
     prior_low = np.concatenate([[np.nan], low[:-1]])
     prior_close = np.concatenate([[np.nan], close[:-1]])
@@ -93,9 +92,9 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + hl_range * 1.1 / 4
     camarilla_s3 = prior_close - hl_range * 1.1 / 4
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -112,7 +111,7 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 indicates strong trending market
         trending = adx_aligned[i] > 25
         
-        # Breakout conditions (using R3/S3 for tighter entries)
+        # Breakout conditions
         breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
         breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
         
@@ -120,11 +119,11 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R3 with volume spike and strong trend
+            # Long: Breakout above R3 with volume spike and strong trending market
             if breakout_long and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below S3 with volume spike and strong trend
+            # Short: Breakout below S3 with volume spike and strong trending market
             elif breakout_short and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
