@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1w trend filter.
-# Uses 1w EMA50 for major trend direction to avoid counter-trend trades.
-# Long when: price breaks above Donchian(20) high AND volume > 1.5x volume MA(20) AND price > 1w EMA50.
-# Short when: price breaks below Donchian(20) low AND volume > 1.5x volume MA(20) AND price < 1w EMA50.
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 12-25 trades/year.
-# Donchian channels provide structural breakouts; volume confirms conviction; 1w EMA50 filters regime.
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d chop regime filter.
+# Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND chop > 61.8 (range regime).
+# Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND chop > 61.8.
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 20-50 trades/year.
+# Donchian channels provide structural breakout signals; volume confirms conviction; chop filter avoids whipsaws in strong trends.
+# Works in bull (breakouts continue) and bear (breakdowns continue) by trading with momentum in range regimes.
 
-name = "12h_Donchian20_VolumeConfirm_1wTrend_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeConfirm_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,37 +27,68 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1d data ONCE before loop for chop regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend direction
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d Chopiness Index (CHOP)
+    # CHOP = 100 * log10(sum(ATR(1), n) / (log10(n) * (max(high,n) - min(low,n))))
+    # Simplified: CHOP = 100 * log10(ATR_sum / (log10(n) * range))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # True Range for 1d
+    tr1 = np.zeros(len(high_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr1[i] = max(high_1d[i] - low_1d[i], 
+                     abs(high_1d[i] - close_1d[i-1]), 
+                     abs(low_1d[i] - close_1d[i-1]))
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # ATR(14) for 1d
+    atr_1d = np.zeros(len(tr1))
+    atr_1d[13] = np.mean(tr1[:14])  # seed
+    for i in range(14, len(tr1)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr1[i]) / 14
     
-    # Volume confirmation: volume > 1.5x volume MA(20)
-    volume_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        volume_ma[i] = np.mean(volume[i-19:i+1])
-    volume_ratio = np.full(n, np.nan)
-    for i in range(19, n):
-        if volume_ma[i] > 0:
-            volume_ratio[i] = volume[i] / volume_ma[i]
+    # Chopiness Index (14)
+    chop_1d = np.full_like(close_1d, np.nan)
+    lookback = 14
+    for i in range(lookback, len(chop_1d)):
+        atr_sum = np.sum(atr_1d[i-lookback+1:i+1])
+        max_high = np.max(high_1d[i-lookback+1:i+1])
+        min_low = np.min(low_1d[i-lookback+1:i+1])
+        range_val = max_high - min_low
+        if range_val > 0 and atr_sum > 0:
+            chop_1d[i] = 100 * np.log10(atr_sum / (np.log10(lookback) * range_val))
+        else:
+            chop_1d[i] = 50.0  # neutral
+    
+    # Align 1d chop to 4h
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Donchian(20) on 4h
+    lookback_dc = 20
+    donchian_high = np.full_like(close, np.nan)
+    donchian_low = np.full_like(close, np.nan)
+    
+    for i in range(lookback_dc-1, len(close)):
+        donchian_high[i] = np.max(high[i-lookback_dc+1:i+1])
+        donchian_low[i] = np.min(low[i-lookback_dc+1:i+1])
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_lookback = 20
+    for i in range(vol_lookback-1, len(volume)):
+        vol_ma[i] = np.mean(volume[i-vol_lookback+1:i+1])
+    volume_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Donchian and volume MA
+    start_idx = max(lookback_dc, vol_lookback, 30)  # warmup
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -74,54 +105,50 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_ratio[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_highest_high = highest_high[i]
-        curr_lowest_low = lowest_low[i]
         curr_volume_ratio = volume_ratio[i]
-        curr_ema_50_1w = ema_50_1w_aligned[i]
+        curr_chop = chop_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = curr_close > curr_highest_high
-        breakout_down = curr_close < curr_lowest_low
-        volume_confirmed = curr_volume_ratio > 1.5
+        # Regime filter: only trade in range markets (chop > 61.8)
+        in_range = curr_chop > 61.8
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: bullish breakout + volume confirmation + above 1w EMA50
-            if (breakout_up and 
-                volume_confirmed and 
-                curr_close > curr_ema_50_1w):
+            # Long: price breaks above Donchian high AND volume confirmation AND range regime
+            if (curr_close > donchian_high[i] and 
+                curr_volume_ratio > 1.5 and 
+                in_range):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout + volume confirmation + below 1w EMA50
-            elif (breakout_down and 
-                  volume_confirmed and 
-                  curr_close < curr_ema_50_1w):
+            # Short: price breaks below Donchian low AND volume confirmation AND range regime
+            elif (curr_close < donchian_low[i] and 
+                  curr_volume_ratio > 1.5 and 
+                  in_range):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR loses volume confirmation
-            if (curr_close < curr_lowest_low or 
-                curr_volume_ratio < 1.2):  # slightly looser exit for volume
+            # Exit: price breaks below Donchian low OR chop drops below 38.2 (trend regime)
+            if (curr_close < donchian_low[i] or 
+                curr_chop < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR loses volume confirmation
-            if (curr_close > curr_highest_high or 
-                curr_volume_ratio < 1.2):
+            # Exit: price breaks above Donchian high OR chop drops below 38.2 (trend regime)
+            if (curr_close > donchian_high[i] or 
+                curr_chop < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
