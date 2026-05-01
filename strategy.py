@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1w EMA50 AND volume > 1.5x 1d volume average.
-# Short when price breaks below Donchian(20) low AND price < 1w EMA50 AND volume > 1.5x 1d volume average.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Donchian channels provide clear structure, 1w EMA50 filters counter-trend breaks, volume confirms momentum.
+# Hypothesis: 6h Donchian(20) breakout + 12h EMA50 trend + volume confirmation.
+# Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 1.8x 6h volume average.
+# Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 1.8x 6h volume average.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
+# Donchian channels provide clear structure, 12h EMA50 filters counter-trend breaks, volume confirms momentum.
 # Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
-# Target: 10-30 trades/year on 1d timeframe (40-120 total over 4 years).
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
 
-name = "1d_Donchian20_1wEMA50_Volume_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hEMA50_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,17 +37,17 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Load 1w data ONCE before loop for EMA50 (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for EMA50 (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d volume average (20-period)
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume average (20-period)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,8 +60,8 @@ def generate_signals(prices):
         if (np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_1d[i])):
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -70,19 +70,19 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 1d volume average
-        if vol_ma_1d[i] <= 0 or np.isnan(vol_ma_1d[i]):
+        # Volume confirmation: current volume > 1.8x 6h volume average
+        if vol_ma_6h[i] <= 0 or np.isnan(vol_ma_6h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma_1d[i] * 1.5)
+            volume_confirm = curr_volume > (vol_ma_6h[i] * 1.8)
         
         # Donchian breakout conditions
         bullish_breakout = curr_high > highest_high[i-1]  # break above previous period's high
         bearish_breakout = curr_low < lowest_low[i-1]     # break below previous period's low
         
-        # Trend filter: price vs 1w EMA50
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: price vs 12h EMA50
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Bullish breakout AND uptrend AND volume confirmation
@@ -103,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -117,8 +117,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
