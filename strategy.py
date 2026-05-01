@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 24-bar average.
 # Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 24-bar average.
 # Uses discrete sizing 0.25 to balance return and drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
-# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 # 1d EMA34 provides robust trend alignment that works in both bull (price above EMA) and bear (price below EMA).
 # Camarilla R3/S3 levels offer reliable breakout points with lower noise than R4/S4.
 # Volume confirmation (2.0x average) ensures only high-conviction breakouts are traded.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -64,7 +64,7 @@ def generate_signals(prices):
     daily['camarilla_r3'] = daily['close'] + (daily['high'] - daily['low']) * 1.1 / 4
     daily['camarilla_s3'] = daily['close'] - (daily['high'] - daily['low']) * 1.1 / 4
     
-    # Map daily levels to 4h bars
+    # Map daily levels to 12h bars
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
@@ -75,8 +75,8 @@ def generate_signals(prices):
             camarilla_r3[i] = day_row.iloc[0]['camarilla_r3']
             camarilla_s3[i] = day_row.iloc[0]['camarilla_s3']
     
-    # Volume confirmation: current 4h volume > 2.0x 6-bar average (equivalent to 1 day)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume confirmation: current 12h volume > 2.0x 2-bar average (equivalent to 1 day)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
