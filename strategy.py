@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses Donchian channels for structure, 1d EMA50 for trend direction, and volume confirmation
-# to filter false breakouts. Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > 1d EMA50 for long, < for short) and ATR-based volatility filter.
+# Uses Donchian channel breakouts as the primary signal, filtered by daily trend and sufficient volatility (ATR > 0.5 * ATR_ma).
+# Works in bull markets (buy upside breakouts with uptrend) and bear markets (sell downside breakouts with downtrend).
 # Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 # Discrete position sizing (0.25) to minimize fee churn.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeConfirm_v1"
+name = "4h_Donchian20_Breakout_1dEMA50_ATRFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,78 +32,72 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 20-period volume median for volume confirmation
-    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Calculate ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period) from 1d timeframe
-    df_1d_ohlc = get_htf_data(prices, '1d')
-    if len(df_1d_ohlc) < 20:
-        return np.zeros(n)
-    
-    # Donchian upper (20-period high) and lower (20-period low) from previous day
-    donchian_upper = pd.Series(df_1d_ohlc['high']).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = pd.Series(df_1d_ohlc['low']).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Align Donchian levels to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d_ohlc, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d_ohlc, donchian_lower)
+    # Calculate Donchian channel (20-period) from previous candles
+    # Using rolling window on past data only (no look-ahead)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA50, volume median, and Donchian
+    # Start after warmup for EMA50, ATR, and Donchian
     start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_median_20[i]) or
-            np.isnan(donchian_upper_aligned[i]) or
-            np.isnan(donchian_lower_aligned[i])):
+            np.isnan(atr[i]) or
+            np.isnan(atr_ma[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
         
         # Trend filter: 1d EMA50 direction
         uptrend = curr_close > ema_50_1d_aligned[i]
         downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period volume median
-        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
-            volume_confirm = False
-        else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+        # Volatility filter: current ATR > 0.5 * 20-period ATR MA (ensures sufficient volatility)
+        volatility_filter = atr[i] > (0.5 * atr_ma[i])
         
         # Donchian breakout conditions
-        breakout_up = curr_close > donchian_upper_aligned[i]   # break above upper channel
-        breakout_down = curr_close < donchian_lower_aligned[i] # break below lower channel
+        breakout_up = curr_close > highest_high[i]   # break above 20-period high
+        breakout_down = curr_close < lowest_low[i]   # break below 20-period low
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout up AND uptrend AND volume confirmation
-            if breakout_up and uptrend and volume_confirm:
+            # Long: Breakout up AND uptrend AND volatility filter
+            if breakout_up and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout down AND downtrend AND volume confirmation
-            elif breakout_down and downtrend and volume_confirm:
+            # Short: Breakout down AND downtrend AND volatility filter
+            elif breakout_down and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakout down (reversal signal)
-            if breakout_down:
+            # Exit on Donchian breakout down (reversal signal) or trend change
+            if breakout_down or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout up (reversal signal)
-            if breakout_up:
+            # Exit on Donchian breakout up (reversal signal) or trend change
+            if breakout_up or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
