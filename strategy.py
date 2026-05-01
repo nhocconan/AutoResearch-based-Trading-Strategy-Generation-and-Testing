@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
 # Uses 1d EMA50 for robust long-term trend alignment (works in both bull and bear markets).
 # Long when price breaks above R3 AND price > 1d EMA50 AND volume > 2.0x 20-bar average.
 # Short when price breaks below S3 AND price < 1d EMA50 AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
-# 4h timeframe targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 12h timeframe targets 50-150 total trades over 4 years (12-37/year).
 # Volume confirmation ensures only high-conviction breakouts are traded.
-# Exit on trend change (price crosses 1d EMA50) or opposite Camarilla level touch.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -63,7 +62,7 @@ def generate_signals(prices):
     daily_1d['camarilla_r3'] = daily_1d['close'] + (daily_1d['high'] - daily_1d['low']) * 1.1 / 4
     daily_1d['camarilla_s3'] = daily_1d['close'] - (daily_1d['high'] - daily_1d['low']) * 1.1 / 4
     
-    # Map daily 1d levels to 4h bars
+    # Map daily 1d levels to 12h bars
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
@@ -74,7 +73,7 @@ def generate_signals(prices):
             camarilla_r3[i] = day_row.iloc[0]['camarilla_r3']
             camarilla_s3[i] = day_row.iloc[0]['camarilla_s3']
     
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average
+    # Volume confirmation: current 12h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
