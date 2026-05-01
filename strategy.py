@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and 1w ADX > 25 regime filter
-# Donchian channels provide robust price structure breakouts
-# 1w volume spike confirms institutional participation, reducing false breakouts
-# 1w ADX > 25 ensures trading only in trending markets, avoiding whipsaws in ranges
-# Designed for very low frequency: ~10-25 trades/year per symbol with discrete sizing
-# Works in bull/bear markets: ADX filter avoids chop, volume confirms legitimacy
+# Hypothesis: 6h Williams %R extreme reversal with 1d volume spike and 1w ADX > 20 regime filter
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) precede reversals
+# Volume spike confirms institutional participation in the reversal
+# 1w ADX > 20 ensures we trade in sufficient momentum, avoiding choppy markets
+# Designed for low frequency: ~12-25 trades/year per symbol with discrete sizing
+# Works in bull/bear: ADX filter avoids ranging markets, volume confirms reversal legitimacy
 
-name = "1d_Donchian20_1wVolume_1wADX_Regime_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for Donchian, volume, and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # 1d HTF data for Williams %R and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian(20) channels from 1w data
+    # 1w HTF data for regime filter (ADX)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align Williams %R to 6h timeframe (wait for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for fewer trades)
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ema_20)
+    
+    # 1w ADX(14) for regime filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Donchian upper = max(high, lookback=20)
-    # Donchian lower = min(low, lookback=20)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donchian_upper = rolling_max(high_1w, 20)
-    donchian_lower = rolling_min(low_1w, 20)
-    
-    # Align Donchian levels to 1d timeframe (wait for 1w bar to close)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
-    
-    # 1w volume spike filter: volume > 2.0 * 20-period EMA
-    vol_1w = df_1w['volume'].values
-    vol_series = pd.Series(vol_1w)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = vol_1w > (2.0 * vol_ema_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
-    
-    # 1w ADX(20) for regime filter
     # True Range
     tr1 = np.abs(high_1w[1:] - low_1w[1:])
     tr2 = np.abs(high_1w[1:] - close_1w[:-1])
     tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    close_1w = df_1w['close'].values
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
@@ -88,7 +79,7 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 20
+    tr_period = 14
     tr_smoothed = wilders_smoothing(tr, tr_period)
     dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
     dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
@@ -107,25 +98,25 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and Donchian
+    start_idx = max(34, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending = adx_aligned[i] > 25
+        # Regime filter: only trade in trending markets (ADX > 20)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Break above Donchian upper with volume spike
-                if close[i] > donchian_upper_aligned[i] and volume_spike_aligned[i]:
+                # Long: Williams %R < -80 (oversold) with volume spike
+                if williams_r_aligned[i] < -80 and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Break below Donchian lower with volume spike
-                elif close[i] < donchian_lower_aligned[i] and volume_spike_aligned[i]:
+                # Short: Williams %R > -20 (overbought) with volume spike
+                elif williams_r_aligned[i] > -20 and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -134,16 +125,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian lower or opposite breakout
-            if close[i] <= donchian_lower_aligned[i] or (close[i] < donchian_lower_aligned[i] and volume_spike_aligned[i]):
+            # Exit: Williams %R returns to -50 or opposite extreme
+            if williams_r_aligned[i] >= -50 or williams_r_aligned[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian upper or opposite breakout
-            if close[i] >= donchian_upper_aligned[i] or (close[i] > donchian_upper_aligned[i] and volume_spike_aligned[i]):
+            # Exit: Williams %R returns to -50 or opposite extreme
+            if williams_r_aligned[i] <= -50 or williams_r_aligned[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
