@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1w ADX regime filter
-# Donchian breakout provides clear structure with proven edge in crypto
-# Volume spike confirms institutional participation, reducing false breakouts
-# 1w ADX > 25 filters for trending regimes, avoiding whipsaws in ranging markets
-# Designed for low frequency (75-200 trades over 4 years) with discrete sizing
-# Works in both bull and bear: ADX regime filter avoids ranging markets, volume confirms legitimacy
+# Hypothesis: 1d KAMA trend + RSI(14) extreme + 1w ADX regime filter
+# KAMA adapts to volatility, reducing whipsaws in choppy markets
+# RSI < 30 or > 70 identifies overextended moves for mean reversion in trends
+# 1w ADX > 25 ensures we only trade in trending regimes, avoiding false signals
+# Designed for low frequency (30-100 trades over 4 years) with discrete sizing
+# Works in both bull and bear: ADX regime filter avoids ranging markets, KAMA catches adaptive trend
 
-name = "4h_Donchian20_1dVolume_1wADX_Regime_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_1wADX_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,24 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
     # 1w HTF data for regime filter (ADX)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA (Adaptive Moving Average) - ER = 10, Fast = 2, Slow = 30
+    close_s = pd.Series(close)
+    change = np.abs(close_s.diff(10).values)
+    volatility = np.abs(close_s.diff(1)).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 1/30) + 1/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 1d volume spike filter: volume > 1.5 * 20-period EMA
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # 1w ADX(20) for regime filter
     high_1w = df_1w['high'].values
@@ -92,11 +98,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and Donchian
+    start_idx = max(34, 20)  # Need ADX, KAMA, RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,12 +111,12 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Break above Donchian high with volume spike
-                if close[i] > highest_high[i] and volume_spike[i]:
+                # Long: Price > KAMA and RSI < 30 (oversold in uptrend)
+                if close[i] > kama[i] and rsi[i] < 30:
                     signals[i] = 0.25
                     position = 1
-                # Short: Break below Donchian low with volume spike
-                elif close[i] < lowest_low[i] and volume_spike[i]:
+                # Short: Price < KAMA and RSI > 70 (overbought in downtrend)
+                elif close[i] < kama[i] and rsi[i] > 70:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -119,16 +125,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian low or opposite breakout
-            if close[i] <= lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
+            # Exit: Price < KAMA or RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian high or opposite breakout
-            if close[i] >= highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
+            # Exit: Price > KAMA or RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
