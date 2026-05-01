@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w trend filter and volume spike confirmation.
-# Uses weekly trend filter (1w EMA50) to capture major trend direction and avoid counter-trend trades.
-# 12h Camarilla R3/S3 levels act as institutional breakout zones.
-# Volume confirmation (>2x 20-period median) reduces false breakouts.
-# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
-# Works in bull markets (buy R3 breaks in uptrend) and bear markets (sell S3 breaks in downtrend).
-# Discrete position sizing (0.25) manages drawdown and reduces fee churn.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
+# Uses 1d Camarilla pivot levels (R3/S3) for institutional breakout detection.
+# Filtered by 1d EMA34 trend and volume > 2.0x 20-period median to reduce false signals.
+# R3/S3 breaks work in both bull (buy R3 with uptrend) and bear (sell S3 with downtrend).
+# Discrete position sizing (0.25) balances return and drawdown. Target: 75-200 trades over 4 years.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,32 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Load 12h data ONCE before loop for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h Camarilla pivot levels (R3, S3)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3
-    rang = high_12h - low_12h
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    rang = high_1d - low_1d
     r3 = pivot + rang * 1.1 / 2
     s3 = pivot - rang * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -58,11 +51,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA50 (50) and volume median (20)
-    start_idx = max(50, 20) + 1  # 51
+    # Start after warmup for EMA34 and volume median
+    start_idx = max(34, 20) + 1  # 35
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i]) or
             np.isnan(vol_median_20[i])):
@@ -74,11 +67,11 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: 1w EMA50 direction
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: 1d EMA34 direction
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2x 20-period volume median
+        # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
