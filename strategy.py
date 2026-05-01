@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses 1d Camarilla R3/S3 levels as stronger breakout confirmation to avoid false breakouts.
 # Trades only in direction of 1d EMA34 trend with volume spike confirmation.
 # Works in bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
 # Discrete position sizing 0.25 balances return and drawdown. Target: 50-150 trades over 4 years.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,11 +46,11 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 6h Donchian(20) channels
+    # 12h Donchian(20) channels
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume on 6h
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 12h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 2.0)
     
@@ -84,7 +84,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Donchian breakout conditions
+        # 12h Donchian breakout conditions
         breakout_up = curr_high > donchian_high[i]  # Break above upper Donchian
         breakdown_down = curr_low < donchian_low[i]  # Break below lower Donchian
         
