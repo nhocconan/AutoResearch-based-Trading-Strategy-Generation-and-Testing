@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
 # Donchian breakout captures momentum, 1d EMA34 filters for higher-timeframe trend alignment,
 # volume spike confirms institutional participation. Works in bull/bear by trading with 1d trend.
-# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag on 12h timeframe
+# Target: 20-50 trades/year (80-200 over 4 years) to minimize fee drag
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
