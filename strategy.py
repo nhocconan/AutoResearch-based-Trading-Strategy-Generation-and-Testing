@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d chop regime filter.
-# Long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and 1d chop > 61.8 (range).
-# Short when price breaks below Donchian(20) low with volume confirmation and 1d chop > 61.8.
+# Hypothesis: 4h Camarilla R3/S3 breakout with volume confirmation and 1d chop regime filter.
+# Long when price breaks above Camarilla R3 with volume > 1.8x 20-bar average and 1d chop > 61.8 (range).
+# Short when price breaks below Camarilla S3 with volume confirmation and 1d chop > 61.8.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Donchian levels derived from prior 20 completed 4h bars. 4h timeframe targets 19-50 trades/year.
+# Camarilla levels derived from prior 1d completed candle. 4h timeframe targets 19-50 trades/year.
 # Volume spike filters low-momentum breakouts. Chop regime ensures mean-reversion edge in ranging markets.
 # Works in bull (breakouts with volume) and bear (mean reversion in chop) regimes.
 
-name = "4h_Donchian_20_Volume_1dChop_v3"
+name = "4h_Camarilla_R3S3_Volume_1dChop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -67,7 +67,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR and Donchian
+    # Start after warmup for ATR and Camarilla
     start_idx = 20
     
     for i in range(start_idx, n):
@@ -87,49 +87,50 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_ma * 1.8)
         
-        # Calculate Donchian levels from prior 20 completed 4h bars
-        # Need 4h OHLC from previous completed 4h bars
-        df_4h = get_htf_data(prices, '4h')
-        if len(df_4h) < 20:
+        # Load 1d data ONCE before loop for Camarilla levels (HTF)
+        if i == start_idx:  # Only load once
+            df_1d_cam = get_htf_data(prices, '1d')
+            if len(df_1d_cam) < 1:
+                signals[i] = 0.0
+                continue
+            high_1d_cam = df_1d_cam['high'].values
+            low_1d_cam = df_1d_cam['low'].values
+            close_1d_cam = df_1d_cam['close'].values
+            
+            # Calculate Camarilla levels for each 1d bar (using OHLC of that bar)
+            # Camarilla R3 = close + 1.1*(high-low)/2
+            # Camarilla S3 = close - 1.1*(high-low)/2
+            camarilla_r3 = close_1d_cam + 1.1 * (high_1d_cam - low_1d_cam) / 2
+            camarilla_s3 = close_1d_cam - 1.1 * (high_1d_cam - low_1d_cam) / 2
+            
+            # Align to 4h timeframe (use previous completed 1d bar's levels)
+            camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_r3)
+            camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_cam, camarilla_s3)
+        
+        # Use previous bar's Camarilla levels (already shifted by align_htf_to_ltf)
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
+        
+        if np.isnan(r3_level) or np.isnan(s3_level):
             signals[i] = 0.0
             continue
         
-        # Align 4h data to get prior completed 4h bar's Donchian levels
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        
-        # Calculate Donchian(20) for each 4h bar (using previous 20 completed bars)
-        highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-        lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-        
-        # Align to 4h timeframe (shift by 1 to use previous completed bar's levels)
-        highest_high_20_aligned = align_htf_to_ltf(prices, df_4h, highest_high_20)
-        lowest_low_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_20)
-        
-        # Use previous bar's Donchian levels (already shifted by align_htf_to_ltf)
-        upper_channel = highest_high_20_aligned[i]
-        lower_channel = lowest_low_20_aligned[i]
-        
-        if np.isnan(upper_channel) or np.isnan(lower_channel):
-            signals[i] = 0.0
-            continue
-        
-        # Donchian breakout conditions
-        breakout_up = curr_high > upper_channel  # break above upper channel
-        breakout_down = curr_low < lower_channel  # break below lower channel
+        # Camarilla breakout conditions
+        breakout_up = curr_high > r3_level  # break above R3
+        breakout_down = curr_low < s3_level  # break below S3
         
         # Chop regime filter: only trade in range market (chop > 61.8)
         chop_filter = chop_1d_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND volume confirmation AND chop regime
+            # Long: Camarilla breakout up AND volume confirmation AND chop regime
             if (breakout_up and 
                 volume_confirm and 
                 chop_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Donchian breakout down AND volume confirmation AND chop regime
+            # Short: Camarilla breakout down AND volume confirmation AND chop regime
             elif (breakout_down and 
                   volume_confirm and 
                   chop_filter):
@@ -145,8 +146,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR chop regime ends (trending)
-            elif (curr_low >= lower_channel and curr_low <= upper_channel) or \
+            # Exit: price re-enters Camarilla levels OR chop regime ends (trending)
+            elif (curr_low >= s3_level and curr_low <= r3_level) or \
                  chop_1d_aligned[i] <= 61.8:
                 signals[i] = 0.0
                 position = 0
@@ -160,8 +161,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR chop regime ends (trending)
-            elif (curr_high >= lower_channel and curr_high <= upper_channel) or \
+            # Exit: price re-enters Camarilla levels OR chop regime ends (trending)
+            elif (curr_high >= s3_level and curr_high <= r3_level) or \
                  chop_1d_aligned[i] <= 61.8:
                 signals[i] = 0.0
                 position = 0
