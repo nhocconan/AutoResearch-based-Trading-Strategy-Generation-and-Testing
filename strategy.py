@@ -3,76 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND 1d EMA50 uptrend AND volume > 1.5x 20-period EMA
-# Short when price breaks below Donchian(20) low AND 1d EMA50 downtrend AND volume > 1.5x 20-period EMA
-# Exit on opposite Donchian breakout or trend reversal
-# Designed for low trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
-# Works in bull/bear markets by following the 1d trend direction
+# Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Camarilla H3/L3 levels act as intraday support/resistance; breakouts with volume indicate institutional interest
+# 1w EMA50 ensures we trade with the weekly trend, reducing whipsaws in ranging markets
+# Volume spike > 2.0x 20-period EMA confirms strong participation
+# Designed for very low trade frequency: ~10-15 trades/year per symbol with 0.30 sizing
+# Works in bull/bear markets by following the 1w trend direction via EMA50
 
-name = "4h_Donchian20_1dEMA50_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # 1d HTF data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 55:
+    # 1w HTF data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period EMA
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(55, 20, 20)  # Need 1d EMA50, Donchian(20), volume EMA
+    # Start after warmup: need enough data for Camarilla calculation (uses previous day)
+    start_idx = 2  # Need at least 2 days for H3/L3 calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade in direction of 1d EMA50
+        # Calculate Camarilla levels for today using yesterday's OHLC
+        # H3 = Close + 1.1*(High - Low)/4
+        # L3 = Close - 1.1*(High - Low)/4
+        y_high = high[i-1]
+        y_low = low[i-1]
+        y_close = close[i-1]
+        
+        rang = y_high - y_low
+        if rang <= 0:
+            signals[i] = 0.0
+            continue
+            
+        h3 = y_close + 1.1 * rang / 4
+        l3 = y_close - 1.1 * rang / 4
+        
+        # Volume confirmation: volume > 2.0 * 20-period EMA
+        if i >= 20:
+            vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+            volume_spike = volume[i] > (2.0 * vol_ema_20)
+        else:
+            volume_spike = False
+        
+        # Trend filter: only trade in direction of 1w EMA50
         uptrend = close[i] > ema_50_aligned[i]
         downtrend = close[i] < ema_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if uptrend:
-                # Long: Donchian breakout above upper band with volume spike
-                if close[i] > donchian_high[i] and volume_spike[i]:
-                    signals[i] = 0.25
+                # Long: price breaks above H3 with volume spike
+                if close[i] > h3 and volume_spike:
+                    signals[i] = 0.30
                     position = 1
                 else:
                     signals[i] = 0.0
             elif downtrend:
-                # Short: Donchian breakout below lower band with volume spike
-                if close[i] < donchian_low[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                # Short: price breaks below L3 with volume spike
+                if close[i] < l3 and volume_spike:
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -80,19 +91,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid sideways markets
         
         elif position == 1:  # Long position
-            # Exit: Donchian breakout below lower band OR trend reversal to downtrend
-            if close[i] < donchian_low[i] or not uptrend:
+            # Exit: price re-enters below H3 (failed breakout) or trend reversal
+            if close[i] < h3 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Donchian breakout above upper band OR trend reversal to uptrend
-            if close[i] > donchian_high[i] or not downtrend:
+            # Exit: price re-enters above L3 (failed breakdown) or trend reversal
+            if close[i] > l3 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
