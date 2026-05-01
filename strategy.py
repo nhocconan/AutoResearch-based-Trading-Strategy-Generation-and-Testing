@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses Camarilla R3/S3 levels from 1d pivots for breakout entries,
 # 1d EMA34 for trend alignment, and volume spike (>1.8x 24-bar MA) for confirmation.
-# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.30).
+# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.25).
 # Works in both bull and bear markets via trend filter and tight entry conditions.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 1.8 * 24-period average volume on 12h
+    # Volume confirmation: current volume > 1.8 * 24-period average volume on 4h
     volume_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (volume_ma_24 * 1.8)
     
@@ -76,18 +76,18 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 12h Camarilla R3/S3 breakout conditions
+        # 4h Camarilla R3/S3 breakout conditions
         breakout_r3 = curr_high > camarilla_r3_aligned[i]  # Break above 1d R3
         breakdown_s3 = curr_low < camarilla_s3_aligned[i]  # Break below 1d S3
         
         if position == 0:  # Flat - look for new entries
             # Long: 1d R3 breakout AND uptrend AND volume confirmation
             if breakout_r3 and uptrend and vol_confirm:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: 1d S3 breakdown AND downtrend AND volume confirmation
             elif breakdown_s3 and downtrend and vol_confirm:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Exit on 1d R3 breakout (reversal signal)
@@ -106,6 +106,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
