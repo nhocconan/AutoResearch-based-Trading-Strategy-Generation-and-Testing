@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and 1d volume spike confirmation.
-# Long when RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) AND 1d volume > 2.0x 20-day average.
-# Short when RSI > 70 (overbought) AND price < 4h EMA50 (downtrend) AND 1d volume > 2.0x 20-day average.
-# Uses discrete sizing 0.20. Session filter: 08-20 UTC to reduce noise.
-# RSI mean reversion works in ranging markets; EMA50 filters counter-trend trades; volume confirms institutional interest.
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
-# Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years).
+# Hypothesis: 6h Williams Alligator + 1d EMA50 trend + volume confirmation.
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > 1d EMA50 AND volume > 1.5x 6h volume average.
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < 1d EMA50 AND volume > 1.5x 6h volume average.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Williams Alligator identifies trend structure via smoothed medians, EMA50 filters higher-timeframe direction, volume confirms momentum.
+# Works in bull (ride uptrend with bullish Alligator alignment) and bear (ride downtrend with bearish Alligator alignment).
+# Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years).
 
-name = "1h_RSI14_MeanRev_4hEMA50_1dVolume_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dEMA50_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,104 +25,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
+    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load 4h data ONCE before loop for EMA50 (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    # Williams Alligator: Smoothed medians (Jaw=13, Teeth=8, Lips=5)
+    # Median = (high + low) / 2
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).median().rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).median().rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).median().rolling(window=3, min_periods=3).mean().values
     
-    # Calculate 4h EMA50
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Load 1d data ONCE before loop for volume average (HTF)
+    # Load 1d data ONCE before loop for EMA50 (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d volume 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 6h volume average (20-period)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0  # track entry price for stoploss
     
-    # Pre-compute session hours for efficiency
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
-    # Start after warmup for RSI, EMA, and volume
-    start_idx = 50
+    # Start after warmup for Alligator, ATR, EMA, and volume
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current 1h volume > 2.0x 1d volume average (scaled)
-        # Scale 1d average to approximate 1h expectation: 1d vol / 24
-        vol_ma_1h_equiv = vol_ma_20_1d_aligned[i] / 24.0
-        if vol_ma_1h_equiv <= 0 or np.isnan(vol_ma_1h_equiv):
+        # Volume confirmation: current volume > 1.5x 6h volume average
+        if vol_ma_6h[i] <= 0 or np.isnan(vol_ma_6h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_ma_1h_equiv * 2.0)
+            volume_confirm = curr_volume > (vol_ma_6h[i] * 1.5)
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Alligator alignment
+        bullish_alignment = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
+        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
         
-        # Trend filter: price vs 4h EMA50
-        uptrend = curr_close > ema_50_4h_aligned[i]
-        downtrend = curr_close < ema_50_4h_aligned[i]
+        # Trend filter: price vs 1d EMA50
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: RSI oversold AND uptrend AND volume confirmation
-            if (rsi_oversold and 
+            # Long: Bullish Alligator alignment AND uptrend AND volume confirmation
+            if (bullish_alignment and 
                 uptrend and 
                 volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought AND downtrend AND volume confirmation
-            elif (rsi_overbought and 
+                entry_price = curr_close
+            # Short: Bearish Alligator alignment AND downtrend AND volume confirmation
+            elif (bearish_alignment and 
                   downtrend and 
                   volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: RSI returns to neutral (50) OR trend turns down
-            if rsi[i] >= 50 or not uptrend:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: Alligator alignment turns bearish OR trend turns down
+            elif (not bullish_alignment) or (not uptrend):
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral (50) OR trend turns up
-            if rsi[i] <= 50 or not downtrend:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: Alligator alignment turns bullish OR trend turns up
+            elif (not bearish_alignment) or (not downtrend):
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
