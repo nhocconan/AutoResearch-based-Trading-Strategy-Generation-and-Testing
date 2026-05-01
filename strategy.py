@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation.
-# Long when price breaks above 20-period high AND 1d ADX > 25 AND volume > 2x 20-bar average.
-# Short when price breaks below 20-period low AND 1d ADX > 25 AND volume > 2x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture medium-term trends.
-# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via ADX filter.
-# Includes ATR-based trailing stoploss: exit long if price < highest_high - 2*ATR, exit short if price > lowest_low + 2*ATR.
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX trend filter + volume confirmation.
+# Long when price breaks above 20-bar Donchian high with 1d ADX > 25 and volume > 1.5x 20-bar average.
+# Short when price breaks below 20-bar Donchian low with 1d ADX > 25 and volume > 1.5x 20-bar average.
+# Uses ATR-based trailing stop: exit long when price < highest_high_since_entry - 2.5*ATR(14),
+# exit short when price > lowest_low_since_entry + 2.5*ATR(14).
+# Discrete sizing 0.30 to balance return and drawdown. Designed for 4h timeframe to capture medium-term trends.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via 1d ADX filter.
 
-name = "4h_Donchian20_1dADX_VolumeSpike_ATRStop_v1"
+name = "4h_Donchian20_1dADX_VolumeConfirm_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -81,7 +82,13 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # ATR calculation (14-period) for stoploss
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high_values = donchian_high.values
+    donchian_low_values = donchian_low.values
+    
+    # 4h ATR calculation (14-period) for trailing stop
     def calculate_atr(high_arr, low_arr, close_arr, period=14):
         # True Range
         tr1 = np.abs(high_arr[1:] - low_arr[1:])
@@ -105,26 +112,21 @@ def generate_signals(prices):
         atr = wilders_smoothing(tr, period)
         return atr
     
-    atr_14 = calculate_atr(high, low, close, 14)
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike: current volume > 2x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    atr_4h = calculate_atr(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    start_idx = 30  # warmup for Donchian and ADX
+    start_idx = 50  # warmup for Donchian, ADX, and ATR
     
     for i in range(start_idx, n):
         # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr_14[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_values[i]) or np.isnan(donchian_low_values[i]) or np.isnan(atr_4h[i]):
             signals[i] = 0.0
             continue
         
@@ -133,57 +135,77 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_atr = atr_14[i]
-        vol_ma = volume_ma[i]
+        curr_atr = atr_4h[i]
+        curr_donchian_high = donchian_high_values[i]
+        curr_donchian_low = donchian_low_values[i]
         
-        # Volume confirmation: current 4h volume > 2x 20-period average
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        if i < 20 + start_idx:
+            signals[i] = 0.0
+            continue
+            
+        vol_ma = np.mean(volume[i-20:i])  # 20-period simple moving average
         if vol_ma <= 0:
-            volume_confirm = False
-        else:
-            volume_confirm = curr_vol > (vol_ma * 2.0)
+            signals[i] = 0.0
+            continue
+        volume_confirm = curr_vol > (vol_ma * 1.5)
         
-        # Donchian breakout conditions
-        breakout_up = curr_close > highest_high[i-1]  # break above previous period's high
-        breakout_down = curr_close < lowest_low[i-1]   # break below previous period's low
+        # Donchian breakout signals
+        bullish_breakout = curr_close > curr_donchian_high
+        bearish_breakout = curr_close < curr_donchian_low
         
         if position == 0:  # Flat - look for new entries
-            # Long: bullish breakout AND ADX > 25 AND volume confirmation
-            if (breakout_up and 
+            # Long: bullish Donchian breakout AND ADX > 25 AND volume confirmation
+            if (bullish_breakout and 
                 curr_adx > 25 and 
                 volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
-            # Short: bearish breakout AND ADX > 25 AND volume confirmation
-            elif (breakout_down and 
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
+            # Short: bearish Donchian breakout AND ADX > 25 AND volume confirmation
+            elif (bearish_breakout and 
                   curr_adx > 25 and 
                   volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update trailing stop: highest high since entry
-            # Exit: price < trailing stop OR ADX < 20 (trend weakening)
-            trailing_stop = highest_high[i] - (2.0 * curr_atr)
-            if (curr_close < trailing_stop or 
-                curr_adx < 20):
+            # Update highest high since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            
+            # Exit conditions:
+            # 1. ATR trailing stop: price < highest_high_since_entry - 2.5*ATR
+            # 2. Trend weakening: ADX < 20
+            # 3. Opposite Donchian breakout
+            if (curr_close < highest_since_entry - 2.5 * curr_atr or
+                curr_adx < 20 or
+                bearish_breakout):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Update trailing stop: lowest low since entry
-            # Exit: price > trailing stop OR ADX < 20 (trend weakening)
-            trailing_stop = lowest_low[i] + (2.0 * curr_atr)
-            if (curr_close > trailing_stop or 
-                curr_adx < 20):
+            # Update lowest low since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            
+            # Exit conditions:
+            # 1. ATR trailing stop: price > lowest_low_since_entry + 2.5*ATR
+            # 2. Trend weakening: ADX < 20
+            # 3. Opposite Donchian breakout
+            if (curr_close > lowest_since_entry + 2.5 * curr_atr or
+                curr_adx < 20 or
+                bullish_breakout):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
