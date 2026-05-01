@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX) and volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Regime filter: ADX(14) > 25 for trending, < 20 for ranging (hysteresis)
-# In trending regime (ADX > 25): follow Elder Ray signals (long if Bull Power > 0, short if Bear Power < 0)
-# In ranging regime (ADX < 20): mean revert at extremes (long if Bear Power < -std, short if Bull Power > +std)
-# Volume confirmation: current volume > 1.5 * 20-period average volume
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses daily EMA for major trend direction (filters counter-trend breakouts)
+# Camarilla R3/S3 levels from 1d data provide precise support/resistance
+# Volume spike confirms breakout authenticity
 # Designed for low frequency (50-150 trades over 4 years) to minimize fee drag
-# Works in bull/bear via regime adaptation: trend follow in trends, mean revert in ranges
+# Works in bull/bear via trend filter + breakout logic
+# Target: 12-37 trades/year per symbol
 
-name = "6h_ElderRay_1dADX_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,188 +25,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ADX regime filter
+    # 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d data
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: PP = (H+L+C)/3, Range = H-L
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
+    # Shift by 1 to use previous day's data (no look-ahead)
+    high_1d_shifted = np.concatenate([[np.nan], high_1d[:-1]])
+    low_1d_shifted = np.concatenate([[np.nan], low_1d[:-1]])
+    close_1d_shifted = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    pivot_point = (high_1d_shifted + low_1d_shifted + close_1d_shifted) / 3.0
+    daily_range = high_1d_shifted - low_1d_shifted
     
-    # Smoothed TR, DM+ (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Camarilla R3 and S3 levels
+    r3_level = close_1d_shifted + (daily_range * 1.1 / 2.0)
+    s3_level = close_1d_shifted - (daily_range * 1.1 / 2.0)
     
-    atr_1d = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, dm_plus_smooth / atr_1d * 100, 0)
-    di_minus = np.where(atr_1d != 0, dm_minus_smooth / atr_1d * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = wilders_smoothing(dx, 14)
-    
-    # Align ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate EMA13 on 6h data for Elder Ray
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(30, 20, 13)  # Need ADX(14) with smoothing, volume MA20, EMA13
+    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA20
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        adx = adx_1d_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = close[i] > r3_aligned[i-1]  # Break above R3
+        breakout_down = close[i] < s3_aligned[i-1]  # Break below S3
+        
+        # Trend filter: price above/below 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        
+        # Volume confirmation
         vol_spike = volume_spike[i]
         
-        # Regime definition with hysteresis
-        # Trending: ADX > 25
-        # Ranging: ADX < 20
-        # Transition: 20 <= ADX <= 25 (hold previous regime)
-        
-        if i == start_idx:
-            # Initialize regime based on current ADX
-            if adx > 25:
-                regime = 'trending'
-            elif adx < 20:
-                regime = 'ranging'
-            else:
-                regime = 'transition'
-        else:
-            # Propagate previous regime with hysteresis
-            prev_regime = regime
-            if adx > 25:
-                regime = 'trending'
-            elif adx < 20:
-                regime = 'ranging'
-            else:
-                regime = prev_regime  # hold in transition zone
-        
         if position == 0:  # Flat - look for new entries
-            if regime == 'trending':
-                # In trending regime: follow Elder Ray signals
-                if bull_power[i] > 0 and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                elif bear_power[i] < 0 and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif regime == 'ranging':
-                # In ranging regime: mean revert at extremes
-                # Calculate volatility-based thresholds
-                if i >= 20:
-                    # Use recent 20-bar std of Elder Ray power
-                    bp_std = np.nanstd(bull_power[max(0, i-20):i+1])
-                    br_std = np.nanstd(-bear_power[max(0, i-20):i+1])  # Bear power is negative, so -bear_power for magnitude
-                    threshold = max(bp_std, br_std) * 1.5  # 1.5 standard deviations
-                    
-                    if bear_power[i] < -threshold and vol_spike:  # Strong bear power = oversold
-                        signals[i] = 0.25
-                        position = 1
-                    elif bull_power[i] > threshold and vol_spike:  # Strong bull power = overbought
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
-                else:
-                    signals[i] = 0.0
-            else:  # transition regime - stay flat
+            # Long: upward breakout above R3, volume spike, uptrend
+            if breakout_up and vol_spike and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: downward breakout below S3, volume spike, downtrend
+            elif breakout_down and vol_spike and downtrend:
+                signals[i] = -0.25
+                position = -1
+            else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions
-            if regime == 'trending':
-                # Exit when bull power turns negative (trend weakness)
-                if bull_power[i] <= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif regime == 'ranging':
-                # Exit when mean reversion occurs (power returns to neutral)
-                if i >= 20:
-                    bp_std = np.nanstd(bull_power[max(0, i-20):i+1])
-                    if bull_power[i] < bp_std * 0.5:  # Return to half std deviation
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.25
-                else:
-                    signals[i] = 0.25
-            else:  # transition
+            # Exit on trend reversal or price re-enters Camarilla range (below R3)
+            if not uptrend or close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
-            if regime == 'trending':
-                # Exit when bear power turns positive (trend weakness)
-                if bear_power[i] >= 0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif regime == 'ranging':
-                # Exit when mean reversion occurs
-                if i >= 20:
-                    br_std = np.nanstd(-bear_power[max(0, i-20):i+1])
-                    if -bear_power[i] < br_std * 0.5:  # Return to half std deviation
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.25
-                else:
-                    signals[i] = -0.25
-            else:  # transition
+            # Exit on trend reversal or price re-enters Camarilla range (above S3)
+            if not downtrend or close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
