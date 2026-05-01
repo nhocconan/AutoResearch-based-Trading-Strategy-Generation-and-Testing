@@ -3,137 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray combination with 1d trend filter
-# Williams Alligator (jaw=13, teeth=8, lips=5 SMAs) identifies trend absence when lines are intertwined
-# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
-# In ranging markets (Alligator sleeping): fade extremes using Elder Ray divergences
-# In trending markets (Alligator awakened): follow Elder Ray power direction
-# 1d EMA34 filter ensures we only trade in alignment with higher timeframe trend
-# Target: 50-150 total trades over 4 years (12-37/year) with balanced BTC/ETH performance
+# Hypothesis: 12h Williams %R breakout with 1w EMA34 trend filter and volume confirmation (>1.5x 20-bar MA)
+# Uses 1w HTF for strong trend alignment to avoid whipsaws in ranging markets.
+# Williams %R identifies overbought/oversold conditions; breakout from extreme levels with volume confirms momentum.
+# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in bull (trend continuation) and bear (mean reversion from extremes) via trend filter.
 
-name = "6h_WilliamsAlligator_ElderRay_1dEMA34_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d HTF data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for EMA calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
+    # 1w EMA(34) on 1w close
+    ema_1w_34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Williams Alligator: SMAs of median price (hlc3)
-    hlc3 = (high + low + close) / 3.0
+    # Align 1w EMA to 12h timeframe
+    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
     
-    # Jaw: 13-period SMA, 8-bar offset
-    jaw = pd.Series(hlc3).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA, 5-bar offset
-    teeth = pd.Series(hlc3).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA, 3-bar offset
-    lips = pd.Series(hlc3).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Williams %R(14) on 12h data
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # Alligator sleeping condition: lines are close together (intertwined)
-    # Using standard deviation of the three lines as proxy for entanglement
-    alligator_lines = np.column_stack([jaw_aligned, teeth_aligned, lips_aligned])
-    alligator_std = np.nanstd(alligator_lines, axis=1)
-    # Normalize by price level to make it adaptive
-    alligator_sleeping = alligator_std < (close * 0.005)  # 0.5% of price
-    
-    # Alligator awakened condition: lines are separated and ordered
-    # Bullish alignment: Lips > Teeth > Jaw
-    # Bearish alignment: Jaw > Teeth > Lips
-    bullish_alignment = (lips_aligned > teeth_aligned) & (teeth_aligned > jaw_aligned)
-    bearish_alignment = (jaw_aligned > teeth_aligned) & (teeth_aligned > lips_aligned)
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need enough for Alligator calculation
+    start_idx = 20  # Need 20 for volume MA and 14 for Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if np.isnan(ema_1w_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # 1d trend filter: only trade long in uptrend, short in downtrend
-        uptrend = close[i] > ema_1d_34_aligned[i]
-        downtrend = close[i] < ema_1d_34_aligned[i]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        
+        # Volume confirmation
+        vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            if alligator_sleeping[i]:
-                # In ranging market: fade extremes using Elder Ray divergences
-                # Long when bull power is rising but price makes lower low
-                # Short when bear power is rising but price makes higher high
-                if (bull_power[i] > bull_power[i-1]) and (low[i] < low[i-1]) and uptrend:
-                    signals[i] = 0.25
-                    position = 1
-                elif (bear_power[i] > bear_power[i-1]) and (high[i] > high[i-1]) and downtrend:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif bullish_alignment[i] and uptrend:
-                # In uptrend and Alligator bullish aligned: long on bull power expansion
-                if bull_power[i] > bull_power[i-1]:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.0
-            elif bearish_alignment[i] and downtrend:
-                # In downtrend and Alligator bearish aligned: short on bear power expansion
-                if bear_power[i] > bear_power[i-1]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: Williams %R crosses above -80 from oversold, above 1w EMA, and volume confirmation
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and curr_close > ema_1w_34_aligned[i] and vol_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R crosses below -20 from overbought, below 1w EMA, and volume confirmation
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and curr_close < ema_1w_34_aligned[i] and vol_confirm:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions:
-            # 1. Alligator sleeping and bear power expanding (range developing)
-            # 2. Bearish alignment in uptrend (trend weakness)
-            # 3. 1d trend turns down
-            if (alligator_sleeping[i] and (bear_power[i] > bear_power[i-1])) or \
-               (bearish_alignment[i] and uptrend) or \
-               (not uptrend):
+            # Exit on Williams %R crossing below -50 or price below 1w EMA
+            if williams_r[i] < -50 and williams_r[i-1] >= -50 or curr_close < ema_1w_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions:
-            # 1. Alligator sleeping and bull power expanding (range developing)
-            # 2. Bullish alignment in downtrend (trend weakness)
-            # 3. 1d trend turns up
-            if (alligator_sleeping[i] and (bull_power[i] > bull_power[i-1])) or \
-               (bullish_alignment[i] and downtrend) or \
-               (not downtrend):
+            # Exit on Williams %R crossing above -50 or price above 1w EMA
+            if williams_r[i] > -50 and williams_r[i-1] <= -50 or curr_close > ema_1w_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
