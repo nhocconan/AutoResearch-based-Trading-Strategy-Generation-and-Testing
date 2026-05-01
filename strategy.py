@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR regime filter
-# Long when price breaks above Donchian(20) high AND volume > 1.5x volume MA(20) AND ATR(14) < ATR(50) (low volatility regime)
-# Short when price breaks below Donchian(20) low AND volume > 1.5x volume MA(20) AND ATR(14) < ATR(50)
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 20-40 trades/year.
-# Donchian channels provide structural breakouts; volume confirmation avoids fakeouts; ATR regime ensures trading in low volatility environments where breakouts are more reliable.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following price structure with volatility filter.
+# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume spike confirmation.
+# Uses 1d ATR(14) percentile to identify low volatility regimes (chop) where breakouts are more reliable.
+# Long when: price breaks above Donchian upper channel AND volume > 1.5x 20-period MA AND 1d ATR(14) < 30th percentile.
+# Short when: price breaks below Donchian lower channel AND volume > 1.5x 20-period MA AND 1d ATR(14) < 30th percentile.
+# ATR regime filter ensures we only trade breakouts during low volatility, reducing false breakouts in choppy markets.
+# Works in bull (breakouts continue) and bear (breakdowns continue) by following price structure.
+# Target: 12-25 trades/year to minimize fee drag while capturing strong moves.
 
-name = "4h_Donchian20_VolumeConfirm_ATRRegime_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dATRRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,41 +28,62 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Donchian(20) - highest high and lowest low of past 20 bars
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load 1d data ONCE before loop for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5x volume MA(20)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma * 1.5)
+    # Calculate 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR regime: ATR(14) < ATR(50) indicates low volatility regime (good for breakouts)
-    def calculate_atr(high, low, close, period):
-        """Calculate ATR using Wilder's smoothing"""
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        
-        atr = np.full_like(tr, np.nan)
-        if len(tr) < period:
-            return atr
-        # First ATR is simple average of first 'period' TR values
-        atr[period-1] = np.nanmean(tr[:period])
-        # Wilder's smoothing: ATR = (prev_ATR * (period-1) + current_TR) / period
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_50 = calculate_atr(high, low, close, 50)
-    atr_regime = atr_14 < atr_50  # Low volatility regime
+    # ATR(14)
+    atr_1d = np.full_like(close_1d, np.nan)
+    for i in range(14, len(tr)):
+        if not np.isnan(atr_1d[i-1]):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+        else:
+            atr_1d[i] = np.nanmean(tr[i-13:i+1]) if i >= 13 else np.nan
+    
+    # Calculate 30th percentile of ATR(1d) for regime filter (low volatility)
+    # Use expanding window to avoid look-ahead
+    atr_percentile_30 = np.full_like(atr_1d, np.nan)
+    for i in range(50, len(atr_1d)):  # need sufficient history
+        valid_atr = atr_1d[:i+1][~np.isnan(atr_1d[:i+1])]
+        if len(valid_atr) >= 20:
+            atr_percentile_30[i] = np.percentile(valid_atr, 30)
+    
+    # Align 1d ATR percentile to 12h
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile_30)
+    
+    # Donchian channels (20-period) on 12h data
+    lookback = 20
+    highest_high = np.full_like(close, np.nan)
+    lowest_low = np.full_like(close, np.nan)
+    
+    for i in range(lookback-1, len(close)):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Volume spike confirmation: volume > 1.5x 20-period MA
+    volume_ma = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
+        volume_ma[i] = np.mean(volume[i-20:i])
+    
+    volume_spike = volume > (volume_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Donchian and ATR
+    start_idx = max(lookback, 20, 50)  # warmup for all indicators
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -78,47 +100,72 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(atr_regime_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume_confirm = volume_confirm[i]
-        curr_atr_regime = atr_regime[i]
+        curr_volume = volume[i]
+        curr_vol_ma = volume_ma[i]
+        curr_atr_regime = atr_regime_aligned[i]
+        
+        # Regime filter: only trade when ATR is below 30th percentile (low volatility)
+        low_volatility_regime = curr_atr_regime > 0 and curr_atr_regime < np.percentile(
+            atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 30) if i < len(atr_1d) else False
+        
+        # Simplified regime check: use pre-computed percentile
+        if i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]):
+            # Get historical ATR values up to current point for percentile calculation
+            hist_atr = atr_1d[:min(i+1, len(atr_1d))]
+            valid_hist_atr = hist_atr[~np.isnan(hist_atr)]
+            if len(valid_hist_atr) >= 20:
+                regime_threshold = np.percentile(valid_hist_atr, 30)
+                low_volatility_regime = curr_atr_regime < regime_threshold
+            else:
+                low_volatility_regime = False
+        else:
+            low_volatility_regime = False
+        
+        # Volume confirmation
+        vol_confirm = curr_volume > (curr_vol_ma * 1.5) if not np.isnan(curr_vol_ma) else False
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian high AND volume confirmation AND low volatility regime
-            if (curr_close > highest_20[i] and 
-                curr_volume_confirm and 
-                curr_atr_regime):
+            # Long: break above upper channel + volume spike + low volatility regime
+            if (curr_close > highest_high[i] and 
+                vol_confirm and 
+                low_volatility_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND volume confirmation AND low volatility regime
-            elif (curr_close < lowest_20[i] and 
-                  curr_volume_confirm and 
-                  curr_atr_regime):
+            # Short: break below lower channel + volume spike + low volatility regime
+            elif (curr_close < lowest_low[i] and 
+                  vol_confirm and 
+                  low_volatility_regime):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Donchian low (opposite breakout) OR high volatility regime
-            if (curr_close < lowest_20[i] or 
-                not curr_atr_regime):
+            # Exit: price breaks below lower channel OR ATR regime shifts to high volatility
+            if (curr_close < lowest_low[i] or 
+                (i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]) and
+                 curr_atr_regime > np.percentile(
+                     atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 70) if i < len(atr_1d) else False)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Donchian high (opposite breakout) OR high volatility regime
-            if (curr_close > highest_20[i] or 
-                not curr_atr_regime):
+            # Exit: price breaks above upper channel OR ATR regime shifts to high volatility
+            if (curr_close > highest_high[i] or 
+                (i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]) and
+                 curr_atr_regime > np.percentile(
+                     atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 70) if i < len(atr_1d) else False)):
                 signals[i] = 0.0
                 position = 0
             else:
