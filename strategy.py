@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ADX regime filter.
-# Long when price breaks above Donchian upper band with volume > 2.0x 12h volume average and 1d ADX > 25 (trending).
-# Short when price breaks below Donchian lower band with volume confirmation and 1d ADX > 25.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band (20-period high) with volume > 1.8x 4h volume average and price > 1d EMA50.
+# Short when price breaks below Donchian lower band (20-period low) with volume confirmation and price < 1d EMA50.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Donchian bands calculated from prior completed 12h bar to avoid look-ahead.
-# Volume spike and ADX filters ensure only strong breakouts in trending regimes.
+# Donchian bands calculated from prior completed 4h bar to avoid look-ahead.
+# Volume spike filters low-momentum breakouts. 1d EMA50 ensures trades only in established trends.
 # Works in bull (breakouts with strong uptrend) and bear (breakouts with strong downtrend) regimes.
-# Target: 12-37 trades/year on 12h timeframe.
+# Target: 19-50 trades/year on 4h timeframe.
 
-name = "12h_Donchian20_Breakout_1dADX_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,73 +34,36 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1d data ONCE before loop for ADX and volume filters (HTF)
+    # Load 1d data ONCE before loop for EMA and volume filters (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_first_1d = np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])
-    tr_1d = np.concatenate([[tr_first_1d], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus_first = np.maximum(high_1d[0] - high_1d[0], 0)  # 0
-    dm_minus_first = np.maximum(low_1d[0] - low_1d[0], 0)   # 0
-    dm_plus = np.concatenate([[dm_plus_first], dm_plus])
-    dm_minus = np.concatenate([[dm_minus_first], dm_minus])
-    
-    # Smoothed TR, DM+
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_14 > 0, (dm_plus_14 / tr_14) * 100, 0)
-    di_minus = np.where(tr_14 > 0, (dm_minus_14 / tr_14) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Load 12h data ONCE before loop for Donchian bands and volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 4h volume average (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    vol_12h = df_12h['volume'].values
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, ADX, and Donchian
+    # Start after warmup for ATR, EMA, and Donchian
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -109,55 +72,50 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume spike: current volume > 2.0x 12h volume average (using previous completed 12h bar)
-        prev_12h_idx = i - 1
-        if prev_12h_idx < 0:
+        # Volume spike: current volume > 1.8x 4h volume average
+        if vol_ma_4h_aligned[i] <= 0 or np.isnan(vol_ma_4h_aligned[i]):
+            volume_spike = False
+        else:
+            volume_spike = curr_volume > (vol_ma_4h_aligned[i] * 1.8)
+        
+        # Trend filter: price vs 1d EMA50
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
+        
+        # Donchian bands from prior completed 4h bar
+        prev_4h_idx = i - 1
+        if prev_4h_idx < 0:
             signals[i] = 0.0
             continue
             
-        # Get 12h volume average for previous completed bar
-        vol_lookback_start = max(0, prev_12h_idx - 19)
-        vol_lookback_end = prev_12h_idx + 1
-        if vol_lookback_end - vol_lookback_start < 20:
-            signals[i] = 0.0
-            continue
-        vol_window = vol_12h[vol_lookback_start:vol_lookback_end]
-        vol_ma_12h_prev = np.mean(vol_window) if len(vol_window) > 0 else 0
-        
-        if vol_ma_12h_prev <= 0:
-            volume_spike = False
-        else:
-            volume_spike = curr_volume > (vol_ma_12h_prev * 2.0)
-        
-        # Regime filter: 1d ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25
-        
-        # Calculate Donchian bands using previous completed 12h bar (lookback 20)
-        lookback_start = max(0, prev_12h_idx - 19)
-        lookback_end = prev_12h_idx + 1
+        lookback_start = max(0, prev_4h_idx - 19)
+        lookback_end = prev_4h_idx + 1
         
         if lookback_end - lookback_start < 20:
             signals[i] = 0.0
             continue
             
-        high_window = high_12h[lookback_start:lookback_end]
-        low_window = low_12h[lookback_start:lookback_end]
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
+        
+        high_window = high_4h[lookback_start:lookback_end]
+        low_window = low_4h[lookback_start:lookback_end]
         
         upper_band = np.max(high_window)
         lower_band = np.min(low_window)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian upper band breakout up AND volume spike AND trending
+            # Long: Donchian upper band breakout up AND volume spike AND uptrend
             if (curr_high > upper_band and 
                 volume_spike and 
-                trending):
+                uptrend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Donchian lower band breakout down AND volume spike AND trending
+            # Short: Donchian lower band breakout down AND volume spike AND downtrend
             elif (curr_low < lower_band and 
                   volume_spike and 
-                  trending):
+                  downtrend):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -170,9 +128,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian bands OR trend weakens (ADX < 20)
+            # Exit: price re-enters Donchian bands OR trend reverses
             elif (curr_low >= lower_band and curr_low <= upper_band) or \
-                 (adx_aligned[i] < 20):
+                 (curr_close < ema_50_1d_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -185,9 +143,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian bands OR trend weakens (ADX < 20)
+            # Exit: price re-enters Donchian bands OR trend reverses
             elif (curr_high >= lower_band and curr_high <= upper_band) or \
-                 (adx_aligned[i] < 20):
+                 (curr_close > ema_50_1d_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
