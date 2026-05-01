@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume spike confirmation.
-# Long when Williams %R < -80 (oversold) AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period median.
-# Short when Williams %R > -20 (overbought) AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period median.
-# Williams %R identifies exhaustion points in trends; ADX ensures we trade with the trend, not against it.
-# Volume spike confirms conviction at extremes. Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Short when price breaks below Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# 12h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Camarilla R3/S3 levels provide strong support/resistance with reasonable frequency.
+# 1d EMA34 filters for longer-term trend alignment; volume spike confirms breakout conviction.
+# Designed to work in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
 
-name = "6h_WilliamsR_Extreme_1dADX_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,69 +37,34 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Williams %R(14) - using prior bar's data to avoid look-ahead
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate Camarilla levels (using prior bar's OHLC to avoid look-ahead)
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
+    camarilla_range = prev_high - prev_low
+    camarilla_R3 = prev_close + 1.25 * camarilla_range
+    camarilla_S3 = prev_close - 1.25 * camarilla_range
     
-    # Calculate 1d ADX(14) trend filter (HTF)
+    # Calculate 1d EMA34 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ADX components
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
-    # True Range
-    tr1 = df_1d_high[1:] - df_1d_low[1:]
-    tr2 = np.abs(df_1d_high[1:] - df_1d_close[:-1])
-    tr3 = np.abs(df_1d_low[1:] - df_1d_close[:-1])
-    tr_first = np.max([df_1d_high[0] - df_1d_low[0], np.abs(df_1d_high[0] - df_1d_close[0]), np.abs(df_1d_low[0] - df_1d_close[0])])
-    tr_1d = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((df_1d_high[1:] - df_1d_high[:-1]) > (df_1d_low[:-1] - df_1d_low[1:]), 
-                       np.maximum(df_1d_high[1:] - df_1d_high[:-1], 0), 0)
-    dm_minus = np.where((df_1d_low[:-1] - df_1d_low[1:]) > (df_1d_high[1:] - df_1d_high[:-1]), 
-                        np.maximum(df_1d_low[:-1] - df_1d_low[1:], 0), 0)
-    # Handle first bar
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR, DM+, DM-
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    # Handle division by zero
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align HTF indicators to LTF
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, Williams %R, ADX, and volume
+    # Start after warmup for ATR, EMA, volume, and Camarilla
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(williams_r_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_R3[i]) or 
+            np.isnan(camarilla_S3[i]) or 
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
@@ -105,12 +72,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Williams %R conditions
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
-        
-        # ADX trend filter: trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price vs 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
@@ -119,13 +83,13 @@ def generate_signals(prices):
             volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
         
         if position == 0:  # Flat - look for new entries
-            # Long: oversold AND trending AND volume spike
-            if oversold and trending and volume_confirm:
+            # Long: price > Camarilla R3 AND uptrend AND volume spike
+            if curr_close > camarilla_R3[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: overbought AND trending AND volume spike
-            elif overbought and trending and volume_confirm:
+            # Short: price < Camarilla S3 AND downtrend AND volume spike
+            elif curr_close < camarilla_S3[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -138,8 +102,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R rises above -50 (exit oversold) OR ADX weakens
-            elif williams_r_aligned[i] > -50 or adx_aligned[i] < 20:
+            # Exit: price breaks below Camarilla S3 OR trend turns down
+            elif curr_close < camarilla_S3[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -152,8 +116,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R falls below -50 (exit overbought) OR ADX weakens
-            elif williams_r_aligned[i] < -50 or adx_aligned[i] < 20:
+            # Exit: price breaks above Camarilla R3 OR trend turns up
+            elif curr_close > camarilla_R3[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
