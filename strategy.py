@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation.
-# Williams %R measures overbought/oversold levels. Long when %R crosses above -80 from below (oversold bounce) 
-# with 1d ADX > 25 (strong trend) and volume > 1.5x 20-bar average. Short when %R crosses below -20 from above 
-# (overbought reversal) with same filters. Uses discrete sizing 0.25. Works in bull (buy oversold bounces) 
-# and bear (sell overbought reversals) via ADX filter that ensures we only trade in strong trending regimes.
-# Williams %R is effective in both trending and ranging markets when combined with trend strength filter.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
+# Short when price breaks below 20-period Donchian low AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
+# Exit when price crosses the 20-period Donchian midpoint (mean of high and low channels).
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to capture medium-term trends with fewer trades.
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via ADX filter.
 
-name = "6h_WilliamsR_1dADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -81,32 +81,35 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Williams %R on 6h data (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
+    # 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    donchian_high_values = donchian_high.values
+    donchian_low_values = donchian_low.values
+    donchian_mid_values = donchian_mid.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Williams %R and ADX
+    start_idx = 50  # warmup for Donchian and ADX
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 6h timeframe
+        # Session filter: trade all sessions for 12h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_values[i]) or np.isnan(donchian_low_values[i]) or np.isnan(donchian_mid_values[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_williams_r = williams_r[i]
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -117,28 +120,20 @@ def generate_signals(prices):
             continue
         volume_confirm = curr_vol > (vol_ma * 1.5)
         
-        # Williams %R signals with crossover detection
-        # Need previous value to detect crossover
-        if i == start_idx:
-            prev_williams_r = williams_r[i-1]
-        else:
-            prev_williams_r = williams_r[i-1]
-        
-        # Long signal: %R crosses above -80 from below (oversold bounce)
-        long_signal = (prev_williams_r < -80) and (curr_williams_r >= -80)
-        # Short signal: %R crosses below -20 from above (overbought reversal)
-        short_signal = (prev_williams_r > -20) and (curr_williams_r <= -20)
+        # Donchian breakout conditions
+        breakout_up = curr_high > donchian_high_values[i]
+        breakout_down = curr_low < donchian_low_values[i]
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: oversold bounce AND ADX > 25 AND volume confirmation
-            if (long_signal and 
+            # Long: breakout above Donchian high AND ADX > 25 AND volume confirmation
+            if (breakout_up and 
                 curr_adx > 25 and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought reversal AND ADX > 25 AND volume confirmation
-            elif (short_signal and 
+            # Short: breakout below Donchian low AND ADX > 25 AND volume confirmation
+            elif (breakout_down and 
                   curr_adx > 25 and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -147,16 +142,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: overbought condition (%R >= -20) OR trend weakening (ADX < 20)
-            if (curr_williams_r >= -20) or (curr_adx < 20):
+            # Exit: price crosses below Donchian midpoint (trend weakening/reversal)
+            if curr_close < donchian_mid_values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: oversold condition (%R <= -80) OR trend weakening (ADX < 20)
-            if (curr_williams_r <= -80) or (curr_adx < 20):
+            # Exit: price crosses above Donchian midpoint (trend weakening/reversal)
+            if curr_close > donchian_mid_values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
