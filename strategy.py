@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses 1d EMA34 for trend alignment (HTF direction) to capture major bull/bear regimes and 1h volume spike for precise entry timing.
-# Long when price breaks above R3, above 1d EMA34, and volume > 2.0x 20-period average (strict confirmation).
-# Short when price breaks below S3, below 1d EMA34, and volume > 2.0x 20-period average.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h Supertrend trend filter and volume spike confirmation.
+# Uses 4h Supertrend for trend alignment (HTF direction) to capture major bull/bear regimes and 1h volume spike for precise entry timing.
+# Long when price breaks above R3, Supertrend is bullish, and volume > 2.0x 20-period average (strict confirmation).
+# Short when price breaks below S3, Supertrend is bearish, and volume > 2.0x 20-period average.
 # Exit on opposite Camarilla level (R1/S1) break for tighter risk control.
 # Session filter (08-20 UTC) reduces noise. Discrete sizing 0.20 minimizes fee churn.
-# Target: 15-30 trades/year by using 1d for signal direction (less frequent than 4h) and 1h only for entry timing.
-# 1d EMA34 is smoothed enough to filter noise but responsive to major trend changes, working in both bull (trend following) and bear (counter-trend at extremes) markets.
+# Target: 15-30 trades/year by using 4h for signal direction (less frequent than 1h) and 1h only for entry timing.
+# 4h Supertrend adapts to volatility and works in both bull (trend following) and bear (counter-trend at extremes) markets.
 
-name = "1h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_Session_v1"
+name = "1h_Camarilla_R3S3_Breakout_4hSupertrend_VolumeConfirm_Session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -29,14 +29,82 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 4h data ONCE before loop for Supertrend trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d data
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Supertrend on 4h data
+    atr_period = 10
+    multiplier = 3.0
+    
+    # True Range
+    tr1 = pd.Series(df_4h['high']).diff()
+    tr2 = pd.Series(df_4h['high']).sub(df_4h['shift_close']).abs()
+    tr3 = pd.Series(df_4h['low']).diff()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1, skipna=False)
+    # Fix for first row
+    tr.iloc[0] = df_4h['high'].iloc[0] - df_4h['low'].iloc[0]
+    
+    # Shift close for previous close
+    df_4h = df_4h.copy()
+    df_4h['shift_close'] = df_4h['close'].shift(1)
+    
+    # Recalculate TR with shift_close
+    tr1 = (df_4h['high'] - df_4h['low']).abs()
+    tr2 = (df_4h['high'] - df_4h['shift_close']).abs()
+    tr3 = (df_4h['low'] - df_4h['shift_close']).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr.iloc[0] = tr1.iloc[0]  # First row
+    
+    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (df_4h['high'] + df_4h['low']) / 2 + multiplier * atr
+    basic_lb = (df_4h['high'] + df_4h['low']) / 2 - multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = pd.Series(index=df_4h.index, dtype='float64')
+    final_lb = pd.Series(index=df_4h.index, dtype='float64')
+    supertrend = pd.Series(index=df_4h.index, dtype='float64')
+    direction = pd.Series(index=df_4h.index, dtype='float64')
+    
+    for i in range(len(df_4h)):
+        if i == 0:
+            final_ub.iloc[i] = basic_ub.iloc[i]
+            final_lb.iloc[i] = basic_lb.iloc[i]
+        else:
+            if basic_ub.iloc[i] < final_ub.iloc[i-1] or df_4h['close'].iloc[i-1] > final_ub.iloc[i-1]:
+                final_ub.iloc[i] = basic_ub.iloc[i]
+            else:
+                final_ub.iloc[i] = final_ub.iloc[i-1]
+                
+            if basic_lb.iloc[i] > final_lb.iloc[i-1] or df_4h['close'].iloc[i-1] < final_lb.iloc[i-1]:
+                final_lb.iloc[i] = basic_lb.iloc[i]
+            else:
+                final_lb.iloc[i] = final_lb.iloc[i-1]
+        
+        if i == 0:
+            supertrend.iloc[i] = final_ub.iloc[i]
+            direction.iloc[i] = 1
+        else:
+            if supertrend.iloc[i-1] == final_ub.iloc[i-1]:
+                if df_4h['close'].iloc[i] <= final_ub.iloc[i]:
+                    supertrend.iloc[i] = final_ub.iloc[i]
+                    direction.iloc[i] = -1
+                else:
+                    supertrend.iloc[i] = final_lb.iloc[i]
+                    direction.iloc[i] = 1
+            else:
+                if df_4h['close'].iloc[i] >= final_lb.iloc[i]:
+                    supertrend.iloc[i] = final_lb.iloc[i]
+                    direction.iloc[i] = 1
+                else:
+                    supertrend.iloc[i] = final_ub.iloc[i]
+                    direction.iloc[i] = -1
+    
+    # Align Supertrend direction to 1h timeframe
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction.values)
     
     # Calculate 1h volume average (20-period) for volume spike filter
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,7 +112,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA and volume average
+    start_idx = 20  # warmup for volume average
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -63,7 +131,7 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_ema = ema_34_aligned[i]
+        curr_direction = supertrend_direction_aligned[i]
         curr_volume = volume[i]
         curr_volume_avg = volume_avg[i]
         
@@ -124,15 +192,15 @@ def generate_signals(prices):
             camarilla_s1 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA34, volume confirmation
+            # Long: price breaks above Camarilla R3, Supertrend bullish (direction=1), volume confirmation
             if (curr_close > camarilla_r3 and 
-                curr_close > curr_ema and 
+                curr_direction == 1 and 
                 volume_confirm):
                 signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Camarilla S3, price below 1d EMA34, volume confirmation
+            # Short: price breaks below Camarilla S3, Supertrend bearish (direction=-1), volume confirmation
             elif (curr_close < camarilla_s3 and 
-                  curr_close < curr_ema and 
+                  curr_direction == -1 and 
                   volume_confirm):
                 signals[i] = -0.20
                 position = -1
