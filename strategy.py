@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# Uses 1d ADX(14) to define regime: ADX>25 = trending (trade Elder Ray signals), ADX<20 = range (fade to EMA21)
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Entry: Long when Bull Power > 0 and rising (2-bar momentum) in trending regime OR when Bear Power < 0 and rising in range regime (mean reversion)
-# Exit: Opposite signal or regime change
-# Designed for low frequency (50-150 trades over 4 years) with clear bull/bear logic
+# Hypothesis: 12h Donchian(20) breakout + 1w volume spike + 1d chop regime filter
+# Uses 1w volume confirmation (volume > 1.5x 20-period MA) to validate breakouts
+# Uses 1d choppiness index (CHOP > 61.8 = range, CHOP < 38.2 = trend) as regime filter
+# In trending regime (CHOP < 38.2): trade Donchian breakouts in direction of trend
+# In ranging regime (CHOP > 61.8): fade Donchian breaks (mean reversion at opposite band)
+# Designed for low frequency (50-150 trades over 4 years) with clear regime logic
 
-name = "6h_ElderRay_1dADX_Regime_MeanRevTrend_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wVolume_1dChop_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,13 +22,14 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d HTF data for regime filter
+    # 1d HTF data for chop regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d ADX(14) calculation for regime detection
+    # 1d Choppiness Index calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,110 +41,104 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # ATR(14) - sum of TR over 14 periods
+    atr_14 = np.zeros_like(tr)
+    for i in range(14, len(tr)):
+        atr_14[i] = np.nansum(tr[i-13:i+1])
     
-    # Wilder's smoothing
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            first_val = np.nansum(x[1:period+1])
-            result[period] = first_val
-            for i in range(period+1, len(x)):
-                result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
+    # High-Low range over 14 periods
+    max_high_14 = np.full_like(close_1d, np.nan)
+    min_low_14 = np.full_like(close_1d, np.nan)
+    for i in range(14, len(close_1d)):
+        max_high_14[i] = np.nanmax(high_1d[i-13:i+1])
+        min_low_14[i] = np.nanmin(low_1d[i-13:i+1])
     
-    tr_period = 14
-    tr_smoothed = wilders_smoothing(tr, tr_period)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
+    # Chop = 100 * log10(sum(TR14) / (max(HH14-LL14))) / log10(14)
+    range_14 = max_high_14 - min_low_14
+    chop = np.full_like(close_1d, np.nan)
+    mask = (atr_14 > 0) & (range_14 > 0) & (~np.isnan(range_14))
+    chop[mask] = 100 * np.log10(atr_14[mask] / range_14[mask]) / np.log10(14)
     
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
-    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # 1w HTF data for volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # 6h Elder Ray components
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
+    # 1w volume confirmation: volume > 1.5x 20-period MA
+    vol_1w = df_1w['volume'].values
+    vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.full_like(vol_1w, np.nan)
+    vol_ratio = np.where(vol_ma_20 > 0, vol_1w / vol_ma_20, np.nan)
+    vol_spike = vol_ratio > 1.5  # Volume spike confirmation
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1w, vol_spike.astype(float), additional_delay_bars=0)
     
-    # 2-bar momentum for confirmation
-    bull_power_mom = bull_power - np.concatenate([[np.nan, np.nan], bull_power[:-2]])
-    bear_power_mom = bear_power - np.concatenate([[np.nan, np.nan], bear_power[:-2]])
+    # 12h Donchian(20) channels
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    for i in range(lookback, len(high)):
+        highest_high[i] = np.nanmax(high[i-lookback+1:i+1])
+        lowest_low[i] = np.nanmin(low[i-lookback+1:i+1])
     
-    # 6h EMA21 for mean reversion exits in range
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Donchian breakout signals
+    breakout_up = close > highest_high  # Close above upper band
+    breakout_down = close < lowest_low  # Close below lower band
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 21)  # Need ADX and EMA21
+    start_idx = max(lookback, 20, 14)  # Need Donchian, volume MA, and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema13[i]) or np.isnan(ema21[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(bull_power_mom[i]) or np.isnan(bear_power_mom[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         # Regime filters
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        trending = chop_aligned[i] < 38.2  # Chop < 38.2 = trending
+        ranging = chop_aligned[i] > 61.8   # Chop > 61.8 = ranging
         
         if position == 0:  # Flat - look for new entries
-            # Trending regime: Elder Ray trend following
-            if trending:
-                # Long: Bull Power positive AND rising (momentum > 0)
-                if bull_power[i] > 0 and bull_power_mom[i] > 0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Bear Power negative AND rising (becoming less negative = momentum > 0)
-                elif bear_power[i] < 0 and bear_power_mom[i] > 0:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            # Ranging regime: Elder Ray mean reversion (fade extremes)
-            elif ranging:
-                # Long: Bear Power negative AND rising (extreme bearish exhaustion)
-                if bear_power[i] < 0 and bear_power_mom[i] > 0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Bull Power positive AND rising (extreme bullish exhaustion)
-                elif bull_power[i] > 0 and bull_power_mom[i] > 0:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Volume confirmation required for all entries
+            if vol_spike_aligned[i]:
+                # Trending regime: trade breakouts in direction of trend
+                if trending:
+                    if breakout_up[i]:
+                        signals[i] = 0.25
+                        position = 1
+                    elif breakout_down[i]:
+                        signals[i] = -0.25
+                        position = -1
+                # Ranging regime: fade breakouts (mean reversion)
+                elif ranging:
+                    if breakout_up[i]:
+                        signals[i] = -0.25  # Short at upper band
+                        position = -1
+                    elif breakout_down[i]:
+                        signals[i] = 0.25   # Long at lower band
+                        position = 1
             else:
-                signals[i] = 0.0  # Transition regime (ADX 20-25) - stay flat
+                signals[i] = 0.0  # No volume confirmation - stay flat
         
         elif position == 1:  # Long position
             # Exit conditions
             exit_long = False
             if trending:
-                # Exit trending long when Bull Power turns negative
-                if bull_power[i] <= 0:
+                # Exit trending long when price reaches lower Donchian band
+                if close[i] <= lowest_low[i]:
                     exit_long = True
             elif ranging:
-                # Exit ranging long when price reaches EMA21 (mean reversion target)
-                if close[i] >= ema21[i]:
+                # Exit ranging long when price reaches midpoint (mean reversion target)
+                midpoint = (highest_high[i] + lowest_low[i]) / 2
+                if close[i] >= midpoint:
                     exit_long = True
             else:
-                # Transition regime - exit on any Elder Ray deterioration
-                if bull_power[i] <= 0 or bear_power[i] >= 0:
+                # Transition regime - exit on opposite Donchian touch
+                if close[i] <= lowest_low[i]:
                     exit_long = True
             
             if exit_long:
@@ -156,16 +151,17 @@ def generate_signals(prices):
             # Exit conditions
             exit_short = False
             if trending:
-                # Exit trending short when Bear Power turns positive
-                if bear_power[i] >= 0:
+                # Exit trending short when price reaches upper Donchian band
+                if close[i] >= highest_high[i]:
                     exit_short = True
             elif ranging:
-                # Exit ranging short when price reaches EMA21 (mean reversion target)
-                if close[i] <= ema21[i]:
+                # Exit ranging short when price reaches midpoint (mean reversion target)
+                midpoint = (highest_high[i] + lowest_low[i]) / 2
+                if close[i] <= midpoint:
                     exit_short = True
             else:
-                # Transition regime - exit on any Elder Ray deterioration
-                if bear_power[i] >= 0 or bull_power[i] <= 0:
+                # Transition regime - exit on opposite Donchian touch
+                if close[i] >= highest_high[i]:
                     exit_short = True
             
             if exit_short:
