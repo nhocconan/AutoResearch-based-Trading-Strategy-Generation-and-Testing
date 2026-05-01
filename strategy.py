@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d Supertrend filter and volume confirmation spike.
-# Long when price breaks above Donchian upper band AND Supertrend=1 AND volume > 2.0x 4h volume median.
-# Short when price breaks below Donchian lower band AND Supertrend=-1 AND volume > 2.0x 4h volume median.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Donchian provides clear structure; 1d Supertrend filters longer-term trend (works in bull/bear).
-# Volume confirmation ensures momentum. Target: 20-35 trades/year on 4h timeframe.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation spike.
+# Long when price breaks above Donchian upper band AND close > 1w EMA50 AND volume > 2.0x 20-period volume median.
+# Short when price breaks below Donchian lower band AND close < 1w EMA50 AND volume > 2.0x 20-period volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Donchian channels provide robust structure; 1w EMA50 filters longer-term trend (more stable for weekly).
+# Volume confirmation ensures momentum. Target: 10-25 trades/year on 1d timeframe.
+# Proven pattern: Donchian breakouts with volume and trend filter work on BTC/ETH in both bull/bear.
 
-name = "4h_Donchian20_Supertrend1d_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,111 +33,58 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h volume median (20-period for stability)
-    vol_median_4h = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Calculate 20-period volume median for confirmation
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate 1d Supertrend (more stable than EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1w EMA50 trend (more stable than shorter periods)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
-    
-    # Calculate ATR for Supertrend
-    hl2 = (df_1d['high'] + df_1d['low']) / 2
-    tr1_1d = df_1d['high'].diff()
-    tr2_1d = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3_1d = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    tr_1d.iloc[0] = np.max([df_1d['high'].iloc[0] - df_1d['low'].iloc[0], 
-                           np.abs(df_1d['high'].iloc[0] - df_1d['close'].iloc[0]), 
-                           np.abs(df_1d['low'].iloc[0] - df_1d['close'].iloc[0])])
-    atr_1d = tr_1d.rolling(window=atr_period, min_periods=atr_period).mean()
-    
-    # Calculate upper and lower bands
-    upper_band = hl2 + (multiplier * atr_1d)
-    lower_band = hl2 - (multiplier * atr_1d)
-    
-    # Initialize Supertrend
-    supertrend = pd.Series(index=df_1d.index, dtype=float)
-    direction = pd.Series(index=df_1d.index, dtype=int)
-    
-    for i in range(len(df_1d)):
-        if i == 0:
-            supertrend.iloc[i] = upper_band.iloc[i]
-            direction.iloc[i] = 1
-        else:
-            if close_1d := df_1d['close'].iloc[i]:
-                if supertrend.iloc[i-1] == upper_band.iloc[i-1]:
-                    if close_1d <= upper_band.iloc[i]:
-                        supertrend.iloc[i] = upper_band.iloc[i]
-                        direction.iloc[i] = -1
-                    else:
-                        supertrend.iloc[i] = lower_band.iloc[i]
-                        direction.iloc[i] = 1
-                else:
-                    if close_1d >= lower_band.iloc[i]:
-                        supertrend.iloc[i] = lower_band.iloc[i]
-                        direction.iloc[i] = 1
-                    else:
-                        supertrend.iloc[i] = upper_band.iloc[i]
-                        direction.iloc[i] = -1
-            else:
-                supertrend.iloc[i] = supertrend.iloc[i-1]
-                direction.iloc[i] = direction.iloc[i-1]
-    
-    supertrend_values = supertrend.values
-    direction_values = direction.values
-    
-    # Align Supertrend and direction to 4h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend_values)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction_values)
-    
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_window = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, Supertrend, Donchian, and volume
-    start_idx = max(100, donchian_window)
+    # Start after warmup for ATR, Donchian, EMA, and volume
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(supertrend_aligned[i]) or 
-            np.isnan(direction_aligned[i]) or 
-            np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or 
-            np.isnan(vol_median_4h[i])):
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_median[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: Supertrend direction
-        uptrend = direction_aligned[i] == 1
-        downtrend = direction_aligned[i] == -1
+        # Trend filter: price vs 1w EMA50
+        uptrend = curr_close > ema_50_1w_aligned[i]
+        downtrend = curr_close < ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 4h volume median (stricter to reduce trades)
-        if vol_median_4h[i] <= 0 or np.isnan(vol_median_4h[i]):
+        # Volume confirmation: current volume > 2.0x 20-period volume median
+        if vol_median[i] <= 0 or np.isnan(vol_median[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_4h[i] * 2.0)
+            volume_confirm = curr_volume > (vol_median[i] * 2.0)
         
         if position == 0:  # Flat - look for new entries
-            # Long: price > upper channel AND uptrend AND volume spike
-            if curr_close > upper_channel[i] and uptrend and volume_confirm:
+            # Long: price > Donchian upper band AND uptrend AND volume spike
+            if curr_close > highest_high[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price < lower channel AND downtrend AND volume spike
-            elif curr_close < lower_channel[i] and downtrend and volume_confirm:
+            # Short: price < Donchian lower band AND downtrend AND volume spike
+            elif curr_close < lowest_low[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -144,13 +92,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below lower channel OR trend turns down
-            elif curr_close < lower_channel[i] or not uptrend:
+            # Exit: price breaks below Donchian lower band OR trend turns down
+            elif curr_close < lowest_low[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -158,13 +106,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close > entry_price + 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above upper channel OR trend turns up
-            elif curr_close > upper_channel[i] or not downtrend:
+            # Exit: price breaks above Donchian upper band OR trend turns up
+            elif curr_close > highest_high[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
