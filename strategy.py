@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme + 1d EMA(34) trend + volume confirmation
-# Williams %R identifies overbought/oversold conditions. In strong trends (1d EMA alignment),
-# extreme readings can signal continuation rather than reversal. Volume confirms conviction.
-# Works in bull markets: buy Williams %R < -90 (oversold) with uptrend + volume.
-# Works in bear markets: sell Williams %R > -10 (overbought) with downtrend + volume.
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25).
+# Hypothesis: 12h Williams %R extreme with 1d EMA(34) trend filter and volume confirmation (>1.5x 20-bar MA)
+# Williams %R identifies overbought/oversold conditions. Long when %R < -80 (oversold) with uptrend,
+# short when %R > -20 (overbought) with downtrend. Works in both bull (buy dips in uptrend) and 
+# bear (sell rallies in downtrend). Volume confirmation ensures breakout validity. Target: 50-150 total trades.
 
-name = "6h_WilliamsR_Extreme_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,16 +30,13 @@ def generate_signals(prices):
     # Daily EMA(34) on 1d close
     daily_ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA to 6h timeframe
+    # Align daily EMA to 12h timeframe
     daily_ema_34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema_34)
     
-    # Williams %R on 6h data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Williams %R calculation (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +46,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for Williams %R
+    start_idx = max(14, 20, 34)  # Need 14 for Williams %R, 20 for volume MA, 34 for EMA
     
     for i in range(start_idx, n):
         if np.isnan(daily_ema_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma_20[i]):
@@ -63,19 +58,19 @@ def generate_signals(prices):
         vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R < -90 (extreme oversold), price above daily EMA, volume confirmation
-            if curr_williams_r < -90 and curr_close > daily_ema_34_aligned[i] and vol_confirm:
+            # Long: Williams %R oversold (< -80), price above daily EMA, and volume confirmation
+            if curr_williams_r < -80 and curr_close > daily_ema_34_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -10 (extreme overbought), price below daily EMA, volume confirmation
-            elif curr_williams_r > -10 and curr_close < daily_ema_34_aligned[i] and vol_confirm:
+            # Short: Williams %R overbought (> -20), price below daily EMA, and volume confirmation
+            elif curr_williams_r > -20 and curr_close < daily_ema_34_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Williams %R > -50 (return to neutral) or price below daily EMA
+            # Exit on Williams %R rising above -50 or price below daily EMA
             if curr_williams_r > -50 or curr_close < daily_ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -83,7 +78,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Williams %R < -50 (return to neutral) or price above daily EMA
+            # Exit on Williams %R falling below -50 or price above daily EMA
             if curr_williams_r < -50 or curr_close > daily_ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
