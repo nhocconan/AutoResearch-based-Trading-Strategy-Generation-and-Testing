@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for structural trend bias (long when price > EMA34, short when price < EMA34)
-# Camarilla R4/S4 levels from 1d provide stronger breakout signals than 4h-derived levels
-# Volume confirmation > 1.8x 20-period EMA ensures institutional participation
-# Designed for low trade frequency: ~30-60 trades/year per symbol with 0.25 sizing
-# 1d EMA34 filter reduces false breakouts in choppy markets while capturing strong trends
-# Works in both bull and bear markets by following the dominant 1d trend
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Uses 1w EMA34 for structural trend bias (long when price > EMA34, short when price < EMA34)
+# Donchian(20) from 1d provides robust breakout signals in both bull and bear markets
+# Volume confirmation > 2.0x 20-period EMA ensures institutional participation
+# Designed for low trade frequency: ~10-25 trades/year per symbol with 0.30 sizing
+# 1w EMA34 filter reduces false breakouts while capturing strong trends across regimes
+# Works in both bull and bear markets by following the dominant 1w trend
 
-name = "4h_Camarilla_R4S4_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +25,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # 1w HTF data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA34
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # Camarilla R4 = close + 1.5*(high-low)*1.1/4
-    # Camarilla S4 = close - 1.5*(high-low)*1.1/4
-    typical_range = df_1d['high'] - df_1d['low']
-    camarilla_r4 = df_1d['close'] + 1.5 * typical_range * 1.1 / 4
-    camarilla_s4 = df_1d['close'] - 1.5 * typical_range * 1.1 / 4
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
+    # 1d Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume confirmation: volume > 1.8 * 20-period EMA
+    # Volume confirmation: volume > 2.0 * 20-period EMA
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ema_20)
+    volume_spike = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need 1d data for EMA34 (40 periods)
-    start_idx = 40
+    # Start after warmup: need 20-period Donchian and 1w EMA34
+    start_idx = max(lookback, 40)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA34: long above EMA34, short below EMA34
-        bullish_bias = close[i] > ema_34_1d_aligned[i]
-        bearish_bias = close[i] < ema_34_1d_aligned[i]
+        # Determine trend bias from 1w EMA34: long above EMA34, short below EMA34
+        bullish_bias = close[i] > ema_34_1w_aligned[i]
+        bearish_bias = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if bullish_bias:
-                # Long: Camarilla R4 breakout above with volume spike
-                if close[i] > camarilla_r4_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
+                # Long: Donchian(20) breakout above with volume spike
+                if close[i] > highest_high[i] and volume_spike[i]:
+                    signals[i] = 0.30
                     position = 1
                 else:
                     signals[i] = 0.0
             elif bearish_bias:
-                # Short: Camarilla S4 breakdown below with volume spike
-                if close[i] < camarilla_s4_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                # Short: Donchian(20) breakdown below with volume spike
+                if close[i] < lowest_low[i] and volume_spike[i]:
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
@@ -84,19 +80,19 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid chop around EMA34
         
         elif position == 1:  # Long position
-            # Exit: Camarilla S4 breakdown below (failure of breakout)
-            if close[i] < camarilla_s4_aligned[i]:
+            # Exit: Donchian(20) breakdown below (failure of breakout)
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Camarilla R4 breakout above (failure of breakdown)
-            if close[i] > camarilla_r4_aligned[i]:
+            # Exit: Donchian(20) breakout above (failure of breakdown)
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
