@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA34 trend filter and volume confirmation.
-# Long when Alligator lines are bullish (jaw < teeth < lips) with price > lips, volume > 1.5x 1d volume average, and price > 1d EMA34.
-# Short when Alligator lines are bearish (jaw > teeth > lips) with price < lips, volume confirmation, and price < 1d EMA34.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band (20-period high) with volume > 1.5x 12h volume average and price > 1d EMA34.
+# Short when price breaks below Donchian lower band (20-period low) with volume confirmation and price < 1d EMA34.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Alligator calculated from 6h data with proper min_periods to avoid look-ahead.
-# 1d EMA and volume filters loaded once before loop using mtf_data helpers.
-# Works in bull (Alligator alignment with uptrend) and bear (Alligator alignment with downtrend) regimes.
-# Target: 12-37 trades/year on 6h timeframe.
+# Donchian bands calculated from prior completed 12h bar to avoid look-ahead.
+# Volume spike filters low-momentum breakouts. 1d EMA34 ensures trades only in established trends.
+# Works in bull (breakouts with strong uptrend) and bear (breakouts with strong downtrend) regimes.
+# Target: 12-37 trades/year on 12h timeframe.
 
-name = "6h_WilliamsAlligator_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,36 +49,15 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate Williams Alligator on 6h data
-    # Jaw: Blue line (13-period SMMA, shifted 8 bars ahead)
-    # Teeth: Red line (8-period SMMA, shifted 5 bars ahead)
-    # Lips: Green line (5-period SMMA, shifted 3 bars ahead)
-    # SMMA = smoothed moving average (similar to EMA but with different smoothing)
-    # We'll use EMA as approximation for SMMA as it's commonly done
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # Shift the lines as per Alligator specification
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    
-    # Set NaN for shifted values that don't have enough data
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, Alligator, and EMA
+    # Start after warmup for ATR, EMA, and Donchian
     start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
@@ -99,24 +78,53 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Alligator conditions
-        # Bullish: jaw < teeth < lips (lines separated and ascending)
-        bullish_alligator = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        # Bearish: jaw > teeth > lips (lines separated and descending)
-        bearish_alligator = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        # Load 12h data ONCE before loop for Donchian bands
+        df_12h = get_htf_data(prices, '12h')
+        if len(df_12h) < 20:
+            signals[i] = 0.0
+            continue
+        
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
+        
+        # Calculate Donchian bands for each 12h bar (using previous completed bar)
+        # Need at least one completed 12h bar
+        if i < 1:  # Need at least 1 previous 12h bar
+            signals[i] = 0.0
+            continue
+            
+        # Get the previous completed 12h bar
+        prev_12h_idx = i - 1
+        
+        if prev_12h_idx < 0:
+            signals[i] = 0.0
+            continue
+            
+        # Calculate Donchian bands using previous completed 12h bar (lookback 20)
+        lookback_start = max(0, prev_12h_idx - 19)
+        lookback_end = prev_12h_idx + 1
+        
+        if lookback_end - lookback_start < 20:
+            signals[i] = 0.0
+            continue
+            
+        high_window = high_12h[lookback_start:lookback_end]
+        low_window = low_12h[lookback_start:lookback_end]
+        
+        upper_band = np.max(high_window)
+        lower_band = np.min(low_window)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish Alligator AND price > lips AND volume spike AND uptrend
-            if (bullish_alligator and 
-                curr_close > lips[i] and 
+            # Long: Donchian upper band breakout up AND volume spike AND uptrend
+            if (curr_high > upper_band and 
                 volume_spike and 
                 uptrend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Bearish Alligator AND price < lips AND volume spike AND downtrend
-            elif (bearish_alligator and 
-                  curr_close < lips[i] and 
+            # Short: Donchian lower band breakout down AND volume spike AND downtrend
+            elif (curr_low < lower_band and 
                   volume_spike and 
                   downtrend):
                 signals[i] = -0.25
@@ -131,8 +139,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Alligator turns bearish OR price < lips OR trend reverses
-            elif (not bullish_alligator) or (curr_close < lips[i]) or (curr_close < ema_34_1d_aligned[i]):
+            # Exit: price re-enters Donchian bands OR trend reverses
+            elif (curr_low >= lower_band and curr_low <= upper_band) or \
+                 (curr_close < ema_34_1d_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -145,8 +154,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Alligator turns bullish OR price > lips OR trend reverses
-            elif (not bearish_alligator) or (curr_close > lips[i]) or (curr_close > ema_34_1d_aligned[i]):
+            # Exit: price re-enters Donchian bands OR trend reverses
+            elif (curr_high >= lower_band and curr_high <= upper_band) or \
+                 (curr_close > ema_34_1d_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
