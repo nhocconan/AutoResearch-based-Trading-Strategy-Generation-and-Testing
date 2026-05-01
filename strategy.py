@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX(9) zero-line cross with 1d volume spike confirmation and chop regime filter
-# TRIX is a triple-smoothed EMA momentum oscillator that filters noise and identifies trend changes
-# Zero-line cross provides clean entry signals with low lag
-# 1d volume spike confirms institutional participation in the breakout
-# Choppiness index regime filter ensures we only trade in trending markets (CHOP < 38.2) or mean-revert in range (CHOP > 61.8)
-# Designed for low trade frequency (20-40/year) with high edge to overcome fee drag
-# Works in both bull and bear markets by adapting to regime
+# Hypothesis: 6h Williams %R extreme reversal with 1d EMA50 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. Extreme readings (< -80 or > -20) 
+# followed by reversal provide high-probability mean reversion entries in ranging markets.
+# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades during strong moves.
+# Volume confirmation filters out false reversals.
+# Designed for 6h timeframe to capture multi-day mean reversion cycles with low trade frequency.
+# Target: 12-25 trades/year for sustainable performance in both bull and bear markets.
 
-name = "4h_TRIX_ZeroCross_1dVolumeSpike_ChopRegime_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_Reversal_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,101 +25,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume spike and chop regime
+    # 1d HTF data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d volume spike: current volume > 2.0 * 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_1d > (vol_ma_20 * 2.0)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d Choppiness Index: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    atr_1d = np.zeros(len(df_1d))
-    tr_1d = np.maximum(df_1d['high'].values, np.roll(df_1d['close'].values, 1))
-    tr_1d = np.maximum(tr_1d, np.roll(df_1d['low'].values, 1)) - np.minimum(df_1d['low'].values, np.roll(df_1d['close'].values, 1))
-    tr_1d = np.maximum(tr_1d, np.roll(df_1d['high'].values, 1)) - np.minimum(df_1d['low'].values, np.roll(df_1d['high'].values, 1))
-    tr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first TR
+    # Williams %R calculation (14-period) on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    chop_denom = highest_high_14 - lowest_low_14
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
-    chop_1d = 100 * np.log10(sum_atr_14 / chop_denom) / np.log10(14)
-    chop_1d = np.where(np.isnan(chop_1d), 50.0, chop_1d)  # fill NaN with neutral
+    # Extreme levels: oversold < -80, overbought > -20
+    # Reversal conditions: Williams %R crosses back above -80 (from below) for long
+    #                      Williams %R crosses back below -20 (from above) for short
+    williams_r_prev = np.roll(williams_r, 1)
+    williams_r_prev[0] = np.nan
     
-    chop_regime_trending = chop_1d < 38.2   # trending regime
-    chop_regime_ranging = chop_1d > 61.8    # ranging regime
-    chop_regime_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_trending)
-    chop_regime_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_ranging)
+    # Bullish reversal: was oversold (< -80) and now crossing above -80
+    bullish_reversal = (williams_r_prev <= -80) & (williams_r > -80)
+    # Bearish reversal: was overbought (> -20) and now crossing below -20
+    bearish_reversal = (williams_r_prev >= -20) & (williams_r < -20)
     
-    # TRIX(9) on 4h close: triple EMA, then percent change
-    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = pd.Series(ema3).pct_change(periods=1) * 100  # percent change
-    trix = np.nan_to_num(trix, nan=0.0)
-    
-    # TRIX zero-line cross signals
-    trix_cross_up = (trix > 0) & (np.roll(trix, 1) <= 0)   # crossed above zero
-    trix_cross_down = (trix < 0) & (np.roll(trix, 1) >= 0) # crossed below zero
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(30, 20)  # TRIX needs ~30 bars for stability, plus 1d indicators
+    start_idx = max(50, lookback)  # Need sufficient history for EMA50 and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(volume_spike_1d_aligned[i]) or 
-            np.isnan(chop_regime_trending_aligned[i]) or np.isnan(chop_regime_ranging_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(williams_r_prev[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_spike = volume_spike_1d_aligned[i]
-        chop_trend = chop_regime_trending_aligned[i]
-        chop_range = chop_regime_ranging_aligned[i]
-        trix_up = trix_cross_up[i]
-        trix_down = trix_cross_down[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Volume confirmation
+        vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: TRIX crosses above zero, volume spike, trending regime
-            if trix_up and vol_spike and chop_trend:
+            # Long: bullish reversal from oversold, volume spike, not in strong downtrend
+            if bullish_reversal[i] and vol_spike and not downtrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero, volume spike, trending regime
-            elif trix_down and vol_spike and chop_trend:
+            # Short: bearish reversal from overbought, volume spike, not in strong uptrend
+            elif bearish_reversal[i] and vol_spike and not uptrend:
                 signals[i] = -0.25
                 position = -1
-            # Mean reversion in ranging regime: TRIX extremes
-            elif chop_range:
-                if trix < -2.0 and vol_spike:  # oversold, mean reversion long
-                    signals[i] = 0.20
-                    position = 1
-                elif trix > 2.0 and vol_spike:  # overbought, mean reversion short
-                    signals[i] = -0.20
-                    position = -1
-                else:
-                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on TRIX cross below zero or loss of momentum
-            if trix_down or (chop_range and trix > 0.5):  # exit ranging long on mean reversion
+            # Exit on bearish reversal or trend reversal to downtrend
+            if bearish_reversal[i] or downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on TRIX cross above zero or loss of momentum
-            if trix_up or (chop_range and trix < -0.5):  # exit ranging short on mean reversion
+            # Exit on bullish reversal or trend reversal to uptrend
+            if bullish_reversal[i] or uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
