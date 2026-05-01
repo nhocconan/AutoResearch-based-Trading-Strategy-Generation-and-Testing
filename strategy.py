@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 1d trend filter (price > 50 EMA) and volume spike confirmation.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
 # Uses 1d EMA50 for trend alignment (HTF direction) to capture major bull/bear regimes and 1h volume spike for precise entry timing.
 # Long when price breaks above R3, above 1d EMA50, and volume > 2.0x 20-period average (strict confirmation).
 # Short when price breaks below S3, below 1d EMA50, and volume > 2.0x 20-period average.
