@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses Camarilla R3/S3 levels from 1d pivots for breakout entries, 1d EMA34 for trend alignment,
-# and volume spike (>2.0x 20-bar MA) for confirmation. Designed for 6h timeframe to achieve
+# and volume spike (>2.0x 20-bar MA) for confirmation. Designed for 12h timeframe to achieve
 # 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee drag.
 # Works in both bull and bear markets via trend filter and tight entry conditions.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume on 6h
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 12h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 2.0)
     
@@ -76,7 +76,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # 6h Camarilla R3/S3 breakout conditions
+        # 12h Camarilla R3/S3 breakout conditions
         breakout_r3 = curr_high > camarilla_r3_aligned[i]  # Break above 1d R3
         breakdown_s3 = curr_low < camarilla_s3_aligned[i]  # Break below 1d S3
         
