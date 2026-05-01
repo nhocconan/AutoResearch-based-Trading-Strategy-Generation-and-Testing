@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d ADX regime filter and volume spike confirmation
-# Camarilla pivot levels provide precise intraday support/resistance from prior 1d range
-# Breakout above H3 or below L3 with volume spike indicates institutional participation
-# 1d ADX > 25 filters for trending markets, avoids false breakouts in ranging conditions
-# Designed for low trade frequency: ~12-25 trades/year per symbol with 0.25 sizing
-# Works in bull/bear markets by following breakout direction with volume confirmation
+# Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation
+# Trades breakouts at Camarilla H3 (resistance) for longs and L3 (support) for shorts
+# Only trades in direction of 1w EMA50 trend to avoid counter-trend whipsaws
+# Volume confirmation > 1.8x 20-period EMA ensures institutional participation
+# Designed for very low trade frequency: ~8-15 trades/year per symbol with 0.30 sizing
+# Works in bull/bear markets by following the 1w trend direction via EMA50
 
-name = "12h_Camarilla_H3L3_Breakout_1dADX_Regime_Volume_v1"
-timeframe = "12h"
+name = "1d_Camarilla_H3L3_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,116 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ADX regime filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w HTF data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Calculate 1d ADX for regime filter (trending vs ranging)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, period)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Camarilla pivot levels from prior 1d
-    # H3 = close + 1.1*(high - low)/2
-    # L3 = close - 1.1*(high - low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation: volume > 1.5 * 20-period EMA
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ema_20)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(40, 30, 20)  # Need 1d ADX, Camarilla levels, volume EMA
+    # Start after warmup (need enough data for calculations)
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending = adx_1d_aligned[i] > 25
+        # Calculate Camarilla levels for today (using yesterday's OHLC)
+        if i == 0:
+            signals[i] = 0.0
+            continue
+            
+        # Yesterday's OHLC for Camarilla calculation
+        y_high = high[i-1]
+        y_low = low[i-1]
+        y_close = close[i-1]
+        
+        # Camarilla levels
+        rng = y_high - y_low
+        if rng <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # H3 and L3 levels (most important for breakouts)
+        h3 = y_close + (rng * 1.1 / 4)
+        l3 = y_close - (rng * 1.1 / 4)
+        
+        # Volume confirmation: volume > 1.8 * 20-period EMA
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+            volume_spike = volume[i] > (1.8 * vol_ma_20)
+        else:
+            volume_spike = False
+        
+        # Trend filter: only trade in direction of 1w EMA50
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if trending:
-                # Long: break above H3 with volume spike
-                if close[i] > camarilla_h3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
+            if uptrend:
+                # Long: price breaks above H3 with volume spike
+                if close[i] > h3 and volume_spike:
+                    signals[i] = 0.30
                     position = 1
-                # Short: break below L3 with volume spike
-                elif close[i] < camarilla_l3_aligned[i] and volume_spike[i]:
-                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            elif downtrend:
+                # Short: price breaks below L3 with volume spike
+                if close[i] < l3 and volume_spike:
+                    signals[i] = -0.30
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid ranging markets
+                signals[i] = 0.0  # Avoid sideways markets
         
         elif position == 1:  # Long position
-            # Exit: price returns below H3 (failed breakout) or close below L3
-            if close[i] < camarilla_h3_aligned[i] or close[i] < camarilla_l3_aligned[i]:
+            # Exit: price closes below yesterday's close (mean reversion)
+            if close[i] < y_close:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: price returns above L3 (failed breakdown) or close above H3
-            if close[i] > camarilla_l3_aligned[i] or close[i] > camarilla_h3_aligned[i]:
+            # Exit: price closes above yesterday's close (mean reversion)
+            if close[i] > y_close:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
