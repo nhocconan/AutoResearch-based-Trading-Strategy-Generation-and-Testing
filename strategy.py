@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend and volume spike.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend and volume spike.
 # Long when price breaks above Camarilla R3 AND 1d EMA34 rising AND volume > 2x 20-bar average.
 # Short when price breaks below Camarilla S3 AND 1d EMA34 falling AND volume > 2x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe with tight entries.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture medium-term breakouts.
 # Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via 1d EMA34 slope filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,22 +41,32 @@ def generate_signals(prices):
     ema_34_rising = ema_34_slope > 0
     ema_34_falling = ema_34_slope < 0
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Need previous day's high, low, close for today's levels
-    prev_high = df_1d['high'].shift(1).values  # previous day's high
-    prev_low = df_1d['low'].shift(1).values     # previous day's low
-    prev_close = df_1d['close'].shift(1).values # previous day's close
+    # Calculate Camarilla pivot levels from previous day (using daily data)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6), R1 = C + ((H-L)*1.1/12)
+    #          S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    # where C = (H+L+Close)/3 of previous day
+    # We need to shift the daily data by 1 to get previous day's values
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align to LTF (4h) with 1-bar delay for completed previous day
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = prev_close_aligned + (prev_high_aligned - prev_low_aligned) * 1.1 / 4
-    camarilla_s3 = prev_close_aligned - (prev_high_aligned - prev_low_aligned) * 1.1 / 4
+    # Calculate pivot point (CP)
+    cp = (prev_high + prev_low + prev_close) / 3.0
+    # Calculate range
+    range_hl = prev_high - prev_low
     
-    # Volume confirmation: current 4h volume > 2x 20-period average
+    # Camarilla levels
+    r3 = cp + (range_hl * 1.1 / 4.0)  # R3 level
+    s3 = cp - (range_hl * 1.1 / 4.0)  # S3 level
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: current 6h volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,39 +75,34 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 4h timeframe
+        # Session filter: trade all sessions for 6h timeframe
         hour = hours[i]
         
-        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
+        
+        if vol_ma[i] <= 0:
+            signals[i] = 0.0
+            continue
+            
+        volume_confirm = volume[i] > (vol_ma[i] * 2.0)
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_vol = volume[i]
-        curr_vol_ma = vol_ma[i]
-        
-        if curr_vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-            
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)
-        
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3[i]  # break above R3
-        breakout_down = curr_low < camarilla_s3[i]  # break below S3
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
             # Long: breakout above Camarilla R3 AND 1d EMA34 rising AND volume confirmation
-            if (breakout_up and 
+            if (curr_high > r3_aligned[i] and 
                 ema_34_rising[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
             # Short: breakout below Camarilla S3 AND 1d EMA34 falling AND volume confirmation
-            elif (breakout_down and 
+            elif (curr_low < s3_aligned[i] and 
                   ema_34_falling[i] and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -107,7 +112,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: price crosses below Camarilla S3 (stoploss) OR 1d EMA34 falls (trend change)
-            if (curr_low < camarilla_s3[i] or 
+            if (curr_low < s3_aligned[i] or 
                 ema_34_falling[i]):
                 signals[i] = 0.0
                 position = 0
@@ -116,7 +121,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: price crosses above Camarilla R3 (stoploss) OR 1d EMA34 rises (trend change)
-            if (curr_high > camarilla_r3[i] or 
+            if (curr_high > r3_aligned[i] or 
                 ema_34_rising[i]):
                 signals[i] = 0.0
                 position = 0
