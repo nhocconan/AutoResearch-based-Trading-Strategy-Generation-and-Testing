@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX Regime + Volume Confirmation
-# Uses 6h Elder Ray (Bull Power/Bear Power) to measure buying/selling pressure
-# 1d ADX(20) for regime filter: ADX>25 = trending (trade with momentum), ADX<20 = range (mean revert)
-# Volume spike confirmation: current volume > 2.0 * 20-period EMA
-# In trending regime: long when Bull Power > 0 and rising, short when Bear Power < 0 and falling
-# In ranging regime: mean revert at Bollinger Bands (20,2.0) with volume confirmation
-# Designed for low frequency (50-150 trades over 4 years) with clear structure and regime adaptation
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d ADX regime filter
+# Uses 1d ADX(14) to filter regime: ADX>25 = trending (trade breakouts), ADX<20 = range (avoid)
+# Donchian channel from 4h: upper=max(high,20), lower=min(low,20)
+# Breakout above upper with volume spike = long, breakdown below lower with volume spike = short
+# Volume spike defined as current volume > 1.5 * 20-period EMA
+# Designed for low frequency (75-200 trades over 4 years) with clear structure
+# Works in bull (trend continuation) and bear (mean reversion from extremes via regime filter)
 
-name = "6h_ElderRay_1dADX_Regime_Volume_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolume_1dADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,12 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for regime filter (ADX)
+    # 1d HTF data for volume spike and ADX regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX(20) for regime filter
+    # Calculate 1d volume EMA(20) for spike detection
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ema_20)
+    
+    # 1d ADX(14) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -60,7 +64,7 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 20
+    tr_period = 14
     tr_smoothed = wilders_smoothing(tr, tr_period)
     dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
     dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
@@ -75,31 +79,33 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, tr_period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 6h Bollinger Bands (20,2.0) for ranging regime mean reversion
-    close_s = pd.Series(close)
-    sma_20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
+    # 4h Donchian channel (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i >= window - 1:
+                result[i] = np.max(arr[i-window+1:i+1])
+        return result
     
-    # 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i >= window - 1:
+                result[i] = np.min(arr[i-window+1:i+1])
+        return result
     
-    # 6h volume spike filter: volume > 2.0 * 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    donchian_upper = rolling_max(high, 20)
+    donchian_lower = rolling_min(low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and EMA13
+    start_idx = max(34, 20)  # Need ADX and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
@@ -108,44 +114,28 @@ def generate_signals(prices):
         ranging = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
+            # Only trade in trending regime (ADX>25) - avoid ranging markets
             if trending:
-                # Trending regime: trade with momentum using Elder Ray
-                # Long: Bull Power > 0 and rising (increasing buying pressure)
-                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_spike[i]:
+                # Long: Break above Donchian upper with volume spike
+                if close[i] > donchian_upper[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Bear Power < 0 and falling (increasing selling pressure)
-                elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif ranging:
-                # Ranging regime: mean revert at Bollinger Bands with volume confirmation
-                # Long: price touches lower BB with volume spike (oversold bounce)
-                if close[i] <= lower_bb[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price touches upper BB with volume spike (overbought rejection)
-                elif close[i] >= upper_bb[i] and volume_spike[i]:
+                # Short: Break below Donchian lower with volume spike
+                elif close[i] < donchian_lower[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid transition regimes (20 <= ADX <= 25)
+                signals[i] = 0.0  # Avoid ranging and transition regimes
         
         elif position == 1:  # Long position
-            # Exit conditions
+            # Exit conditions: price returns to Donchian lower or opposite breakout
             exit_long = False
-            if trending:
-                # Exit long when Bull Power turns negative (buying pressure gone)
-                if bull_power[i] <= 0:
-                    exit_long = True
-            elif ranging:
-                # Exit long when price reaches middle BB or opposite BB with volume
-                if close[i] >= sma_20[i] or (close[i] >= upper_bb[i] and volume_spike[i]):
-                    exit_long = True
+            if close[i] <= donchian_lower[i]:  # Return to Donchian lower
+                exit_long = True
+            elif close[i] < donchian_lower[i] and volume_spike[i]:  # Reverse breakout
+                exit_long = True
             
             if exit_long:
                 signals[i] = 0.0
@@ -154,16 +144,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
+            # Exit conditions: price returns to Donchian upper or opposite breakout
             exit_short = False
-            if trending:
-                # Exit short when Bear Power turns positive (selling pressure gone)
-                if bear_power[i] >= 0:
-                    exit_short = True
-            elif ranging:
-                # Exit short when price reaches middle BB or opposite BB with volume
-                if close[i] <= sma_20[i] or (close[i] <= lower_bb[i] and volume_spike[i]):
-                    exit_short = True
+            if close[i] >= donchian_upper[i]:  # Return to Donchian upper
+                exit_short = True
+            elif close[i] > donchian_upper[i] and volume_spike[i]:  # Reverse breakout
+                exit_short = True
             
             if exit_short:
                 signals[i] = 0.0
