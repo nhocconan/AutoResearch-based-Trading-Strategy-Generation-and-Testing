@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar MA)
-# Camarilla pivot levels provide high-probability intraday reversal/breakout zones, 1d EMA34 filters trend alignment
-# Volume spike confirms institutional participation. Discrete sizing (0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar volume MA)
+# Donchian breakout captures momentum, 1d EMA34 filters counter-trend noise (stronger HTF filter), volume spike >2x confirms strong participation
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) when aligned with higher timeframe trend
+# Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,85 +24,69 @@ def generate_signals(prices):
     
     # 1d HTF data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA(34) on 1d close
     ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Need to resample to daily OHLC first (using actual Binance 1d data)
-    df_1d_ohlc = get_htf_data(prices, '1d')[['open', 'high', 'low', 'close']].copy()
-    if len(df_1d_ohlc) < 2:
-        return np.zeros(n)
+    # Donchian channels (20-period) on 4h data
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels for each 1d bar: R3, R2, R1, PP, S1, S2, S3
-    # Camarilla formulas based on previous day's range
-    prev_close = df_1d_ohlc['close'].shift(1).values
-    prev_high = df_1d_ohlc['high'].shift(1).values
-    prev_low = df_1d_ohlc['low'].shift(1).values
-    
-    # Avoid look-ahead: use only previous completed 1d bar
-    range_ = prev_high - prev_low
-    camarilla_pp = prev_close
-    camarilla_r3 = camarilla_pp + (range_ * 1.1 / 4)
-    camarilla_s3 = camarilla_pp - (range_ * 1.1 / 4)
-    
-    # Align Camarilla levels to 12h timeframe (using previous 1d bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_s3)
-    
-    # Volume confirmation: current volume > 1.8 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average volume (stricter filter)
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.8)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 20  # Need 20 for volume MA
+    start_idx = 34  # Need 34 for 1d EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(high_ma_20[i]) or 
+            np.isnan(low_ma_20[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
-        # Camarilla breakout conditions
-        long_breakout = curr_close > camarilla_r3_aligned[i]
-        short_breakout = curr_close < camarilla_s3_aligned[i]
+        # Donchian breakout conditions
+        upper_break = curr_close > high_ma_20[i-1]  # Break above previous period's high
+        lower_break = curr_close < low_ma_20[i-1]   # Break below previous period's low
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3, above 1d EMA34, volume spike
-            if long_breakout and curr_close > ema_1d_34_aligned[i] and vol_spike:
+            # Long: Price breaks above upper Donchian, above 1d EMA34, volume spike
+            if upper_break and curr_close > ema_1d_34_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3, below 1d EMA34, volume spike
-            elif short_breakout and curr_close < ema_1d_34_aligned[i] and vol_spike:
+            # Short: Price breaks below lower Donchian, below 1d EMA34, volume spike
+            elif lower_break and curr_close < ema_1d_34_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price below Camarilla S3 or below 1d EMA34
-            if curr_close < camarilla_s3_aligned[i] or curr_close < ema_1d_34_aligned[i]:
+            # Exit on price below lower Donchian or below 1d EMA34
+            if curr_close < low_ma_20[i] or curr_close < ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on price above Camarilla R3 or above 1d EMA34
-            if curr_close > camarilla_r3_aligned[i] or curr_close > ema_1d_34_aligned[i]:
+            # Exit on price above upper Donchian or above 1d EMA34
+            if curr_close > high_ma_20[i] or curr_close > ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
