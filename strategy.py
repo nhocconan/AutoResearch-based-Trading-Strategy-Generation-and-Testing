@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX18 trend filter and volume confirmation
-# Uses 1d ADX(14) > 18 as trend filter (trending market) + Camarilla breakout from prior 12h bar
-# Volume spike (2.0x 20-period MA) confirms participation
-# Works in bull/bear via trend filter - only trades in strong trends, avoids chop
-# Designed for low frequency (50-150 trades over 4 years) to minimize fee drag on 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume confirmation and regime filter
+# Uses Donchian channel breakout from prior 4h bar for entry
+# 1d ATR(14) > 1.5x 50-period MA as volatility expansion filter (avoids chop)
+# Volume spike (2.0x 20-period MA) confirms institutional participation
+# Works in bull/bear via volatility filter - only trades during high volatility regimes
+# Designed for low frequency (75-200 trades over 4 years) to minimize fee drag on 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1dADX18_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATR_VolumeSpike_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,12 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ADX trend filter
+    # 1d HTF data for ATR and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX(14) calculation (trend filter)
+    # 1d ATR(14) calculation (volatility filter)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,15 +41,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with indices
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
+    # ATR using Wilder's smoothing
     def wilders_smoothing(x, period):
         result = np.full_like(x, np.nan)
         if len(x) >= period:
@@ -58,89 +51,82 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 14
-    tr_smoothed = wilders_smoothing(tr, tr_period)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
+    atr_period = 14
+    atr = wilders_smoothing(tr, atr_period)
     
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
-    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
+    # 1d ATR 50-period moving average
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    # 1d ATR aligned to 4h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    def wilders_smoothing_dx(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            first_val = np.nansum(x[1:period+1])
-            result[period] = first_val
-            for i in range(period+1, len(x)):
-                result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
+    # Volatility filter: current ATR > 1.5 * 50-period ATR MA (expanding volatility)
+    volatility_expanding = atr_aligned > (atr_ma_50_aligned * 1.5)
     
-    adx = wilders_smoothing_dx(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume confirmation: 1d volume > 2.0 * 20-period average volume
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    volume_spike = volume_1d_aligned > (volume_ma_20_1d_aligned * 2.0)
     
-    # Calculate Camarilla levels from prior 12h bar (using prior bar's HLC)
+    # Calculate Donchian levels from prior 4h bar (using prior bar's HH/LL)
+    # Donchian(20) = highest high/lowest low of last 20 periods
+    def donchian_channel(high_arr, low_arr, period):
+        highest_high = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        return highest_high, lowest_low
+    
+    # Use prior bar's data to avoid look-ahead
     prior_high = np.concatenate([[np.nan], high[:-1]])
     prior_low = np.concatenate([[np.nan], low[:-1]])
-    prior_close = np.concatenate([[np.nan], close[:-1]])
     
-    hl_range = prior_high - prior_low
-    camarilla_r3 = prior_close + hl_range * 1.1 / 4
-    camarilla_s3 = prior_close - hl_range * 1.1 / 4
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    donchian_high, donchian_low = donchian_channel(prior_high, prior_low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(34, 20)  # Need ADX and volume MA20
+    start_idx = max(50, 20)  # Need ATR MA50 and Donchian20
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
-            np.isnan(prior_close[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(volatility_expanding[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 18 indicates trending market
-        trending = adx_aligned[i] > 18
-        
         # Breakout conditions
-        breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
-        breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
+        breakout_long = close[i] > donchian_high[i]  # Price breaks above Donchian high
+        breakout_short = close[i] < donchian_low[i]  # Price breaks below Donchian low
         
-        # Volume confirmation
-        vol_spike = volume_spike[i]
+        # Combined filters
+        vol_ok = volatility_expanding[i]
+        vol_spike_ok = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R3 with volume spike and trending market
-            if breakout_long and vol_spike and trending:
+            # Long: Breakout above Donchian high with volatility expansion and volume spike
+            if breakout_long and vol_ok and vol_spike_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below S3 with volume spike and trending market
-            elif breakout_short and vol_spike and trending:
+            # Short: Breakout below Donchian low with volatility expansion and volume spike
+            elif breakout_short and vol_ok and vol_spike_ok:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below prior bar's low or ADX weakening (<12)
-            if close[i] < prior_low[i] or adx_aligned[i] < 12:
+            # Exit on close below Donchian low or volatility contraction (<1.0x ATR MA)
+            if close[i] < donchian_low[i] or atr_aligned[i] < (atr_ma_50_aligned[i] * 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above prior bar's high or ADX weakening (<12)
-            if close[i] > prior_high[i] or adx_aligned[i] < 12:
+            # Exit on close above Donchian high or volatility contraction (<1.0x ATR MA)
+            if close[i] > donchian_high[i] or atr_aligned[i] < (atr_ma_50_aligned[i] * 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
