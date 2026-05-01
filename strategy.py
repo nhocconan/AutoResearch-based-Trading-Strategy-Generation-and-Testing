@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d ADX regime filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; reversals from extremes work in both bull/bear markets
-# 1d ADX > 25 filters for trending markets, avoiding false reversals in chop
-# Volume spike confirms institutional participation behind the reversal
-# Designed for low frequency (50-150 trades over 4 years) to minimize fee drag
-# Uses discrete position sizing (0.25) to reduce churn
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout zones
+# 1d ADX > 25 ensures we trade only in trending markets, avoiding chop
+# Volume spike confirms institutional participation behind the move
+# Designed for very low frequency (50-150 trades over 4 years) to minimize fee drag
+# Works in bull/bear via trend filter + price structure logic
 
-name = "6h_WilliamsR_Extreme_Reversal_1dADX25_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -75,10 +75,16 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Williams %R (14-period) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Camarilla levels from prior 12h bar (using prior bar's HLC)
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    #          S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    prior_high = np.concatenate([[np.nan], high[:-1]])  # prior bar's high
+    prior_low = np.concatenate([[np.nan], low[:-1]])    # prior bar's low
+    prior_close = np.concatenate([[np.nan], close[:-1]]) # prior bar's close
+    
+    hl_range = prior_high - prior_low
+    camarilla_r3 = prior_close + hl_range * 1.1 / 4
+    camarilla_s3 = prior_close - hl_range * 1.1 / 4
     
     # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,25 +94,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(30, 20, 14)  # Need 1d ADX, volume MA20, and Williams %R
+    start_idx = max(30, 20)  # Need 1d ADX and volume MA20
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_20[i]) or highest_high[i] == lowest_low[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
+            np.isnan(prior_close[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R extreme conditions
-        oversold = williams_r[i] <= -80  # Oversold condition
-        overbought = williams_r[i] >= -20  # Overbought condition
-        
-        # Reversal signals: turning up from oversold or turning down from overbought
-        # Need previous bar to confirm the extreme was held
-        prev_oversold = williams_r[i-1] <= -80
-        prev_overbought = williams_r[i-1] >= -20
-        
-        bullish_reversal = oversold and not prev_oversold and williams_r[i] > williams_r[i-1]
-        bearish_reversal = overbought and not prev_overbought and williams_r[i] < williams_r[i-1]
+        # Breakout conditions
+        breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
+        breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
         
         # Trend filter: ADX > 25 indicates trending market
         trending = adx_aligned[i] > 25
@@ -115,28 +113,28 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish reversal from oversold with volume spike and trend
-            if bullish_reversal and vol_spike and trending:
+            # Long: Breakout above R3 with volume spike and trend
+            if breakout_long and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish reversal from overbought with volume spike and trend
-            elif bearish_reversal and vol_spike and trending:
+            # Short: Breakout below S3 with volume spike and trend
+            elif breakout_short and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on bearish reversal or trend weakening
-            if bearish_reversal or adx_aligned[i] < 20:
+            # Exit on close below prior bar's low or trend weakening
+            if close[i] < prior_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on bullish reversal or trend weakening
-            if bullish_reversal or adx_aligned[i] < 20:
+            # Exit on close above prior bar's high or trend weakening
+            if close[i] > prior_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
