@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d volume confirmation and 1w ADX > 25 regime filter
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) 
-# followed by reversal provide high-probability mean reversion entries in ranging markets
+# Hypothesis: 12h Williams %R extreme reversal with 1d volume confirmation and 1w ADX > 20 regime filter
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) signal potential reversals
 # Volume confirmation ensures institutional participation, reducing false signals
-# 1w ADX > 25 ensures we only trade in trending markets, avoiding chop where mean reversion fails
-# Designed for low frequency: ~15-30 trades/year per symbol with discrete sizing
-# Works in bull/bear: ADX filter avoids ranging markets, volume confirms institutional participation
+# 1w ADX > 20 ensures we avoid choppy markets, focusing on trending environments where reversals are more meaningful
+# Designed for low frequency: ~12-25 trades/year per symbol with discrete sizing (0.25)
+# Works in bull/bear: ADX filter avoids ranging markets, volume confirms breakout legitimacy
 
-name = "6h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,22 +34,22 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Handle division by zero
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Williams %R to 6h timeframe (wait for 1d bar to close)
+    # Align Williams %R to 12h timeframe (wait for 1d bar to close)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for fewer trades)
+    # 1d volume confirmation: volume > 1.5 * 20-period EMA
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_confirm = volume > (1.5 * vol_ema_20)
     
-    # 1w ADX(20) for regime filter
+    # 1w ADX(14) for regime filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -80,7 +79,7 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 20
+    tr_period = 14
     tr_smoothed = wilders_smoothing(tr, tr_period)
     dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
     dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
@@ -99,7 +98,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and volume EMA
+    start_idx = max(34, 20)  # Need ADX and Williams %R
     
     for i in range(start_idx, n):
         if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
@@ -107,21 +106,17 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending = adx_aligned[i] > 25
+        # Regime filter: only trade when ADX > 20 (avoid choppy markets)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Williams %R < -90 (oversold) and reversing up with volume spike
-                if (williams_r_aligned[i] < -90 and 
-                    williams_r_aligned[i] > williams_r_aligned[i-1] and 
-                    volume_spike[i]):
+                # Long: Williams %R crosses above -80 from below (oversold reversal) with volume confirmation
+                if williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and volume_confirm[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R > -10 (overbought) and reversing down with volume spike
-                elif (williams_r_aligned[i] > -10 and 
-                      williams_r_aligned[i] < williams_r_aligned[i-1] and 
-                      volume_spike[i]):
+                # Short: Williams %R crosses below -20 from above (overbought reversal) with volume confirmation
+                elif williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and volume_confirm[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -130,16 +125,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: Williams %R > -50 (moving out of oversold) or opposite extreme
-            if williams_r_aligned[i] > -50 or williams_r_aligned[i] > -10:
+            # Exit: Williams %R crosses above -20 (overbought) or opposite signal
+            if williams_r_aligned[i] >= -20 or (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and volume_confirm[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R < -50 (moving out of overbought) or opposite extreme
-            if williams_r_aligned[i] < -50 or williams_r_aligned[i] < -90:
+            # Exit: Williams %R crosses below -80 (oversold) or opposite signal
+            if williams_r_aligned[i] <= -80 or (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and volume_confirm[i]):
                 signals[i] = 0.0
                 position = 0
             else:
