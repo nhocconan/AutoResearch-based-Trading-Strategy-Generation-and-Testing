@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + volume confirmation + 1w chop regime filter.
-# Long when price breaks above Donchian(20) high with volume > 1.8x 20-bar average and 1w chop > 61.8 (range).
-# Short when price breaks below Donchian(20) low with volume confirmation and 1w chop > 61.8.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Session filter: 08-20 UTC to reduce noise. Target: 15-25 trades/year to minimize fee drag.
-# Works in both bull and bear: Donchian breakouts capture strong moves, chop filter avoids whipsaws in ranges.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter.
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 and rising (2-bar momentum) AND 1d ADX < 25 (range regime).
+# Short when Bear Power < 0 and falling (2-bar momentum) AND 1d ADX < 25.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Works in bull/bear: ADX < 25 filters out strong trends where Elder Ray fails, focuses on range/mean-reversion.
 
-name = "1d_Donchian_20_Volume_1wChop_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_Range_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +23,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Pre-compute session hours for 08-20 UTC filter
+    # Pre-compute session hours for 08-20 UTC filter (optional, can be removed if too restrictive)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Calculate ATR(14) for stoploss
@@ -34,83 +34,97 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Load 1w data ONCE before loop for chop regime (HTF filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Elder Ray components
+    bull_power = high - ema13  # Higher = stronger bulls
+    bear_power = low - ema13   # Lower (more negative) = stronger bears
+    
+    # Elder Ray momentum (2-bar change)
+    bull_power_mom = bull_power - np.roll(bull_power, 2)
+    bear_power_mom = bear_power - np.roll(bear_power, 2)
+    # Handle first two bars
+    bull_power_mom[:2] = 0
+    bear_power_mom[:2] = 0
+    
+    # Load 1d data ONCE before loop for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate 1w Chop Index(14) - same formula as before
-    def true_range(h, l, c):
-        tr1 = h[1:] - l[1:]
-        tr2 = np.abs(h[1:] - np.roll(c, 1)[1:])
-        tr3 = np.abs(l[1:] - np.roll(c, 1)[1:])
-        tr_first = np.max([h[0] - l[0], np.abs(h[0] - c[0]), np.abs(l[0] - c[0])])
-        return np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1d ADX(14) for regime filter: <25 = range/weak trend (good for Elder Ray mean reversion)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr_chop_1w = true_range(high_1w, low_1w, close_1w)
-    atr_14_1w = pd.Series(tr_chop_1w).rolling(window=14, min_periods=14).sum().values
-    highest_high_14_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_14_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop_1w = 100 * np.log10(atr_14_1w / (highest_high_14_1w - lowest_low_14_1w)) / np.log10(14)
+    # True Range
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
     
-    # Align 1w chop to 1d
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # First bar
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    dm_plus_1d = pd.Series(dm_plus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    dm_minus_1d = pd.Series(dm_minus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    
+    # Directional Indicators
+    di_plus_1d = 100 * dm_plus_1d / (atr_1d + 1e-10)
+    di_minus_1d = 100 * dm_minus_1d / (atr_1d + 1e-10)
+    
+    # DX and ADX
+    dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d + 1e-10)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    
+    # Align 1d ADX to 6h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 20  # warmup for Donchian
+    start_idx = 20  # warmup for Elder Ray and ATR
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
+        # Optional session filter: 08-20 UTC (uncomment if needed)
+        # if not (8 <= hours[i] <= 20):
+        #     signals[i] = 0.0
+        #     continue
         
-        if (np.isnan(atr[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(bull_power_mom[i]) or np.isnan(bear_power_mom[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 1.8x 20-bar average (stricter to reduce trades)
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
-        if vol_ma <= 0:
-            volume_confirm = False
-        else:
-            volume_confirm = curr_volume > (vol_ma * 1.8)
-        
-        # Donchian breakout conditions
-        breakout_up = curr_high > highest_20[i]  # break above upper band
-        breakout_down = curr_low < lowest_20[i]  # break below lower band
-        
-        # Chop regime filter: only trade in range market (chop > 61.8)
-        chop_filter = chop_1w_aligned[i] > 61.8
+        # Regime filter: only trade in range/weak trend market (ADX < 25)
+        regime_filter = adx_1d_aligned[i] < 25
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND volume confirmation AND chop regime
-            if (breakout_up and 
-                volume_confirm and 
-                chop_filter):
+            # Long: Bull Power > 0 AND rising momentum AND range regime
+            if (bull_power[i] > 0 and 
+                bull_power_mom[i] > 0 and 
+                regime_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Donchian breakout down AND volume confirmation AND chop regime
-            elif (breakout_down and 
-                  volume_confirm and 
-                  chop_filter):
+            # Short: Bear Power < 0 AND falling momentum AND range regime
+            elif (bear_power[i] < 0 and 
+                  bear_power_mom[i] < 0 and 
+                  regime_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -118,14 +132,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.5*ATR (wider to avoid premature exits)
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR chop regime ends (trending)
-            elif (curr_low <= highest_20[i] and curr_low >= lowest_20[i]) or \
-                 chop_1w_aligned[i] <= 61.8:
+            # Exit: Elder Ray signals weaken (Bull Power <= 0 or momentum negative) OR regime shifts to strong trend
+            elif (bull_power[i] <= 0 or bull_power_mom[i] <= 0) or \
+                 adx_1d_aligned[i] >= 25:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -133,14 +147,14 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.5*ATR
-            if curr_close > entry_price + 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Donchian channel OR chop regime ends (trending)
-            elif (curr_high <= highest_20[i] and curr_high >= lowest_20[i]) or \
-                 chop_1w_aligned[i] <= 61.8:
+            # Exit: Elder Ray signals weaken (Bear Power >= 0 or momentum positive) OR regime shifts to strong trend
+            elif (bear_power[i] >= 0 or bear_power_mom[i] >= 0) or \
+                 adx_1d_aligned[i] >= 25:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
