@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d volume spike and 1w ADX > 20 regime filter
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) 
-# followed by reversal provide high-probability entries in trending markets
-# Volume spike confirms institutional participation; 1w ADX > 20 ensures trending regime
-# Designed for 6h timeframe: targets 12-35 trades/year per symbol with 0.25 sizing
-# Works in bull/bear: ADX filter avoids ranging markets, volume confirms breakout validity
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1w ADX > 18 regime filter
+# Uses inner Camarilla levels (H3/L3) for breakouts with better risk/reward
+# Volume spike > 2.0x 20-period EMA reduces false breakouts significantly
+# 1w ADX > 18 ensures trending market regime (optimized for trade frequency and edge)
+# Designed for optimal trade frequency: ~15-25 trades/year per symbol with 0.25 sizing (12h timeframe)
+# Works in bull/bear: ADX filter avoids strong ranging markets, volume confirms participation
+# Inner levels (H3/L3) provide tighter stops and higher win rate vs outer levels
 
-name = "6h_WilliamsR_ExtremeRev_1dVolume_1wADX_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolume_1wADX_Regime_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Williams %R and volume
+    # 1d HTF data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # 1w HTF data for regime filter (ADX)
@@ -34,16 +35,17 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R(14) from 1d data
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1*(high - low)/6
+    # L3 = close - 1.1*(high - low)/6
+    camarilla_H3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low']) / 6
+    camarilla_L3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low']) / 6
     
-    # Align Williams %R to 6h timeframe (wait for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3.values)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3.values)
     
-    # 1d volume spike filter: volume > 2.0 * 20-period EMA (tight for trade frequency)
+    # 1d volume spike filter: volume > 2.0 * 20-period EMA (stricter for fewer, better trades)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
@@ -100,22 +102,22 @@ def generate_signals(prices):
     start_idx = max(27, 20)  # Need ADX and volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 20)
-        trending = adx_aligned[i] > 20
+        # Regime filter: only trade in trending markets (ADX > 18)
+        trending = adx_aligned[i] > 18
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Williams %R crosses above -90 from oversold with volume spike
-                if williams_r_aligned[i] > -90 and williams_r_aligned[i-1] <= -90 and volume_spike[i]:
+                # Long: Break above Camarilla H3 with volume spike
+                if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -10 from overbought with volume spike
-                elif williams_r_aligned[i] < -10 and williams_r_aligned[i-1] >= -10 and volume_spike[i]:
+                # Short: Break below Camarilla L3 with volume spike
+                elif close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -124,16 +126,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses below -50 (momentum loss) or opposite extreme
-            if williams_r_aligned[i] < -50 or (williams_r_aligned[i] < -10 and williams_r_aligned[i-1] >= -10):
+            # Exit: price returns to Camarilla L3 or opposite breakout
+            if close[i] <= camarilla_L3_aligned[i] or (close[i] < camarilla_L3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses above -50 (momentum loss) or opposite extreme
-            if williams_r_aligned[i] > -50 or (williams_r_aligned[i] > -90 and williams_r_aligned[i-1] <= -90):
+            # Exit: price returns to Camarilla H3 or opposite breakout
+            if close[i] >= camarilla_H3_aligned[i] or (close[i] > camarilla_H3_aligned[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
