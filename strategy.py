@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-# Long when Bull Power > 0 AND price > 1d EMA50 AND volume > 1.5x 20-bar average.
-# Short when Bear Power < 0 AND price < 1d EMA50 AND volume > 1.5x 20-bar average.
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND 1w EMA50 > EMA200 (bullish trend) AND volume > 2.0x 20-bar average.
+# Short when price breaks below Donchian(20) low AND 1w EMA50 < EMA200 (bearish trend) AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Elder Ray measures bull/bear strength relative to EMA13, providing clearer momentum signals than price alone.
-# 1d EMA50 filter ensures alignment with higher timeframe trend, reducing counter-trend trades.
-# Volume confirmation set to 1.5x to avoid choppy market noise while capturing genuine momentum bursts.
-# Primary timeframe: 6h, HTF: 1d for trend and EMA calculation.
+# Weekly EMA filter ensures alignment with higher timeframe momentum, reducing false breakouts.
+# Volume spike threshold set to 2.0x to avoid choppy market noise.
+# Primary timeframe: 12h, HTF: 1w for trend bias.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,39 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA13 and EMA50 on 1d data
-    close_1d = pd.Series(df_1d['close'].values)
-    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA50 and EMA200 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_50 = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200 = close_1w.ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Weekly trend: 1 = bullish (EMA50 > EMA200), -1 = bearish (EMA50 < EMA200), 0 = neutral
+    weekly_trend_raw = np.where(ema_50 > ema_200, 1,
+                                np.where(ema_50 < ema_200, -1, 0))
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_raw)
     
-    # Align 1d EMAs to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Donchian(20) channels from 1d data (more stable than 12h for structure)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_1d_aligned
-    bear_power = low - ema13_1d_aligned
+    # Donchian high: max(high, 20) from previous completed day
+    donchian_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
+    # Donchian low: min(low, 20) from previous completed day
+    donchian_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: current 6h volume > 1.5x 20-bar average
+    # Align Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Volume confirmation: current 12h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMAs and volume MA
+    start_idx = 50  # warmup for Donchian and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or \
-           np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(weekly_trend_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -66,27 +77,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Elder Ray signals
-        bull_power_val = bull_power[i]
-        bear_power_val = bear_power[i]
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_high_aligned[i]  # break above Donchian high
+        breakout_down = curr_low < donchian_low_aligned[i]  # break below Donchian low
         
-        # Trend filter from 1d EMA50
-        uptrend = curr_close > ema50_1d_aligned[i]
-        downtrend = curr_close < ema50_1d_aligned[i]
+        # Weekly trend filter
+        bullish_trend = weekly_trend_aligned[i] == 1
+        bearish_trend = weekly_trend_aligned[i] == -1
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND uptrend AND volume confirmation
-            if (bull_power_val > 0 and 
-                uptrend and 
+            # Long: breakout above Donchian high AND bullish trend AND volume confirmation
+            if (breakout_up and 
+                bullish_trend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND downtrend AND volume confirmation
-            elif (bear_power_val < 0 and 
-                  downtrend and 
+            # Short: breakout below Donchian low AND bearish trend AND volume confirmation
+            elif (breakout_down and 
+                  bearish_trend and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -94,18 +105,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bull Power <= 0 (momentum loss) OR price breaks below 1d EMA50 (trend change)
-            if (bull_power_val <= 0 or 
-                not uptrend):
+            # Exit: price crosses below Donchian low (stoploss) OR weekly trend turns bearish
+            if (curr_low < donchian_low_aligned[i] or 
+                weekly_trend_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bear Power >= 0 (momentum loss) OR price breaks above 1d EMA50 (trend change)
-            if (bear_power_val >= 0 or 
-                not downtrend):
+            # Exit: price crosses above Donchian high (stoploss) OR weekly trend turns bullish
+            if (curr_high > donchian_high_aligned[i] or 
+                weekly_trend_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
