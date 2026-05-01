@@ -49,6 +49,22 @@ def generate_signals(prices):
     vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
+    # Load 4h data ONCE before loop for Donchian channels (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian channels for each 4h bar (using previous completed bar)
+    # Upper channel = max(high of last 20 completed bars)
+    # Lower channel = min(low of last 20 completed bars)
+    high_4h_series = pd.Series(high_4h)
+    low_4h_series = pd.Series(low_4h)
+    upper_channel_4h = high_4h_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower_channel_4h = low_4h_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
@@ -59,7 +75,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
             np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma_12h_aligned[i])):
+            np.isnan(vol_ma_12h_aligned[i]) or
+            np.isnan(upper_channel_4h[i]) or
+            np.isnan(lower_channel_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -78,53 +96,16 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_12h_aligned[i]
         downtrend = curr_close < ema_50_12h_aligned[i]
         
-        # Load 4h data ONCE before loop for Donchian channels
-        df_4h = get_htf_data(prices, '4h')
-        if len(df_4h) < 20:
-            signals[i] = 0.0
-            continue
-        
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        
-        # Calculate Donchian channels for each 4h bar (using previous completed bar)
-        # Upper channel = max(high of last 20 bars)
-        # Lower channel = min(low of last 20 bars)
-        # Use previous completed bars to avoid look-ahead
-        if i < 20:  # Need at least 20 previous 4h bars
-            signals[i] = 0.0
-            continue
-            
-        # Get the index range for the last 20 completed 4h bars
-        # Since we're at 4h bar i, we need bars [i-20, i-1] for calculation
-        start_4h = i - 20
-        end_4h = i - 1
-        
-        if start_4h < 0:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Donchian levels using previous 20 completed bars
-        high_slice = high_4h[start_4h:end_4h+1]
-        low_slice = low_4h[start_4h:end_4h+1]
-        
-        if len(high_slice) < 20:
-            signals[i] = 0.0
-            continue
-            
-        upper_channel = np.max(high_slice)
-        lower_channel = np.min(low_slice)
-        
         if position == 0:  # Flat - look for new entries
             # Long: Donchian breakout up AND volume confirmation AND uptrend
-            if (curr_high > upper_channel and 
+            if (curr_high > upper_channel_4h[i] and 
                 volume_confirm and 
                 uptrend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             # Short: Donchian breakout down AND volume confirmation AND downtrend
-            elif (curr_low < lower_channel and 
+            elif (curr_low < lower_channel_4h[i] and 
                   volume_confirm and 
                   downtrend):
                 signals[i] = -0.25
@@ -140,7 +121,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             # Exit: price re-enters Donchian channels OR trend reverses
-            elif (curr_low >= lower_channel and curr_low <= upper_channel) or \
+            elif (curr_low >= lower_channel_4h[i] and curr_low <= upper_channel_4h[i]) or \
                  (curr_close < ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
@@ -155,7 +136,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             # Exit: price re-enters Donchian channels OR trend reverses
-            elif (curr_high >= lower_channel and curr_high <= upper_channel) or \
+            elif (curr_high >= lower_channel_4h[i] and curr_high <= upper_channel_4h[i]) or \
                  (curr_close > ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
