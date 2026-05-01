@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal + 1d volume confirmation + 1w ADX regime filter
-# Williams %R identifies overbought/oversold conditions with mean reversion tendency
-# Volume spike confirms institutional participation at reversal points
-# 1w ADX > 25 filters for trending regimes to avoid choppy markets
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1w ADX regime filter
+# Donchian breakout provides clear structure with proven edge in crypto
+# Volume spike confirms institutional participation, reducing false breakouts
+# 1w ADX > 25 filters for trending regimes, avoiding whipsaws in ranging markets
 # Designed for low frequency (50-150 trades over 4 years) with discrete sizing
-# Works in both bull and bear: ADX regime avoids ranging, volume confirms legitimacy of reversals
+# Works in both bull and bear: ADX regime filter avoids ranging markets, volume confirms legitimacy
 
-name = "6h_WilliamsR_1dVolume_1wADX_Regime_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolume_1wADX_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,12 +34,9 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Williams %R (14-period) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          -100 * ((highest_high - close) / (highest_high - lowest_low)), 
-                          -50)
+    # Donchian channels (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 1d volume spike filter: volume > 1.5 * 20-period EMA
     vol_series = pd.Series(volume)
@@ -95,7 +92,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 14)  # Need ADX and Williams %R
+    start_idx = max(34, 20)  # Need ADX and Donchian
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
@@ -108,12 +105,12 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # Long: Williams %R oversold (< -80) with volume spike
-                if williams_r[i] < -80 and volume_spike[i]:
+                # Long: Break above Donchian high with volume spike
+                if close[i] > highest_high[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R overbought (> -20) with volume spike
-                elif williams_r[i] > -20 and volume_spike[i]:
+                # Short: Break below Donchian low with volume spike
+                elif close[i] < lowest_low[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
@@ -122,16 +119,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns to neutral (> -50) or opposite extreme
-            if williams_r[i] > -50 or williams_r[i] > -20:
+            # Exit: price returns to Donchian low or opposite breakout
+            if close[i] <= lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral (< -50) or opposite extreme
-            if williams_r[i] < -50 or williams_r[i] < -80:
+            # Exit: price returns to Donchian high or opposite breakout
+            if close[i] >= highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
