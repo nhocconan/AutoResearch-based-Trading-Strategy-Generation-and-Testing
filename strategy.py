@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation (>1.5x 20-bar MA)
-# Uses 1d HTF for stronger trend alignment than 6h alone, reducing whipsaws in ranging markets.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation (>1.5x 20-bar MA)
+# Uses 1d HTF for stronger trend alignment than 12h, reducing whipsaws in ranging markets.
 # Camarilla R3/S3 breakouts capture strong momentum moves. Volume confirmation ensures institutional participation.
 # Discrete sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by requiring breakout alignment with daily trend.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,13 +25,13 @@ def generate_signals(prices):
     
     # 1d HTF data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA(34) on 1d close
     ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 6h timeframe
+    # Align 1d EMA to 12h timeframe
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
     # Camarilla pivot levels from 1d data (using previous 1d bar's OHLC)
@@ -42,7 +43,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
     camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
