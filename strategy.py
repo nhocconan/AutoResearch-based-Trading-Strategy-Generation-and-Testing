@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume spike confirmation.
-# Uses 1d ATR(14) percentile to identify low volatility regimes (chop) where breakouts are more reliable.
-# Long when: price breaks above Donchian upper channel AND volume > 1.5x 20-period MA AND 1d ATR(14) < 30th percentile.
-# Short when: price breaks below Donchian lower channel AND volume > 1.5x 20-period MA AND 1d ATR(14) < 30th percentile.
-# ATR regime filter ensures we only trade breakouts during low volatility, reducing false breakouts in choppy markets.
-# Works in bull (breakouts continue) and bear (breakdowns continue) by following price structure.
-# Target: 12-25 trades/year to minimize fee drag while capturing strong moves.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter.
+# Long when price breaks above Donchian upper band AND volume > 1.5x 20-bar avg AND close > 12h EMA50.
+# Short when price breaks below Donchian lower band AND volume > 1.5x 20-bar avg AND close < 12h EMA50.
+# Uses ATR-based stoploss (signal → 0 when price moves against position by 2*ATR).
+# Discrete sizing 0.25 to balance return and drawdown. Target: 20-50 trades/year.
+# Donchian channels provide objective breakout levels; volume confirms conviction; 12h EMA filters counter-trend trades.
+# Works in bull (breakouts with trend) and bear (breakdowns with trend) by aligning with higher timeframe structure.
 
-name = "12h_Donchian20_1dATRRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeConfirm_12hEMA50_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,62 +28,39 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    # ATR(14)
-    atr_1d = np.full_like(close_1d, np.nan)
-    for i in range(14, len(tr)):
-        if not np.isnan(atr_1d[i-1]):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-        else:
-            atr_1d[i] = np.nanmean(tr[i-13:i+1]) if i >= 13 else np.nan
-    
-    # Calculate 30th percentile of ATR(1d) for regime filter (low volatility)
-    # Use expanding window to avoid look-ahead
-    atr_percentile_30 = np.full_like(atr_1d, np.nan)
-    for i in range(50, len(atr_1d)):  # need sufficient history
-        valid_atr = atr_1d[:i+1][~np.isnan(atr_1d[:i+1])]
-        if len(valid_atr) >= 20:
-            atr_percentile_30[i] = np.percentile(valid_atr, 30)
-    
-    # Align 1d ATR percentile to 12h
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile_30)
-    
-    # Donchian channels (20-period) on 12h data
+    # Donchian(20) channels
     lookback = 20
-    highest_high = np.full_like(close, np.nan)
-    lowest_low = np.full_like(close, np.nan)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    for i in range(lookback-1, len(close)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Volume confirmation: volume > 1.5x 20-bar average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # Volume spike confirmation: volume > 1.5x 20-period MA
-    volume_ma = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
-        volume_ma[i] = np.mean(volume[i-20:i])
-    
-    volume_spike = volume > (volume_ma * 1.5)
+    # ATR(14) for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr2.iloc[0] = np.nan
+    tr3.iloc[0] = np.nan
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = max(lookback, 20, 50)  # warmup for all indicators
+    start_idx = max(lookback, 20, 14) + 5  # warmup
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -101,71 +78,50 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(atr_regime_aligned[i]) or np.isnan(volume_ma[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
-        curr_vol_ma = volume_ma[i]
-        curr_atr_regime = atr_regime_aligned[i]
+        curr_vol_confirm = volume_confirm[i]
+        curr_ema_12h = ema_50_12h_aligned[i]
+        curr_atr = atr[i]
         
-        # Regime filter: only trade when ATR is below 30th percentile (low volatility)
-        low_volatility_regime = curr_atr_regime > 0 and curr_atr_regime < np.percentile(
-            atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 30) if i < len(atr_1d) else False
+        # Donchian breakout conditions
+        breakout_up = curr_close > highest_high[i]
+        breakout_down = curr_close < lowest_low[i]
         
-        # Simplified regime check: use pre-computed percentile
-        if i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]):
-            # Get historical ATR values up to current point for percentile calculation
-            hist_atr = atr_1d[:min(i+1, len(atr_1d))]
-            valid_hist_atr = hist_atr[~np.isnan(hist_atr)]
-            if len(valid_hist_atr) >= 20:
-                regime_threshold = np.percentile(valid_hist_atr, 30)
-                low_volatility_regime = curr_atr_regime < regime_threshold
-            else:
-                low_volatility_regime = False
-        else:
-            low_volatility_regime = False
-        
-        # Volume confirmation
-        vol_confirm = curr_volume > (curr_vol_ma * 1.5) if not np.isnan(curr_vol_ma) else False
-        
-        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: break above upper channel + volume spike + low volatility regime
-            if (curr_close > highest_high[i] and 
-                vol_confirm and 
-                low_volatility_regime):
+            # Long: breakout up AND volume confirmation AND price > 12h EMA50
+            if (breakout_up and 
+                curr_vol_confirm and 
+                curr_close > curr_ema_12h):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel + volume spike + low volatility regime
-            elif (curr_close < lowest_low[i] and 
-                  vol_confirm and 
-                  low_volatility_regime):
+                entry_price = curr_close
+            # Short: breakout down AND volume confirmation AND price < 12h EMA50
+            elif (breakout_down and 
+                  curr_vol_confirm and 
+                  curr_close < curr_ema_12h):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower channel OR ATR regime shifts to high volatility
-            if (curr_close < lowest_low[i] or 
-                (i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]) and
-                 curr_atr_regime > np.percentile(
-                     atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 70) if i < len(atr_1d) else False)):
+            # Stoploss: price moves against position by 2*ATR
+            if curr_close < entry_price - 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper channel OR ATR regime shifts to high volatility
-            if (curr_close > highest_high[i] or 
-                (i < len(atr_regime_aligned) and not np.isnan(atr_regime_aligned[i]) and
-                 curr_atr_regime > np.percentile(
-                     atr_1d[~np.isnan(atr_1d)][:min(i+1, len(atr_1d))], 70) if i < len(atr_1d) else False)):
+            # Stoploss: price moves against position by 2*ATR
+            if curr_close > entry_price + 2.0 * curr_atr:
                 signals[i] = 0.0
                 position = 0
             else:
