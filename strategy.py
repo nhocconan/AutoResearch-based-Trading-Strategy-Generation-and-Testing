@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h HMA21 trend filter and volume spike confirmation
 # Uses Camarilla pivot levels (R3/S3) from 1d timeframe for institutional breakout levels
-# 1d EMA34 filter ensures alignment with daily trend to avoid counter-trend whipsaws
+# 12h HMA21 filter ensures alignment with medium-term trend to avoid counter-trend whipsaws
 # Volume spike (>2.0 * 20-period EMA) confirms institutional participation
-# Designed for low trade frequency: ~12-25 trades/year per symbol with 0.25 sizing
+# Designed for low trade frequency: ~25-40 trades/year per symbol with 0.25 sizing
 # Works in bull markets via breakout continuation and bear markets via trend-following alignment
-# BTC/ETH focused: requires 1d trend alignment and volume spike to avoid SOL-only bias
+# BTC/ETH focused: requires 12h trend alignment and volume spike to avoid SOL-only bias
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hHMA21_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,25 +25,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter and Camarilla pivots
+    # 1d HTF data for Camarilla pivots (R3/S3)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h HTF data for HMA21 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
     
     # Calculate Camarilla pivot levels (R3, S3) from 1d OHLC
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    camarilla_r3 = close_1d_arr + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d_arr - 1.1 * (high_1d - low_1d) / 2
+    close_1d = df_1d['close'].values
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 12h HMA21 for trend filter
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = np.convolve(arr, np.arange(1, half + 1), 'valid') / (half * (half + 1) / 2)
+        wma1 = np.convolve(arr, np.arange(1, period + 1), 'valid') / (period * (period + 1) / 2)
+        raw = 2 * wma2 - wma1
+        hma_vals = np.convolve(raw, np.arange(1, sqrt + 1), 'valid') / (sqrt * (sqrt + 1) / 2)
+        # Pad to original length
+        result = np.full_like(arr, np.nan)
+        result[period-1:period-1+len(hma_vals)] = hma_vals
+        return result
+    
+    close_12h = df_12h['close'].values
+    hma_21_12h = hma(close_12h, 21)
+    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
     
     # Volume confirmation: volume > 2.0 * 20-period EMA (strict filter)
     vol_series = pd.Series(volume)
@@ -62,9 +81,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA34
-        bullish_bias = close[i] > ema_34_1d_aligned[i]
-        bearish_bias = close[i] < ema_34_1d_aligned[i]
+        # Determine trend bias from 12h HMA21
+        bullish_bias = close[i] > hma_21_12h_aligned[i]
+        bearish_bias = close[i] < hma_21_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if bullish_bias:
@@ -82,19 +101,19 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid chop around EMA34
+                signals[i] = 0.0  # Avoid chop around HMA21
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Camarilla S3 or price below 1d EMA34
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: price breaks below Camarilla S3 or price below 12h HMA21
+            if close[i] < camarilla_s3_aligned[i] or close[i] < hma_21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Camarilla R3 or price above 1d EMA34
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: price breaks above Camarilla R3 or price above 12h HMA21
+            if close[i] > camarilla_r3_aligned[i] or close[i] > hma_21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
