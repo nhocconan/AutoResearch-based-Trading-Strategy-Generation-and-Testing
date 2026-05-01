@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
-# Uses 12h primary timeframe to reduce trade frequency and fee drag.
-# 1d Camarilla R3/S3 levels provide stronger breakout signals than 4h/6h variants.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+# Uses 1d Camarilla R3/S3 levels (stronger breakout levels) to avoid false breakouts.
 # Trades only in direction of 1d EMA34 trend with volume spike confirmation.
-# R3/S3 breakouts indicate strong momentum and are less prone to whipsaw in ranging markets.
+# R3/S3 breakouts indicate strong momentum and are less prone to whipsaw.
 # Works in bull (buy R3 breakout with uptrend) and bear (sell S3 breakdown with downtrend).
-# Discrete position sizing 0.25 balances return and drawdown. Target: 50-150 trades over 4 years.
+# Discrete position sizing 0.25 balances return and drawdown. Target: 75-200 trades over 4 years.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +47,7 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume on 12h
+    # Volume confirmation: current volume > 2.0 * 20-period average volume on 4h
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_ma_20 * 2.0)
     
