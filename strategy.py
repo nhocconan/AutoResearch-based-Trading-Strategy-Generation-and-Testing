@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA(21) pullback strategy with 4h trend filter and 1d volume confirmation.
-# Long when: price pulls back to EMA(21) in 1h uptrend (4h EMA50 > EMA200) AND 1d volume > 1.5x 20-day average.
-# Short when: price pulls back to EMA(21) in 1h downtrend (4h EMA50 < EMA200) AND 1d volume > 1.5x 20-day average.
-# Uses discrete sizing 0.20 to manage drawdown. Target: 60-150 total trades over 4 years (15-37/year).
-# 4h EMA crossover provides robust trend filter that works in both bull and bear markets.
-# 1d volume confirmation ensures institutional participation, reducing false signals.
-# 1h EMA(21) pullback provides precise entry timing with favorable risk-reward.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Long when price breaks above Donchian(20) high AND weekly close > weekly open (bullish week) AND volume > 2.0x 20-bar average.
+# Short when price breaks below Donchian(20) low AND weekly close < weekly open (bearish week) AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Weekly pivot filter ensures alignment with higher timeframe momentum, reducing false breakouts.
+# Volume spike threshold set to 2.0x to avoid choppy market noise.
+# Primary timeframe: 6h, HTF: 1w for weekly bias.
 
-name = "1h_EMA21_Pullback_4hTrend_1dVolume_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,98 +25,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1w data ONCE before loop for weekly bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 and EMA200 for trend filter
-    close_4h = pd.Series(df_4h['close'].values)
-    ema50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = close_4h.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Weekly bias: 1 = bullish week (close > open), -1 = bearish week (close < open)
+    weekly_bias_raw = np.where(df_1w['close'].values > df_1w['open'].values, 1,
+                               np.where(df_1w['close'].values < df_1w['open'].values, -1, 0))
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_raw)
     
-    # Align 4h EMAs to 1h timeframe (wait for completed 4h bar)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # Load 1d data ONCE before loop for volume confirmation
+    # Calculate Donchian(20) channels from 1d data (more stable than 6h for structure)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d volume MA(20) for confirmation
-    vol_1d = pd.Series(df_1d['volume'].values)
-    vol_ma_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    # Donchian high: max(high, 20) from previous completed day
+    donchian_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
+    # Donchian low: min(low, 20) from previous completed day
+    donchian_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align 1d volume MA to 1h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate 1h EMA(21) for pullback entries
-    close_s = pd.Series(close)
-    ema21_1h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Session filter: 08-20 UTC (already datetime64, use index)
-    hours = prices.index.hour
+    # Volume confirmation: current 6h volume > 2.0x 20-bar average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 50  # warmup for Donchian and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or \
-           np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema21_1h[i]):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(weekly_bias_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_ema21 = ema21_1h[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_vol = volume[i]
+        curr_vol_ma = vol_ma[i]
         
-        # Trend filter from 4h
-        uptrend_4h = ema50_4h_aligned[i] > ema200_4h_aligned[i]
-        downtrend_4h = ema50_4h_aligned[i] < ema200_4h_aligned[i]
+        if curr_vol_ma <= 0:
+            signals[i] = 0.0
+            continue
+            
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Volume confirmation from 1d
-        volume_confirm = vol_ma_1d_aligned[i] > 0 and volume[i] > (vol_ma_1d_aligned[i] * 1.5)
+        # Donchian breakout signals
+        breakout_up = curr_high > donchian_high_aligned[i]  # break above Donchian high
+        breakout_down = curr_low < donchian_low_aligned[i]  # break below Donchian low
         
+        # Weekly bias filter
+        bullish_week = weekly_bias_aligned[i] == 1
+        bearish_week = weekly_bias_aligned[i] == -1
+        
+        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: pullback to EMA21 in 1h uptrend (4h) AND volume confirmation
-            if (curr_low <= curr_ema21 <= curr_high and  # price touches EMA21
-                uptrend_4h and 
+            # Long: breakout above Donchian high AND bullish week AND volume confirmation
+            if (breakout_up and 
+                bullish_week and 
                 volume_confirm):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: pullback to EMA21 in 1h downtrend (4h) AND volume confirmation
-            elif (curr_low <= curr_ema21 <= curr_high and  # price touches EMA21
-                  downtrend_4h and 
+            # Short: breakout below Donchian low AND bearish week AND volume confirmation
+            elif (breakout_down and 
+                  bearish_week and 
                   volume_confirm):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below EMA21 OR 4h trend turns down
-            if (curr_close < curr_ema21 or 
-                not uptrend_4h):
+            # Exit: price crosses below Donchian low (stoploss) OR weekly bias turns bearish
+            if (curr_low < donchian_low_aligned[i] or 
+                weekly_bias_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA21 OR 4h trend turns up
-            if (curr_close > curr_ema21 or 
-                not downtrend_4h):
+            # Exit: price crosses above Donchian high (stoploss) OR weekly bias turns bullish
+            if (curr_high > donchian_high_aligned[i] or 
+                weekly_bias_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
