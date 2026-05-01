@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike (>2x 20-bar MA)
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 and increasing, price above 1d EMA34, and volume spike
-# Short when Bear Power < 0 and decreasing, price below 1d EMA34, and volume spike
-# Uses 1d EMA34 for higher-timeframe trend alignment to reduce whipsaws in ranging markets.
-# Volume spike confirms institutional participation. Discrete sizing (0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Camarilla pivot levels identify key support/resistance where price often reverses or breaks out.
+# Breakout above R3 or below S3 with volume confirmation and 1d EMA34 trend alignment captures strong moves.
+# Works in both bull and bear markets by following institutional interest confirmed by volume.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits.
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,16 +31,28 @@ def generate_signals(prices):
     # 1d EMA(34) on 1d close
     ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 6h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Calculate EMA13 for Elder Ray (using 6h close)
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla pivot levels using previous day's OHLC
+    # We need to get the previous day's high, low, close for each 4h bar
+    # Since we're on 4h timeframe, we'll use the 1d data to calculate pivots
+    # and align them to 4h bars
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    # Calculate Camarilla levels for each 1d bar: based on previous day's HLC
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla formulas
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (they represent levels for the current day)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,49 +62,43 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 20  # Need 20 for volume MA and EMA13
+    start_idx = 20  # Need 20 for volume MA and to have previous day's data
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
-        # Elder Ray momentum: check if power is increasing/decreasing
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_falling = bear_power[i] < bear_power[i-1]
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 and rising, price above 1d EMA34, volume spike
-            if bull_power[i] > 0 and bull_power_rising and curr_close > ema_1d_34_aligned[i] and vol_spike:
+            # Long: Close breaks above R3 with volume spike and price above 1d EMA34
+            if curr_close > R3_aligned[i] and vol_spike and curr_close > ema_1d_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling, price below 1d EMA34, volume spike
-            elif bear_power[i] < 0 and bear_power_falling and curr_close < ema_1d_34_aligned[i] and vol_spike:
+            # Short: Close breaks below S3 with volume spike and price below 1d EMA34
+            elif curr_close < S3_aligned[i] and vol_spike and curr_close < ema_1d_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Bull Power <= 0 or price below 1d EMA34
-            if bull_power[i] <= 0 or curr_close < ema_1d_34_aligned[i]:
+            # Exit on close below R3 or price below 1d EMA34
+            if curr_close < R3_aligned[i] or curr_close < ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Bear Power >= 0 or price above 1d EMA34
-            if bear_power[i] >= 0 or curr_close > ema_1d_34_aligned[i]:
+            # Exit on close above S3 or price above 1d EMA34
+            if curr_close > S3_aligned[i] or curr_close > ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
