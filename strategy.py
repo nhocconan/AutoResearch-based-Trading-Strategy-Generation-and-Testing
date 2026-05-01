@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray power + 1d trend filter.
-# Long when: Alligator jaws < teeth < lips (bullish alignment) AND Bull Power > 0 AND price > 1d EMA50.
-# Short when: Alligator jaws > teeth > lips (bearish alignment) AND Bear Power < 0 AND price < 1d EMA50.
+# Hypothesis: 12h Williams %R reversal with 1w EMA34 trend filter and volume spike confirmation.
+# Long when Williams %R crosses above -80 from below with 1w EMA34 uptrend and volume > 1.8x 24-bar average.
+# Short when Williams %R crosses below -20 from above with 1w EMA34 downtrend and volume confirmation.
 # Uses discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
-# Primary timeframe: 6h, HTF: 1d for EMA trend filter.
+# Primary timeframe: 12h, HTF: 1w for EMA trend filter.
 # Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
+# Session filter: 08-20 UTC to reduce noise trades.
 
-name = "6h_WilliamsAlligator_ElderRay_1dEMA50_Trend_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,18 +23,19 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Pre-compute session hours for 08-20 UTC filter (optional, reduces noise)
+    # Pre-compute session hours for 08-20 UTC filter
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate 1w EMA34 trend filter
+    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -42,68 +44,63 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Williams Alligator: SMAs of median price (hlc3) with specific periods
-    hlc3 = (high + low + close) / 3.0
-    # Jaw: 13-period SMMA, shifted 8 bars
-    jaw = pd.Series(hlc3).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift right by 8
-    jaw[:8] = np.nan
-    # Teeth: 8-period SMMA, shifted 5 bars
-    teeth = pd.Series(hlc3).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift right by 5
-    teeth[:5] = np.nan
-    # Lips: 5-period SMMA, shifted 3 bars
-    lips = pd.Series(hlc3).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift right by 3
-    lips[:3] = np.nan
-    
-    # Elder Ray: Bull Power = high - EMA13, Bear Power = low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Williams %R (14-period) from 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 60  # warmup for Alligator and EMA
+    start_idx = 50  # warmup for EMA34 and ATR
     
     for i in range(start_idx, n):
-        # Optional session filter: 08-20 UTC
-        # if not (8 <= hours[i] <= 20):
-        #     signals[i] = 0.0
-        #     continue
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
         
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_volume = volume[i]
         
-        # Alligator alignment
-        bullish_alignment = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        # Volume confirmation: current volume > 1.8x 24-bar average (tight to reduce trades)
+        vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values[i]
+        if vol_ma <= 0:
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_ma * 1.8)
         
-        # Elder Ray power
-        strong_bull_power = bull_power[i] > 0
-        strong_bear_power = bear_power[i] < 0
+        # Williams %R reversal conditions
+        wr_prev = williams_r[i-1] if i > 0 else -50
+        wr_cross_above_80 = (wr_prev <= -80) and (williams_r[i] > -80)
+        wr_cross_below_20 = (wr_prev >= -20) and (williams_r[i] < -20)
         
-        # 1d trend filter
-        uptrend = curr_close > ema_50_aligned[i]
-        downtrend = curr_close < ema_50_aligned[i]
+        # Trend filter: bullish if close > EMA34, bearish if close < EMA34
+        bullish_trend = curr_close > ema_34_aligned[i]
+        bearish_trend = curr_close < ema_34_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish Alligator AND Bull Power > 0 AND Uptrend
-            if bullish_alignment and strong_bull_power and uptrend:
+            # Long: Williams %R crosses above -80 AND bullish trend AND volume confirmation
+            if (wr_cross_above_80 and 
+                bullish_trend and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Bearish Alligator AND Bear Power < 0 AND Downtrend
-            elif bearish_alignment and strong_bear_power and downtrend:
+            # Short: Williams %R crosses below -20 AND bearish trend AND volume confirmation
+            elif (wr_cross_below_20 and 
+                  bearish_trend and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -116,10 +113,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Alligator turns bearish OR Bear Power becomes negative OR trend turns down
-            elif (not bullish_alignment or 
-                  not strong_bull_power or 
-                  not uptrend):
+            # Exit: Williams %R crosses below -50 OR trend turns bearish
+            elif (williams_r[i] < -50 or 
+                  bearish_trend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -132,10 +128,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Alligator turns bullish OR Bull Power becomes positive OR trend turns up
-            elif (not bearish_alignment or 
-                  not strong_bear_power or 
-                  not downtrend):
+            # Exit: Williams %R crosses above -50 OR trend turns bullish
+            elif (williams_r[i] > -50 or 
+                  bullish_trend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
