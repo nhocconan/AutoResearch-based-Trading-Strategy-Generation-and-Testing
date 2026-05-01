@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme + 1d Volume Spike + Chop Regime Filter
-# Williams %R(14) < -80 = oversold (long), > -20 = overbought (short) on 12h
-# Entry confirmed by 1d volume > 1.5 * 20-period average volume (spike)
-# Regime filter: 1d Chopiness Index(14) > 61.8 = ranging (mean revert), < 38.2 = trending (follow breakout)
-# Designed for low frequency (50-150 trades over 4 years) with clear reversal logic in ranging markets
-# and breakout logic in trending markets, using volume confirmation to avoid false signals
+# Hypothesis: 4h Williams %R + 1d Regime Filter
+# Williams %R(14) identifies overbought/oversold conditions
+# 1d ADX(14) defines regime: ADX>25 = trending (fade extremes), ADX<20 = range (mean revert)
+# Long: Williams %R < -80 (oversold) in trending OR Williams %R > -20 (overbought) in range
+# Short: Williams %R > -20 (overbought) in trending OR Williams %R < -80 (oversold) in range
+# Designed for low frequency (75-200 trades over 4 years) with clear mean reversion logic
 
-name = "12h_WilliamsR_1dVolume_Chop_Regime_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dADX_Regime_MeanRev_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,19 +22,13 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1d HTF data for regime and volume filters
+    # 1d HTF data for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need 20 for vol avg + 14 for chop
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1d volume spike confirmation: volume > 1.5 * 20-period average
-    vol_ma20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (1.5 * vol_ma20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    
-    # 1d Chopiness Index(14) for regime detection
+    # 1d ADX(14) calculation for regime detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,89 +40,109 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Sum of True Range over 14 periods
-    tr_sum14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Wilder's smoothing
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            first_val = np.nansum(x[1:period+1])
+            result[period] = first_val
+            for i in range(period+1, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Chopiness Index: 100 * log10(tr_sum14 / (hh14 - ll14)) / log10(14)
-    # Avoid division by zero
-    hh_ll = hh14 - ll14
-    chop_raw = np.where((hh_ll > 0) & (tr_sum14 > 0), 
-                        100 * np.log10(tr_sum14 / hh_ll) / np.log10(14), 
-                        50)  # default to neutral when undefined
-    chop = np.concatenate([[np.nan] * 13, chop_raw[13:]])  # align with 14-period lookback
+    tr_period = 14
+    tr_smoothed = wilders_smoothing(tr, tr_period)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
+    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
     
-    # 12h Williams %R(14)
-    highest_high12 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low12 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high12 - close) / (highest_high12 - lowest_low12)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high12 - lowest_low12) == 0, -50, williams_r)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, tr_period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h Williams %R(14)
+    def williams_r(high, low, close, period):
+        highest_high = np.full_like(high, np.nan)
+        lowest_low = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+        wr = np.where((highest_high - lowest_low) != 0, 
+                      -100 * (highest_high - close) / (highest_high - lowest_low), -50)
+        return wr
+    
+    wr = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: max(34 for 1d indicators, 14 for Williams %R)
-    start_idx = 34
+    # Start after warmup
+    start_idx = max(34, 14)  # Need ADX and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(wr[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters from 1d Chop
-        ranging = chop_aligned[i] > 61.8
-        trending = chop_aligned[i] < 38.2
+        # Regime filters
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
-            if ranging:
-                # Mean reversion in ranging market
-                # Long: Williams %R deeply oversold
-                if williams_r[i] < -80 and volume_spike_aligned[i]:
+            # Trending regime: Williams %R mean reversion (fade extremes)
+            if trending:
+                # Long: Oversold condition
+                if wr[i] < -80:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R deeply overbought
-                elif williams_r[i] > -20 and volume_spike_aligned[i]:
+                # Short: Overbought condition
+                elif wr[i] > -20:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
-            elif trending:
-                # Breakout continuation in trending market
-                # Long: Williams %R rising from oversold (bullish momentum)
-                if williams_r[i] < -50 and williams_r[i] > williams_r[i-1] and volume_spike_aligned[i]:
+            # Ranging regime: Williams %R trend following (ride momentum)
+            elif ranging:
+                # Long: Rising from oversold
+                if wr[i] > -80 and wr[i] > wr[i-1]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R falling from overbought (bearish momentum)
-                elif williams_r[i] > -50 and williams_r[i] < williams_r[i-1] and volume_spike_aligned[i]:
+                # Short: Falling from overbought
+                elif wr[i] < -20 and wr[i] < wr[i-1]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                # Transition regime (Chop 38.2-61.8) - stay flat to avoid whipsaw
-                signals[i] = 0.0
+                signals[i] = 0.0  # Transition regime (ADX 20-25) - stay flat
         
         elif position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            if ranging:
-                # Exit long when Williams %R reaches overbought territory (mean reversion complete)
-                if williams_r[i] > -20:
+            if trending:
+                # Exit trending long when Williams %R rises above -50 (neutral)
+                if wr[i] > -50:
                     exit_long = True
-            elif trending:
-                # Exit long when Williams %R shows bearish momentum (failure to make new highs)
-                if williams_r[i] < williams_r[i-1] and williams_r[i] < -50:
+            elif ranging:
+                # Exit ranging long when Williams %R reaches overbought
+                if wr[i] >= -20:
                     exit_long = True
             else:
                 # Transition regime - exit on any deterioration
-                if williams_r[i] > -50:  # Lost momentum
+                if wr[i] > -50:
                     exit_long = True
             
             if exit_long:
@@ -140,17 +154,17 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            if ranging:
-                # Exit short when Williams %R reaches oversold territory (mean reversion complete)
-                if williams_r[i] < -80:
+            if trending:
+                # Exit trending short when Williams %R falls below -50 (neutral)
+                if wr[i] < -50:
                     exit_short = True
-            elif trending:
-                # Exit short when Williams %R shows bullish momentum (failure to make new lows)
-                if williams_r[i] > williams_r[i-1] and williams_r[i] > -50:
+            elif ranging:
+                # Exit ranging short when Williams %R reaches oversold
+                if wr[i] <= -80:
                     exit_short = True
             else:
                 # Transition regime - exit on any deterioration
-                if williams_r[i] < -50:  # Lost momentum
+                if wr[i] < -50:
                     exit_short = True
             
             if exit_short:
