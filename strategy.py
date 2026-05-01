@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1w EMA50 trend filter and volume confirmation.
-# Long when Williams %R crosses above -80 (oversold) AND 1w close > EMA50 AND volume > 1.5x 20-bar average.
-# Short when Williams %R crosses below -20 (overbought) AND 1w close < EMA50 AND volume > 1.5x 20-bar average.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1w close > EMA50 AND volume > 2.0x 20-bar average.
+# Short when price breaks below S3 AND 1w close < EMA50 AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Volume spike threshold set to 1.5x to reduce false signals and improve signal quality.
-# Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 6h, HTF: 1w for trend filter.
+# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
+# Primary timeframe: 12h, HTF: 1w for trend filter.
 
-name = "6h_WilliamsR_Reversal_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,29 +37,43 @@ def generate_signals(prices):
     # Calculate 1w close aligned for trend bias
     close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # Calculate Williams %R (14-period) on 6h data
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla pivot levels from previous day (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: current 6h volume > 1.5x 20-bar average
+    # Previous day's high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # shift(1) to use previous completed day
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla levels: R3/S3
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: current 12h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, lookback)  # warmup for EMA and Williams %R
+    start_idx = 50  # warmup for EMA and indicators
     
     for i in range(start_idx, n):
         if np.isnan(ema_aligned[i]) or np.isnan(close_1w_aligned[i]) or \
-           np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
+           np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -68,15 +81,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Williams %R signals: cross above -80 (long) or below -20 (short)
-        # Use previous bar to detect cross
-        prev_williams_r = williams_r[i-1]
-        curr_williams_r = williams_r[i]
-        
-        cross_above_oversold = (prev_williams_r <= -80) and (curr_williams_r > -80)
-        cross_below_overbought = (prev_williams_r >= -20) and (curr_williams_r < -20)
+        # Camarilla breakout signals
+        breakout_up = curr_high > r3_aligned[i]  # break above R3
+        breakout_down = curr_low < s3_aligned[i]  # break below S3
         
         # Trend filter: use 1w close vs its EMA50 for bias
         bullish_bias = close_1w_aligned[i] > ema_aligned[i]  # 1w close above its EMA50 = bullish
@@ -84,14 +93,14 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R crosses above -80 AND bullish bias AND volume confirmation
-            if (cross_above_oversold and 
+            # Long: breakout above R3 AND bullish bias AND volume confirmation
+            if (breakout_up and 
                 bullish_bias and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 AND bearish bias AND volume confirmation
-            elif (cross_below_overbought and 
+            # Short: breakout below S3 AND bearish bias AND volume confirmation
+            elif (breakout_down and 
                   bearish_bias and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -100,9 +109,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses below -50 (mean reversion) OR bearish bias (trend change)
-            cross_below_mid = (prev_williams_r >= -50) and (curr_williams_r < -50)
-            if (cross_below_mid or 
+            # Exit: price crosses below S3 (stoploss) OR bearish bias (trend change)
+            if (curr_low < s3_aligned[i] or 
                 bearish_bias):
                 signals[i] = 0.0
                 position = 0
@@ -110,9 +118,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses above -50 (mean reversion) OR bullish bias (trend change)
-            cross_above_mid = (prev_williams_r <= -50) and (curr_williams_r > -50)
-            if (cross_above_mid or 
+            # Exit: price crosses above R3 (stoploss) OR bullish bias (trend change)
+            if (curr_high > r3_aligned[i] or 
                 bullish_bias):
                 signals[i] = 0.0
                 position = 0
