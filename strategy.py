@@ -4,10 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla R3/S3 represent stronger intraday support/resistance than R1/S1, reducing false breakouts.
-# Breakout above R3 or below S3 with volume spike indicates strong institutional participation.
-# 1d EMA34 ensures alignment with higher timeframe trend, working in both bull and bear markets.
-# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+# Camarilla R3/S3 represent stronger intraday support/resistance than R1/S1.
+# Breakout above R3 or below S3 with volume spike indicates strong momentum.
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
+# Volume confirmation filters out false breakouts.
+# Designed for fewer, higher-quality trades to minimize fee drag.
+# Target: 20-40 trades/year for sustainable performance.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
@@ -34,6 +36,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # 1d data for Camarilla pivot calculation (yesterday's OHLC)
+    # Need at least 2 days: yesterday for levels, today for alignment
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -54,9 +57,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.8 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    volume_spike = volume > (volume_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
