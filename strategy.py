@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width Regime + 1d Donchian(20) Breakout
-# Uses BB Width percentile to detect range (CHOP) vs trend regimes on 6h.
-# In range (BBW > 60th percentile): fade at 1d Donchian bands with volume confirmation.
-# In trend (BBW < 40th percentile): breakout continuation in direction of 1d Donchian.
-# Volume spike (>1.5x 20-bar MA) confirms institutional participation.
-# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume spike (>1.5x 20-bar MA), and chop regime filter (CHOP(14) < 38.2 = trending)
+# Long when price breaks above Donchian(20) high, price above 1d EMA50, volume spike, and CHOP < 38.2
+# Short when price breaks below Donchian(20) low, price below 1d EMA50, volume spike, and CHOP < 38.2
+# Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Combines price channel breakout (proven edge) with volume confirmation and regime filter to avoid whipsaws.
 
-name = "6h_BBWRegime_1dDonchian20_BreakoutFade_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,46 +23,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Bollinger Bands (20, 2) for regime detection
-    close_s = pd.Series(close)
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_mid  # Normalized width
-    
-    # BB Width percentile rank (lookback 50 periods) for regime
-    bb_width_series = pd.Series(bb_width)
-    bb_width_rank = bb_width_series.rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    
-    # 1d HTF data for Donchian channels
+    # 1d HTF data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d Donchian(20) channels
-    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # 1d EMA(50) on 1d close
+    ema_1d_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d Donchian to 6h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    
+    # Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma_20 * 1.5)
     
+    # Choppiness Index (CHOP) regime filter: CHOP(14) < 38.2 = trending (favor breakouts)
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(highest_high - lowest_low) * 14)) / log10(14)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar TR
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    hh_ll_14 = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
+    chop = 100 * np.log10(sum_atr_14 / (hh_ll_14 * 14)) / np.log10(14)
+    chop_trending = chop < 38.2  # Trending regime
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = 50  # Need 50 for BB width rank
+    start_idx = max(lookback, 20, 14)  # Need 20 for Donchian, volume MA, and CHOP
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_width_rank[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(bb_mid[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -72,55 +70,33 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation
+        # Confirmations
         vol_spike = volume_spike[i]
-        
-        # Regime detection: BB Width percentile
-        bbw_rank = bb_width_rank[i]
-        is_range = bbw_rank > 0.60   # High BB Width = ranging/Chop
-        is_trend = bbw_rank < 0.40   # Low BB Width = trending
+        is_trending = chop_trending[i]
         
         if position == 0:  # Flat - look for new entries
-            # RANGE REGIME: Fade at 1d Donchian bands
-            if is_range and vol_spike:
-                # Long: price at or below 1d Donchian low (support)
-                if curr_low <= donch_low_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price at or above 1d Donchian high (resistance)
-                elif curr_high >= donch_high_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            # TREND REGIME: Breakout continuation in direction of 1d Donchian
-            elif is_trend and vol_spike:
-                # Long: breakout above 1d Donchian high
-                if curr_high > donch_high_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: breakdown below 1d Donchian low
-                elif curr_low < donch_low_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: Price breaks above Donchian(20) high, above 1d EMA50, volume spike, trending regime
+            if curr_close > highest_high[i] and curr_close > ema_1d_50_aligned[i] and vol_spike and is_trending:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below Donchian(20) low, below 1d EMA50, volume spike, trending regime
+            elif curr_close < lowest_low[i] and curr_close < ema_1d_50_aligned[i] and vol_spike and is_trending:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on return to 1d Donchian midpoint (mean reversion) or opposite band touch
-            bb_mid_1d = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
-            if curr_close >= bb_mid_1d or curr_low <= donch_low_aligned[i]:
+            # Exit on price below Donchian(20) low or below 1d EMA50
+            if curr_close < lowest_low[i] or curr_close < ema_1d_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on return to 1d Donchian midpoint or opposite band touch
-            bb_mid_1d = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
-            if curr_close <= bb_mid_1d or curr_high >= donch_high_aligned[i]:
+            # Exit on price above Donchian(20) high or above 1d EMA50
+            if curr_close > highest_high[i] or curr_close > ema_1d_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
