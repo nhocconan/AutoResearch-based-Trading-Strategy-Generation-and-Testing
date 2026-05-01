@@ -4,14 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
-# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
-# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Target: 20-50 trades/year on 4h timeframe (~80-200 total over 4 years).
-# Camarilla levels provide intraday support/resistance; EMA34 filter ensures trend alignment; volume confirmation reduces false breakouts.
+# Long when price breaks above Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Short when price breaks below Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
+# Target: 19-50 trades/year on 4h timeframe (~75-200 total over 4 years).
+# Camarilla levels provide institutional support/resistance; EMA34 filter avoids counter-trend trades; volume confirmation reduces false breakouts.
 # Works in bull markets (trend continuation) and bear markets (sharp reversals on volume spikes).
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,14 +37,16 @@ def generate_signals(prices):
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
     # Calculate Camarilla levels (using prior bar to avoid look-ahead)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4, etc.
-    # We only need R3 and S3
-    camarilla_r3 = pd.Series(close).rolling(window=20, min_periods=20).apply(
-        lambda x: x[-1] + 1.1 * (x.max() - x.min()) * 1.1 / 4, raw=False
-    ).shift(1).values
-    camarilla_s3 = pd.Series(close).rolling(window=20, min_periods=20).apply(
-        lambda x: x[-1] - 1.1 * (x.max() - x.min()) * 1.1 / 4, raw=False
-    ).shift(1).values
+    # Based on previous bar's high, low, close
+    prev_close = close[:-1]
+    prev_high = high[:-1]
+    prev_low = low[:-1]
+    # Camarilla calculation: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_high = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_low = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Shift to align with current bar (levels from previous bar)
+    camarilla_high = np.concatenate([np.array([np.nan]), camarilla_high])
+    camarilla_low = np.concatenate([np.array([np.nan]), camarilla_low])
     
     # Calculate 1d EMA34 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -64,8 +66,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or 
+            np.isnan(camarilla_high[i]) or 
+            np.isnan(camarilla_low[i]) or 
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
             continue
@@ -85,12 +87,12 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             # Long: price > Camarilla R3 AND uptrend AND volume spike
-            if curr_close > camarilla_r3[i] and uptrend and volume_confirm:
+            if curr_close > camarilla_high[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
             # Short: price < Camarilla S3 AND downtrend AND volume spike
-            elif curr_close < camarilla_s3[i] and downtrend and volume_confirm:
+            elif curr_close < camarilla_low[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -98,13 +100,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close < entry_price - 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             # Exit: price breaks below Camarilla S3 OR trend turns down
-            elif curr_close < camarilla_s3[i] or not uptrend:
+            elif curr_close < camarilla_low[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -112,13 +114,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Stoploss: price moves against position by 2.0*ATR
-            if curr_close > entry_price + 2.0 * atr[i]:
+            # Stoploss: price moves against position by 2.5*ATR
+            if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             # Exit: price breaks above Camarilla R3 OR trend turns up
-            elif curr_close > camarilla_r3[i] or not downtrend:
+            elif curr_close > camarilla_high[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
