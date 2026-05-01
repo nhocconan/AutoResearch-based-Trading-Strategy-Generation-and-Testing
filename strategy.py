@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
 # Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Donchian(20) provides clear structure for breakouts in both trending and ranging markets.
-# 1d EMA34 filters for higher-timeframe trend alignment; volume spike confirms breakout conviction.
-# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# Donchian channels provide clear breakout levels; 1d EMA34 filters for higher-timeframe trend alignment.
+# Volume spike confirms breakout conviction. Works in both bull (breakouts with trend) and bear (breakdowns with trend).
+# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
 
-name = "12h_Donchian20_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +36,7 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Donchian bands (20-period) using prior bar's data to avoid look-ahead
+    # Calculate Donchian channels (using prior bar's OHLC to avoid look-ahead)
     prev_high = np.concatenate([[high[0]], high[:-1]])
     prev_low = np.concatenate([[low[0]], low[:-1]])
     donchian_upper = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
