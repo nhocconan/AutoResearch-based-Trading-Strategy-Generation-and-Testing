@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and volume confirmation
-# Uses 4h EMA50 for trend direction (price > EMA50 = uptrend, price < EMA50 = downtrend)
-# Entry: Long when price breaks above R3 AND volume > 1.5x 20-bar avg volume in uptrend
-#        Short when price breaks below S3 AND volume > 1.5x 20-bar avg volume in downtrend
-# Exit: Opposite Camarilla level break (R4/S4) or time-based exit (24 bars max hold)
-# Designed for low frequency (60-150 trades over 4 years) with clear structure and volume filter
+# Hypothesis: 6h Williams %R Extreme Reversal with 1d ADX Regime Filter
+# Williams %R(14) identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold
+# 1d ADX(14) defines regime: ADX > 25 = trending (fade extremes), ADX < 20 = range (mean revert to VWAP)
+# In trending markets: short at Williams %R > -20, long at Williams %R < -80 (fade momentum exhaustion)
+# In ranging markets: long at Williams %R < -80, short at Williams %R > -20 (mean reversion at extremes)
+# Uses 6h VWAP as dynamic mean reversion target in ranging regime
+# Designed for low frequency: Williams %R extremes occur ~10-15% of time, filtered by regime = 2-4 signals/month
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_Volume_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_1dADX_Regime_ExtremeReversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,95 +23,164 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h HTF data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1d HTF data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 4h EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # 1d ADX(14) calculation for regime detection
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for 1h (based on previous bar)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4, etc.
-    # Actually: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    # Using previous bar to avoid look-ahead
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    rng = prev_high - prev_low
-    r3 = prev_close + 1.1 * rng * (1.1/4)
-    s3 = prev_close - 1.1 * rng * (1.1/4)
-    r4 = prev_close + 1.1 * rng * (1.1/2)
-    s4 = prev_close - 1.1 * rng * (1.1/2)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Volume confirmation: volume > 1.5x 20-bar average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma20)
+    # Wilder's smoothing
+    def wilders_smoothing(x, period):
+        result = np.full_like(x, np.nan)
+        if len(x) >= period:
+            first_val = np.nansum(x[1:period+1])
+            result[period] = first_val
+            for i in range(period+1, len(x)):
+                result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    tr_period = 14
+    tr_smoothed = wilders_smoothing(tr, tr_period)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
+    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, tr_period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 6h Williams %R(14)
+    def williams_r(high, low, close, period):
+        highest_high = np.full_like(high, np.nan)
+        lowest_low = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+        wr = np.where((highest_high - lowest_low) != 0, 
+                      -100 * (highest_high - close) / (highest_high - lowest_low), 
+                      -50)
+        return wr
+    
+    wr_period = 14
+    wr = williams_r(high, low, close, wr_period)
+    
+    # 6h VWAP for mean reversion target in ranging regime
+    typical_price = (high + low + close) / 3
+    pv = typical_price * prices['volume'].values
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(prices['volume'].values)
+    vwap = np.where(cum_vol != 0, cum_pv / cum_vol, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_in_trade = 0
     
     # Start after warmup
-    start_idx = 50
+    start_idx = max(34, 21)  # Need ADX and Williams %R
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(wr[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
-        # Update bars in trade
-        if position != 0:
-            bars_in_trade += 1
+        # Regime filters
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20
         
-        # Exit conditions
-        exit_signal = False
-        if position == 1:  # Long
-            # Exit on R4 break (stronger resistance) or max hold time (24 bars = 1 day)
-            if close[i] >= r4[i] or bars_in_trade >= 24:
-                exit_signal = True
-        elif position == -1:  # Short
-            # Exit on S4 break (stronger support) or max hold time
-            if close[i] <= s4[i] or bars_in_trade >= 24:
-                exit_signal = True
-        
-        if exit_signal:
-            signals[i] = 0.0
-            position = 0
-            bars_in_trade = 0
-            continue
-        
-        # Entry logic (only when flat)
-        if position == 0 and in_session[i]:
-            # Uptrend: price > 4h EMA50
-            if close[i] > ema50_4h_aligned[i]:
-                # Long: break above R3 with volume confirmation
-                if close[i] > r3[i] and vol_confirm[i]:
-                    signals[i] = 0.20
+        if position == 0:  # Flat - look for new entries
+            # Williams %R extremes
+            wr_overbought = wr[i] > -20
+            wr_oversold = wr[i] < -80
+            
+            if trending:
+                # In trending regime: fade extremes (momentum exhaustion)
+                if wr_oversold:
+                    signals[i] = 0.25
                     position = 1
-                    bars_in_trade = 1
-            # Downtrend: price < 4h EMA50
-            elif close[i] < ema50_4h_aligned[i]:
-                # Short: break below S3 with volume confirmation
-                if close[i] < s3[i] and vol_confirm[i]:
-                    signals[i] = -0.20
+                elif wr_overbought:
+                    signals[i] = -0.25
                     position = -1
-                    bars_in_trade = 1
+                else:
+                    signals[i] = 0.0
+            elif ranging:
+                # In ranging regime: mean reversion at extremes
+                if wr_oversold:
+                    signals[i] = 0.25
+                    position = 1
+                elif wr_overbought:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0  # Transition regime (ADX 20-25) - stay flat
         
-        # Hold position
-        if position == 1 and not exit_signal:
-            signals[i] = 0.20
-        elif position == -1 and not exit_signal:
-            signals[i] = -0.20
+        elif position == 1:  # Long position
+            # Exit conditions
+            exit_long = False
+            if trending:
+                # Exit trending long when Williams %R rises above -50 (momentum returning)
+                if wr[i] > -50:
+                    exit_long = True
+            elif ranging:
+                # Exit ranging long when price reaches VWAP (mean reversion target)
+                if close[i] >= vwap[i]:
+                    exit_long = True
+            else:
+                # Transition regime - exit on Williams %R normalization
+                if wr[i] > -50:
+                    exit_long = True
+            
+            if exit_long:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:  # Short position
+            # Exit conditions
+            exit_short = False
+            if trending:
+                # Exit trending short when Williams %R falls below -50 (momentum returning)
+                if wr[i] < -50:
+                    exit_short = True
+            elif ranging:
+                # Exit ranging short when price reaches VWAP (mean reversion target)
+                if close[i] <= vwap[i]:
+                    exit_short = True
+            else:
+                # Transition regime - exit on Williams %R normalization
+                if wr[i] < -50:
+                    exit_short = True
+            
+            if exit_short:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
