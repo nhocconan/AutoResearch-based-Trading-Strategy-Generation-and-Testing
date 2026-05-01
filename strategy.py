@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d EMA34 > price for bullish bias and EMA34 < price for bearish bias.
-# Long when price breaks above R3 AND 1d close > EMA34 AND volume > 2.0x 20-bar average.
-# Short when price breaks below S3 AND 1d close < EMA34 AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years.
-# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
-# Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
+# Hypothesis: 4h TRIX momentum with 1d volume spike regime and choppiness filter.
+# TRIX (12) captures smoothed momentum; long when TRIX crosses above zero AND 1d volume > 1.5x 20-day average AND chop < 61.8 (trending regime).
+# Short when TRIX crosses below zero AND 1d volume > 1.5x 20-day average AND chop < 61.8.
+# Uses discrete sizing 0.25. Target: 75-200 total trades over 4 years.
+# Volume spike confirms institutional participation; chop filter avoids whipsaws in ranging markets.
+# Works in bull markets (momentum continuation) and bear markets (mean reversion at extremes via zero-cross).
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_TRIX_ZeroCross_1dVolumeSpike_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,92 +24,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for volume and chop filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34 calculation
+    if len(df_1d) < 30:  # Need enough for 1d indicators
         return np.zeros(n)
     
-    # 1d EMA34 calculation
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1d volume: current volume > 1.5x 20-bar average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = align_htf_to_ltf(prices, df_1d, vol_1d > (vol_ma_1d * 1.5))
     
-    # Calculate Camarilla levels (based on previous 1d bar's range)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # 1d choppiness index: CHOP(14) < 61.8 = trending regime (avoid ranging markets)
+    # CHOP = 100 * log10(sum(ATR(14)) / (max(high,14) - min(low,14))) / log10(14)
+    true_range_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                               np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
+                                          np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))))
+    true_range_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # first bar
+    atr_14_1d = pd.Series(true_range_1d).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop_denominator = max_high_14 - min_low_14
+    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
+    chop_1d = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
+    chop_filter_1d = align_htf_to_ltf(prices, df_1d, chop_1d < 61.8)
     
-    camarilla_r3_1d = daily_close + (daily_high - daily_low) * 1.1 / 4
-    camarilla_s3_1d = daily_close - (daily_high - daily_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (use previous 1d bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 4h TRIX(12,9,9): triple EMA of ROC, then signal line
+    # TRIX = EMA(EMA(EMA(ROC, 12), 9), 9)
+    roc = pd.Series(close).pct_change(periods=12).values  # ROC(12)
+    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = ema3  # TRIX value
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values  # signal line
+    trix_hist = trix - trix_signal  # histogram for zero-cross
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # warmup for EMA and volume MA
+    start_idx = 40  # warmup for TRIX and 1d indicators
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(trix_hist[i]) or np.isnan(vol_spike_1d[i]) or np.isnan(chop_filter_1d[i]):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_vol = volume[i]
-        curr_vol_ma = vol_ma[i]
-        
-        if curr_vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-            
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
-        
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
-        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
-        
-        # Trend filter: use 1d close vs its EMA34 for bias
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        bullish_bias = close_1d_aligned[i] > ema_aligned[i]  # 1d close above its EMA34 = bullish
-        bearish_bias = close_1d_aligned[i] < ema_aligned[i]  # 1d close below its EMA34 = bearish
+        # TRIX zero-cross signals
+        trix_cross_up = trix_hist[i] > 0 and trix_hist[i-1] <= 0  # cross above zero
+        trix_cross_down = trix_hist[i] < 0 and trix_hist[i-1] >= 0  # cross below zero
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND bullish bias AND volume confirmation
-            if (breakout_up and 
-                bullish_bias and 
-                volume_confirm):
+            # Long: TRIX crosses above zero AND 1d volume spike AND chop < 61.8 (trending)
+            if (trix_cross_up and 
+                vol_spike_1d[i] and 
+                chop_filter_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 AND bearish bias AND volume confirmation
-            elif (breakout_down and 
-                  bearish_bias and 
-                  volume_confirm):
+            # Short: TRIX crosses below zero AND 1d volume spike AND chop < 61.8 (trending)
+            elif (trix_cross_down and 
+                  vol_spike_1d[i] and 
+                  chop_filter_1d[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR bearish bias (trend change)
-            if (curr_low < camarilla_s3_aligned[i] or 
-                bearish_bias):
+            # Exit: TRIX crosses below zero (momentum loss) OR chop >= 61.8 (ranging) OR volume spike ends
+            if (trix_hist[i] < 0 or 
+                chop_filter_1d[i] == False or 
+                vol_spike_1d[i] == False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR bullish bias (trend change)
-            if (curr_high > camarilla_r3_aligned[i] or 
-                bullish_bias):
+            # Exit: TRIX crosses above zero (momentum loss) OR chop >= 61.8 (ranging) OR volume spike ends
+            if (trix_hist[i] > 0 or 
+                chop_filter_1d[i] == False or 
+                vol_spike_1d[i] == False):
                 signals[i] = 0.0
                 position = 0
             else:
