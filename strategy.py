@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d trend filter and volume confirmation.
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d EMA50 uptrend AND volume > 1.5x 20-period median.
-# Short when Bear Power < 0 AND Bull Power < 0 AND 1d EMA50 downtrend AND volume > 1.5x 20-period median.
+# Hypothesis: 4h Williams %R extreme with 1d EMA50 trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x 20-period median.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x 20-period median.
 # Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Elder Ray measures bull/bear strength via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# This captures momentum shifts while the 1d EMA50 filter ensures alignment with higher timeframe trend.
-# Volume confirmation reduces false signals. Target: 12-37 trades/year on 6h timeframe.
+# Williams %R identifies exhaustion points that work in both bull and bear markets.
+# Volume confirmation ensures moves have participation, reducing false signals from weak breakouts.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-50 trades/year on 4h timeframe.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_VolumeConfirm_ATR_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_Extreme_1dEMA50_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,12 +34,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate 14-period Williams %R
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -57,14 +58,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for EMA13, EMA50, volume, and ATR
-    start_idx = 100
+    # Start after warmup for Williams %R, EMA, volume, and ATR
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -73,12 +72,11 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
+        curr_williams_r = williams_r[i]
         curr_atr = atr[i]
         
-        # Trend filter: 1d EMA50 direction
+        # Trend filter: price vs 1d EMA50
         uptrend = curr_close > ema_50_1d_aligned[i]
         downtrend = curr_close < ema_50_1d_aligned[i]
         
@@ -88,20 +86,16 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
-        # Elder Ray conditions
-        bull_strong = bull_power[i] > 0
-        bear_weak = bear_power[i] < 0
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 AND Bear Power < 0 AND uptrend AND volume spike
-            if bull_strong and bear_weak and uptrend and volume_confirm:
+            # Long: Williams %R < -80 (oversold) AND uptrend AND volume confirmation
+            if curr_williams_r < -80 and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Bear Power < 0 AND Bull Power < 0 AND downtrend AND volume spike
-            elif not bull_strong and bear_weak and downtrend and volume_confirm:
+            # Short: Williams %R > -20 (overbought) AND downtrend AND volume confirmation
+            elif curr_williams_r > -20 and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -115,9 +109,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Elder Ray weakening OR trend reversal
+            # Exit conditions: ATR stoploss OR Williams %R > -50 (exit oversold) OR trend reversal
             stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or not (bull_strong and bear_weak) or not uptrend:
+            if curr_close < stop_price or curr_williams_r > -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,9 +122,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR Elder Ray weakening OR trend reversal
+            # Exit conditions: ATR stoploss OR Williams %R < -50 (exit overbought) OR trend reversal
             stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or not (not bull_strong and bear_weak) or not downtrend:
+            if curr_close > stop_price or curr_williams_r < -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
