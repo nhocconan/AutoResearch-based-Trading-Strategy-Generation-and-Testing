@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivot levels identify key intraday support/resistance; R3/S3 breaks capture strong momentum
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels identify key intraday support/resistance; breakouts capture momentum
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend whipsaws
 # Volume spike > 2.0x 20-period EMA confirms institutional participation
-# Designed for low trade frequency: ~12-25 trades/year per symbol with 0.25 sizing
-# Works in both bull and bear markets by only taking trend-aligned breakouts and using volatility filter
+# Designed for low trade frequency: ~20-30 trades/year per symbol with 0.25 sizing
+# Works in both bull and bear markets by only taking trend-aligned breakouts
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter
+    # 1d HTF data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -34,16 +34,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    # Typical price for the day: (high + low + close) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Range: high - low
-    daily_range = df_1d['high'] - df_1d['low']
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_r3 = df_1d['close'].values + daily_range.values * 1.1 / 4
-    camarilla_s3 = df_1d['close'].values - daily_range.values * 1.1 / 4
+    # Calculate 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar close)
+    # Camarilla formula: Range = (High - Low)
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = close_1d + camarilla_range * 1.1 / 4
+    camarilla_s3 = close_1d - camarilla_range * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -55,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need sufficient 1d data for EMA/Camarilla calculation
+    # Start after warmup: need sufficient 1d data for EMA34/Camarilla calculation
     start_idx = 34
     
     for i in range(start_idx, n):
