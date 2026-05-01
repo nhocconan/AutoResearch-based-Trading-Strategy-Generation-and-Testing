@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d ADX regime filter
-# Uses 1d ADX(14) to filter regime: ADX>25 = trending (trade breakouts), ADX<20 = range (avoid)
-# Donchian(20) from 4h acts as dynamic support/resistance
-# Breakout above upper band with volume spike = long, breakdown below lower band = short
-# Volume spike defined as current volume > 1.8 * 20-period EMA
-# Designed for low frequency (75-200 trades over 4 years) with clear structure
-# Works in both bull and bear markets via regime filter and symmetric long/short logic
+# Hypothesis: 6h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
+# Uses 1d EMA34 to filter trend direction: price > EMA34 = bullish bias (longs only), price < EMA34 = bearish bias (shorts only)
+# Donchian(20) breakout on 6f timeframe: long on break above 20-period high, short on break below 20-period low
+# Volume confirmation: current volume > 1.5 * 20-period EMA of volume
+# Designed for low frequency (50-150 trades over 4 years) with clear structure and trend alignment
 
-name = "4h_Donchian20_1dVolume_1dADX_Regime_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA34_VolumeTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,124 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for regime filter (ADX) and volume average
+    # 1d HTF data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper_band = high_roll.values
-    lower_band = low_roll.values
-    
-    # 1d ADX(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # 6h Donchian(20) channels
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Wilder's smoothing
-    def wilders_smoothing(x, period):
-        result = np.full_like(x, np.nan)
-        if len(x) >= period:
-            first_val = np.nansum(x[1:period+1])
-            result[period] = first_val
-            for i in range(period+1, len(x)):
-                result[i] = result[i-1] - (result[i-1] / period) + x[i]
-        return result
-    
-    tr_period = 14
-    tr_smoothed = wilders_smoothing(tr, tr_period)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
-    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 1d volume spike filter: volume > 1.8 * 20-period EMA (using 4h volume aggregated to 1d)
-    # Since we don't have 1d volume directly, we'll use 4h volume with a longer EMA
+    # 6h volume spike filter: volume > 1.5 * 20-period EMA
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ema_20)
+    volume_spike = volume > (1.5 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 20)  # Need ADX and Donchian
+    start_idx = max(34, 20)  # Need EMA34 and Donchian20
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_max_20[i]) or 
+            np.isnan(low_min_20[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        # Determine trend bias from 1d EMA34
+        bullish_bias = close[i] > ema34_1d_aligned[i]
+        bearish_bias = close[i] < ema34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade in trending regime (ADX>25) - avoid ranging markets
-            if trending:
-                # Long: Break above upper band with volume spike
-                if close[i] > upper_band[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Break below lower band with volume spike
-                elif close[i] < lower_band[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Long: Donchian breakout above 20-period high + volume spike + bullish bias
+            if high[i] > high_max_20[i-1] and volume_spike[i] and bullish_bias:
+                signals[i] = 0.25
+                position = 1
+            # Short: Donchian breakout below 20-period low + volume spike + bearish bias
+            elif low[i] < low_min_20[i-1] and volume_spike[i] and bearish_bias:
+                signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0  # Avoid ranging and transition regimes
+                signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions: price returns to midpoint or opposite breakout
-            midpoint = (upper_band[i] + lower_band[i]) / 2.0
-            exit_long = False
-            if close[i] <= midpoint:  # Return to midpoint
-                exit_long = True
-            elif close[i] < lower_band[i] and volume_spike[i]:  # Reverse breakout
-                exit_long = True
-            
-            if exit_long:
+            # Exit: Donchian breakdown below 20-period low OR loss of bullish bias
+            if low[i] < low_min_20[i-1] or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions: price returns to midpoint or opposite breakout
-            midpoint = (upper_band[i] + lower_band[i]) / 2.0
-            exit_short = False
-            if close[i] >= midpoint:  # Return to midpoint
-                exit_short = True
-            elif close[i] > upper_band[i] and volume_spike[i]:  # Reverse breakout
-                exit_short = True
-            
-            if exit_short:
+            # Exit: Donchian breakout above 20-period high OR loss of bearish bias
+            if high[i] > high_max_20[i-1] or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
