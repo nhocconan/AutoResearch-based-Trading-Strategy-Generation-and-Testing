@@ -4,7 +4,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Donchian channel breakouts for momentum continuation, filtered by 1d EMA34 trend and volume > 2x 20-period median.
+# Uses Donchian channel breakouts filtered by daily EMA34 trend and volume > 2x 20-period median.
 # Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
 # Discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
 
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -34,15 +34,15 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Donchian(20) levels from previous period OHLC
+    # Calculate Donchian(20) from previous period OHLC
     donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA34 and Donchian
-    start_idx = 50
+    # Start after warmup for EMA34 and volume median
+    start_idx = 34
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
