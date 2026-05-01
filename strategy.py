@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above 4h Donchian upper channel AND 1d EMA34 uptrend AND volume > 1.5x 20-period median.
-# Short when price breaks below 4h Donchian lower channel AND 1d EMA34 downtrend AND volume > 1.5x 20-period median.
-# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year on 4h timeframe.
-# Donchian channels provide robust price structure that works in both bull and bear markets.
-# Volume confirmation ensures breakouts have participation, reducing false signals.
-# ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
+# Hypothesis: 6h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels (-80 to -20 for oversold/overbought).
+# Long when Williams %R < -80 (extreme oversold) AND price > 1d EMA50 (uptrend filter) AND volume > 1.5x 20-period median.
+# Short when Williams %R > -20 (extreme overbought) AND price < 1d EMA50 (downtrend filter) AND volume > 1.5x 20-period median.
+# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.5*ATR(14), exit short if price > lowest_since_entry + 2.5*ATR(14).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-30 trades/year on 6h timeframe.
+# Williams %R works in both bull and bear markets by identifying exhaustion points.
+# Volume confirmation ensures reversals have participation, reducing false signals from weak moves.
+# Wider ATR stop (2.5x) allows for volatility during mean reversion moves.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_ATR_v4"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeSpike_ATR_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,22 +27,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (loaded once before loop)
+    # Calculate 1d EMA50 for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1d close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper channel = highest high of last 20 periods
-    # Lower channel = lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 14-period Williams %R on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -59,13 +60,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for Donchian, EMA, volume, and ATR
+    # Start after warmup for Williams %R, EMA, volume, and ATR
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
@@ -74,14 +74,13 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         curr_atr = atr[i]
+        curr_williams_r = williams_r[i]
         
-        # Trend filter: 1d EMA34 direction
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
@@ -90,15 +89,15 @@ def generate_signals(prices):
             volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian upper channel AND uptrend AND volume spike
-            if curr_close > donchian_upper[i] and uptrend and volume_confirm:
+            # Long: Williams %R < -80 (extreme oversold) AND uptrend AND volume spike
+            if curr_williams_r < -80.0 and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below Donchian lower channel AND downtrend AND volume spike
-            elif curr_close < donchian_lower[i] and downtrend and volume_confirm:
+            # Short: Williams %R > -20 (extreme overbought) AND downtrend AND volume spike
+            elif curr_williams_r > -20.0 and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -108,26 +107,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update highest high since entry (using close prices for consistency)
+            # Update highest high since entry
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break below Donchian lower channel (reversal) OR trend reversal
-            stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or curr_close < donchian_lower[i] or not uptrend:
+            # Exit conditions: ATR stoploss OR Williams %R > -20 (overbought reversal) OR trend reversal
+            stop_price = highest_since_entry - 2.5 * curr_atr
+            if curr_close < stop_price or curr_williams_r > -20.0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry (using close prices for consistency)
+            # Update lowest low since entry
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break above Donchian upper channel (reversal) OR trend reversal
-            stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or curr_close > donchian_upper[i] or not downtrend:
+            # Exit conditions: ATR stoploss OR Williams %R < -80 (oversold reversal) OR trend reversal
+            stop_price = lowest_since_entry + 2.5 * curr_atr
+            if curr_close > stop_price or curr_williams_r < -80.0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
