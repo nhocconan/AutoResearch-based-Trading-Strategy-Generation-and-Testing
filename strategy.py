@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width regime + Donchian(20) breakout + volume confirmation
-# BBW < 0.02 = low volatility squeeze (regime filter). Breakout from Donchian(20) with volume > 1.5x 20-bar mean.
-# Long when price breaks above Donchian upper band in low BBW regime + volume spike.
-# Short when price breaks below Donchian lower band in low BBW regime + volume spike.
-# Uses discrete sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years.
-# BBW regime filters out whipsaws in ranging markets, capturing only explosive moves after consolidation.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 20-bar Donchian high, price > 1d EMA34, volume > 1.5x 20-bar avg
+# Short when price breaks below 20-bar Donchian low, price < 1d EMA34, volume > 1.5x 20-bar avg
+# Uses discrete sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Donchian channels provide clear structure, EMA34 filters counter-trend noise, volume confirms conviction.
 
-name = "6h_BBWRegime_Donchian20_Breakout_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,68 +23,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Band Width (20,2) regime filter
-    close_s = pd.Series(close)
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_mid  # normalized width
+    # 1d HTF data for EMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Donchian channels (20)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d EMA(34) on 1d close
+    ema_1d_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA to 12h timeframe
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
+    
+    # Donchian(20) channels
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for all indicators (20 periods)
-    start_idx = 20
+    # Start after warmup for all indicators
+    start_idx = 20  # Need 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(bb_width[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(high_ma_20[i]) or 
+            np.isnan(low_ma_20[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
+        
+        # Donchian breakout conditions
+        breakout_up = curr_close > high_ma_20[i-1]  # Close above previous period's high
+        breakout_down = curr_close < low_ma_20[i-1]  # Close below previous period's low
         
         # Volume confirmation
-        vol_spike = volume_spike[i]
-        
-        # BBW regime: low volatility squeeze (< 0.02)
-        low_volatility_regime = bb_width[i] < 0.02
+        vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high in low BBW regime + volume spike
-            if curr_close > donch_high[i] and low_volatility_regime and vol_spike:
+            # Long: Price breaks above Donchian high, above 1d EMA34, volume confirmation
+            if breakout_up and curr_close > ema_1d_34_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low in low BBW regime + volume spike
-            elif curr_close < donch_low[i] and low_volatility_regime and vol_spike:
+            # Short: Price breaks below Donchian low, below 1d EMA34, volume confirmation
+            elif breakout_down and curr_close < ema_1d_34_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price below Donchian mid or BBW expands beyond threshold
-            if curr_close < bb_mid[i] or bb_width[i] > 0.05:
+            # Exit on close below Donchian low or below 1d EMA34
+            if curr_close < low_ma_20[i] or curr_close < ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on price above Donchian mid or BBW expands beyond threshold
-            if curr_close > bb_mid[i] or bb_width[i] > 0.05:
+            # Exit on close above Donchian high or above 1d EMA34
+            if curr_close > high_ma_20[i] or curr_close > ema_1d_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
