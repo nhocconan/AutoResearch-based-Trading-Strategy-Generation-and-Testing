@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX trend filter + volume confirmation.
-# Long when price breaks above 20-bar Donchian high with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Short when price breaks below 20-bar Donchian low with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Uses ATR-based trailing stop: exit long when price < highest_high_since_entry - 2.5*ATR(14),
-# exit short when price > lowest_low_since_entry + 2.5*ATR(14).
-# Discrete sizing 0.30 to balance return and drawdown. Designed for 4h timeframe to capture medium-term trends.
-# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via 1d ADX filter.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume spike and 12h EMA trend filter.
+# Long when BB width < 20th percentile (squeeze) and price breaks above upper band with 1d volume > 2x 20-bar average and 12h EMA50 > EMA200.
+# Short when BB width < 20th percentile (squeeze) and price breaks below lower band with 1d volume > 2x 20-bar average and 12h EMA50 < EMA200.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture low-volatility breakouts in both bull and bear markets.
+# Works in bull (buy breakouts above upper band) and bear (sell breakouts below lower band) via 12h EMA trend filter.
 
-name = "4h_Donchian20_1dADX_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "6h_BB_Squeeze_Breakout_1dVolume_12hEMATrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,184 +26,104 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ADX trend filter
+    # Load 1d data ONCE before loop for volume spike filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d ADX calculation (14-period)
-    def calculate_adx(high_arr, low_arr, close_arr, period=14):
-        # True Range
-        tr1 = np.abs(high_arr[1:] - low_arr[1:])
-        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
-        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align length
-        
-        # Directional Movement
-        up_move = high_arr[1:] - high_arr[:-1]
-        down_move = low_arr[:-1] - low_arr[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
-        
-        # Smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-        def wilders_smoothing(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            return result
-        
-        atr = wilders_smoothing(tr, period)
-        plus_dm_smooth = wilders_smoothing(plus_dm, period)
-        minus_dm_smooth = wilders_smoothing(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = wilders_smoothing(dx, period)
-        return adx
+    # Load 12h data ONCE before loop for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate 1d ADX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # 1d volume spike: volume > 2x 20-bar simple moving average
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = df_1d['volume'].values > (vol_ma_1d.values * 2.0)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high_values = donchian_high.values
-    donchian_low_values = donchian_low.values
+    # 12h EMA trend: EMA50 and EMA200
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
     
-    # 4h ATR calculation (14-period) for trailing stop
-    def calculate_atr(high_arr, low_arr, close_arr, period=14):
-        # True Range
-        tr1 = np.abs(high_arr[1:] - low_arr[1:])
-        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
-        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align length
-        
-        # Wilder's smoothing
-        def wilders_smoothing(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            return result
-        
-        atr = wilders_smoothing(tr, period)
-        return atr
+    # 6h Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    ma_20 = close_s.rolling(window=20, min_periods=20).mean()
+    std_20 = close_s.rolling(window=20, min_periods=20).std()
+    upper_bb = ma_20 + (2 * std_20)
+    lower_bb = ma_20 - (2 * std_20)
+    bb_width = (upper_bb - lower_bb) / ma_20  # Normalized width
     
-    atr_4h = calculate_atr(high, low, close, 14)
+    # Bollinger Band squeeze: width < 20th percentile of lookback
+    bb_width_percentile = bb_width.rolling(window=50, min_periods=50).quantile(0.20)
+    squeeze = bb_width < bb_width_percentile
+    
+    # Breakout conditions
+    breakout_up = close > upper_bb
+    breakout_down = close < lower_bb
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    start_idx = 50  # warmup for Donchian, ADX, and ATR
+    start_idx = 200  # warmup for 12h EMA200 and BB calculations
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 4h timeframe
+        # Session filter: trade all sessions for 6h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_values[i]) or np.isnan(donchian_low_values[i]) or np.isnan(atr_4h[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_200_12h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or np.isnan(squeeze.iloc[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_vol = volume[i]
-        curr_adx = adx_1d_aligned[i]
-        curr_atr = atr_4h[i]
-        curr_donchian_high = donchian_high_values[i]
-        curr_donchian_low = donchian_low_values[i]
+        curr_vol_spike = vol_spike_1d_aligned[i]
+        curr_ema_50 = ema_50_12h_aligned[i]
+        curr_ema_200 = ema_200_12h_aligned[i]
+        curr_squeeze = squeeze.iloc[i]
+        curr_breakout_up = breakout_up.iloc[i]
+        curr_breakout_down = breakout_down.iloc[i]
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        if i < 20 + start_idx:
-            signals[i] = 0.0
-            continue
-            
-        vol_ma = np.mean(volume[i-20:i])  # 20-period simple moving average
-        if vol_ma <= 0:
-            signals[i] = 0.0
-            continue
-        volume_confirm = curr_vol > (vol_ma * 1.5)
-        
-        # Donchian breakout signals
-        bullish_breakout = curr_close > curr_donchian_high
-        bearish_breakout = curr_close < curr_donchian_low
-        
+        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: bullish Donchian breakout AND ADX > 25 AND volume confirmation
-            if (bullish_breakout and 
-                curr_adx > 25 and 
-                volume_confirm):
-                signals[i] = 0.30
+            # Long: BB squeeze AND breakout up AND volume spike AND 12h EMA50 > EMA200 (uptrend)
+            if (curr_squeeze and 
+                curr_breakout_up and 
+                curr_vol_spike and 
+                curr_ema_50 > curr_ema_200):
+                signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
-            # Short: bearish Donchian breakout AND ADX > 25 AND volume confirmation
-            elif (bearish_breakout and 
-                  curr_adx > 25 and 
-                  volume_confirm):
-                signals[i] = -0.30
+            # Short: BB squeeze AND breakout down AND volume spike AND 12h EMA50 < EMA200 (downtrend)
+            elif (curr_squeeze and 
+                  curr_breakout_down and 
+                  curr_vol_spike and 
+                  curr_ema_50 < curr_ema_200):
+                signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            
-            # Exit conditions:
-            # 1. ATR trailing stop: price < highest_high_since_entry - 2.5*ATR
-            # 2. Trend weakening: ADX < 20
-            # 3. Opposite Donchian breakout
-            if (curr_close < highest_since_entry - 2.5 * curr_atr or
-                curr_adx < 20 or
-                bearish_breakout):
+            # Exit: breakout below middle band (mean reversion) OR loss of squeeze (volatility expansion) OR trend change
+            ma_20_val = ma_20.iloc[i]
+            if (curr_close < ma_20_val or 
+                not curr_squeeze or 
+                curr_ema_50 < curr_ema_200):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            
-            # Exit conditions:
-            # 1. ATR trailing stop: price > lowest_low_since_entry + 2.5*ATR
-            # 2. Trend weakening: ADX < 20
-            # 3. Opposite Donchian breakout
-            if (curr_close > lowest_since_entry + 2.5 * curr_atr or
-                curr_adx < 20 or
-                bullish_breakout):
+            # Exit: breakout above middle band (mean reversion) OR loss of squeeze (volatility expansion) OR trend change
+            ma_20_val = ma_20.iloc[i]
+            if (curr_close > ma_20_val or 
+                not curr_squeeze or 
+                curr_ema_50 > curr_ema_200):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
