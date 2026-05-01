@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation spike.
-# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 12h volume median.
-# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 12h volume median.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation spike.
+# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 1.8x 4h volume median.
+# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 1.8x 4h volume median.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Camarilla levels from prior 1d provide structure; 1d EMA34 filters long-term trend.
-# Volume confirmation ensures momentum. Target: 12-37 trades/year on 12h timeframe.
+# Camarilla levels from prior 1d provide structure; 1d EMA34 filters longer-term trend (more stable than 12h).
+# Volume confirmation ensures momentum. Target: 20-35 trades/year on 4h timeframe.
 # Proven pattern: tight entries + volume + trend filter works on BTC/ETH in both bull/bear.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,10 +33,10 @@ def generate_signals(prices):
     tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h volume median (20-period for stability)
-    vol_median_12h = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    # Calculate 4h volume median (20-period for stability)
+    vol_median_4h = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate 1d EMA34 trend
+    # Calculate 1d EMA34 trend (more stable than 12h EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -44,7 +44,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (same df_1d as above)
+    # Calculate Camarilla levels from prior 1d bar (use same df_1d for consistency)
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -60,7 +60,7 @@ def generate_signals(prices):
     r3 = c1 + camarilla_range * 1.1 / 4.0
     s3 = c1 - camarilla_range * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -76,7 +76,7 @@ def generate_signals(prices):
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_median_12h[i])):
+            np.isnan(vol_median_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -87,11 +87,11 @@ def generate_signals(prices):
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 12h volume median
-        if vol_median_12h[i] <= 0 or np.isnan(vol_median_12h[i]):
+        # Volume confirmation: current volume > 1.8x 4h volume median (slightly looser for more trades)
+        if vol_median_4h[i] <= 0 or np.isnan(vol_median_4h[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_12h[i] * 2.0)
+            volume_confirm = curr_volume > (vol_median_4h[i] * 1.8)
         
         if position == 0:  # Flat - look for new entries
             # Long: price > R3 AND uptrend AND volume spike
