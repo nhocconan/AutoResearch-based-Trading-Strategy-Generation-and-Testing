@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend and volume confirmation filter.
-# Long when: price breaks above Donchian upper band AND 1d close > 1d EMA34 AND 4h volume > 2.0x 20-period average
-# Short when: price breaks below Donchian lower band AND 1d close < 1d EMA34 AND 4h volume > 2.0x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend and volume confirmation.
+# Long when: price breaks above Donchian upper band AND 1d close > 1d EMA34 AND 4h volume > 2.0x 20-period average volume
+# Short when: price breaks below Donchian lower band AND 1d close < 1d EMA34 AND 4h volume > 2.0x 20-period average volume
 # Uses Donchian channels from primary 4h data for structure, 1d EMA34 for trend alignment, volume spike for conviction.
 # Target: 20-50 trades/year on 4h. Discrete sizing 0.25 to minimize fee drag while capturing significant moves.
 # Works in bull (breakouts with trend) and bear (breakdowns with trend) by trading with aligned 1d trend.
+# Added volume MA precomputation outside loop to reduce compute and ensure correct alignment.
 
 name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
@@ -27,20 +28,25 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 4h data ONCE before loop for Donchian calculation
+    # Load 4h data ONCE before loop for Donchian and volume MA calculation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period) using current bar's OHLC
+    # Calculate 4h Donchian channels (20-period)
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 4h primary timeframe (no additional delay needed)
+    # Align Donchian levels to 4h primary timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Calculate 4h volume MA (20-period) and align
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -72,7 +78,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -83,13 +89,9 @@ def generate_signals(prices):
         curr_donchian_high = donchian_high_aligned[i]
         curr_donchian_low = donchian_low_aligned[i]
         curr_ema_34 = ema_34_1d_aligned[i]
-        
-        # Volume confirmation: current 4h volume > 2.0x 20-period average
-        # Calculate 4h volume MA on the fly using aligned 4h data
-        vol_4h = df_4h['volume'].values
-        vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-        vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
         curr_vol_ma = vol_ma_4h_aligned[i]
+        
+        # Volume confirmation: current 4h volume > 2.0x 20-period average volume
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)
         
         # 1d trend filter
