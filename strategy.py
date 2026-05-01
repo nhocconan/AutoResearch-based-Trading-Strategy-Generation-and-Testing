@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
-# Long when: BB squeeze (bandwidth < 20th percentile) AND price breaks above upper band AND 1d ADX > 25 AND 6h volume > 1.5x 20-period average
-# Short when: BB squeeze AND price breaks below lower band AND 1d ADX > 25 AND 6h volume > 1.5x 20-period average
-# Uses discrete sizing 0.25. Target: 12-37 trades/year on 6h.
-# Bollinger squeeze identifies low volatility primed for breakout, ADX ensures breakout occurs in trending environment, volume confirms conviction.
-# Works in bull (catching bullish breakouts) and bear (catching bearish breakdowns) by trading breakouts in the direction of the 1d trend.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when: price breaks above 20-period Donchian high AND 1d close > 1d EMA50 AND 12h volume > 1.5x 20-period average
+# Short when: price breaks below 20-period Donchian low AND 1d close < 1d EMA50 AND 12h volume > 1.5x 20-period average
+# Uses discrete sizing 0.25. Target: 12-37 trades/year on 12h.
+# Donchian channels provide clear structure, 1d EMA50 filters for higher timeframe trend alignment, volume spike confirms conviction.
+# Works in bull (catching breakouts) and bear (catching breakdowns) by trading with the aligned trend.
 
-name = "6h_BB_Squeeze_Breakout_1dADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,79 +27,37 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 6h data ONCE before loop for Bollinger Bands
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Load 12h data ONCE before loop for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for ADX
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Bollinger Bands on 6h (20, 2)
-    bb_period = 20
-    bb_std = 2.0
-    sma_6h = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_6h = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_6h + (bb_std * std_6h)
-    lower_band = sma_6h - (bb_std * std_6h)
-    bandwidth = (upper_band - lower_band) / sma_6h  # Normalized bandwidth
+    # 12h Donchian channels (20-period)
+    donchian_high = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Al Bollinger Bands to 6h primary timeframe (already aligned as computed from close)
-    # Note: sma_6h, std_6h, upper_band, lower_band, bandwidth are already 6h-aligned as they use close prices
+    # Align Donchian levels to 12h primary timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # 1d ADX for trend filter (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = alpha = 1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_1d = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_1d = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus_1d = 100 * (dm_plus_1d / atr_1d)
-    di_minus_1d = 100 * (dm_minus_1d / atr_1d)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 6h volume average (20-period) for volume confirmation
-    vol_6h = df_6h['volume'].values
-    vol_ma_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
-    
-    # Calculate bandwidth percentile rank (20-period lookback) for squeeze detection
-    bandwidth_series = pd.Series(bandwidth)
-    bandwidth_percentile = bandwidth_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else np.nan, raw=False
-    ).values
+    # 12h volume average (20-period) for volume confirmation
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for bandwidth percentile and ADX
+    start_idx = 20  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -116,9 +74,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(sma_6h[i]) or np.isnan(std_6h[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(bandwidth_percentile[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -126,34 +83,29 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_vol = volume[i]
-        curr_vol_ma = vol_ma_6h_aligned[i]
-        curr_upper = upper_band[i]
-        curr_lower = lower_band[i]
-        curr_bandwidth_pct = bandwidth_percentile[i]
-        curr_adx = adx_aligned[i]
+        curr_vol_ma = vol_ma_12h_aligned[i]
+        curr_donchian_high = donchian_high_aligned[i]
+        curr_donchian_low = donchian_low_aligned[i]
+        curr_ema_50 = ema_50_aligned[i]
         
-        # Bollinger squeeze: bandwidth < 20th percentile (low volatility)
-        squeeze = curr_bandwidth_pct < 20.0
-        
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
         volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
-        # 1d trend filter: ADX > 25 indicates trending market
-        trending = curr_adx > 25.0
+        # 1d trend filter: price above/below EMA50
+        uptrend_1d = curr_close > curr_ema_50
+        downtrend_1d = curr_close < curr_ema_50
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: squeeze AND price breaks above upper band AND trending AND volume confirmation
-            if (squeeze and 
-                curr_close > curr_upper and 
-                trending and 
+            # Long: break above Donchian high AND 1d uptrend AND volume confirmation
+            if (curr_close > curr_donchian_high and 
+                uptrend_1d and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze AND price breaks below lower band AND trending AND volume confirmation
-            elif (squeeze and 
-                  curr_close < curr_lower and 
-                  trending and 
+            # Short: break below Donchian low AND 1d downtrend AND volume confirmation
+            elif (curr_close < curr_donchian_low and 
+                  downtrend_1d and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -161,18 +113,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price closes below middle band (SMA) OR squeeze breaks (volatility expands)
-            if (curr_close < sma_6h[i] or 
-                curr_bandwidth_pct > 50.0):  # Exit when bandwidth > median
+            # Exit: price closes below Donchian low (stoploss) or above Donchian high (take profit)
+            if curr_close < curr_donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price closes above middle band (SMA) OR squeeze breaks (volatility expands)
-            if (curr_close > sma_6h[i] or 
-                curr_bandwidth_pct > 50.0):  # Exit when bandwidth > median
+            # Exit: price closes above Donchian high (stoploss) or below Donchian low (take profit)
+            if curr_close > curr_donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
