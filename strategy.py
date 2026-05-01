@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w/1d pivot direction filter and volume confirmation.
-# Long: price breaks above Donchian(20) high AND price > 1w pivot point (bullish bias) AND volume > 1.5x 20-bar average.
-# Short: price breaks below Donchian(20) low AND price < 1w pivot point (bearish bias) AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed to capture breakouts in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above 20-bar 12h Donchian upper band AND price > 1d EMA50 AND volume > 1.5x 20-bar 12h volume MA.
+# Short when price breaks below 20-bar 12h Donchian lower band AND price < 1d EMA50 AND volume > 1.5x 20-bar 12h volume MA.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed to capture medium-term trends in both bull and bear markets.
 
-name = "6h_Donchian20_1wPivot_Direction_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,48 +25,44 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1w data ONCE before loop for pivot point calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for Donchian channels and volume MA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    pivot_1w = (weekly_high + weekly_low + weekly_close) / 3.0
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # 12h Donchian(20) channels
+    donch_hi = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
+    donch_lo = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
+    donch_hi_aligned = align_htf_to_ltf(prices, df_12h, donch_hi)
+    donch_lo_aligned = align_htf_to_ltf(prices, df_12h, donch_lo)
     
-    # Load 1d data ONCE before loop for additional trend filter
+    # 12h volume MA(20)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA34 and pivot
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
+        # Session filter: 00-23 UTC (12h timeframe, trade all sessions)
         hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            # Outside session: flatten position if any
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        in_session = True  # 12h bars cover full day, no session filter needed
         
         # Skip if any data not ready
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(donch_hi_aligned[i]) or np.isnan(donch_lo_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,36 +70,25 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_vol = volume[i]
-        curr_pivot_1w = pivot_1w_aligned[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_donch_hi = donch_hi_aligned[i]
+        curr_donch_lo = donch_lo_aligned[i]
+        curr_vol_ma = vol_ma_12h_aligned[i]
+        curr_ema_50_1d = ema_50_1d_aligned[i]
         
-        # Donchian(20) calculation requires 20 periods of high/low
-        if i < 20 + start_idx:  # need extra warmup for Donchian
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Donchian(20) channels
-        highest_high = np.max(high[i-19:i+1])  # 20 periods including current
-        lowest_low = np.min(low[i-19:i+1])
-        
-        # Volume confirmation: current 6h volume > 1.5x 20-period average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        curr_vol_ma = vol_ma[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
         volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian high AND price > 1w pivot AND price > 1d EMA34 AND volume confirmation
-            if (curr_close > highest_high and 
-                curr_close > curr_pivot_1w and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price > Donchian upper AND price > 1d EMA50 AND volume confirmation
+            if (curr_close > curr_donch_hi and 
+                curr_close > curr_ema_50_1d and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND price < 1w pivot AND price < 1d EMA34 AND volume confirmation
-            elif (curr_close < lowest_low and 
-                  curr_close < curr_pivot_1w and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price < Donchian lower AND price < 1d EMA50 AND volume confirmation
+            elif (curr_close < curr_donch_lo and 
+                  curr_close < curr_ema_50_1d and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -111,18 +96,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR price < 1w pivot (bias change)
-            if (curr_close < lowest_low or 
-                curr_close < curr_pivot_1w):
+            # Exit: price < Donchian lower (breakdown) OR price < 1d EMA50 (trend violation)
+            if (curr_close < curr_donch_lo or 
+                curr_close < curr_ema_50_1d):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR price > 1w pivot (bias change)
-            if (curr_close > highest_high or 
-                curr_close > curr_pivot_1w):
+            # Exit: price > Donchian upper (breakout) OR price > 1d EMA50 (trend violation)
+            if (curr_close > curr_donch_hi or 
+                curr_close > curr_ema_50_1d):
                 signals[i] = 0.0
                 position = 0
             else:
