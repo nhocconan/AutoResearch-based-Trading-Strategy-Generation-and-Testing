@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Uses 1d ATR for stoploss and position sizing. Long when price breaks above Donchian(20) high
-# with volume > 1.5x average and choppy market (CHOP > 61.8). Short when price breaks below
-# Donchian(20) low with volume confirmation and choppy market. Uses discrete sizing 0.25.
-# Designed to capture trends in choppy/range-bound markets which are common in bear phases
-# while avoiding whipsaws in strong trends via the chop filter. Works in both bull and bear
-# markets by adapting to regime conditions.
+# Hypothesis: 6h 1-2-3 Reversal Pattern with 1d Trend Filter and Volume Confirmation.
+# Uses classic 1-2-3 reversal (Ross Hook) for high-probability trend continuation entries.
+# 1d EMA50 establishes higher timeframe trend direction to avoid counter-trend trades.
+# Volume confirmation ensures institutional participation. Target: 15-25 trades/year.
+# Works in bull markets (long 1-2-3 at pullbacks) and bear markets (short 1-2-3 at rallies).
+# The 1-2-3 pattern has proven edge in capturing institutional order flow after retracements.
 
-name = "4h_Donchian20_VolumeChop_Regime_v1"
-timeframe = "4h"
+name = "6h_123Reversal_1dTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,82 +27,28 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for ATR and chop
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for stoploss
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # ATR(14) using Wilder's smoothing
-    atr_1d = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_1d[i] = np.nan
-        elif i == 14:
-            atr_1d[i] = np.nanmean(tr[1:15])  # first ATR is average of first 14 TR
-        else:
-            if not np.isnan(atr_1d[i-1]):
-                atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-            else:
-                atr_1d[i] = np.nan
-    
-    # Calculate 1d Choppiness Index(14)
-    # CHOP = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
-    sum_tr_14 = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
-            sum_tr_14[i] = np.nan
-        else:
-            sum_tr_14[i] = np.nansum(tr[i-13:i+1])
-    
-    chop_1d = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14 or np.isnan(sum_tr_14[i]) or np.isnan(atr_1d[i]) or atr_1d[i] == 0:
-            chop_1d[i] = np.nan
-        else:
-            chop_1d[i] = 100 * np.log10(sum_tr_14[i] / (atr_1d[i] * 14)) / np.log10(14)
-    
-    # Align 1d indicators to 4h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate Donchian(20) channels on 4h
-    # Donchian High = highest high of last 20 periods
-    # Donchian Low = lowest low of last 20 periods
-    donchian_high = np.full_like(high, np.nan)
-    donchian_low = np.full_like(low, np.nan)
-    
-    for i in range(len(high)):
-        if i < 19:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.nanmax(high[i-19:i+1])
-            donchian_low[i] = np.nanmin(low[i-19:i+1])
-    
-    # Calculate volume average(20) for confirmation
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if i < 19:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.nanmean(volume[i-19:i+1])
+    # Calculate 20-period volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for Donchian and volume MA
+    # Track 1-2-3 pattern points
+    point1 = np.full(n, np.nan)  # extreme point
+    point2 = np.full(n, np.nan)  # retracement point
+    point3 = np.full(n, np.nan)  # test of point1 level
+    pattern_stage = np.zeros(n)  # 0: none, 1: point1 found, 2: point2 found, 3: point3 found
+    
+    start_idx = 30  # warmup
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -119,58 +64,132 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_dc_high = donchian_high[i]
-        curr_dc_low = donchian_low[i]
-        curr_vol_ma = vol_ma[i]
-        curr_atr = atr_1d_aligned[i]
-        curr_chop = chop_1d_aligned[i]
+        curr_ema_50 = ema_50_1d_aligned[i]
+        curr_vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = curr_volume > (1.5 * curr_vol_ma)
+        # Skip if data not ready
+        if (np.isnan(curr_ema_50) or np.isnan(curr_vol_ma)):
+            signals[i] = 0.0
+            continue
         
-        # Choppiness regime: CHOP > 61.8 indicates choppy/range-bound market
-        choppy_market = curr_chop > 61.8
+        # Volume confirmation: above average volume
+        volume_ok = curr_volume > curr_vol_ma
+        
+        # Update 1-2-3 pattern tracking
+        if i > start_idx:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            
+            # Check for new swing high/low (point1 candidates)
+            # Swing high: current high > previous high and next candle's high (we use previous as proxy)
+            # Actually look for: recent swing points
+            
+            # Simpler approach: track recent extremes
+            if i >= 5:
+                lookback = 5
+                recent_high = np.max(high[i-lookback:i+1])
+                recent_low = np.min(low[i-lookback:i+1])
+                
+                # New swing high made
+                if curr_high == recent_high and curr_high > np.max(high[i-lookback:i]):
+                    # Potential point1 for downtrend (recent high)
+                    point1[i] = curr_high
+                    point2[i] = np.nan
+                    point3[i] = np.nan
+                    pattern_stage[i] = 1
+                
+                # New swing low made
+                elif curr_low == recent_low and curr_low < np.min(low[i-lookback:i]):
+                    # Potential point1 for uptrend (recent low)
+                    point1[i] = curr_low
+                    point2[i] = np.nan
+                    point3[i] = np.nan
+                    pattern_stage[i] = 1
+                else:
+                    # Inherit previous pattern stage
+                    point1[i] = point1[i-1]
+                    point2[i] = point2[i-1]
+                    point3[i] = point3[i-1]
+                    pattern_stage[i] = pattern_stage[i-1]
+                    
+                    # Update point2 (retracement) if we have point1
+                    if pattern_stage[i-1] == 1 and not np.isnan(point1[i-1]):
+                        # For uptrend pattern (point1 is low): point2 is retracement high
+                        if curr_high > point1[i-1] and curr_high < point1[i-1] * 1.05:  # reasonable retracement
+                            point2[i] = curr_high
+                            pattern_stage[i] = 2
+                        # For downtrend pattern (point1 is high): point2 is retracement low
+                        elif curr_low < point1[i-1] and curr_low > point1[i-1] * 0.95:
+                            point2[i] = curr_low
+                            pattern_stage[i] = 2
+                    
+                    # Update point3 (test of point1) if we have point2
+                    elif pattern_stage[i-1] == 2 and not np.isnan(point2[i-1]):
+                        # For uptrend: point3 should test point1 low but not break it
+                        if curr_low <= point1[i-1] * 1.005 and curr_low >= point1[i-1] * 0.995:  # within 0.5%
+                            point3[i] = curr_low
+                            pattern_stage[i] = 3
+                        # For downtrend: point3 should test point1 high but not break it
+                        elif curr_high >= point1[i-1] * 0.995 and curr_high <= point1[i-1] * 1.005:
+                            point3[i] = curr_high
+                            pattern_stage[i] = 3
+        
+        # Inherit values if not set in this iteration
+        if i == start_idx:
+            point1[i] = np.nan
+            point2[i] = np.nan
+            point3[i] = np.nan
+            pattern_stage[i] = 0
+        elif np.isnan(point1[i]):
+            point1[i] = point1[i-1]
+            point2[i] = point2[i-1]
+            point3[i] = point3[i-1]
+            pattern_stage[i] = pattern_stage[i-1]
+        
+        curr_p1 = point1[i]
+        curr_p2 = point2[i]
+        curr_p3 = point3[i]
+        curr_stage = pattern_stage[i]
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian high + volume confirmation + choppy market
-            if (curr_close > curr_dc_high and 
-                vol_confirmed and 
-                choppy_market):
+            # Long 1-2-3: point1=low, point2=retracement high, point3=test of low
+            # Conditions: uptrend on 1d, point3 formed, volume confirmation
+            if (not np.isnan(curr_p1) and not np.isnan(curr_p2) and not np.isnan(curr_p3) and
+                curr_stage == 3 and
+                curr_close > curr_ema_50 and  # 1d uptrend filter
+                curr_close > curr_p1 and      # price above point1 (breakout)
+                volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + volume confirmation + choppy market
-            elif (curr_close < curr_dc_low and 
-                  vol_confirmed and 
-                  choppy_market):
+            # Short 1-2-3: point1=high, point2=retracement low, point3=test of high
+            # Conditions: downtrend on 1d, point3 formed, volume confirmation
+            elif (not np.isnan(curr_p1) and not np.isnan(curr_p2) and not np.isnan(curr_p3) and
+                  curr_stage == 3 and
+                  curr_close < curr_ema_50 and  # 1d downtrend filter
+                  curr_close < curr_p1 and      # price below point1 (breakdown)
+                  volume_ok):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Donchian low OR ATR-based stoploss
-            # Stoploss: entry price - 2 * ATR (tracked via position logic)
-            if (curr_close < curr_dc_low):
+            # Exit: price breaks below point2 (retracement high) or trend change
+            if (not np.isnan(curr_p2) and curr_close < curr_p2) or curr_close < curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Donchian high OR ATR-based stoploss
-            if (curr_close > curr_dc_high):
+            # Exit: price breaks above point2 (retracement low) or trend change
+            if (not np.isnan(curr_p2) and curr_close > curr_p2) or curr_close > curr_ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
