@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h EHLERS FISHER TRANSFORM + 1d VOLUME REGIME + 1w PIVOT DIRECTION
-# Fisher Transform identifies extreme price reversals with leading signals.
-# Volume regime filter (high/low volume) confirms participation.
-# 1w pivot direction provides structural bias to avoid counter-trend extremes in strong trends.
-# Long: Fisher < -1.5 AND volume regime = high AND price > 1w pivot point
-# Short: Fisher > +1.5 AND volume regime = high AND price < 1w pivot point
-# Works in bull/bear by aligning reversals with higher timeframe structure and volume confirmation.
-# Target: 15-30 trades/year (60-120 total over 4 years) with discrete sizing 0.25.
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend + volume spike confirmation.
+# Long when: price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 1.5x 20-bar avg volume.
+# Short when: price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 1.5x 20-bar avg volume.
+# Uses discrete sizing 0.25. ATR-based stoploss: exit when price moves 2*ATR against position.
+# Target: 20-50 trades/year. Works in bull (breakouts with trend) and bear (breakdowns with trend).
+# Donchian provides structure, 12h EMA50 filters for higher timeframe trend, volume confirms conviction.
 
-name = "6h_EhlersFisher_1dVolumeRegime_1wPivotDir_v1"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,71 +27,38 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for volume regime and Fisher
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop for EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for pivot direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === 1d Ehlers Fisher Transform (period=10) ===
-    hl2_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
-    max_hl2 = pd.Series(hl2_1d).rolling(window=10, min_periods=10).max().values
-    min_hl2 = pd.Series(hl2_1d).rolling(window=10, min_periods=10).min().values
-    range_hl2 = max_hl2 - min_hl2
-    # Avoid division by zero
-    range_hl2 = np.where(range_hl2 == 0, 1e-10, range_hl2)
-    value_1d = 0.66 * ((hl2_1d - min_hl2) / range_hl2 - 0.5) + 0.67 * np.roll(0.66 * ((hl2_1d - min_hl2) / range_hl2 - 0.5) + 0.67 * np.roll(np.zeros_like(hl2_1d), 1), 1)
-    # Initialize first value
-    value_1d[0] = 0
-    # Calculate Fisher Transform recursively
-    fish_1d = np.zeros_like(hl2_1d)
-    for i in range(1, len(hl2_1d)):
-        fish_1d[i] = 0.5 * np.log((1 + value_1d[i]) / (1 - value_1d[i] + 1e-10)) + 0.5 * fish_1d[i-1]
-    # Align Fisher to 6h
-    fish_1d_aligned = align_htf_to_ltf(prices, df_1d, fish_1d)
+    # Calculate ATR(14) for stoploss
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # === 1d Volume Regime (High/Low) ===
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.where(vol_ma_1d > 0, volume / vol_ma_1d, 1.0)
-    # Volume regime: 1 = high volume (>1.5x MA), 0 = normal/low
-    vol_regime_1d = (vol_ratio_1d > 1.5).astype(float)
-    vol_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_1d)
+    # Calculate Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1w Camarilla Pivot Points (using prior week OHLC) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Prior week OHLC for current week's pivot
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot_1w = (prev_high + prev_low + prev_close) / 3.0
-    range_1w = prev_high - prev_low
-    r1_1w = prev_close + (range_1w * 1.1 / 12)
-    s1_1w = prev_close - (range_1w * 1.1 / 12)
-    r3_1w = prev_close + (range_1w * 1.1 / 4)
-    s3_1w = prev_close - (range_1w * 1.1 / 4)
-    
-    # Align 1w levels to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Calculate volume spike: volume > 1.5x 20-bar average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    start_idx = 30  # warmup for indicators
+    start_idx = 50  # warmup for Donchian, EMA, ATR
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
@@ -110,51 +75,55 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(fish_1d_aligned[i]) or np.isnan(vol_regime_1d_aligned[i]) or
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_fish = fish_1d_aligned[i]
-        curr_vol_regime = vol_regime_1d_aligned[i]
-        curr_pivot = pivot_1w_aligned[i]
-        curr_r3 = r3_1w_aligned[i]
-        curr_s3 = s3_1w_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_highest_20 = highest_20[i]
+        curr_lowest_20 = lowest_20[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
+        curr_atr = atr_14[i]
+        curr_volume_spike = volume_spike[i]
         
-        # Entry conditions
+        # Donchian breakout conditions
+        breakout_long = curr_close > curr_highest_20
+        breakout_short = curr_close < curr_lowest_20
+        
         if position == 0:  # Flat - look for new entries
-            # Long: Fisher < -1.5 (extreme low) AND high volume AND price above weekly pivot
-            if (curr_fish < -1.5 and 
-                curr_vol_regime > 0.5 and 
-                curr_close > curr_pivot):
+            # Long: Donchian breakout high AND price > 12h EMA50 AND volume spike
+            if (breakout_long and 
+                curr_close > curr_ema_50_12h and 
+                curr_volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher > +1.5 (extreme high) AND high volume AND price below weekly pivot
-            elif (curr_fish > 1.5 and 
-                  curr_vol_regime > 0.5 and 
-                  curr_close < curr_pivot):
+                entry_price = curr_close
+            # Short: Donchian breakout low AND price < 12h EMA50 AND volume spike
+            elif (breakout_short and 
+                  curr_close < curr_ema_50_12h and 
+                  curr_volume_spike):
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Fisher > 0 (reversal signal) OR volume drops low OR price breaks below weekly S1
-            if (curr_fish > 0 or 
-                curr_vol_regime < 0.5 or 
-                curr_close < s1_1w_aligned[i]):
+            # Exit: Donchian breakdown OR 2*ATR stoploss
+            if (curr_close < curr_lowest_20 or 
+                curr_close < entry_price - 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Fisher < 0 (reversal signal) OR volume drops low OR price breaks above weekly R1
-            if (curr_fish < 0 or 
-                curr_vol_regime < 0.5 or 
-                curr_close > r1_1w_aligned[i]):
+            # Exit: Donchian breakout OR 2*ATR stoploss
+            if (curr_close > curr_highest_20 or 
+                curr_close > entry_price + 2.0 * curr_atr):
                 signals[i] = 0.0
                 position = 0
             else:
