@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel AND 1d close > EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below lower Donchian channel AND 1d close < EMA50 AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Volume spike threshold set to 2.0x to reduce false breakouts and improve signal quality.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian AND 1d close > EMA50 AND volume > 1.5x 20-bar average.
+# Short when price breaks below lower Donchian AND 1d close < EMA50 AND volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Volume spike threshold set to 1.5x to reduce false breakouts and improve signal quality.
 # Works in bull markets (trend continuation) and bear markets (mean reversion at extremes).
-# Primary timeframe: 12h, HTF: 1d for trend filter.
+# Primary timeframe: 4h, HTF: 1d for trend filter.
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,14 +38,14 @@ def generate_signals(prices):
     # Calculate 1d close aligned for trend bias
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    # We need to calculate this on the primary timeframe (12h) using rolling window
+    # Calculate Donchian(20) channels from 4h data
+    # Upper = max(high, 20), Lower = min(low, 20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current 12h volume > 2.0x 20-bar average
+    # Volume confirmation: current 4h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(ema_aligned[i]) or np.isnan(close_1d_aligned[i]) or \
-           np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(vol_ma[i]):
+           np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -69,11 +69,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)  # Volume spike threshold
         
         # Donchian breakout signals
-        breakout_up = curr_high > upper_channel[i]  # break above upper channel
-        breakout_down = curr_low < lower_channel[i]  # break below lower channel
+        breakout_up = curr_high > upper[i]  # break above upper Donchian
+        breakout_down = curr_low < lower[i]  # break below lower Donchian
         
         # Trend filter: use 1d close vs its EMA50 for bias
         bullish_bias = close_1d_aligned[i] > ema_aligned[i]  # 1d close above its EMA50 = bullish
@@ -81,13 +81,13 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper channel AND bullish bias AND volume confirmation
+            # Long: breakout above upper Donchian AND bullish bias AND volume confirmation
             if (breakout_up and 
                 bullish_bias and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower channel AND bearish bias AND volume confirmation
+            # Short: breakout below lower Donchian AND bearish bias AND volume confirmation
             elif (breakout_down and 
                   bearish_bias and 
                   volume_confirm):
@@ -97,8 +97,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower channel (stoploss) OR bearish bias (trend change)
-            if (curr_low < lower_channel[i] or 
+            # Exit: price crosses below lower Donchian (stoploss) OR bearish bias (trend change)
+            if (curr_low < lower[i] or 
                 bearish_bias):
                 signals[i] = 0.0
                 position = 0
@@ -106,8 +106,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper channel (stoploss) OR bullish bias (trend change)
-            if (curr_high > upper_channel[i] or 
+            # Exit: price crosses above upper Donchian (stoploss) OR bullish bias (trend change)
+            if (curr_high > upper[i] or 
                 bullish_bias):
                 signals[i] = 0.0
                 position = 0
