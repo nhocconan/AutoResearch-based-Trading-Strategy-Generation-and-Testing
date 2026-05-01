@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme Reversal with 1d ADX Trend Filter
-# Uses 1d ADX(14) to define trend regime: ADX>25 = strong trend (fade reversals), ADX<20 = ranging/weak trend (trade reversals)
-# Williams %R(14) on 6h: Long when %R crosses above -80 from oversold, Short when %R crosses below -20 from overbought
-# Only trade reversals in weak/range regime (ADX<20) to avoid trend exhaustion false signals
-# Designed for low frequency (50-150 trades over 4 years) with clear reversal logic in appropriate regimes
+# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d ADX Trend Filter and Volume Spike
+# Uses 1d ADX(14) to confirm trending regime (ADX>25) and 12h volume spike (1.5x 20-bar avg)
+# Enters long when price breaks above Camarilla R3, short when breaks below S3
+# Exits on opposite Camarilla level (R4/S4) or ADX<20 (range regime)
+# Designed for low frequency (50-150 trades over 4 years) with clear trend following logic
 
-name = "6h_WilliamsR_Extreme_Reversal_1dADX_Regime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,13 +21,14 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d HTF data for regime filter
+    # 1d HTF data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d ADX(14) calculation for regime detection
+    # 1d ADX(34) calculation for stronger trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -57,7 +58,7 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + x[i]
         return result
     
-    tr_period = 14
+    tr_period = 34
     tr_smoothed = wilders_smoothing(tr, tr_period)
     dm_plus_smoothed = wilders_smoothing(dm_plus, tr_period)
     dm_minus_smoothed = wilders_smoothing(dm_minus, tr_period)
@@ -72,61 +73,67 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, tr_period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 6h Williams %R(14)
-    def williams_r(high, low, close, period):
-        highest_high = np.full_like(high, np.nan)
-        lowest_low = np.full_like(low, np.nan)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        wr = np.where((highest_high - lowest_low) != 0, 
-                      -100 * (highest_high - close) / (highest_high - lowest_low), -50)
-        return wr
+    # 12h Camarilla levels (based on previous day's OHLC)
+    # Calculate daily OHLC from 1d data
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    wr = williams_r(high, low, close, 14)
+    # Camarilla levels: R4 = close + ((high-low)*1.1/2), R3 = close + ((high-low)*1.1/4)
+    # S3 = close - ((high-low)*1.1/4), S4 = close - ((high-low)*1.1/2)
+    rng = prev_high - prev_low
+    camarilla_r3 = prev_close + (rng * 1.1 / 4)
+    camarilla_s3 = prev_close - (rng * 1.1 / 4)
+    camarilla_r4 = prev_close + (rng * 1.1 / 2)
+    camarilla_s4 = prev_close - (rng * 1.1 / 2)
     
-    # Williams %R signals: cross above -80 (long), cross below -20 (short)
-    wr_long_signal = (wr > -80) & (np.concatenate([[False], wr[:-1]]) <= -80)
-    wr_short_signal = (wr < -20) & (np.concatenate([[False], wr[:-1]]) >= -20)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # 12h volume spike filter (1.5x 20-bar average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(34, 14)  # Need ADX and Williams %R
+    start_idx = max(34, 20)  # Need ADX and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(wr[i]) or 
-            np.isnan(wr_long_signal[i]) or np.isnan(wr_short_signal[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade reversals in weak trend/ranging regime
-        weak_trend = adx_aligned[i] < 20  # Range/weak trend - trade reversals
-        strong_trend = adx_aligned[i] > 25  # Strong trend - avoid reversals (trade with trend instead, but we focus on reversals only)
+        # Regime filter: only trade in trending markets (ADX>25)
+        trending = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            if weak_trend:
-                # Long reversal: Williams %R crosses above -80 from oversold
-                if wr_long_signal[i]:
+            if trending and volume_spike[i]:
+                # Long: price breaks above Camarilla R3
+                if close[i] > camarilla_r3_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short reversal: Williams %R crosses below -20 from overbought
-                elif wr_short_signal[i]:
+                # Short: price breaks below Camarilla S3
+                elif close[i] < camarilla_s3_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                # In strong trend or transition - stay flat to avoid false reversal signals
-                signals[i] = 0.0
+                signals[i] = 0.0  # No trade in ranging regime or no volume spike
         
         elif position == 1:  # Long position
-            # Exit conditions: Williams %R crosses below -50 (momentum loss) or strong trend develops
+            # Exit conditions
             exit_long = False
-            if wr[i] < -50:  # Loss of bullish momentum
+            # Exit on opposite Camarilla level (R4) or ADX<20 (range regime)
+            if close[i] >= camarilla_r4_aligned[i]:
                 exit_long = True
-            elif adx_aligned[i] > 25:  # Strong trend developed - may not be good for reversal
+            elif adx_aligned[i] < 20:
                 exit_long = True
             
             if exit_long:
@@ -136,11 +143,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions: Williams %R crosses above -50 (momentum loss) or strong trend develops
+            # Exit conditions
             exit_short = False
-            if wr[i] > -50:  # Loss of bearish momentum
+            # Exit on opposite Camarilla level (S4) or ADX<20 (range regime)
+            if close[i] <= camarilla_s4_aligned[i]:
                 exit_short = True
-            elif adx_aligned[i] > 25:  # Strong trend developed - may not be good for reversal
+            elif adx_aligned[i] < 20:
                 exit_short = True
             
             if exit_short:
