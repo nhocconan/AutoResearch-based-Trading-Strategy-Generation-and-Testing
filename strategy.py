@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1w ADX regime filter
-# Designed to capture strong trending moves while avoiding false breakouts in ranging markets
-# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
-# Target: 75-200 trades over 4 years (19-50/year) for optimal fee drag control
-# Works in bull markets via long breakouts and bear markets via short breakouts
-# ADX > 25 ensures we only trade in trending regimes, reducing whipsaws
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and 1w ADX regime filter
+# Designed to capture strong trending moves with institutional confirmation
+# ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges
+# Volume spike > 1.5x 20-period EMA confirms breakout legitimacy
+# Discrete position sizing (0.25) to minimize fee churn
+# Target: 75-200 trades over 4 years (19-50/year) for optimal fee/alpha balance
 
-name = "4h_Donchian20_1dVolume_1wADX_Regime_v3"
+name = "4h_Donchian20_1dVolume_1wADX_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -119,16 +119,16 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Avoid ranging markets
         
         elif position == 1:  # Long position
-            # Exit: price returns to Donchian low or opposite breakout with volume
-            if close[i] <= lowest_low[i] or (close[i] < highest_high[i] and volume_spike[i]):
+            # Exit: price returns to Donchian low or opposite breakout
+            if close[i] <= lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian high or opposite breakout with volume
-            if close[i] >= highest_high[i] or (close[i] > lowest_low[i] and volume_spike[i]):
+            # Exit: price returns to Donchian high or opposite breakout
+            if close[i] >= highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
