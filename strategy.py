@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Donchian channel breakouts filtered by daily EMA34 trend and volume > 2x 20-period median.
-# Works in bull (buy breakouts with uptrend) and bear (sell breakdowns with downtrend).
-# Discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+# Hypothesis: 6h Williams %R Extreme with 1d EMA34 trend filter and volume spike confirmation.
+# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) 
+# signal potential reversals when aligned with 1d trend and confirmed by volume spikes.
+# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+# Discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,22 +35,23 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Donchian(20) from previous period OHLC
-    # Donchian upper: 20-period high, lower: 20-period low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Williams %R on 6h data (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    rr = highest_high_14 - lowest_low_14
+    williams_r = np.where(rr != 0, -100 * (highest_high_14 - close) / rr, -50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA34 and Donchian
+    # Start after warmup for Williams %R and EMA34
     start_idx = 34
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_median_20[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -68,33 +70,33 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
         
-        # Donchian breakout conditions
-        breakout_up = curr_close > donchian_high[i]   # break above upper band
-        breakout_down = curr_close < donchian_low[i]  # break below lower band
+        # Williams %R extreme conditions
+        oversold = williams_r[i] < -90   # Extremely oversold
+        overbought = williams_r[i] > -10  # Extremely overbought
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout up AND uptrend AND volume confirmation
-            if breakout_up and uptrend and volume_confirm:
+            # Long: Oversold AND uptrend AND volume confirmation
+            if oversold and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout down AND downtrend AND volume confirmation
-            elif breakout_down and downtrend and volume_confirm:
+            # Short: Overbought AND downtrend AND volume confirmation
+            elif overbought and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakout down (reversal signal)
-            if breakout_down:
+            # Exit when Williams %R rises above -50 (momentum fading)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout up (reversal signal)
-            if breakout_up:
+            # Exit when Williams %R falls below -50 (momentum fading)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
