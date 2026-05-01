@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI(14) + 1w chop regime filter.
-# Long when KAMA is rising (bullish trend), RSI < 30 (oversold), and weekly chop > 61.8 (range market).
-# Short when KAMA is falling (bearish trend), RSI > 70 (overbought), and weekly chop > 61.8.
+# Hypothesis: 6h Williams %R extreme + 12h EMA50 trend filter + volume spike confirmation.
+# Long when Williams %R(14) < -80 (oversold) AND price > 12h EMA50 (uptrend) AND volume > 2.0x 20-bar average.
+# Short when Williams %R(14) > -20 (overbought) AND price < 12h EMA50 (downtrend) AND volume > 2.0x 20-bar average.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Session filter: 08-20 UTC to reduce noise. Target: 15-25 trades/year to minimize fee drag.
-# Works in bull markets via trend following (KAMA direction) and in bear markets via mean reversion (RSI extremes) in range regimes (chop filter).
+# Session filter: 08-20 UTC to reduce noise. Target: 12-30 trades/year to minimize fee drag.
 
-name = "1d_KAMA_RSI_1wChop_Regime_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,67 +30,29 @@ def generate_signals(prices):
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
-    tr0 = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
-    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate KAMA(10, 2, 30) - ER = 2, Fastest EMA = 2, Slowest EMA = 30
-    def kama(close, er_length=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=er_length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
-    kama_vals = kama(close)
-    kama_rising = kama_vals > np.roll(kama_vals, 1)
-    kama_falling = kama_vals < np.roll(kama_vals, 1)
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[50], rsi])  # pad first value
-    
-    # Load 1w data ONCE before loop for chop regime (HTF filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w Chop Index(14) - same formula as before
-    def true_range(h, l, c):
-        tr1 = h[1:] - l[1:]
-        tr2 = np.abs(h[1:] - np.roll(c, 1)[1:])
-        tr3 = np.abs(l[1:] - np.roll(c, 1)[1:])
-        tr0 = np.max([h[0] - l[0], np.abs(h[0] - c[0]), np.abs(l[0] - c[0])])
-        tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr_ = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-        highest_high = pd.Series(h).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(l).rolling(window=14, min_periods=14).min().values
-        chop = 100 * np.log10(atr_ / (highest_high - lowest_low)) / np.log10(14)
-        return chop
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    chop_1w = true_range(high_1w, low_1w, close_1w)
-    
-    # Align 1w chop to 1d
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 30  # warmup for KAMA and RSI
+    start_idx = 14  # warmup for Williams %R
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -99,28 +60,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(atr[i]) or np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_volume = volume[i]
         
-        # Chop regime filter: only trade in range market (chop > 61.8)
-        chop_filter = chop_1w_aligned[i] > 61.8
+        # Volume confirmation: current volume > 2.0x 20-bar average
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
+        if vol_ma <= 0:
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_ma * 2.0)
         
         if position == 0:  # Flat - look for new entries
-            # Long: KAMA rising AND RSI < 30 (oversold) AND chop regime
-            if (kama_rising[i] and 
-                rsi[i] < 30 and 
-                chop_filter):
+            # Long: Williams %R oversold AND price > 12h EMA50 AND volume confirmation
+            if (williams_r[i] < -80 and 
+                curr_close > ema_50_12h_aligned[i] and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: KAMA falling AND RSI > 70 (overbought) AND chop regime
-            elif (kama_falling[i] and 
-                  rsi[i] > 70 and 
-                  chop_filter):
+            # Short: Williams %R overbought AND price < 12h EMA50 AND volume confirmation
+            elif (williams_r[i] > -20 and 
+                  curr_close < ema_50_12h_aligned[i] and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -133,9 +98,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: KAMA turns bearish OR chop regime ends (trending)
-            elif (not kama_rising[i]) or \
-                 chop_1w_aligned[i] <= 61.8:
+            # Exit: Williams %R returns to neutral range (-50 to -30) OR volume confirmation fails
+            elif williams_r[i] > -50 or not volume_confirm:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -148,9 +112,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: KAMA turns bullish OR chop regime ends (trending)
-            elif (not kama_falling[i]) or \
-                 chop_1w_aligned[i] <= 61.8:
+            # Exit: Williams %R returns to neutral range (-70 to -50) OR volume confirmation fails
+            elif williams_r[i] < -70 or not volume_confirm:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
