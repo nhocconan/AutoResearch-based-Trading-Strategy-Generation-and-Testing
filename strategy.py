@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-# Uses Donchian channel breakouts for entry, 1w EMA34 for trend direction, and volume spike (>1.5x 20-bar MA) for confirmation.
-# Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with discrete sizing (0.25).
-# Works in both bull and bear markets via volatility-based breakouts and tight entry conditions.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels from 1d for structure, 1d EMA34 for trend direction, and volume > 2.0x 20-bar MA for confirmation.
+# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.30).
+# Works in both bull and bear markets via trend filter and volatility-based breakouts.
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,29 +22,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d Camarilla pivot levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r3 = pivot + (high_1d - low_1d) * 1.1 / 4.0
+    s3 = pivot - (high_1d - low_1d) * 1.1 / 4.0
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.5)
-    
-    # Multi-timeframe: 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
+    volume_confirm = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup for all indicators
-    start_idx = max(lookback, 20, 34) + 1  # 35
+    start_idx = max(34, 20) + 1  # 35
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]) or np.isnan(ema_1w_34_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -55,45 +65,37 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Donchian breakout conditions
-        breakout_up = curr_high > highest_high[i-1]  # Break above previous period's high
-        breakdown_down = curr_low < lowest_low[i-1]  # Break below previous period's low
-        
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
-        # Trend filter: 1w EMA34 slope (using previous bar's value)
-        trend_up = ema_1w_34_aligned[i] > ema_1w_34_aligned[i-1]
-        trend_down = ema_1w_34_aligned[i] < ema_1w_34_aligned[i-1]
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up AND volume confirmation AND 1w EMA34 trending up
-            if breakout_up and vol_confirm and trend_up:
-                signals[i] = 0.25
+            # Long: price breaks above R3 AND above 1d EMA34 AND volume confirmation
+            if curr_high > r3_aligned[i] and curr_close > ema_34_1d_aligned[i] and vol_confirm:
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
-            # Short: Donchian breakdown down AND volume confirmation AND 1w EMA34 trending down
-            elif breakdown_down and vol_confirm and trend_down:
-                signals[i] = -0.25
+            # Short: price breaks below S3 AND below 1d EMA34 AND volume confirmation
+            elif curr_low < s3_aligned[i] and curr_close < ema_34_1d_aligned[i] and vol_confirm:
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on Donchian breakdown (break below lowest low of lookback period)
-            if curr_low < lowest_low[i-1]:
+            # Exit on close below 1d EMA34
+            if curr_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit on Donchian breakout (break above highest high of lookback period)
-            if curr_high > highest_high[i-1]:
+            # Exit on close above 1d EMA34
+            if curr_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
