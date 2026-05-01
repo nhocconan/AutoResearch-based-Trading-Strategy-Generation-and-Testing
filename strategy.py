@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (>1.8x 20-bar MA)
-# Donchian channels provide clear breakout levels. Breakout above upper band or below lower band with
-# 1d EMA trend alignment and volume confirmation captures strong momentum moves. Works in bull markets
-# via breakouts above upper band with uptrend, and in bear markets via breakdowns below lower band with downtrend.
-# Target: 100-150 total trades over 4 years (25-38/year) with discrete sizing (0.25).
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA(34) trend filter and volume confirmation (>1.5x 20-bar MA)
+# Camarilla pivot levels provide precise daily support/resistance. Breakout above R3 or below S3 with
+# 1w EMA trend alignment and volume confirmation captures strong momentum moves. Works in bull markets
+# via breakouts above R3 with uptrend, and in bear markets via breakdowns below S3 with downtrend.
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing (0.30).
 
-name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,70 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for EMA calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA(50) on 1d close
-    daily_ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA(34) on 1w close
+    weekly_ema_34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily EMA to 4h timeframe
-    daily_ema_50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema_50)
+    # Align weekly EMA to 1d timeframe
+    weekly_ema_34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_34)
     
-    # Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla pivot levels from 1d data (using previous day's OHLC)
+    # Camarilla levels: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    prev_high = prices['high'].shift(1).values
+    prev_low = prices['low'].shift(1).values
+    prev_close = prices['close'].shift(1).values
     
-    # Volume confirmation: current volume > 1.8 * 20-period average volume
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_ma_20 * 1.8)
+    volume_confirm = volume > (volume_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(20, 50)  # Need 20 for Donchian, 50 for EMA
+    start_idx = max(20, 34)  # Need 20 for volume MA, 34 for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(daily_ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]):
+        if np.isnan(weekly_ema_34_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         
         # Volume confirmation
         vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper band, above daily EMA, and volume confirmation
-            if curr_close > highest_high[i] and curr_close > daily_ema_50_aligned[i] and vol_confirm:
-                signals[i] = 0.25
+            # Long: price breaks above Camarilla R3, above weekly EMA, and volume confirmation
+            if curr_close > camarilla_r3[i] and curr_close > weekly_ema_34_aligned[i] and vol_confirm:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below Donchian lower band, below daily EMA, and volume confirmation
-            elif curr_close < lowest_low[i] and curr_close < daily_ema_50_aligned[i] and vol_confirm:
-                signals[i] = -0.25
+            # Short: price breaks below Camarilla S3, below weekly EMA, and volume confirmation
+            elif curr_close < camarilla_s3[i] and curr_close < weekly_ema_34_aligned[i] and vol_confirm:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price breaking below Donchian lower band or below daily EMA
-            if curr_close < lowest_low[i] or curr_close < daily_ema_50_aligned[i]:
+            # Exit on price breaking below Camarilla S3 or below weekly EMA
+            if curr_close < camarilla_s3[i] or curr_close < weekly_ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit on price breaking above Donchian upper band or above daily EMA
-            if curr_close > highest_high[i] or curr_close > daily_ema_50_aligned[i]:
+            # Exit on price breaking above Camarilla R3 or above weekly EMA
+            if curr_close > camarilla_r3[i] or curr_close > weekly_ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
