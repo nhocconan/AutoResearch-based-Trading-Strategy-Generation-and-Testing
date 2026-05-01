@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI(14) + Choppiness Index regime filter.
-# Uses 1d timeframe for signal generation.
-# KAMA(10,2,30) for adaptive trend direction to avoid whipsaws in ranging markets.
-# RSI(14) for momentum confirmation (long when RSI>50, short when RSI<50).
-# Choppiness Index(14) > 61.8 for ranging regime (mean reversion at Bollinger Bands),
-# < 38.2 for trending regime (trend following with KAMA).
-# Volume confirmation: current volume > 1.3x 20-bar average.
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation.
+# Uses 12h for signal generation (Williams %R identifies overbought/oversold conditions).
+# 1d EMA34 for trend filter to avoid counter-trend trades.
+# Long when Williams %R crosses above -80 from below with 1d EMA34 uptrend and volume > 1.3x 20-bar average.
+# Short when Williams %R crosses below -20 from above with 1d EMA34 downtrend and volume confirmation.
 # Discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
 # Session filter: 08-20 UTC to reduce noise trades.
-# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag.
 
-name = "1d_KAMA_RSI_Chop_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_WilliamsR_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,6 +29,15 @@ def generate_signals(prices):
     # Pre-compute session hours for 08-20 UTC filter
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
+    # Load 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -38,40 +45,19 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate KAMA(10,2,30) for trend direction
-    close_s = pd.Series(close)
-    direction = np.abs(close_s.diff(10))
-    volatility = close_s.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = direction / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14) for momentum
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    
-    # Calculate Choppiness Index(14) for regime filter
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max()
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
+    # Calculate Williams %R(14) on 12h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    start_idx = 30  # warmup for KAMA and RSI
+    start_idx = 34  # warmup for 1d EMA34 and Williams %R
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -79,8 +65,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(kama[i]) or np.isnan(atr[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
@@ -94,53 +80,34 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_ma * 1.3)
         
-        # Regime filter based on Choppiness Index
-        chop_value = chop[i]
-        ranging_regime = chop_value > 61.8
-        trending_regime = chop_value < 38.2
+        # Williams %R conditions
+        williams_r_curr = williams_r[i]
+        williams_r_prev = williams_r[i-1]
         
-        # KAMA direction: price above KAMA = uptrend, below = downtrend
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
+        # Cross above -80 from below (bullish signal)
+        cross_up = williams_r_prev < -80 and williams_r_curr >= -80
+        # Cross below -20 from above (bearish signal)
+        cross_down = williams_r_prev > -20 and williams_r_curr <= -20
         
-        # RSI momentum: >50 bullish, <50 bearish
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
+        # 1d EMA34 trend filter: price above EMA = uptrend, below = downtrend
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: KAMA uptrend AND RSI bullish AND volume confirmation
-            # In trending regime: follow KAMA+RSI
-            # In ranging regime: mean reversion at extremes (RSI<30 for long, RSI>70 for short)
-            if (uptrend and 
-                rsi_bullish and 
-                volume_confirm and
-                trending_regime):
+            # Long: Williams %R cross up AND uptrend AND volume confirmation
+            if (cross_up and 
+                uptrend and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: KAMA downtrend AND RSI bearish AND volume confirmation
-            elif (downtrend and 
-                  rsi_bearish and 
-                  volume_confirm and
-                  trending_regime):
+            # Short: Williams %R cross down AND downtrend AND volume confirmation
+            elif (cross_down and 
+                  downtrend and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-            # Ranging regime: mean reversion at Bollinger Band-like extremes
-            elif (ranging_regime and
-                  volume_confirm):
-                # Long when oversold (RSI<30) and price near recent low
-                if (rsi[i] < 30 and 
-                    curr_close <= ll[i] * 1.02):  # within 2% of recent low
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                # Short when overbought (RSI>70) and price near recent high
-                elif (rsi[i] > 70 and 
-                      curr_close >= hh[i] * 0.98):  # within 2% of recent high
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
             else:
                 signals[i] = 0.0
         
@@ -150,8 +117,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend changes to downtrend OR RSI becomes bearish
-            elif not uptrend or not rsi_bullish:
+            # Exit: Williams %R crosses below -50 (momentum loss) OR trend changes to downtrend
+            elif williams_r_curr < -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -164,8 +131,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend changes to uptrend OR RSI becomes bullish
-            elif not downtrend or not rsi_bearish:
+            # Exit: Williams %R crosses above -50 (momentum loss) OR trend changes to uptrend
+            elif williams_r_curr > -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
