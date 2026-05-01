@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian upper channel AND 1d EMA34 trending up AND volume > 2.0x 20-bar average.
-# Short when price breaks below Donchian lower channel AND 1d EMA34 trending down AND volume > 2.0x 20-bar average.
-# Uses ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
-# Discrete sizing 0.25 to manage drawdown and minimize fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
-# Donchian channels provide structural breakouts, EMA34 filters higher-timeframe trend,
-# volume confirmation ensures momentum validity, ATR stop controls risk.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike confirmation.
+# Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 AND 1d close > EMA34 (bullish trend) AND volume > 2.0x 20-bar average.
+# Short when Bear Power < 0 AND 1d close < EMA34 (bearish trend) AND volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Elder Ray measures bull/bear strength relative to EMA13, EMA34 filters higher-timeframe trend, volume spike confirms momentum.
+# Primary timeframe: 6h, HTF: 1d for EMA trend filter.
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,80 +30,67 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray (6h)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # 1d EMA34 trend filter
     prev_close = df_1d['close'].values
     ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average
+    # Volume confirmation: current 6h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14) for stoploss
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = max(34, 20, 20, 14)  # warmup for all indicators
+    start_idx = 34  # warmup for EMA34 and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_bull_power = bull_power[i]
+        curr_bear_power = bear_power[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
-        curr_atr = atr[i]
         
-        if curr_vol_ma <= 0 or curr_atr <= 0:
+        if curr_vol_ma <= 0:
             signals[i] = 0.0
             continue
             
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Donchian breakout conditions
-        breakout_up = curr_close > highest_high[i-1]  # break above previous period's high
-        breakout_down = curr_close < lowest_low[i-1]   # break below previous period's low
-        
         # Trend filter: bullish if close > EMA34, bearish if close < EMA34
         bullish_trend = curr_close > ema_34_aligned[i]
         bearish_trend = curr_close < ema_34_aligned[i]
         
+        # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout up AND bullish trend AND volume confirmation
-            if (breakout_up and 
+            # Long: Bull Power > 0 AND bullish trend AND volume confirmation
+            if (curr_bull_power > 0 and 
                 bullish_trend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-            # Short: breakout down AND bearish trend AND volume confirmation
-            elif (breakout_down and 
+            # Short: Bear Power < 0 AND bearish trend AND volume confirmation
+            elif (curr_bear_power < 0 and 
                   bearish_trend and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: stoploss hit OR trend turns bearish
-            if (curr_close < entry_price - 2.5 * curr_atr or 
+            # Exit: Bull Power crosses below 0 (weakening bulls) OR trend turns bearish
+            if (curr_bull_power <= 0 or 
                 bearish_trend):
                 signals[i] = 0.0
                 position = 0
@@ -112,8 +98,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: stoploss hit OR trend turns bullish
-            if (curr_close > entry_price + 2.5 * curr_atr or 
+            # Exit: Bear Power crosses above 0 (weakening bears) OR trend turns bullish
+            if (curr_bear_power >= 0 or 
                 bullish_trend):
                 signals[i] = 0.0
                 position = 0
