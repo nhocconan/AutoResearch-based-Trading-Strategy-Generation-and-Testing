@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 AND 1d close > EMA34 (bullish trend) AND volume > 2.0x 20-bar average.
-# Short when price breaks below Camarilla S3 AND 1d close < EMA34 (bearish trend) AND volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels provide precise intraday support/resistance, EMA34 filters trend alignment, volume spike confirms momentum.
-# Primary timeframe: 12h, HTF: 1d for EMA trend and Camarilla calculation.
+# Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume spike confirmation.
+# Long when Williams %R crosses above -80 from below AND 1d close > EMA50 (bullish trend) AND volume > 2.0x 20-bar average.
+# Short when Williams %R crosses below -20 from above AND 1d close < EMA50 (bearish trend) AND volume > 2.0x 20-bar average.
+# Williams %R identifies overextended conditions for mean reversion, EMA50 filters trend alignment, volume spike confirms momentum.
+# Primary timeframe: 6h, HTF: 1d for EMA trend.
+# Williams %R is effective in ranging markets (common in 2025 BTC/ETH) and avoids look-ahead by using completed candle values.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_EMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and EMA trend
+    # Load 1d data ONCE before loop for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # where C = (H+L+O)/3 (typical price), but using close as pivot for simplicity
+    # 1d EMA50 trend filter
     prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    ema_50 = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Camarilla levels based on previous day
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    # Williams %R on 6h data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # We calculate it on 6h data with 14-period lookback
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1d EMA34 trend filter
-    ema_34 = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume confirmation: current 12h volume > 2.0x 20-bar average
+    # Volume confirmation: current 6h volume > 2.0x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,14 +51,11 @@ def generate_signals(prices):
     start_idx = 50  # warmup for EMA and indicators
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or \
-           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -74,24 +65,29 @@ def generate_signals(prices):
             
         volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Volume spike threshold
         
-        # Camarilla breakout signals
-        breakout_up = curr_high > camarilla_r3_aligned[i]  # break above R3
-        breakout_down = curr_low < camarilla_s3_aligned[i]  # break below S3
+        # Williams %R conditions
+        wr = williams_r[i]
+        wr_prev = williams_r[i-1]
         
-        # Trend filter: bullish if close > EMA34, bearish if close < EMA34
-        bullish_trend = curr_close > ema_34_aligned[i]
-        bearish_trend = curr_close < ema_34_aligned[i]
+        # Long: Williams %R crosses above -80 from below (oversold reversal)
+        long_condition = (wr > -80) and (wr_prev <= -80)
+        # Short: Williams %R crosses below -20 from above (overbought reversal)
+        short_condition = (wr < -20) and (wr_prev >= -20)
+        
+        # Trend filter: bullish if close > EMA50, bearish if close < EMA50
+        bullish_trend = curr_close > ema_50_aligned[i]
+        bearish_trend = curr_close < ema_50_aligned[i]
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above R3 AND bullish trend AND volume confirmation
-            if (breakout_up and 
+            # Long: oversold reversal AND bullish trend AND volume confirmation
+            if (long_condition and 
                 bullish_trend and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 AND bearish trend AND volume confirmation
-            elif (breakout_down and 
+            # Short: overbought reversal AND bearish trend AND volume confirmation
+            elif (short_condition and 
                   bearish_trend and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -100,18 +96,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below S3 (stoploss) OR trend turns bearish
-            if (curr_low < camarilla_s3_aligned[i] or 
-                bearish_trend):
+            # Exit: Williams %R crosses above -20 (overbought) OR trend turns bearish
+            if (wr >= -20) or bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (stoploss) OR trend turns bullish
-            if (curr_high > camarilla_r3_aligned[i] or 
-                bullish_trend):
+            # Exit: Williams %R crosses below -80 (oversold) OR trend turns bullish
+            if (wr <= -80) or bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
