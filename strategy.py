@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
-# Long when price > Alligator Jaw (13-period SMMA) and Jaw > Teeth > Lips (bullish alignment) with volume > 1.5x 20-bar average.
-# Short when price < Alligator Jaw and Jaw < Teeth < Lips (bearish alignment) with volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to avoid overtrading.
-# Williams Alligator identifies trendless periods (all lines intertwined) and strong trends (lines diverged in order).
-# Works in bull (buy aligned uptrend) and bear (sell aligned downtrend) via Alligator alignment filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with 12h EMA50 uptrend and volume > 1.8x 20-bar average.
+# Short when price breaks below Donchian lower band with 12h EMA50 downtrend and volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to avoid overtrading.
+# Works in bull (buy breakouts) and bear (sell breakdowns) via trend filter.
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,25 +26,25 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for EMA34 and Alligator calculation
+    start_idx = 100  # warmup for EMA50 and Donchian calculation
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 12h timeframe
+        # Session filter: trade all sessions for 4h timeframe
         hour = hours[i]
         
-        if np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(ema_50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -53,47 +52,19 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_vol = volume[i]
-        curr_ema_34_1d = ema_34_1d_aligned[i]
+        curr_ema_50_12h = ema_50_12h_aligned[i]
         
-        # Calculate Williams Alligator from previous 12h bars (need 13 periods for SMMA)
-        if i < 13 + start_idx:
+        # Calculate Donchian bands from previous 20 periods (4h bars)
+        if i < 20 + start_idx:
             signals[i] = 0.0
             continue
             
-        # Williams Alligator: three smoothed moving averages
-        # Jaw (blue): 13-period SMMA, shifted 8 bars forward
-        # Teeth (red): 8-period SMMA, shifted 5 bars forward  
-        # Lips (green): 5-period SMMA, shifted 3 bars forward
-        # SMMA = smoothed moving average (similar to EMA but with different smoothing)
+        # Donchian upper band: highest high of last 20 bars (excluding current)
+        highest_high = np.max(high[i-20:i])
+        # Donchian lower band: lowest low of last 20 bars (excluding current)
+        lowest_low = np.min(low[i-20:i])
         
-        # Calculate SMMA for close prices
-        def smma(source, period):
-            if len(source) < period:
-                return np.full_like(source, np.nan)
-            result = np.full_like(source, np.nan)
-            # First value is simple SMA
-            result[period-1] = np.mean(source[:period])
-            # Subsequent values: SMMA = (PREV_SMMA*(period-1) + PRICE) / period
-            for j in range(period, len(source)):
-                result[j] = (result[j-1] * (period-1) + source[j]) / period
-            return result
-        
-        # Calculate SMMA series
-        smma_close = smma(close[:i+1], 1)  # dummy call to get array
-        jaw_raw = smma(close[:i+1], 13)
-        teeth_raw = smma(close[:i+1], 8)
-        lips_raw = smma(close[:i+1], 5)
-        
-        if len(jaw_raw) < 13 or len(teeth_raw) < 8 or len(lips_raw) < 5:
-            signals[i] = 0.0
-            continue
-            
-        # Get latest values (already shifted in calculation)
-        jaw = jaw_raw[-1] if not np.isnan(jaw_raw[-1]) else 0
-        teeth = teeth_raw[-1] if not np.isnan(teeth_raw[-1]) else 0
-        lips = lips_raw[-1] if not np.isnan(lips_raw[-1]) else 0
-        
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        # Volume confirmation: current 4h volume > 1.8x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -102,21 +73,19 @@ def generate_signals(prices):
         if vol_ma <= 0:
             signals[i] = 0.0
             continue
-        volume_confirm = curr_vol > (vol_ma * 1.5)
+        volume_confirm = curr_vol > (vol_ma * 1.8)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: bullish Alligator alignment (Jaw > Teeth > Lips) AND price > Jaw AND EMA34 uptrend AND volume confirmation
-            if (jaw > teeth and teeth > lips and 
-                curr_close > jaw and 
-                curr_close > curr_ema_34_1d and 
+            # Long: price breaks above Donchian upper band AND price > 12h EMA50 AND volume confirmation
+            if (curr_close > highest_high and 
+                curr_close > curr_ema_50_12h and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment (Jaw < Teeth < Lips) AND price < Jaw AND EMA34 downtrend AND volume confirmation
-            elif (jaw < teeth and teeth < lips and 
-                  curr_close < jaw and 
-                  curr_close < curr_ema_34_1d and 
+            # Short: price breaks below Donchian lower band AND price < 12h EMA50 AND volume confirmation
+            elif (curr_close < lowest_low and 
+                  curr_close < curr_ema_50_12h and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -124,20 +93,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: bearish Alligator alignment (Jaw < Teeth < Lips) OR price < Jaw (trend violation) OR EMA34 downtrend
-            if (jaw < teeth and teeth < lips) or \
-               (curr_close < jaw) or \
-               (curr_close < curr_ema_34_1d):
+            # Exit: price breaks below Donchian lower band (reversal) OR price < 12h EMA50 (trend violation)
+            if (curr_close < lowest_low or 
+                curr_close < curr_ema_50_12h):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bullish Alligator alignment (Jaw > Teeth > Lips) OR price > Jaw (trend violation) OR EMA34 uptrend
-            if (jaw > teeth and teeth > lips) or \
-               (curr_close > jaw) or \
-               (curr_close > curr_ema_34_1d):
+            # Exit: price breaks above Donchian upper band (reversal) OR price > 12h EMA50 (trend violation)
+            if (curr_close > highest_high or 
+                curr_close > curr_ema_50_12h):
                 signals[i] = 0.0
                 position = 0
             else:
