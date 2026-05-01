@@ -3,17 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly EMA50 trend filter and daily volume confirmation.
-# Long when price breaks above 20-period 6h Donchian high AND weekly EMA50 uptrend AND daily volume > 1.5x 20-period median.
-# Short when price breaks below 20-period 6h Donchian low AND weekly EMA50 downtrend AND daily volume > 1.5x 20-period median.
-# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 6h timeframe.
-# Donchian channels provide clear breakout levels, weekly EMA50 filters major trend, daily volume confirms participation.
-# This combination has shown robustness across market regimes in prior research.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) AND 1d EMA50 uptrend AND volume > 1.5x 20-period volume median.
+# Short when price < Alligator Lips (8-period SMMA) AND 1d EMA50 downtrend AND volume > 1.5x 20-period volume median.
+# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.5*ATR(14), exit short if price > lowest_since_entry + 2.5*ATR(14).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year on 12h timeframe.
+# Williams Alligator identifies trend absence/presence via three smoothed moving averages (Jaw, Teeth, Lips).
+# In ranging markets, the lines intertwine; in trends, they diverge with Jaw (slowest) on one side, Lips (fastest) on the other.
+# This provides a strong trend filter that works in both bull and bear markets by identifying when a trend is established.
+# Volume confirmation ensures breakouts have participation, reducing false signals.
+# ATR stoploss adapts to volatility while respecting engine semantics (close-based exit).
 
-name = "6h_Donchian20_Breakout_1wEMA50_VolumeSpike_ATR_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike_ATR_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def smma(values, period):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
+    if len(values) < period:
+        return np.full_like(values, np.nan, dtype=np.float64)
+    result = np.full_like(values, np.nan, dtype=np.float64)
+    # First value is simple SMA
+    result[period-1] = np.mean(values[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
+    for i in range(period, len(values)):
+        result[i] = (result[i-1] * (period-1) + values[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,29 +40,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA50 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on weekly close
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily volume for confirmation (loaded once before loop)
+    # Calculate 1d EMA50 for trend filter (loaded once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period daily volume median
-    vol_median_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).median().values
-    vol_median_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20_1d)
+    # Calculate EMA50 on 1d close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 20-period 6h Donchian channels
-    # Highest high of last 20 periods (including current)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lowest low of last 20 periods (including current)
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
+    # Teeth: 8-period SMMA of median price, shifted 5 bars forward  
+    # Lips: 5-period SMMA of median price, shifted 3 bars forward
+    median_price = (high + low) / 2.0
+    
+    jaw_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
+    
+    # Apply forward shifts (Alligator specific)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    
+    # Invalidate the shifted values at the beginning
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
     # Calculate 14-period ATR for stoploss
     tr1 = high[1:] - low[1:]
@@ -56,20 +76,24 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for Donchian, EMA, volume, and ATR
-    start_idx = 100
+    # Start after warmup for Alligator, EMA, volume, and ATR
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or 
-            np.isnan(vol_median_20_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or 
+            np.isnan(vol_median_20[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             if position != 0:
@@ -77,31 +101,29 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         curr_atr = atr[i]
         
-        # Trend filter: weekly EMA50 direction
-        uptrend = curr_close > ema_50_1w_aligned[i]
-        downtrend = curr_close < ema_50_1w_aligned[i]
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current daily volume > 1.5x 20-period daily volume median
-        if vol_median_20_1d_aligned[i] <= 0 or np.isnan(vol_median_20_1d_aligned[i]):
+        # Volume confirmation: current volume > 1.5x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20_1d_aligned[i] * 1.5)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above 20-period Donchian high AND uptrend AND volume spike
-            if curr_high > highest_20[i] and uptrend and volume_confirm:
+            # Long: Price > Jaw AND uptrend AND volume spike
+            if curr_close > jaw[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Price breaks below 20-period Donchian low AND downtrend AND volume spike
-            elif curr_low < lowest_20[i] and downtrend and volume_confirm:
+            # Short: Price < Lips AND downtrend AND volume spike
+            elif curr_close < lips[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -115,9 +137,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break below 20-period Donchian low (reversal) OR trend reversal
-            stop_price = highest_since_entry - 2.0 * curr_atr
-            if curr_close < stop_price or curr_close < lowest_20[i] or not uptrend:
+            # Exit conditions: ATR stoploss OR break below Teeth (reversal) OR trend reversal
+            stop_price = highest_since_entry - 2.5 * curr_atr
+            if curr_close < stop_price or curr_close < teeth[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,9 +150,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR break above 20-period Donchian high (reversal) OR trend reversal
-            stop_price = lowest_since_entry + 2.0 * curr_atr
-            if curr_close > stop_price or curr_close > highest_20[i] or not downtrend:
+            # Exit conditions: ATR stoploss OR break above Teeth (reversal) OR trend reversal
+            stop_price = lowest_since_entry + 2.5 * curr_atr
+            if curr_close > stop_price or curr_close > teeth[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
