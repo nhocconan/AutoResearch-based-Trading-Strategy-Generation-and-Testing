@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX25 trend filter and volume confirmation
-# Donchian channels provide clear trend-following structure with defined breakout levels
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX25 trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout zones
 # 1d ADX > 25 ensures we trade only in trending markets, avoiding chop
 # Volume spike confirms institutional participation behind the move
-# Designed for very low frequency (50-150 trades over 4 years) to minimize fee drag
+# Designed for low frequency (75-200 trades over 4 years) to minimize fee drag
 # Works in bull/bear via trend filter + price structure logic
 
-name = "12h_Donchian20_1dADX25_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -75,10 +75,16 @@ def generate_signals(prices):
     adx = wilders_smoothing(dx, period)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Donchian(20) channels on 12h timeframe
-    donchian_period = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate Camarilla levels from prior 4h bar (using prior bar's HLC)
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    #          S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    prior_high = np.concatenate([[np.nan], high[:-1]])  # prior bar's high
+    prior_low = np.concatenate([[np.nan], low[:-1]])    # prior bar's low
+    prior_close = np.concatenate([[np.nan], close[:-1]]) # prior bar's close
+    
+    hl_range = prior_high - prior_low
+    camarilla_r3 = prior_close + hl_range * 1.1 / 4
+    camarilla_s3 = prior_close - hl_range * 1.1 / 4
     
     # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,17 +94,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(30, donchian_period, 20)  # Need 1d ADX, Donchian20 and volume MA20
+    start_idx = max(30, 20)  # Need 1d ADX and volume MA20
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
+            np.isnan(prior_close[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > upper_channel[i]  # Price breaks above upper Donchian
-        breakout_short = close[i] < lower_channel[i]  # Price breaks below lower Donchian
+        breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
+        breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
         
         # Trend filter: ADX > 25 indicates trending market
         trending = adx_aligned[i] > 25
@@ -107,11 +113,11 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above upper channel with volume spike and trend
+            # Long: Breakout above R3 with volume spike and trend
             if breakout_long and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below lower channel with volume spike and trend
+            # Short: Breakout below S3 with volume spike and trend
             elif breakout_short and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
@@ -119,16 +125,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below lower channel or trend weakening
-            if close[i] < lower_channel[i] or adx_aligned[i] < 20:
+            # Exit on close below prior bar's low or trend weakening
+            if close[i] < prior_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above upper channel or trend weakening
-            if close[i] > upper_channel[i] or adx_aligned[i] < 20:
+            # Exit on close above prior bar's high or trend weakening
+            if close[i] > prior_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
