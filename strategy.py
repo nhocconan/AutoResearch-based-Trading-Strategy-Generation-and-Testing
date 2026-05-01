@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 with volume > 2.0x 12h volume average and price > 12h EMA50.
-# Short when price breaks below Camarilla S3 with volume confirmation and price < 12h EMA50.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band (20-period high) with volume > 1.5x 12h volume average and price > 12h EMA50.
+# Short when price breaks below Donchian lower band (20-period low) with volume confirmation and price < 12h EMA50.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Camarilla levels calculated from prior completed 4h bar to avoid look-ahead.
+# Donchian bands calculated from prior completed 4h bar to avoid look-ahead.
 # Volume spike filters low-momentum breakouts. 12h EMA50 ensures trades only in established trends.
 # Works in bull (breakouts with strong uptrend) and bear (breakouts with strong downtrend) regimes.
 # Target: 25-35 trades/year on 4h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
+name = "4h_Donchian20_Breakout_12hEMA50_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,7 +53,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, and Camarilla
+    # Start after warmup for ATR, EMA, and Donchian
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -68,19 +68,19 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume spike: current volume > 2.0x 12h volume average
+        # Volume spike: current volume > 1.5x 12h volume average
         if vol_ma_12h_aligned[i] <= 0 or np.isnan(vol_ma_12h_aligned[i]):
             volume_spike = False
         else:
-            volume_spike = curr_volume > (vol_ma_12h_aligned[i] * 2.0)
+            volume_spike = curr_volume > (vol_ma_12h_aligned[i] * 1.5)
         
         # Trend filter: price vs 12h EMA50
         uptrend = curr_close > ema_50_12h_aligned[i]
         downtrend = curr_close < ema_50_12h_aligned[i]
         
-        # Load 4h data ONCE before loop for Camarilla levels
+        # Load 4h data ONCE before loop for Donchian bands
         df_4h = get_htf_data(prices, '4h')
-        if len(df_4h) < 5:
+        if len(df_4h) < 20:
             signals[i] = 0.0
             continue
         
@@ -88,7 +88,7 @@ def generate_signals(prices):
         low_4h = df_4h['low'].values
         close_4h = df_4h['close'].values
         
-        # Calculate Camarilla levels for each 4h bar (using previous completed bar)
+        # Calculate Donchian bands for each 4h bar (using previous completed bar)
         # Need at least one completed 4h bar
         if i < 1:  # Need at least 1 previous 4h bar
             signals[i] = 0.0
@@ -101,30 +101,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Calculate Camarilla levels using previous completed 4h bar
-        high_prev = high_4h[prev_4h_idx]
-        low_prev = low_4h[prev_4h_idx]
-        close_prev = close_4h[prev_4h_idx]
+        # Calculate Donchian bands using previous completed 4h bar (lookback 20)
+        lookback_start = max(0, prev_4h_idx - 19)
+        lookback_end = prev_4h_idx + 1
         
-        # Avoid division by zero
-        if high_prev == low_prev:
+        if lookback_end - lookback_start < 20:
             signals[i] = 0.0
             continue
             
-        # Camarilla levels
-        R3 = close_prev + (high_prev - low_prev) * 1.1 / 4
-        S3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+        high_window = high_4h[lookback_start:lookback_end]
+        low_window = low_4h[lookback_start:lookback_end]
+        
+        upper_band = np.max(high_window)
+        lower_band = np.min(low_window)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Camarilla R3 breakout up AND volume spike AND uptrend
-            if (curr_high > R3 and 
+            # Long: Donchian upper band breakout up AND volume spike AND uptrend
+            if (curr_high > upper_band and 
                 volume_spike and 
                 uptrend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Camarilla S3 breakout down AND volume spike AND downtrend
-            elif (curr_low < S3 and 
+            # Short: Donchian lower band breakout down AND volume spike AND downtrend
+            elif (curr_low < lower_band and 
                   volume_spike and 
                   downtrend):
                 signals[i] = -0.25
@@ -139,8 +139,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Camarilla levels OR trend reverses
-            elif (curr_low >= S3 and curr_low <= R3) or \
+            # Exit: price re-enters Donchian bands OR trend reverses
+            elif (curr_low >= lower_band and curr_low <= upper_band) or \
                  (curr_close < ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
@@ -154,8 +154,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Camarilla levels OR trend reverses
-            elif (curr_high >= S3 and curr_high <= R3) or \
+            # Exit: price re-enters Donchian bands OR trend reverses
+            elif (curr_high >= lower_band and curr_high <= upper_band) or \
                  (curr_close > ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
