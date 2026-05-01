@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R extreme reversal with 1w EMA50 trend filter and volume spike confirmation
-# Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Extreme readings: %R < -80 (oversold) or %R > -20 (overbought)
-# Long: %R crosses above -80 from below + price above 1w EMA50 + volume spike
-# Short: %R crosses below -20 from above + price below 1w EMA50 + volume spike
-# Uses 1d timeframe for lower frequency (target: 7-25 trades/year) to minimize fee drag
-# Works in bull markets via buying oversold dips in uptrend and in bear markets via selling overbought rallies in downtrend
+# Hypothesis: 6h Bollinger Band Squeeze + Volume Spike + 12h EMA50 Trend Filter
+# Bollinger Band Squeeze (low volatility) precedes explosive moves in both bull and bear markets.
+# Entry: BB Width < 20th percentile (squeeze) + Volume Spike (>2.0x 20-bar avg) + price breaks above/below BB (±2σ)
+# Direction: 12h EMA50 trend filter (long if price > EMA50, short if price < EMA50)
+# Exit: BB Width > 50th percentile (squeeze end) or opposite BB touch
+# Works in bull markets via breakouts and in bear markets via volatility expansion shorts
+# Target: 12-35 trades/year via strict squeeze + volume + trend confluence
 
-name = "1d_WilliamsR_Extreme_Reversal_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_BB_Squeeze_VolumeSpike_12hEMA50_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,77 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h HTF data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Williams %R calculation (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2.0
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    bb_width = upper_band - lower_band
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # BB Width percentile (20-day lookback for squeeze detection)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 1.5)
+    volume_spike = volume > (volume_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(50, 14, 20)  # Need sufficient history for all indicators
+    start_idx = max(50, bb_period, 20, 100)  # Need sufficient history
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(bb_width[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
+        
+        # Squeeze condition: BB Width < 20th percentile (low volatility)
+        squeeze = bb_width_percentile[i] < 20.0
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
-        # Williams %R extremes and crossovers
-        wr_current = williams_r[i]
-        wr_previous = williams_r[i-1]
-        
-        # Long conditions: %R crosses above -80 from below (bullish reversal)
-        long_signal = (wr_previous < -80 and wr_current >= -80) and vol_spike and uptrend
-        
-        # Short conditions: %R crosses below -20 from above (bearish reversal)
-        short_signal = (wr_previous > -20 and wr_current <= -20) and vol_spike and downtrend
+        # Breakout conditions
+        breakout_up = close[i] > upper_band[i]
+        breakout_down = close[i] < lower_band[i]
         
         if position == 0:  # Flat - look for new entries
-            if long_signal:
+            # Long: squeeze + volume spike + breakout up + uptrend
+            if squeeze and vol_spike and breakout_up and uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+            # Short: squeeze + volume spike + breakout down + downtrend
+            elif squeeze and vol_spike and breakout_down and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on %R crossing above -20 (overbought) or trend reversal
-            if wr_current >= -20 or not uptrend:
+            # Exit on squeeze end (BB Width > 50th percentile) or opposite band touch
+            if bb_width_percentile[i] > 50.0 or close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on %R crossing below -80 (oversold) or trend reversal
-            if wr_current <= -80 or not downtrend:
+            # Exit on squeeze end (BB Width > 50th percentile) or opposite band touch
+            if bb_width_percentile[i] > 50.0 or close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
