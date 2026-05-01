@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and ATR-based trailing stop.
-# Uses 1d EMA34 for trend alignment (HTF direction) and ATR(14) for dynamic stoploss.
-# Long when price breaks above R3 and above 1d EMA34; short when breaks below S3 and below 1d EMA34.
-# Exit on opposite Camarilla level break or ATR trailing stop (2.0x ATR from extreme).
-# Session filter (08-20 UTC) reduces noise. Discrete sizing 0.25 minimizes fee churn.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 1d EMA34 for trend alignment (HTF direction), requires volume > 1.5x 20-bar average for confirmation.
+# Long when price breaks above R3 and above 1d EMA34 with volume confirmation; short when breaks below S3 and below 1d EMA34 with volume confirmation.
+# Exit on opposite Camarilla level break. Session filter (08-20 UTC) reduces noise. Discrete sizing 0.25 minimizes fee churn.
 # Target: 20-40 trades/year by using 1d for signal direction and 4h only for entry timing.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_ATRTrail_Session_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_Session_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,20 +35,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for 4h timeframe trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 20-bar volume average for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
-    start_idx = 100  # warmup for EMA, ATR
+    start_idx = 100  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         # Session filter: 08-20 UTC
@@ -69,7 +61,16 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_ema = ema_34_aligned[i]
-        curr_atr = atr[i]
+        curr_volume = volume[i]
+        curr_volume_ma = volume_ma[i]
+        
+        # Skip if volume data not ready
+        if np.isnan(curr_volume_ma):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x 20-bar average
+        volume_confirmed = curr_volume > 1.5 * curr_volume_ma
         
         # Calculate Camarilla levels for current day using previous day's OHLC
         if i >= 6:  # Need at least 6 bars (1.5 days) of 4h data for previous day
@@ -110,40 +111,32 @@ def generate_signals(prices):
             camarilla_s3 = curr_close
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Camarilla R3, price above 1d EMA34
+            # Long: price breaks above Camarilla R3, price above 1d EMA34, volume confirmed
             if (curr_close > camarilla_r3 and 
-                curr_close > curr_ema):
+                curr_close > curr_ema and
+                volume_confirmed):
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-                long_stop = curr_high - 2.0 * curr_atr  # initial stop below entry
-            # Short: price breaks below Camarilla S3, price below 1d EMA34
+            # Short: price breaks below Camarilla S3, price below 1d EMA34, volume confirmed
             elif (curr_close < camarilla_s3 and 
-                  curr_close < curr_ema):
+                  curr_close < curr_ema and
+                  volume_confirmed):
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
-                short_stop = curr_low + 2.0 * curr_atr  # initial stop above entry
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update trailing stop: move stop up to highest high minus 2.0*ATR
-            long_stop = max(long_stop, curr_high - 2.0 * curr_atr)
-            # Exit conditions: price breaks below Camarilla S3 OR stoploss hit
-            if (curr_close < camarilla_s3 or 
-                curr_close < long_stop):
+            # Exit: price breaks below Camarilla S3
+            if curr_close < camarilla_s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update trailing stop: move stop down to lowest low plus 2.0*ATR
-            short_stop = min(short_stop, curr_low + 2.0 * curr_atr)
-            # Exit conditions: price breaks above Camarilla R3 OR stoploss hit
-            if (curr_close > camarilla_r3 or 
-                curr_close > short_stop):
+            # Exit: price breaks above Camarilla R3
+            if curr_close > camarilla_r3:
                 signals[i] = 0.0
                 position = 0
             else:
