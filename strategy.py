@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter.
-# Long when: price breaks above Donchian upper band AND 1d volume > 1.5x 20-period average AND ADX(14) > 25 (trending market).
-# Short when: price breaks below Donchian lower band AND 1d volume > 1.5x 20-period average AND ADX(14) > 25.
-# Uses discrete sizing 0.25 to balance return and drawdown. Target: 20-50 trades/year.
-# Donchian channels provide clear breakout levels, volume confirms institutional participation,
-# ADX filter ensures we only trade in trending conditions to avoid choppy markets.
-# Works in bull markets (breakouts continuation) and bear markets (breakdown continuation) by following the trend.
+# Hypothesis: 1d Donchian(20) breakout with 1w ATR regime filter and volume confirmation.
+# Uses 1w ATR to detect high/low volatility regimes - breakouts work best in expanding volatility.
+# Long when: price breaks above Donchian(20) high AND 1w ATR > 20-period mean AND volume > 1.5x average.
+# Short when: price breaks below Donchian(20) low AND 1w ATR > 20-period mean AND volume > 1.5x average.
+# Uses discrete sizing 0.25 to balance return and drawdown. Target: 15-25 trades/year.
+# Donchian channels provide clear structure, ATR regime filter avoids false breakouts in low volatility,
+# volume confirmation ensures institutional participation. Works in bull (breakouts up) and bear (breakouts down).
 
-name = "4h_Donchian20_1dVolConfirm_ADXRegime_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wATR_Regime_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,83 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours for efficiency
+    # Pre-compute session hours for efficiency (optional for 1d but kept for consistency)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Load 1d data ONCE before loop for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop for ATR regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume SMA(20)
-    vol_sma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w ATR(20) for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX(14) on 1d data
-    # ADX requires +DM, -DM, and TR
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # True Range calculation
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = np.nan  # First bar has no previous close
+    tr2[0] = np.nan
+    tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no prior close
     
-    # +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm[0] = np.nan
-    minus_dm[0] = np.nan
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        """Wilder's smoothing (similar to EMA with alpha=1/period)"""
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        smoothed = np.full_like(values, np.nan)
-        smoothed[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            if not np.isnan(smoothed[i-1]):
-                smoothed[i] = (smoothed[i-1] * (period-1) + values[i]) / period
+    # ATR(20) - using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr_1w = np.full_like(tr, np.nan)
+    if len(tr) >= 20:
+        atr_1w[19] = np.nanmean(tr[:20])  # First ATR is simple average
+        for i in range(20, len(tr)):
+            if not np.isnan(atr_1w[i-1]):
+                atr_1w[i] = (atr_1w[i-1] * 19 + tr[i]) / 20
             else:
-                smoothed[i] = np.nan
-        return smoothed
+                atr_1w[i] = np.nan
     
-    atr_14 = wilders_smoothing(tr, 14)
-    plus_di_14 = wilders_smoothing(plus_dm, 14) / atr_14 * 100
-    minus_di_14 = wilders_smoothing(minus_dm, 14) / atr_14 * 100
-    dx = np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14) * 100
-    adx_14 = wilders_smoothing(dx, 14)
+    # Calculate 1w ATR(20) mean for regime threshold
+    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 4h
-    vol_sma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Align 1w ATR and ATR mean to 1d
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
     
-    # Calculate Donchian(20) on 4h data
-    def donchian_channels(high, low, period):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Calculate Donchian(20) on 1d
+    # Donchian high = highest high over last 20 periods
+    # Donchian low = lowest low over last 20 periods
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    # Calculate 20-period volume average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # warmup for Donchian and ADX
+    start_idx = 40  # warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC (reduce noise, focus on active sessions)
+        # Optional session filter: 00-24 UTC (always active for 1d, but keeping structure)
         hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        in_session = True  # 1d timeframe always in session
         
         if not in_session:
-            # Outside session: flatten position if any
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -110,8 +92,9 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(vol_sma_20_aligned[i]) or np.isnan(adx_14_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(atr_1w_aligned[i]) or np.isnan(atr_ma_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -119,47 +102,48 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_vol_sma_20 = vol_sma_20_aligned[i]
-        curr_adx = adx_14_aligned[i]
-        curr_upper = donchian_upper[i]
-        curr_lower = donchian_lower[i]
+        curr_donch_high = donch_high[i]
+        curr_donch_low = donch_low[i]
+        curr_atr = atr_1w_aligned[i]
+        curr_atr_ma = atr_ma_1w_aligned[i]
+        curr_vol_ma = vol_ma[i]
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirm = curr_volume > (curr_vol_sma_20 * 1.5)
+        # Regime filter: only trade when ATR is above its mean (expanding volatility)
+        vol_regime = curr_atr > curr_atr_ma
         
-        # ADX regime filter: trending market (ADX > 25)
-        trending_regime = curr_adx > 25
+        # Volume confirmation: volume > 1.5x average
+        vol_confirm = curr_volume > (1.5 * curr_vol_ma)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper AND volume confirm AND trending regime
-            if (curr_close > curr_upper and 
-                volume_confirm and 
-                trending_regime):
+            # Long: break above Donchian high AND vol regime AND vol confirm
+            if (curr_close > curr_donch_high and 
+                vol_regime and 
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND volume confirm AND trending regime
-            elif (curr_close < curr_lower and 
-                  volume_confirm and 
-                  trending_regime):
+            # Short: break below Donchian low AND vol regime AND vol confirm
+            elif (curr_close < curr_donch_low and 
+                  vol_regime and 
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian lower (reversal) OR ADX drops below 20 (trend weak)
-            if (curr_close < curr_lower or 
-                curr_adx < 20):
+            # Exit: break below Donchian low (opposite side) OR volatility contracts
+            if (curr_close < curr_donch_low or 
+                not vol_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper (reversal) OR ADX drops below 20 (trend weak)
-            if (curr_close > curr_upper or 
-                curr_adx < 20):
+            # Exit: break above Donchian high (opposite side) OR volatility contracts
+            if (curr_close > curr_donch_high or 
+                not vol_regime):
                 signals[i] = 0.0
                 position = 0
             else:
