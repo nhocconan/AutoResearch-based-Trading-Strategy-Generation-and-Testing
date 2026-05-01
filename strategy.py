@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter (EMA50) and volume confirmation.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
 # Long when price breaks above R3 AND price > 4h EMA50 AND volume > 2.0x 24-bar average.
 # Short when price breaks below S3 AND price < 4h EMA50 AND volume > 2.0x 24-bar average.
 # Uses discrete sizing 0.20 to limit drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
