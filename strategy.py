@@ -66,6 +66,30 @@ def generate_signals(prices):
     # Align 1w chop to 12h
     chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
+    # Load 1d data ONCE before loop for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar (based on previous day's HLC)
+    camarilla_r3 = np.full(len(high_1d), np.nan)
+    camarilla_s3 = np.full(len(high_1d), np.nan)
+    for j in range(1, len(high_1d)):
+        phigh = high_1d[j-1]
+        plow = low_1d[j-1]
+        pclose = close_1d[j-1]
+        range_ = phigh - plow
+        camarilla_r3[j] = pclose + range_ * 1.1 / 4
+        camarilla_s3[j] = pclose - range_ * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
@@ -75,11 +99,12 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Session filter: optional for 12h, but keep for consistency
-        # if not (0 <= hours[i] <= 23):  # always true, kept for structure
-        #     signals[i] = 0.0
-        #     continue
+        if not (0 <= hours[i] <= 23):  # always true, kept for structure
+            signals[i] = 0.0
+            continue
         
-        if (np.isnan(atr[i]) or np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(chop_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,64 +120,8 @@ def generate_signals(prices):
         else:
             volume_confirm = curr_volume > (vol_ma * 2.0)
         
-        # Calculate Camarilla levels from prior 1d session
-        # Need 1d OHLC from previous completed 1d bar
-        df_1d = get_htf_data(prices, '1d')
-        if len(df_1d) < 1:
-            signals[i] = 0.0
-            continue
-        
-        # Align 1d data to get prior completed 1d bar's OHLC
-        # We need the 1d bar that closed before current 12h bar
-        # Use shift=1 to get previous day's data
-        if len(df_1d) >= 2:
-            # Get OHLC of the 1d bar that is fully completed before current time
-            prev_day_idx = len(df_1d) - 2  # second to last is last completed day
-            # But we need to align properly - use align_htf_to_ltf with shift
-            # Simpler: get the 1d data and take the last completed bar's values
-            # Since we're iterating, we can use the index to get correct bar
-            # For 12h timeframe, we can use integer division with caution - but safer to use HTF alignment
-            
-            # Instead, compute Camarilla from the 1d data aligned and shifted
-            high_1d = df_1d['high'].values
-            low_1d = df_1d['low'].values
-            close_1d = df_1d['close'].values
-            
-            # Calculate Camarilla for each 1d bar
-            camarilla_r3 = []
-            camarilla_s3 = []
-            for j in range(len(high_1d)):
-                if j == 0:
-                    camarilla_r3.append(np.nan)
-                    camarilla_s3.append(np.nan)
-                else:
-                    # Camarilla levels: based on previous day's HLC
-                    phigh = high_1d[j-1]
-                    plow = low_1d[j-1]
-                    pclose = close_1d[j-1]
-                    range_ = phigh - plow
-                    r3 = pclose + range_ * 1.1 / 4
-                    s3 = pclose - range_ * 1.1 / 4
-                    camarilla_r3.append(r3)
-                    camarilla_s3.append(s3)
-            
-            camarilla_r3 = np.array(camarilla_r3)
-            camarilla_s3 = np.array(camarilla_s3)
-            
-            # Align to 12h timeframe
-            camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-            camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-            
-            r3 = camarilla_r3_aligned[i]
-            s3 = camarilla_s3_aligned[i]
-        else:
-            # Not enough 1d data yet
-            r3 = np.nan
-            s3 = np.nan
-        
-        if np.isnan(r3) or np.isnan(s3):
-            signals[i] = 0.0
-            continue
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         
         # Camarilla breakout conditions
         breakout_up = curr_high > r3  # break above R3
