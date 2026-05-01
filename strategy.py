@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above 1d Camarilla R3 AND close > 1w EMA34 AND volume > 2.0x 20-period volume median.
-# Short when price breaks below 1d Camarilla S3 AND close < 1w EMA34 AND volume > 2.0x 20-period volume median.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.5*ATR.
-# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 # Camarilla pivots identify key intraday support/resistance; EMA34 filter avoids counter-trend trades; volume confirmation reduces false breakouts.
 # Works in bull markets (trend continuation) and bear markets (sharp reversals on volume spikes).
 
-name = "1d_Camarilla_R3_S3_1wEMA34_Volume_Breakout_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,28 +36,34 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate 1d Camarilla levels (using prior bar to avoid look-ahead)
-    camarilla_r3 = (high + 2 * (close - low) * 1.1 / 12).shift(1).values
-    camarilla_s3 = (high - 2 * (high - low) * 1.1 / 12).shift(1).values
+    # Calculate Camarilla levels (using prior bar to avoid look-ahead)
+    # Camarilla: Pivot = (H + L + C)/3; Range = H - L
+    # R3 = Pivot + 1.1 * Range * 1.1/2 = Pivot + 1.1 * Range * 0.55
+    # S3 = Pivot - 1.1 * Range * 0.55
+    typical_price = (high + low + close) / 3.0
+    pivot = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().shift(1).values
+    price_range = pd.Series(high - low).rolling(window=20, min_periods=20).max().shift(1).values
+    camarilla_r3 = pivot + 1.1 * price_range * 0.55
+    camarilla_s3 = pivot - 1.1 * price_range * 0.55
     
-    # Calculate 1w EMA34 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA34 trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, volume, and Camarilla
+    # Start after warmup for ATR, EMA, volume, pivot, and range
     start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r3[i]) or 
             np.isnan(camarilla_s3[i]) or 
             np.isnan(vol_median_20[i])):
@@ -67,9 +73,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: price vs 1w EMA34
-        uptrend = curr_close > ema_34_1w_aligned[i]
-        downtrend = curr_close < ema_34_1w_aligned[i]
+        # Trend filter: price vs 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
         # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
