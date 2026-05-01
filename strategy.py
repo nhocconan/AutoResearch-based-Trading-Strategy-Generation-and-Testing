@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above R3 AND price > 1d EMA34 AND volume > 2.0x 24-bar average.
 # Short when price breaks below S3 AND price < 1d EMA34 AND volume > 2.0x 24-bar average.
 # Uses discrete sizing 0.25 to balance return and drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
-# Target: 80-180 total trades over 4 years (20-45/year) for 4h timeframe.
+# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe.
 # 1d EMA34 provides robust trend alignment that works in both bull (price above EMA) and bear (price below EMA).
 # Camarilla R3/S3 levels offer reliable breakout points with lower noise than R4/S4.
 # Volume confirmation (2.0x average) ensures only high-conviction breakouts are traded.
@@ -45,6 +45,7 @@ def generate_signals(prices):
     price_below_ema = close < ema_34_aligned
     
     # Calculate Camarilla levels (based on previous day's range)
+    # Need daily data for Camarilla calculation
     df_1d_copy = df_1d.copy()
     df_1d_copy['date'] = pd.to_datetime(df_1d_copy['open_time']).dt.date
     daily = df_1d_copy.groupby('date').agg({
