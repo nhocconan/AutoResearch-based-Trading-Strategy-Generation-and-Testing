@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above R3 with 1w EMA50 uptrend and volume > 1.8x 20-bar average.
-# Short when price breaks below S3 with 1w EMA50 downtrend and volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 12h timeframe to avoid overtrading.
-# Works in bull (buy breakouts) and bear (sell breakdowns) via trend filter.
+# Hypothesis: 1d Williams %R extreme reversal with 1w EMA50 trend filter and volume spike confirmation.
+# Long when %R < -80 (oversold) with 1w EMA50 uptrend and volume > 1.8x 20-bar average.
+# Short when %R > -20 (overbought) with 1w EMA50 downtrend and volume > 1.8x 20-bar average.
+# Uses discrete sizing 0.25 to minimize fee churn. Designed for 1d timeframe to capture multi-day reversals.
+# Works in bull (buy oversold dips) and bear (sell overbought rallies) via trend filter.
 
-name = "12h_Camarilla_R3S3_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_WilliamsR_Extreme_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,10 +38,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for EMA50 and Camarilla calculation
+    start_idx = 100  # warmup for EMA50 and Williams %R calculation
     
     for i in range(start_idx, n):
-        # Session filter: 00-23 UTC (trade all sessions for 12h timeframe)
+        # Session filter: 00-23 UTC (trade all sessions for 1d timeframe)
         hour = hours[i]
         
         if np.isnan(ema_50_1w_aligned[i]):
@@ -54,28 +54,21 @@ def generate_signals(prices):
         curr_vol = volume[i]
         curr_ema_50_1w = ema_50_1w_aligned[i]
         
-        # Calculate Camarilla levels from previous 12h bar
-        # Use bar i-1 for prior period calculation
-        if i-1 < start_idx:
+        # Calculate Williams %R from previous 14 periods (need 14 bars of data)
+        if i < 14 + start_idx:
             signals[i] = 0.0
             continue
             
-        prev_close = close[i-1]
-        prev_high = high[i-1]
-        prev_low = low[i-1]
+        highest_high = np.max(high[i-14:i])  # highest high over last 14 periods
+        lowest_low = np.min(low[i-14:i])     # lowest low over last 14 periods
         
-        # Camarilla levels calculation
-        range_val = prev_high - prev_low
-        if range_val <= 0:
+        if highest_high == lowest_low:
             signals[i] = 0.0
             continue
             
-        # Camarilla R3 and S3 levels
-        r3 = prev_close + range_val * 1.1 / 4
-        s3 = prev_close - range_val * 1.1 / 4
+        williams_r = -100 * (highest_high - curr_close) / (highest_high - lowest_low)
         
-        # Volume confirmation: current 12h volume > 1.8x 20-period average
-        # Calculate volume MA from current timeframe data
+        # Volume confirmation: current 1d volume > 1.8x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -88,14 +81,14 @@ def generate_signals(prices):
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above R3 AND price > 1w EMA50 AND volume confirmation
-            if (curr_close > r3 and 
+            # Long: Williams %R < -80 (oversold) AND price > 1w EMA50 AND volume confirmation
+            if (williams_r < -80 and 
                 curr_close > curr_ema_50_1w and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND price < 1w EMA50 AND volume confirmation
-            elif (curr_close < s3 and 
+            # Short: Williams %R > -20 (overbought) AND price < 1w EMA50 AND volume confirmation
+            elif (williams_r > -20 and 
                   curr_close < curr_ema_50_1w and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -104,8 +97,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3 (reversal) OR price < 1w EMA50 (trend violation)
-            if (curr_close < s3 or 
+            # Exit: Williams %R > -20 (overbought) OR price < 1w EMA50 (trend violation)
+            if (williams_r > -20 or 
                 curr_close < curr_ema_50_1w):
                 signals[i] = 0.0
                 position = 0
@@ -113,8 +106,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (reversal) OR price > 1w EMA50 (trend violation)
-            if (curr_close > r3 or 
+            # Exit: Williams %R < -80 (oversold) OR price > 1w EMA50 (trend violation)
+            if (williams_r < -80 or 
                 curr_close > curr_ema_50_1w):
                 signals[i] = 0.0
                 position = 0
