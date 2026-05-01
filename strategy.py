@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d ADX > 25 regime filter
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX > 25 regime filter
 # Donchian breakouts capture strong momentum moves; 1d ADX > 25 ensures we only trade in strong trends
 # Volume > 2.0x 20-period EMA confirms institutional participation
 # Designed for low trade frequency: ~15-25 trades/year per symbol with 0.25 sizing
 # Works in bull/bear: ADX filter avoids chop, volume confirms breakout validity in both directions
 
-name = "12h_Donchian20_VolumeConfirm_1dADX_Regime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeConfirm_1dADX_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian(20) channels from 12h data
+    # Donchian(20) channels from 4h data
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
