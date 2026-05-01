@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level with volume > 1.5x 20-period volume average and price > 12h EMA50 (uptrend).
-# Short when price breaks below Camarilla S3 level with volume confirmation and price < 12h EMA50 (downtrend).
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter.
+# Long when price breaks above 20-period Donchian high with volume > 1.5x 20-period volume average and price > 12h EMA50.
+# Short when price breaks below 20-period Donchian low with volume confirmation and price < 12h EMA50.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Camarilla levels calculated from prior completed 4h bar to avoid look-ahead.
+# Donchian channels calculated from prior completed 4h bar to avoid look-ahead.
 # Volume confirmation filters low-momentum breakouts. 12h EMA50 ensures trades only in established trends.
 # Works in bull (breakouts with strong uptrend) and bear (breakouts with strong downtrend) regimes.
 # Target: 30-60 trades/year on 4h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Volume_v1"
+name = "4h_Donchian_20_Breakout_12hEMA50_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,7 +53,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0  # track entry price for stoploss
     
-    # Start after warmup for ATR, EMA, and Camarilla
+    # Start after warmup for ATR, EMA, and Donchian
     start_idx = 50
     
     for i in range(start_idx, n):
@@ -78,59 +78,53 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_12h_aligned[i]
         downtrend = curr_close < ema_50_12h_aligned[i]
         
-        # Load 4h data ONCE before loop for Camarilla levels
+        # Load 4h data ONCE before loop for Donchian channels
         df_4h = get_htf_data(prices, '4h')
-        if len(df_4h) < 5:
+        if len(df_4h) < 20:
             signals[i] = 0.0
             continue
         
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
-        close_4h = df_4h['close'].values
         
-        # Calculate Camarilla levels for each 4h bar (using previous completed bar)
-        # Camarilla R3 = close + 1.1*(high-low)/2
-        # Camarilla S3 = close - 1.1*(high-low)/2
-        # Use previous completed bar to avoid look-ahead
-        prev_high = high_4h[:-1]
-        prev_low = low_4h[:-1]
-        prev_close = close_4h[:-1]
-        
-        # Need at least 1 previous bar
-        if len(prev_high) < 1:
+        # Calculate Donchian channels for each 4h bar (using previous completed bar)
+        # Upper channel = max(high of last 20 bars)
+        # Lower channel = min(low of last 20 bars)
+        # Use previous completed bars to avoid look-ahead
+        if i < 20:  # Need at least 20 previous 4h bars
             signals[i] = 0.0
             continue
             
-        # Calculate levels for previous bar
-        camarilla_range = prev_high - prev_low
-        r3 = prev_close + 1.1 * camarilla_range / 2
-        s3 = prev_close - 1.1 * camarilla_range / 2
+        # Get the index range for the last 20 completed 4h bars
+        # Since we're at 4h bar i, we need bars [i-20, i-1] for calculation
+        start_4h = i - 20
+        end_4h = i - 1
         
-        # Shift to align with current bar (use previous bar's levels)
-        r3_aligned = np.concatenate([[np.nan], r3])
-        s3_aligned = np.concatenate([[np.nan], s3])
-        
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if start_4h < 0:
             signals[i] = 0.0
             continue
+            
+        # Calculate Donchian levels using previous 20 completed bars
+        high_slice = high_4h[start_4h:end_4h+1]
+        low_slice = low_4h[start_4h:end_4h+1]
         
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        
-        # Camarilla breakout conditions
-        breakout_up = curr_high > r3_level  # break above R3
-        breakout_down = curr_low < s3_level  # break below S3
+        if len(high_slice) < 20:
+            signals[i] = 0.0
+            continue
+            
+        upper_channel = np.max(high_slice)
+        lower_channel = np.min(low_slice)
         
         if position == 0:  # Flat - look for new entries
-            # Long: Camarilla breakout up AND volume confirmation AND uptrend
-            if (breakout_up and 
+            # Long: Donchian breakout up AND volume confirmation AND uptrend
+            if (curr_high > upper_channel and 
                 volume_confirm and 
                 uptrend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: Camarilla breakout down AND volume confirmation AND downtrend
-            elif (breakout_down and 
+            # Short: Donchian breakout down AND volume confirmation AND downtrend
+            elif (curr_low < lower_channel and 
                   volume_confirm and 
                   downtrend):
                 signals[i] = -0.25
@@ -145,8 +139,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Camarilla bands OR trend reverses
-            elif (curr_low >= s3_level and curr_low <= r3_level) or \
+            # Exit: price re-enters Donchian channels OR trend reverses
+            elif (curr_low >= lower_channel and curr_low <= upper_channel) or \
                  (curr_close < ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
@@ -160,8 +154,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price re-enters Camarilla bands OR trend reverses
-            elif (curr_high >= s3_level and curr_high <= r3_level) or \
+            # Exit: price re-enters Donchian channels OR trend reverses
+            elif (curr_high >= lower_channel and curr_high <= upper_channel) or \
                  (curr_close > ema_50_12h_aligned[i]):  # trend reversal
                 signals[i] = 0.0
                 position = 0
