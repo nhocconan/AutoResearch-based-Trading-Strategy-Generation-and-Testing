@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w ADX25 trend filter and volume confirmation
-# Uses 1w ADX(14) > 25 as trend filter (trending market) + Camarilla breakout from prior 12h bar
-# Volume spike (2x 20-period MA) confirms institutional participation
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d ADX20 trend filter and volume confirmation
+# Uses 1d ADX(14) > 20 as trend filter (trending market) + Camarilla breakout from prior 4h bar
+# Volume spike (1.8x 20-period MA) confirms participation
 # Works in bull/bear via trend filter - only trades in strong trends, avoids chop
-# Designed for low frequency (50-150 trades over 4 years) to minimize fee drag on 12h timeframe
+# Designed for low frequency (75-200 trades over 4 years) to minimize fee drag on 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1wADX25_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_1dADX20_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # 1d HTF data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1w ADX(14) calculation (trend filter)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d ADX(14) calculation (trend filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with indices
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -81,20 +81,20 @@ def generate_signals(prices):
         return result
     
     adx = wilders_smoothing_dx(dx, tr_period)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Camarilla levels from prior 12h bar (using prior bar's HLC)
+    # Calculate Camarilla levels from prior 4h bar (using prior bar's HLC)
     prior_high = np.concatenate([[np.nan], high[:-1]])
     prior_low = np.concatenate([[np.nan], low[:-1]])
     prior_close = np.concatenate([[np.nan], close[:-1]])
     
     hl_range = prior_high - prior_low
-    camarilla_r3 = prior_close + hl_range * 1.1 / 4
-    camarilla_s3 = prior_close - hl_range * 1.1 / 4
+    camarilla_r4 = prior_close + hl_range * 1.1 / 2
+    camarilla_s4 = prior_close - hl_range * 1.1 / 2
     
-    # Volume confirmation: current volume > 2.0 * 20-period average volume
+    # Volume confirmation: current volume > 1.8 * 20-period average volume
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma_20 * 2.0)
+    volume_spike = volume > (volume_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -108,22 +108,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
         
         # Breakout conditions
-        breakout_long = close[i] > camarilla_r3[i]  # Price breaks above R3
-        breakout_short = close[i] < camarilla_s3[i]  # Price breaks below S3
+        breakout_long = close[i] > camarilla_r4[i]  # Price breaks above R4
+        breakout_short = close[i] < camarilla_s4[i]  # Price breaks below S4
         
         # Volume confirmation
         vol_spike = volume_spike[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R3 with volume spike and trending market
+            # Long: Breakout above R4 with volume spike and trending market
             if breakout_long and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below S3 with volume spike and trending market
+            # Short: Breakout below S4 with volume spike and trending market
             elif breakout_short and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
@@ -131,16 +131,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on close below prior bar's low or ADX weakening (<20)
-            if close[i] < prior_low[i] or adx_aligned[i] < 20:
+            # Exit on close below prior bar's low or ADX weakening (<15)
+            if close[i] < prior_low[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on close above prior bar's high or ADX weakening (<20)
-            if close[i] > prior_high[i] or adx_aligned[i] < 20:
+            # Exit on close above prior bar's high or ADX weakening (<15)
+            if close[i] > prior_high[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
