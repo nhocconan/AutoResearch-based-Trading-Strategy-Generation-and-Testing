@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + daily EMA50 trend + volume confirmation (>1.5x 20-bar MA)
-# Donchian breakout captures momentum, daily EMA50 filters trend direction (long above EMA50, short below),
-# volume confirms strength. Works in bull markets via breakouts above EMA50 and in bear markets via short
-# breakdowns below EMA50. Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25).
+# Hypothesis: 1d Donchian(20) breakout + weekly pivot direction + volume confirmation (>1.5x 20-bar MA)
+# Donchian breakout captures momentum, weekly pivot filters trend direction (long above weekly pivot, short below),
+# volume confirms strength. Works in bull markets via breakouts above weekly pivot and in bear markets via short
+# breakdowns below weekly pivot. Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing (0.25).
+# Primary timeframe: 1d, HTF: 1w (via 1d data resampled to weekly)
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyPivot_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA50 calculation
+    # 1d HTF data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA50
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Weekly pivot points (using prior week's OHLC)
+    # Calculate weekly OHLC from 1d data (5 trading days per week)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
     
-    # Donchian(20) channels on 12h data
+    # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Align weekly pivot to 1d timeframe (each value lasts 5 trading days)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    
+    # Donchian(20) channels on 1d data
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -44,10 +53,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup for all indicators
-    start_idx = max(lookback, 20, 50)  # Need 20 for Donchian and volume MA, 50 for EMA
+    start_idx = max(lookback, 20)  # Need 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]):
+        if np.isnan(weekly_pivot_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -60,28 +69,28 @@ def generate_signals(prices):
         vol_confirm = volume_confirm[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper band, above daily EMA50, and volume confirmation
-            if curr_close > highest_high[i-1] and curr_close > ema_50_aligned[i] and vol_confirm:
+            # Long: price breaks above Donchian upper band, above weekly pivot, and volume confirmation
+            if curr_close > highest_high[i-1] and curr_close > weekly_pivot_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band, below daily EMA50, and volume confirmation
-            elif curr_close < lowest_low[i-1] and curr_close < ema_50_aligned[i] and vol_confirm:
+            # Short: price breaks below Donchian lower band, below weekly pivot, and volume confirmation
+            elif curr_close < lowest_low[i-1] and curr_close < weekly_pivot_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit on price breaking below Donchian lower band or below daily EMA50
-            if curr_close < lowest_low[i-1] or curr_close < ema_50_aligned[i]:
+            # Exit on price breaking below Donchian lower band or below weekly pivot
+            if curr_close < lowest_low[i-1] or curr_close < weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit on price breaking above Donchian upper band or above daily EMA50
-            if curr_close > highest_high[i-1] or curr_close > ema_50_aligned[i]:
+            # Exit on price breaking above Donchian upper band or above weekly pivot
+            if curr_close > highest_high[i-1] or curr_close > weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
