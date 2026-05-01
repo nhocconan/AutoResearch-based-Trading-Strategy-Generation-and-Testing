@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation.
-# Long when Williams %R(14) < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period median.
-# Short when Williams %R(14) > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period median.
-# Williams %R identifies exhaustion points in ranging markets; 1d EMA50 filters counter-trend noise; volume confirms reversal validity.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe with discrete sizing (0.25) to minimize fee churn.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 1d EMA50 uptrend AND volume > 1.8x 20-period median.
+# Short when price breaks below Donchian lower band AND 1d EMA50 downtrend AND volume > 1.8x 20-period median.
+# Uses ATR(14) stoploss: exit long if price < highest_since_entry - 2.0*ATR(14), exit short if price > lowest_since_entry + 2.0*ATR(14).
+# Discrete position sizing (0.25) minimizes fee churn. Target: 12-37 trades/year on 12h timeframe.
+# Donchian channels provide robust trend-following structure; volume confirms breakout validity; 1d EMA50 filters counter-trend noise.
 
-name = "6h_WilliamsR_Extreme_1dEMA50_VolumeConfirm_ATR_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_ATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,13 +40,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 14-period Williams %R
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          ((highest_high - close) / (highest_high - lowest_low)) * -100,
-                          -50.0)  # neutral when range is zero
+    # Calculate 20-period Donchian channels (based on current timeframe's OHLC)
+    # Upper band = highest high of last 20 periods, Lower band = lowest low of last 20 periods
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
@@ -56,12 +54,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for Williams %R, EMA50, ATR, and volume median
-    start_idx = max(14, 50, 20)
+    # Start after warmup for EMA50, ATR, Donchian, and volume median
+    start_idx = 50
     
     for i in range(start_idx, n):
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_median_20[i])):
             signals[i] = 0.0
@@ -79,26 +78,26 @@ def generate_signals(prices):
         uptrend = curr_close > ema_50_1d_aligned[i]
         downtrend = curr_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period volume median
+        # Volume confirmation: current volume > 1.8x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
             volume_confirm = False
         else:
-            volume_confirm = curr_volume > (vol_median_20[i] * 1.5)
+            volume_confirm = curr_volume > (vol_median_20[i] * 1.8)
         
-        # Williams %R extreme signals
-        williams_oversold = williams_r[i] < -80.0
-        williams_overbought = williams_r[i] > -20.0
+        # Donchian breakout signals (using current bar's high/low)
+        breakout_up = curr_high > donchian_upper[i-1]  # Using previous bar's upper band
+        breakout_down = curr_low < donchian_lower[i-1]  # Using previous bar's lower band
         
         if position == 0:  # Flat - look for new entries
-            # Long: Williams %R oversold AND uptrend AND volume confirmation
-            if williams_oversold and uptrend and volume_confirm:
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Williams %R overbought AND downtrend AND volume confirmation
-            elif williams_overbought and downtrend and volume_confirm:
+            # Short: Breakout down AND downtrend AND volume spike
+            elif breakout_down and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -112,10 +111,9 @@ def generate_signals(prices):
             if curr_close > highest_since_entry:
                 highest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR trend reversal OR Williams %R normalization
-            stop_price = highest_since_entry - 2.5 * curr_atr
-            williams_normalized = williams_r[i] > -50.0  # exit when momentum fades
-            if curr_close < stop_price or not uptrend or williams_normalized:
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stop_price or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,10 +124,9 @@ def generate_signals(prices):
             if curr_close < lowest_since_entry:
                 lowest_since_entry = curr_close
             
-            # Exit conditions: ATR stoploss OR trend reversal OR Williams %R normalization
-            stop_price = lowest_since_entry + 2.5 * curr_atr
-            williams_normalized = williams_r[i] < -50.0  # exit when momentum fades
-            if curr_close > stop_price or not downtrend or williams_normalized:
+            # Exit conditions: ATR stoploss OR trend reversal
+            stop_price = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stop_price or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
