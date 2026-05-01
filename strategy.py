@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above Donchian upper channel AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
-# Short when price breaks below Donchian lower channel AND 1d ADX > 25 AND volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 4h timeframe to capture medium-term trends.
-# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) via ADX filter.
+# Hypothesis: 6h Elder Ray Index with 1d ADX trend filter and volume confirmation.
+# Elder Ray measures bull/bear power via EMA(13). Long when bull power > 0 and rising, ADX > 25, volume > 1.5x 20-bar avg.
+# Short when bear power < 0 and falling, ADX > 25, volume confirmation. Uses discrete sizing 0.25.
+# Works in bull (buy rising bull power) and bear (sell falling bear power) via ADX filter for trend strength.
 
-name = "4h_Donchian20_1dADX_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dADX_VolumeConfirm_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -80,35 +79,34 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Donchian Channel (20-period) on 4h data
-    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min()
-    
-    upper_values = upper_channel.values
-    lower_values = lower_channel.values
+    # Elder Ray Index on 6h data
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Donchian and ADX
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        # Session filter: trade all sessions for 4h timeframe
+        # Session filter: trade all sessions for 6h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(upper_values[i]) or np.isnan(lower_values[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_13[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_upper = upper_values[i]
-        curr_lower = lower_values[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
+        curr_ema = ema_13[i]
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        # Volume confirmation: current 6h volume > 1.5x 20-period average
         if i < 20 + start_idx:
             signals[i] = 0.0
             continue
@@ -119,42 +117,36 @@ def generate_signals(prices):
             continue
         volume_confirm = curr_vol > (vol_ma * 1.5)
         
-        # Donchian breakout signals
-        # Long: price breaks above upper channel
-        # Short: price breaks below lower channel
-        breakout_up = curr_high > curr_upper
-        breakout_down = curr_low < curr_lower
+        # Elder Ray signals with trend confirmation
+        # Bullish: bull power > 0 AND rising (current > previous) AND ADX > 25
+        # Bearish: bear power < 0 AND falling (current < previous) AND ADX > 25
+        bullish_signal = (curr_bull > 0) and (curr_bull > bull_power[i-1]) and (curr_adx > 25)
+        bearish_signal = (curr_bear < 0) and (curr_bear < bear_power[i-1]) and (curr_adx > 25)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout up AND ADX > 25 AND volume confirmation
-            if (breakout_up and 
-                curr_adx > 25 and 
-                volume_confirm):
+            # Long: bullish Elder Ray AND volume confirmation
+            if bullish_signal and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down AND ADX > 25 AND volume confirmation
-            elif (breakout_down and 
-                  curr_adx > 25 and 
-                  volume_confirm):
+            # Short: bearish Elder Ray AND volume confirmation
+            elif bearish_signal and volume_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower channel (mean reversion) OR ADX < 20 (trend weakening)
-            if (curr_close < curr_lower or 
-                curr_adx < 20):
+            # Exit: bearish Elder Ray signal OR ADX < 20 (trend weakening)
+            if bearish_signal or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper channel (mean reversion) OR ADX < 20 (trend weakening)
-            if (curr_close > curr_upper or 
-                curr_adx < 20):
+            # Exit: bullish Elder Ray signal OR ADX < 20 (trend weakening)
+            if bullish_signal or curr_adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
