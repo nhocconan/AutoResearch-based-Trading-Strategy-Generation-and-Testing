@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period volume median.
-# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period volume median.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 AND close > 12h EMA50 AND volume > 2.0x 20-period volume median.
+# Short when price breaks below Camarilla S3 AND close < 12h EMA50 AND volume > 2.0x 20-period volume median.
 # Uses discrete sizing 0.25. ATR(14) stoploss: signal→0 when price moves against position by 2.0*ATR.
-# Target: 12-37 trades/year on 12h timeframe (~50-150 total over 4 years).
+# Target: 20-40 trades/year on 4h timeframe (~80-160 total over 4 years).
 # Proven pattern: Camarilla breakouts with volume and trend filter work on BTC/ETH in both bull/bear markets.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,24 +35,32 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
-    # Calculate Camarilla pivot levels (R3, S3) from prior day to avoid look-ahead
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Prior day's typical price, high, low
-    prior_tp = pd.Series(typical_price).shift(1).values
-    prior_high = pd.Series(high).shift(1).values
-    prior_low = pd.Series(low).shift(1).values
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prior_tp + (prior_high - prior_low) * 1.1 / 4.0
-    camarilla_s3 = prior_tp - (prior_high - prior_low) * 1.1 / 4.0
-    
-    # Calculate 1d EMA34 trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 12h EMA50 trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate Camarilla levels (R3, S3) from prior bar to avoid look-ahead
+    # Based on prior day's high, low, close (using 4h data, approximate daily from last 6 bars)
+    # For 4h timeframe, use prior 6-bar window to approximate daily OHLC
+    def calculate_camarilla(high_arr, low_arr, close_arr):
+        # Use rolling window of 6 bars (approx 1 day for 4h data)
+        roll_high = pd.Series(high_arr).rolling(window=6, min_periods=6).max().shift(1).values
+        roll_low = pd.Series(low_arr).rolling(window=6, min_periods=6).min().shift(1).values
+        roll_close = pd.Series(close_arr).rolling(window=6, min_periods=6).last().shift(1).values
+        
+        pivot = (roll_high + roll_low + roll_close) / 3.0
+        range_val = roll_high - roll_low
+        
+        r3 = pivot + (range_val * 1.1 / 4.0)
+        s3 = pivot - (range_val * 1.1 / 4.0)
+        
+        return r3, s3
+    
+    camarilla_r3, camarilla_s3 = calculate_camarilla(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(atr[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(camarilla_r3[i]) or 
             np.isnan(camarilla_s3[i]) or 
             np.isnan(vol_median_20[i])):
@@ -73,9 +81,9 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: price vs 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend filter: price vs 12h EMA50
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
         
         # Volume confirmation: current volume > 2.0x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
