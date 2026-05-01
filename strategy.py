@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from prior 1d to identify key support/resistance (R3/S3 for breakout, R4/S4 for continuation)
-# EMA34 on 1d determines primary trend direction (only take longs above EMA34, shorts below)
-# Volume confirmation > 2.0x 20-period EMA ensures institutional participation
-# Designed for low trade frequency: ~15-30 trades/year per symbol with 0.25 sizing
-# Camarilla R3/S3 breakouts have high follow-through in trending markets, especially with volume confirmation
-# EMA34 filter avoids counter-trend trades during strong trends, improving win rate in both bull and bear markets
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
+# Uses weekly EMA50 from 1w data to determine structural bias (long above EMA50, short below)
+# Camarilla R3/S3 breakout provides precise entry timing in direction of weekly trend
+# Volume confirmation > 1.8x 20-period EMA ensures institutional participation
+# Designed for low trade frequency: ~12-25 trades/year per symbol with 0.25 sizing
+# Weekly EMA50 acts as dynamic support/resistance that works in both bull and bear markets
+# Breakouts in direction of weekly EMA50 trend have higher follow-through probability
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1wEMA50_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,97 +25,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivot and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # 1w HTF data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior 1d OHLC
-    # Camarilla levels: based on prior day's range
+    # Calculate weekly EMA50 from weekly close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1d HTF data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from prior day OHLC
+    # R3 = CLOSE + (HIGH - LOW) * 1.1/4
+    # S3 = CLOSE - (HIGH - LOW) * 1.1/4
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Prior day's values (shifted by 1 to avoid look-ahead)
-    prior_high = np.roll(high_1d, 1)
-    prior_low = np.roll(low_1d, 1)
-    prior_close = np.roll(close_1d, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Camarilla calculations
-    range_ = prior_high - prior_low
-    camarilla_h5 = prior_close + (range_ * 1.1 / 2)  # R4 equivalent
-    camarilla_h4 = prior_close + (range_ * 1.1 / 4)  # R3
-    camarilla_h3 = prior_close + (range_ * 1.1 / 6)  # R2
-    camarilla_l3 = prior_close - (range_ * 1.1 / 6)  # S2
-    camarilla_l4 = prior_close - (range_ * 1.1 / 4)  # S3
-    camarilla_l5 = prior_close - (range_ * 1.1 / 2)  # S4
+    # Align Camarilla levels to 12h timeframe (use prior completed day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 2.0 * 20-period EMA
+    # Volume confirmation: volume > 1.8 * 20-period EMA
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_spike = volume > (1.8 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need 1d EMA34 (34 days) + volume EMA20
-    start_idx = max(34, 20)
+    # Start after warmup: need 1w data for EMA50 (50 weeks min) + 1d data for pivots + volume EMA20
+    start_idx = max(50, 1, 20)  # 50 weeks for EMA50, 1 day for pivots, 20 for volume EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA34
-        bullish_trend = close[i] > ema_34_aligned[i]
-        bearish_trend = close[i] < ema_34_aligned[i]
+        # Determine trend bias from weekly EMA50: long above EMA50, short below EMA50
+        bullish_bias = close[i] > ema_50_1w_aligned[i]
+        bearish_bias = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if bullish_trend:
-                # Long: break above Camarilla H3 (R2) with volume spike, target H4 (R3)
-                if close[i] > camarilla_h3_aligned[i] and volume_spike[i]:
+            if bullish_bias:
+                # Long: Camarilla R3 breakout above with volume spike
+                if close[i] > camarilla_r3_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.0
-            elif bearish_trend:
-                # Short: break below Camarilla L3 (S2) with volume spike, target L4 (S3)
-                if close[i] < camarilla_l3_aligned[i] and volume_spike[i]:
+            elif bearish_bias:
+                # Short: Camarilla S3 breakdown below with volume spike
+                if close[i] < camarilla_s3_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid chop around EMA
+                signals[i] = 0.0  # Avoid chop around EMA50
         
         elif position == 1:  # Long position
-            # Exit: close below Camarilla L3 (S2) or reverse signal with volume
-            if close[i] < camarilla_l3_aligned[i] and volume_spike[i]:
+            # Exit: Camarilla S3 breakdown below (failure of breakout)
+            if close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: close above Camarilla H3 (R2) or reverse signal with volume
-            if close[i] > camarilla_h3_aligned[i] and volume_spike[i]:
+            # Exit: Camarilla R3 breakout above (failure of breakdown)
+            if close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
