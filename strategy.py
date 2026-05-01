@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 1d EMA50 for robust long-term trend alignment that works in both bull and bear markets.
-# Long when price breaks above Donchian upper band AND price > 1d EMA50 AND volume > 2.0x 20-bar average.
-# Short when price breaks below Donchian lower band AND price < 1d EMA50 AND volume > 2.0x 20-bar average.
+# Hypothesis: 12h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; reversals from extremes work in both bull and bear markets.
+# Long when Williams %R crosses above -80 FROM BELOW AND price > 1d EMA50 AND volume > 1.5x 20-bar average.
+# Short when Williams %R crosses below -20 FROM ABOVE AND price < 1d EMA50 AND volume > 1.5x 20-bar average.
 # Uses discrete sizing 0.25 to manage drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
-# Volume spike threshold increased to 2.0x to reduce trade frequency and avoid overtrading.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Volume threshold set to 1.5x to balance trade frequency and signal quality.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,17 +43,32 @@ def generate_signals(prices):
     price_above_ema = close > ema_50_aligned
     price_below_ema = close < ema_50_aligned
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R calculation (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          -100 * (highest_high - close) / (highest_high - lowest_low),
+                          -50)  # neutral when range is zero
     
-    # Volume confirmation: current 4h volume > 2.0x 20-bar average (increased threshold to reduce trades)
+    # Williams %R signals: cross above -80 (long) or cross below -20 (short)
+    williams_r_long_signal = np.zeros(n, dtype=bool)
+    williams_r_short_signal = np.zeros(n, dtype=bool)
+    
+    for i in range(1, n):
+        # Long signal: Williams %R crosses above -80 from below
+        if williams_r[i-1] <= -80 and williams_r[i] > -80:
+            williams_r_long_signal[i] = True
+        # Short signal: Williams %R crosses below -20 from above
+        if williams_r[i-1] >= -20 and williams_r[i] < -20:
+            williams_r_short_signal[i] = True
+    
+    # Volume confirmation: current 12h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA, Donchian, and volume MA
+    start_idx = 50  # warmup for EMA, Williams %R, and volume MA
     
     for i in range(start_idx, n):
         # Session filter: trade only 08-20 UTC
@@ -62,13 +77,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(williams_r[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -76,22 +89,18 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        volume_confirm = curr_vol > (curr_vol_ma * 2.0)  # Increased threshold to 2.0x
-        
-        # Donchian breakout signals
-        breakout_up = curr_high > highest_high[i]  # break above upper band
-        breakout_down = curr_low < lowest_low[i]   # break below lower band
+        volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: breakout above upper band AND price > 1d EMA50 AND volume confirmation
-            if (breakout_up and 
+            # Long: Williams %R cross above -80 AND price > 1d EMA50 AND volume confirmation
+            if (williams_r_long_signal[i] and 
                 price_above_ema[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band AND price < 1d EMA50 AND volume confirmation
-            elif (breakout_down and 
+            # Short: Williams %R cross below -20 AND price < 1d EMA50 AND volume confirmation
+            elif (williams_r_short_signal[i] and 
                   price_below_ema[i] and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -100,8 +109,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below lower band (stoploss) OR price < 1d EMA50 (trend change)
-            if (curr_low < lowest_low[i] or 
+            # Exit: Williams %R crosses below -50 (momentum loss) OR price < 1d EMA50 (trend change)
+            if (williams_r[i] < -50 or 
                 not price_above_ema[i]):
                 signals[i] = 0.0
                 position = 0
@@ -109,8 +118,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band (stoploss) OR price > 1d EMA50 (trend change)
-            if (curr_high > highest_high[i] or 
+            # Exit: Williams %R crosses above -50 (momentum loss) OR price > 1d EMA50 (trend change)
+            if (williams_r[i] > -50 or 
                 not price_below_ema[i]):
                 signals[i] = 0.0
                 position = 0
