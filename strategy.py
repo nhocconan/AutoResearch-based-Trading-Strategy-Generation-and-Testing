@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for stronger trend bias (more reliable than 12h in volatile markets)
-# Camarilla R3/S3 levels from 12h provide high-probability breakout signals
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 1d EMA34 for strong trend bias (proven effective across bull/bear markets)
+# Camarilla R3/S3 levels from 1d provide high-probability breakout signals
 # Volume confirmation > 2.0x 20-period EMA ensures institutional participation
-# Designed for low trade frequency: ~12-37 trades/year per symbol with 0.30 sizing
+# Designed for low trade frequency: ~20-40 trades/year per symbol with 0.30 sizing
 # 1d EMA34 filter reduces false breakouts while capturing strong trends
 # Works in both bull and bear markets by following the dominant 1d trend
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,10 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA34 trend filter and 12h HTF data for Camarilla levels
+    # 1d HTF data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 34 or len(df_12h) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
@@ -36,14 +35,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 12h OHLC
+    # Calculate Camarilla levels from previous 1d OHLC
     # Camarilla R3 = close + 1.1*(high-low)
     # Camarilla S3 = close - 1.1*(high-low)
-    typical_range = df_12h['high'] - df_12h['low']
-    camarilla_r3 = df_12h['close'] + 1.1 * typical_range
-    camarilla_s3 = df_12h['close'] - 1.1 * typical_range
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3.values)
+    typical_range = df_1d['high'] - df_1d['low']
+    camarilla_r3 = df_1d['close'] + 1.1 * typical_range
+    camarilla_s3 = df_1d['close'] - 1.1 * typical_range
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
     # Volume confirmation: volume > 2.0 * 20-period EMA (stricter filter)
     vol_series = pd.Series(volume)
