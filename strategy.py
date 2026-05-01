@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR trailing stop.
-# Long when price breaks above 20-period Donchian high AND volume > 1.5x 20-period volume median.
-# Short when price breaks below 20-period Donchian low AND volume > 1.5x 20-period volume median.
-# Exit on ATR(20) trailing stop (2.5x ATR from extreme) or Donchian breakout in opposite direction.
-# Donchian channels provide clear structure for breakouts; volume confirms institutional interest; ATR stop manages risk.
-# Target: 20-40 trades/year on 4h timeframe. Works in bull (buy breakouts) and bear (sell breakdowns) by following momentum.
+# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation + ATR trailing stop.
+# Long when price breaks above 20-period Donchian high AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period median volume.
+# Short when price breaks below 20-period Donchian low AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period median volume.
+# Exit on ATR trailing stop (2.5x ATR from extreme) or Donchian breakout in opposite direction.
+# Donchian channels provide clear breakout levels; 1d EMA50 filters counter-trend trades; volume confirms momentum.
+# Target: 12-37 trades/year on 12h timeframe. Works in bull (buy breakouts) and bear (sell breakdowns).
 
-name = "4h_Donchian20_Breakout_VolumeConfirm_ATR_v2"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeConfirm_ATR_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,9 +24,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA50 for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period ATR for trailing stop
     tr1 = high[1:] - low[1:]
@@ -38,20 +42,25 @@ def generate_signals(prices):
     # Calculate 20-period volume median for volume confirmation
     vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     
+    # Calculate 20-period Donchian channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup for Donchian, ATR, and volume median
-    start_idx = 40
+    # Start after warmup for EMA50, ATR, Donchian, and volume median
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(vol_median_20[i])):
+            np.isnan(vol_median_20[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             if position != 0:
                 position = 0
@@ -62,6 +71,10 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         curr_atr = atr[i]
+        
+        # Trend filter: 1d EMA50 direction
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period volume median
         if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
@@ -74,15 +87,15 @@ def generate_signals(prices):
         breakout_down = curr_close < donchian_low[i]  # break below lower band
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout up AND volume spike
-            if breakout_up and volume_confirm:
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_close
                 lowest_since_entry = curr_close
-            # Short: Breakout down AND volume spike
-            elif breakout_down and volume_confirm:
+            # Short: Breakout down AND downtrend AND volume spike
+            elif breakout_down and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
