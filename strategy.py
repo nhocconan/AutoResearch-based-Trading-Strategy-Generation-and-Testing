@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above R3 with 1d EMA34 uptrend and volume > 2.0x 20-bar average.
 # Short when price breaks below S3 with 1d EMA34 downtrend and volume confirmation.
 # Uses discrete sizing 0.25. ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
 # Primary timeframe: 4h, HTF: 1d for EMA trend filter.
 # Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-# Camarilla levels from 1d provide strong intraday support/resistance with high win rate in ranging markets.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,40 +40,36 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar (need 1d OHLC)
-    # We'll use the 1d data to compute Camarilla for the current 4h bar
-    # Camarilla formula based on previous day's range
-    df_1d_close = df_1d['close'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
+    # Calculate Camarilla levels (R3, S3) from previous day's OHLC
+    # For 4h data, we need to align daily OHLC to each 4h bar
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 1:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_R3 = np.zeros(len(df_1d))
-    camarilla_S3 = np.zeros(len(df_1d))
-    camarilla_R4 = np.zeros(len(df_1d))  # for exit
-    camarilla_S4 = np.zeros(len(df_1d))  # for exit
+    # Extract daily OHLC values
+    daily_open = df_1d_ohlc['open'].values
+    daily_high = df_1d_ohlc['high'].values
+    daily_low = df_1d_ohlc['low'].values
+    daily_close = df_1d_ohlc['close'].values
     
-    for i in range(len(df_1d)):
+    # Calculate Camarilla levels for each day
+    camarilla_r3 = np.zeros_like(daily_close)
+    camarilla_s3 = np.zeros_like(daily_close)
+    
+    for i in range(len(daily_close)):
         if i == 0:
-            camarilla_R3[i] = np.nan
-            camarilla_S3[i] = np.nan
-            camarilla_R4[i] = np.nan
-            camarilla_S4[i] = np.nan
+            camarilla_r3[i] = daily_close[i]  # fallback for first day
+            camarilla_s3[i] = daily_close[i]
         else:
-            close_prev = df_1d_close[i-1]
-            high_prev = df_1d_high[i-1]
-            low_prev = df_1d_low[i-1]
-            range_prev = high_prev - low_prev
-            camarilla_R3[i] = close_prev + range_prev * 1.1 / 4
-            camarilla_S3[i] = close_prev - range_prev * 1.1 / 4
-            camarilla_R4[i] = close_prev + range_prev * 1.1 / 2
-            camarilla_S4[i] = close_prev - range_prev * 1.1 / 2
+            prev_close = daily_close[i-1]
+            prev_high = daily_high[i-1]
+            prev_low = daily_low[i-1]
+            camarilla_r3[i] = prev_close + 1.1 * (prev_high - prev_low) / 4
+            camarilla_s3[i] = prev_close - 1.1 * (prev_high - prev_low) / 4
     
     # Align Camarilla levels to 4h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
-    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema_34_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i])):
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -93,7 +88,7 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-bar average (tighter for fewer trades)
+        # Volume confirmation: current volume > 2.0x 20-bar average (stricter to reduce trades)
         vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         if vol_ma <= 0:
             volume_confirm = False
@@ -101,8 +96,8 @@ def generate_signals(prices):
             volume_confirm = curr_volume > (vol_ma * 2.0)
         
         # Camarilla breakout conditions
-        breakout_long = curr_high > camarilla_R3_aligned[i]  # price breaks above R3
-        breakout_short = curr_low < camarilla_S3_aligned[i]  # price breaks below S3
+        breakout_long = curr_high > camarilla_r3_aligned[i]  # price breaks above R3
+        breakout_short = curr_low < camarilla_s3_aligned[i]  # price breaks below S3
         
         # Trend filter: bullish if close > EMA34, bearish if close < EMA34
         bullish_trend = curr_close > ema_34_aligned[i]
@@ -132,10 +127,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below S3 OR trend turns bearish OR hits R4 (profit target)
-            elif (curr_low < camarilla_S3_aligned[i] or 
-                  bearish_trend or
-                  curr_high > camarilla_R4_aligned[i]):
+            # Exit: price breaks below S3 OR trend turns bearish
+            elif (curr_low < camarilla_s3_aligned[i] or 
+                  bearish_trend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -148,10 +142,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above R3 OR trend turns bullish OR hits S4 (profit target)
-            elif (curr_high > camarilla_R3_aligned[i] or 
-                  bullish_trend or
-                  curr_low < camarilla_S4_aligned[i]):
+            # Exit: price breaks above R3 OR trend turns bullish
+            elif (curr_high > camarilla_r3_aligned[i] or 
+                  bullish_trend):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
