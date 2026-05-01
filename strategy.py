@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter (close > SMA50) and volume confirmation.
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d SMA50 AND volume > 1.5x 20-bar average.
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d SMA50 AND volume > 1.5x 20-bar average.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume > 1.5x 20-bar average.
 # Uses discrete sizing 0.25 to limit drawdown. Session filter 08-20 UTC to avoid low-liquidity hours.
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-# Williams Alligator identifies trend phases; alignment confirms strong trend. 1d SMA50 filters for higher-timeframe trend.
-# Volume confirmation ensures breakouts have conviction. Works in bull (long when aligned above SMA) and bear (short when aligned below SMA).
+# Donchian channels provide robust structure, EMA50 offers smooth trend alignment,
+# volume confirmation ensures conviction, and session filter reduces noise.
 
-name = "4h_WilliamsAlligator_1dSMA50_Trend_VolumeConfirm_v1"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,42 +29,24 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Load 1d data ONCE before loop for SMA50 trend filter
+    # Load 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d SMA50 calculation
+    # 1d EMA50 calculation
     close_1d = df_1d['close'].values
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # 1d trend: price above/below SMA50
-    price_above_sma = close > sma_50_aligned
-    price_below_sma = close < sma_50_aligned
+    # 1d trend: price above/below EMA50
+    price_above_ema = close > ema_50_aligned
+    price_below_ema = close < ema_50_aligned
     
-    # Williams Alligator on 4h data: SMAs of median price with offsets
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2.0
-    
-    # Jaw: 13-period SMMA, offset 8 bars
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # offset 8 bars into future
-    jaw[:8] = np.nan  # first 8 values invalid due to offset
-    
-    # Teeth: 8-period SMMA, offset 5 bars
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # offset 5 bars into future
-    teeth[:5] = np.nan  # first 5 values invalid due to offset
-    
-    # Lips: 5-period SMMA, offset 3 bars
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # offset 3 bars into future
-    lips[:3] = np.nan  # first 3 values invalid due to offset
-    
-    # Alligator alignment: bullish when Lips > Teeth > Jaw, bearish when Lips < Teeth < Jaw
-    bullish_align = (lips > teeth) & (teeth > jaw)
-    bearish_align = (lips < teeth) & (teeth < jaw)
+    # Donchian channels (20-period) on 4h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume confirmation: current 4h volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # warmup for indicators
+    start_idx = 50  # warmup for EMA and Donchian channels
     
     for i in range(start_idx, n):
         # Session filter: trade only 08-20 UTC
@@ -81,12 +63,13 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(sma_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_vol = volume[i]
         curr_vol_ma = vol_ma[i]
         
@@ -96,17 +79,21 @@ def generate_signals(prices):
             
         volume_confirm = curr_vol > (curr_vol_ma * 1.5)
         
+        # Donchian breakout signals
+        breakout_up = curr_high > highest_high[i]  # break above upper band
+        breakout_down = curr_low < lowest_low[i]   # break below lower band
+        
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: bullish Alligator alignment AND price > 1d SMA50 AND volume confirmation
-            if (bullish_align[i] and 
-                price_above_sma[i] and 
+            # Long: breakout above upper band AND price > 1d EMA50 AND volume confirmation
+            if (breakout_up and 
+                price_above_ema[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment AND price < 1d SMA50 AND volume confirmation
-            elif (bearish_align[i] and 
-                  price_below_sma[i] and 
+            # Short: breakout below lower band AND price < 1d EMA50 AND volume confirmation
+            elif (breakout_down and 
+                  price_below_ema[i] and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -114,18 +101,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: bearish Alligator alignment OR price < 1d SMA50 (trend change)
-            if (bearish_align[i] or 
-                not price_above_sma[i]):
+            # Exit: price crosses below lower band (stoploss) OR price < 1d EMA50 (trend change)
+            if (curr_low < lowest_low[i] or 
+                not price_above_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bullish Alligator alignment OR price > 1d SMA50 (trend change)
-            if (bullish_align[i] or 
-                not price_below_sma[i]):
+            # Exit: price crosses above upper band (stoploss) OR price > 1d EMA50 (trend change)
+            if (curr_high > highest_high[i] or 
+                not price_below_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
