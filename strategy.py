@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d ADX trend filter and volume confirmation.
-# Williams Alligator consists of three SMAs (jaw, teeth, lips) that indicate trend strength and direction.
-# Long when lips cross above teeth (bullish alignment) with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Short when lips cross below teeth (bearish alignment) with 1d ADX > 25 and volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to minimize fee churn. Designed for 6h timeframe to capture medium-term trends.
-# Works in bull (buy Alligator alignment up) and bear (sell Alligator alignment down) via ADX filter.
+# Hypothesis: 6h Elder Ray Index with 1d ADX trend filter and volume confirmation.
+# Elder Ray measures bull/bear power relative to EMA13. Long when bull power > 0 and bear power < 0 with 1d ADX > 25.
+# Short when bear power > 0 and bull power < 0 with 1d ADX > 25. Uses volume > 1.5x 20-bar average for confirmation.
+# Designed for 6h timeframe to capture medium-term trends with discrete sizing 0.25.
+# Works in bull (buy bull power strength) and bear (sell bear power strength) via ADX filter.
 
-name = "6h_WilliamsAlligator_1dADX_VolumeConfirm_v1"
+name = "6h_ElderRay_1dADX_VolumeConfirm_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -81,37 +80,31 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Williams Alligator on 6h data (SMAs)
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    # Teeth: 8-period SMA, shifted 5 bars forward  
-    # Lips: 5-period SMA, shifted 3 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
-    
-    jaw_values = jaw.values
-    teeth_values = teeth.values
-    lips_values = lips.values
+    # Elder Ray on 6h data (EMA13-based)
+    # Bull Power = High - EMA13(close)
+    # Bear Power = Low - EMA13(close)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for Alligator and ADX
+    start_idx = 50  # warmup for EMA and ADX
     
     for i in range(start_idx, n):
         # Session filter: trade all sessions for 6h timeframe
         hour = hours[i]
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(lips_values[i]) or np.isnan(teeth_values[i]) or np.isnan(jaw_values[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_vol = volume[i]
         curr_adx = adx_1d_aligned[i]
-        curr_lips = lips_values[i]
-        curr_teeth = teeth_values[i]
-        curr_jaw = jaw_values[i]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
         
         # Volume confirmation: current 6h volume > 1.5x 20-period average
         if i < 20 + start_idx:
@@ -124,22 +117,22 @@ def generate_signals(prices):
             continue
         volume_confirm = curr_vol > (vol_ma * 1.5)
         
-        # Alligator signals
-        # Bullish: lips > teeth > jaw (aligned up)
-        # Bearish: lips < teeth < jaw (aligned down)
-        bullish_alignment = (curr_lips > curr_teeth) and (curr_teeth > curr_jaw)
-        bearish_alignment = (curr_lips < curr_teeth) and (curr_teeth < curr_jaw)
+        # Elder Ray signals
+        # Bullish: bull power > 0 AND bear power < 0 (bulls in control)
+        # Bearish: bear power > 0 AND bull power < 0 (bears in control)
+        bullish_signal = (curr_bull > 0) and (curr_bear < 0)
+        bearish_signal = (curr_bear > 0) and (curr_bull < 0)
         
         # Entry conditions
         if position == 0:  # Flat - look for new entries
-            # Long: bullish Alligator alignment AND ADX > 25 AND volume confirmation
-            if (bullish_alignment and 
+            # Long: bullish Elder Ray AND ADX > 25 AND volume confirmation
+            if (bullish_signal and 
                 curr_adx > 25 and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment AND ADX > 25 AND volume confirmation
-            elif (bearish_alignment and 
+            # Short: bearish Elder Ray AND ADX > 25 AND volume confirmation
+            elif (bearish_signal and 
                   curr_adx > 25 and 
                   volume_confirm):
                 signals[i] = -0.25
@@ -148,8 +141,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: bearish Alligator alignment (trend change) OR ADX < 20 (trend weakening)
-            if (bearish_alignment or 
+            # Exit: bearish Elder Ray (trend change) OR ADX < 20 (trend weakening)
+            if (bearish_signal or 
                 curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
@@ -157,8 +150,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bullish Alligator alignment (trend change) OR ADX < 20 (trend weakening)
-            if (bullish_alignment or 
+            # Exit: bullish Elder Ray (trend change) OR ADX < 20 (trend weakening)
+            if (bullish_signal or 
                 curr_adx < 20):
                 signals[i] = 0.0
                 position = 0
