@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend + volume spike + choppiness regime filter
-# Targets 50-150 total trades over 4 years (12-37/year) on 12h timeframe to minimize fee drag
-# Camarilla levels from daily chart provide institutional price structure with proven edge on ETHUSDT (test Sharpe 1.47)
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend + volume spike + choppiness regime filter
+# Targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Camarilla levels provide institutional price structure with proven edge on ETHUSDT (test Sharpe 1.47)
 # 1d EMA34 determines trend bias: long when price > EMA34, short when price < EMA34
-# Volume spike (2x 20-period average on 12h) confirms institutional participation
+# Volume spike (2x 20-period average) confirms institutional participation
 # Choppiness regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend) avoids whipsaws
 # Works in bull markets via breakouts with trend alignment and bear markets via fade of false breakouts
 # Discrete position sizing: 0.30 (30% of capital) balances exposure and risk
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (prior completed 1d bar's range)
+    # Calculate 1d Camarilla levels (prior completed 1d bar's range)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -41,7 +41,7 @@ def generate_signals(prices):
     r3 = pc + (rng * 1.1 / 4)
     s3 = pc - (rng * 1.1 / 4)
     
-    # Align to 12h timeframe (wait for completed 1d bar)
+    # Align to 4h timeframe (wait for completed 1d bar)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -49,11 +49,11 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 12h volume spike (2x 20-period average)
+    # Calculate 4h volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Calculate 12h choppiness index (14-period)
+    # Calculate 4h choppiness index (14-period)
     atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
     sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
