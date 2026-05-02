@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ATR Trailing Stop + 1d Camarilla Pivot Breakout + Volume Spike
-# Uses ATR-based trailing stop to let winners run while cutting losses quickly
-# Camarilla R3/S3 breakouts with volume confirmation capture momentum moves
-# Works in bull markets by buying breakouts above R3 and in bear markets by selling breakdowns below S3
-# ATR stoploss adapts to volatility, reducing whipsaw in ranging markets
-# Targets 20-50 trades/year (80-200 total over 4 years) for 4h timeframe
+# Hypothesis: 6h Williams %R Extreme + 1d EMA34 Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions (long when %R < -80, short when %R > -20)
+# 1d EMA34 provides trend filter (only long when price > EMA34, short when price < EMA34)
+# Volume spike confirms momentum (2.0x 20-period average)
+# Works in bull markets by buying oversold dips in uptrend and in bear markets by selling overbought rallies in downtrend
+# Targets 12-37 trades/year (50-150 total over 4 years) for 6h timeframe
 
-name = "4h_ATRTrailingStop_1dCamarilla_R3S3_Breakout_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +24,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    # Load 1d data ONCE before loop for EMA and Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    camarilla_range = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * camarilla_range / 2
-    s3_1d = close_1d - 1.1 * camarilla_range / 2
-    
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Calculate ATR(14) for trailing stop and position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 6h Williams %R (%R = (Highest High - Close) / (Highest High - Lowest Low) * -100)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
     # Calculate volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -57,54 +45,40 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0  # For long trailing stop
-    lowest_low_since_entry = 0.0    # For short trailing stop
     
-    # Start after warmup (need enough for ATR and volume MA)
-    start_idx = 30
+    # Start after warmup (need enough for Williams %R and volume MA)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(atr[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above R3 + volume spike
-            if close[i] > r3_1d_aligned[i] and volume_spike[i]:
+            # Long: Williams %R oversold (< -80) + price > 1d EMA34 + volume spike
+            if williams_r[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-                highest_high_since_entry = high[i]
-            # Short: Price breaks below S3 + volume spike
-            elif close[i] < s3_1d_aligned[i] and volume_spike[i]:
+            # Short: Williams %R overbought (> -20) + price < 1d EMA34 + volume spike
+            elif williams_r[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
-                lowest_low_since_entry = low[i]
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_high_since_entry:
-                highest_high_since_entry = high[i]
-            
-            # ATR trailing stop: exit if price drops 2.5*ATR from highest high
-            trailing_stop = highest_high_since_entry - 2.5 * atr[i]
-            if close[i] < trailing_stop:
+            # Exit: Williams %R returns above -50 (momentum fading) or volume spike ends
+            if williams_r[i] > -50 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_low_since_entry:
-                lowest_low_since_entry = low[i]
-            
-            # ATR trailing stop: exit if price rises 2.5*ATR from lowest low
-            trailing_stop = lowest_low_since_entry + 2.5 * atr[i]
-            if close[i] > trailing_stop:
+            # Exit: Williams %R returns below -50 (momentum fading) or volume spike ends
+            if williams_r[i] < -50 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
