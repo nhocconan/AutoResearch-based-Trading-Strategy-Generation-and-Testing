@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Donchian breakouts capture momentum shifts; weekly pivot (from prior week) provides institutional bias
-# Volume spike (>2.0 x 30-period EMA) confirms breakout validity
-# Discrete position sizing (0.25) controls fee drag while maintaining exposure
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
-# Works in both bull and bear markets by requiring alignment with weekly trend
+# Hypothesis: 12h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions; reversals from extreme levels (>80 or <20) 
+# provide high-probability mean-reversion entries in ranging markets. 
+# 1d EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades.
+# Volume spike (>2.0 x 30-period EMA) confirms momentum behind the reversal.
+# Discrete position sizing (0.25) balances opportunity with fee drag control.
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns.
+# Works in both bull and bear markets by fading extremes in ranging regimes while respecting trend.
 
-name = "6h_Donchian20_Breakout_1wPivot_Direction_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_Reversal_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,46 +30,20 @@ def generate_signals(prices):
     vol_ema_30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
     volume_confirmation = volume > (2.0 * vol_ema_30)
     
-    # Weekly data for Donchian channels and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
+    
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels from previous weekly bar (20-period)
-    # Upper = max(high over last 20 weekly bars)
-    # Lower = min(low over last 20 weekly bars)
-    # Using shift(1) to ensure we only use completed weekly bars
-    win = 20
-    if len(df_1w) < win + 1:
-        return np.zeros(n)
-    
-    # Calculate rolling max/min on weekly data
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Compute Donchian channels using pandas rolling for clarity
-    dh_series = pd.Series(weekly_high).rolling(window=win, min_periods=win).max().shift(1).values
-    dl_series = pd.Series(weekly_low).rolling(window=win, min_periods=win).min().shift(1).values
-    
-    # Align Donchian levels to 6h timeframe (wait for completed weekly bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, dh_series)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, dl_series)
-    
-    # Weekly pivot points from previous weekly bar
-    # PP = (H + L + C) / 3
-    # R1 = 2*PP - L
-    # S1 = 2*PP - H
-    prev_weekly_high = df_1w['high'].shift(1).values
-    prev_weekly_low = df_1w['low'].shift(1).values
-    prev_weekly_close = df_1w['close'].shift(1).values
-    
-    weekly_pp = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pp - prev_weekly_low
-    weekly_s1 = 2 * weekly_pp - prev_weekly_high
-    
-    # Align weekly pivot levels to 6h timeframe
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,39 +52,38 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine weekly bias from pivot levels
-        weekly_bullish = close[i] > weekly_pp[i] if not np.isnan(weekly_pp[i]) else False
-        weekly_bearish = close[i] < weekly_pp[i] if not np.isnan(weekly_pp[i]) else False
+        # Determine trend bias from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close breaks above Donchian high with volume confirmation and weekly bullish bias
-            if close[i] > donchian_high_aligned[i] and volume_confirmation[i] and weekly_bullish:
+            # Long: Williams %R crosses above -80 (oversold reversal) with volume confirmation and not strong downtrend
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and volume_confirmation[i] and not downtrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian low with volume confirmation and weekly bearish bias
-            elif close[i] < donchian_low_aligned[i] and volume_confirmation[i] and weekly_bearish:
+            # Short: Williams %R crosses below -20 (overbought reversal) with volume confirmation and not strong uptrend
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and volume_confirmation[i] and not uptrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close drops below Donchian low OR weekly bias turns bearish
-            if close[i] < donchian_low_aligned[i] or not weekly_bullish:
+            # Exit: Williams %R crosses below -50 (momentum loss) OR trend changes to downtrend
+            if williams_r[i] < -50 and williams_r[i-1] >= -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close rises above Donchian high OR weekly bias turns bullish
-            if close[i] > donchian_high_aligned[i] or not weekly_bearish:
+            # Exit: Williams %R crosses above -50 (momentum loss) OR trend changes to uptrend
+            if williams_r[i] > -50 and williams_r[i-1] <= -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
