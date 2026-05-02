@@ -4,9 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla pivot levels from prior 1d provide precise support/resistance
+# Camarilla pivot levels provide precise intraday support/resistance from prior 1d
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
-# Volume spike (>2.0 x 20-period EMA) filters false breakouts
+# Volume spike confirmation filters false breakouts
 # Works in bull markets (breakout above R3 + 1d EMA34 up) and bear markets (breakout below S3 + 1d EMA34 down)
 # Uses discrete position sizing (0.25) to balance return and drawdown control
 
@@ -33,12 +33,10 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d data for Camarilla pivot levels (R3, S3)
+    # 1d data for Camarilla pivot levels (R3, S3) from previous 1d bar
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
