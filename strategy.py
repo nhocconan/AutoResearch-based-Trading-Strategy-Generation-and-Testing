@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and volume confirmation
-# Uses Donchian channel from 4h for structure, 1d ATR(14) to filter low-volatility chop
+# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
+# Uses Donchian channel from 6h for structure, 1d weekly pivot for trend bias, volume spike for confirmation
+# Only takes breakouts in direction of weekly pivot (long above weekly pivot, short below)
 # Volume spike ensures participation and reduces false breakouts
 # Discrete position sizing 0.25 balances risk and minimizes fee churn
-# Targets 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# Works in both bull and bear markets by only taking breakouts with volume confirmation
-# ATR filter avoids whipsaws in ranging markets
+# Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# Weekly pivot provides structural bias that works in both bull and bear markets
 
-name = "4h_Donchian20_1dATR_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dWeeklyPivot_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,83 +25,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR
+    # Load 1d data ONCE before loop for weekly pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 1d weekly pivot (using prior week's high, low, close)
+    # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_1d index
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Shift by 5 to get prior week's values (approximation for 5 trading days)
+    weekly_high = np.roll(high_1d, 5)
+    weekly_low = np.roll(low_1d, 5)
+    weekly_close = np.roll(close_1d, 5)
     
-    # Align 1d ATR to 4h
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # First 5 values will be invalid due to roll
+    weekly_high[:5] = np.nan
+    weekly_low[:5] = np.nan
+    weekly_close[:5] = np.nan
     
-    # Calculate 4h Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Calculate 4h volume confirmation (2x 20-period average)
+    # Align weekly pivot to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    
+    # Calculate 6h Donchian channel (20-period)
+    donchian_window = 20
+    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    
+    # Calculate 6h volume confirmation (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for ATR and Donchian)
-    start_idx = 34  # max(20 for Donchian, 14 for ATR) + buffer
+    # Start after warmup (need enough for Donchian and volume MA)
+    start_idx = max(donchian_window, 20) + 5  # +5 for weekly pivot shift
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # ATR filter: only trade when volatility is above average (avoid chop)
-        atr_ma = pd.Series(atr_14_aligned).rolling(window=10, min_periods=10).mean().shift(1).values
-        if np.isnan(atr_ma[i]) or atr_ma[i] == 0:
-            volatility_filter = True  # allow trade if MA not ready
-        else:
-            volatility_filter = atr_14_aligned[i] > (atr_ma[i] * 0.8)  # trade when ATR > 80% of MA
-        
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above upper Donchian AND volume confirm AND volatility filter
+            # Long: price breaks above Donchian high AND above weekly pivot AND volume confirm
             if (close[i] > highest_high[i] and 
-                volume_confirm[i] and 
-                volatility_filter):
+                close[i] > weekly_pivot_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian AND volume confirm AND volatility filter
+            # Short: price breaks below Donchian low AND below weekly pivot AND volume confirm
             elif (close[i] < lowest_low[i] and 
-                  volume_confirm[i] and 
-                  volatility_filter):
+                  close[i] < weekly_pivot_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower Donchian OR volatility drops significantly
+            # Exit: price breaks below Donchian low OR below weekly pivot
             if (close[i] < lowest_low[i] or 
-                (not volatility_filter and atr_14_aligned[i] < (atr_ma[i] * 0.6))):
+                close[i] < weekly_pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian OR volatility drops significantly
+            # Exit: price breaks above Donchian high OR above weekly pivot
             if (close[i] > highest_high[i] or 
-                (not volatility_filter and atr_14_aligned[i] < (atr_ma[i] * 0.6))):
+                close[i] > weekly_pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
