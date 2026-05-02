@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h EMA50 trend filter and volume confirmation
-# Uses 4h timeframe for signal generation with Donchian(20) breakouts
-# 12h EMA50 provides multi-timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (1.5x 20-period average) ensures institutional participation
-# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
-# Discrete position sizing (0.25) minimizes fee churn
-# Target: 100-180 total trades over 4 years = 25-45/year for 4h timeframe
-# Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
-# Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and chop regime filter
+# Uses Donchian(20) for structure, 12h EMA50 for trend alignment, and 1d Chop < 61.8 to avoid ranging markets
+# Volume confirmation ensures institutional participation. Designed for low trade frequency (<50/year) to minimize fee drag
+# Works in bull via trend-aligned breakouts, in bear via chop filter avoiding false signals during consolidation
+# Discrete position sizing (0.25) minimizes churn. Target: 75-150 total trades over 4 years
 
-name = "4h_Donchian20_12hEMA50_VolumeS_ChopFilter_v1"
+name = "4h_Donchian20_12hEMA50_Volume_ChopFilter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) - index is DatetimeIndex
+    # Pre-compute session hours (08-20 UTC)
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
