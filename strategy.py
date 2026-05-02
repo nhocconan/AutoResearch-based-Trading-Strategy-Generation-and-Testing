@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
 # Camarilla pivot levels (R3/S3) derived from daily OHLC provide strong support/resistance
 # Breakout above R3 or below S3 with volume confirmation indicates institutional participation
 # 1d ADX > 25 ensures alignment with higher timeframe trending market to avoid range-bound whipsaws
-# Designed for 4h timeframe targeting 19-50 trades/year (75-200 total over 4 years)
+# Designed for 12h timeframe targeting 12-37 trades/year (50-150 total over 4 years)
 # Uses discrete position sizing (0.25) to minimize fee churn and control drawdown
 # Works in bull markets (breakout above R3 + 1d ADX up-trend) and bear markets (breakout below S3 + 1d ADX down-trend)
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -64,7 +64,7 @@ def generate_signals(prices):
     camarilla_r3 = df_1d['close'].values + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 4
     camarilla_s3 = df_1d['close'].values - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (use same day's levels)
+    # Align Camarilla levels to 12h timeframe (use same day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
