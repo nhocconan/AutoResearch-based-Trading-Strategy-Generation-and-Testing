@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend filter + Volume Spike
-# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Donchian breakout captures strong momentum moves
-# 1d EMA50 ensures alignment with daily trend (avoid counter-trend trades)
-# Volume spike (2.0x 20-period average) confirms institutional participation
-# Discrete position sizing: 0.25 balances exposure and risk
-# Works in bull via trend continuation and bear via mean reversion during range-bound periods
+# Hypothesis: 4h Bollinger Band Squeeze Breakout + 1d Volume Regime + ATR Filter
+# Targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Bollinger Band squeeze (low volatility) precedes explosive moves in both bull and bear markets
+# 1d volume regime filter ensures institutional participation (volume > 1.5x 20-day average)
+# ATR-based stoploss and discrete position sizing (0.25) controls risk
+# Works in bull via breakout continuation and bear via volatility expansion captures
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_BBand_Squeeze_Breakout_1dVolRegime_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,62 +26,82 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50 calculation
+    if len(df_1d) < 30:  # Need enough for volume MA calculation
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d volume regime (volume > 1.5x 20-day average)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean()
+    vol_regime_1d = df_1d['volume'].values > (vol_ma_1d.values * 1.5)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_1d)
     
-    # Calculate 12h Donchian(20) - upper and lower channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 4h Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean()
+    bb_std = close_s.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    # Calculate 12h volume spike (2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Bollinger Band squeeze: width < 20-period average width (low volatility)
+    bb_width_ma = bb_width.rolling(window=20, min_periods=20).mean()
+    bb_squeeze = bb_width < bb_width_ma
+    
+    # Calculate 4h ATR(14) for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr2.iloc[0] = np.nan
+    tr3.iloc[0] = np.nan
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = max(30, 50)
+    start_idx = 40  # Need 20 for BB + 20 for BB width MA + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bb_squeeze.iloc[i]) or np.isnan(vol_regime_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above upper Donchian channel AND price > 1d EMA50 AND volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below lower Donchian channel AND price < 1d EMA50 AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # Only trade during volume regime (institutional participation)
+            if vol_regime_aligned[i]:
+                # Bollinger Band breakout with squeeze confirmation
+                # Long: price breaks above upper BB AND was in squeeze (low volatility)
+                # Short: price breaks below lower BB AND was in squeeze (low volatility)
+                if (close[i] > bb_upper.iloc[i] and 
+                    bb_squeeze.iloc[i]):
+                    signals[i] = 0.25
+                    position = 1
+                elif (close[i] < bb_lower.iloc[i] and 
+                      bb_squeeze.iloc[i]):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower Donchian channel OR volume dries up
-            if close[i] < lowest_low[i] or not volume_spike[i]:
+            # Dynamic exit: price closes below middle BB OR ATR-based stoploss
+            # Stoploss: entry price - 2.5 * ATR (approximated via close-based rule)
+            if (close[i] < bb_middle.iloc[i] or 
+                close[i] < close[i-1] - 2.5 * atr[i]):  # Simplified close-based stop
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian channel OR volume dries up
-            if close[i] > highest_high[i] or not volume_spike[i]:
+            # Dynamic exit: price closes above middle BB OR ATR-based stoploss
+            # Stoploss: entry price + 2.5 * ATR (approximated via close-based rule)
+            if (close[i] > bb_middle.iloc[i] or 
+                close[i] > close[i-1] + 2.5 * atr[i]):  # Simplified close-based stop
                 signals[i] = 0.0
                 position = 0
             else:
