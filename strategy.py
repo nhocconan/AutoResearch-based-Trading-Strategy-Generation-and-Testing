@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d EMA34 trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13 to detect trend strength and exhaustion
-# Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Strong Bull Power + price > EMA34 indicates sustained uptrend; strong Bear Power + price < EMA34 indicates downtrend
-# Volume confirmation filters low-participation moves
-# Works in both bull (riding trends) and bear (fading exhaustion) markets
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Hypothesis: 12h Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivots provide mathematically derived support/resistance levels that work in both trending and ranging markets
+# Breakouts at R4/S4 levels indicate strong momentum continuation, while R3/S3 offer mean reversion opportunities
+# 1d EMA34 ensures trades align with intermediate-term trend to reduce false signals
+# Volume confirmation at 2.0x average filters low-participation moves
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Discrete sizing 0.25 to balance profit potential and fee drag
+# Works in both bull and bear: trend filter (EMA34) captures direction, Camarilla breakouts catch momentum, volume confirms validity
 
-name = "6h_ElderRay_Power_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +26,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Elder Ray Power components
+    # Calculate 1d Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for EMA13
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's data for Elder Ray (to avoid look-ahead)
+    # Previous day's OHLC for Camarilla calculation
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate EMA13 for previous day's close
-    close_1d = prev_close  # Use shifted close for EMA calculation
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Camarilla pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = prev_high - ema_13_1d
-    bear_power = prev_low - ema_13_1d
+    # Resistance levels
+    r3 = pivot + range_hl * 1.1 / 4.0
+    r4 = pivot + range_hl * 1.1 / 2.0
     
-    # Align 1d Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Support levels
+    s3 = pivot - range_hl * 1.1 / 4.0
+    s4 = pivot - range_hl * 1.1 / 2.0
+    
+    # Align 1d levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # 1d EMA34 for trend filter
-    close_1d_raw = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d_raw).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: 2.0x 20-period average
@@ -65,20 +71,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Strong Bull Power AND price > 1d EMA34 AND volume spike
-            if (bull_power_aligned[i] > 0 and 
+            # Long breakout: Price breaks above R4 AND price > 1d EMA34 AND volume spike
+            if (close[i] > r4_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Strong Bear Power AND price < 1d EMA34 AND volume spike
-            elif (bear_power_aligned[i] < 0 and 
+            # Short breakout: Price breaks below S4 AND price < 1d EMA34 AND volume spike
+            elif (close[i] < s4_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -87,16 +93,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bull Power turns negative (trend weakening) OR price < EMA34 (trend change)
-            if bull_power_aligned[i] <= 0 or close[i] < ema_34_1d_aligned[i]:
+            # Exit: Price drops below R3 (mean reversion) OR closes below 1d EMA34 (trend change)
+            if close[i] < r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bear Power turns positive (trend weakening) OR price > EMA34 (trend change)
-            if bear_power_aligned[i] >= 0 or close[i] > ema_34_1d_aligned[i]:
+            # Exit: Price rises above S3 (mean reversion) OR closes above 1d EMA34 (trend change)
+            if close[i] > s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
