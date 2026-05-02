@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h volume spike and ADX trend filter
 # Camarilla R3/S3 levels from 1d chart represent strong intraday support/resistance - breaks often lead to sustained moves
-# 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
-# Volume spike (>2.0 x 20-period EMA) confirms breakout validity with strong participation
+# 12h volume spike (>2.0 x 20-period EMA) confirms breakout validity with strong participation
+# 12h ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
 # Discrete position sizing (0.25) controls fee drag while allowing meaningful exposure
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
+# Target: 80-180 total trades over 4 years (20-45/year) for optimal risk-adjusted returns
 # Works in bull markets by catching breakouts with trend, works in bear by only taking trend-aligned breaks
-# Focus on BTC/ETH as primary symbols with SOL as secondary confirmation
 
-name = "12h_Camarilla_R3_S3_Breakout_1dADX_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hADX_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (volume spike > 2.0 x 20-period EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation = volume > (2.0 * vol_ema_20)
-    
-    # 1d data for ADX trend filter and Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    # Volume confirmation (volume spike > 2.0 x 20-period EMA from 12h)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 1d ADX calculation (trend strength filter)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_12h = df_12h['volume'].values
+    vol_ema_20_12h = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike_12h = vol_12h > (2.0 * vol_ema_20_12h)
+    volume_confirmation = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    
+    # 12h data for ADX trend filter
+    if len(df_12h) < 30:  # Need enough data for ADX calculation
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Calculate +DM and -DM
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
     # Pad to same length
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
     # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[0], tr])
     
@@ -85,10 +88,11 @@ def generate_signals(prices):
     
     adx = wilders_smoothing(dx, period)
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -103,7 +107,7 @@ def generate_signals(prices):
     camarilla_r3 = pivot + (range_ * 1.1 / 4.0)   # R3 level
     camarilla_s3 = pivot - (range_ * 1.1 / 4.0)   # S3 level
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -119,7 +123,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d ADX (need ADX > 25 for trending market)
+        # Determine trend bias from 12h ADX (need ADX > 25 for trending market)
         trending = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
