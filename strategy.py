@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR volatility filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ATR volatility filter
 # Uses Camarilla pivot levels from 1d for structure, 1d ATR(14) to filter low-volatility chop
 # Volume spike ensures participation and reduces false breakouts
 # Discrete position sizing 0.25 balances risk and minimizes fee churn
-# Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# Targets 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
 # Works in both bull and bear markets by only taking breakouts with volume confirmation
 # ATR filter avoids whipsaws in ranging markets
 
-name = "12h_Camarilla_R3S3_1dATR_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dATR_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,12 +48,12 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # align with close_1d index
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h
+    # Align Camarilla levels and ATR to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 12h volume confirmation (2x 20-period average)
+    # Calculate 4h volume confirmation (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 2.0)
     
