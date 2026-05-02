@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trending vs ranging markets
-# When Alligator lines are entangled (close together) = ranging market (avoid trades)
-# When Alligator lines are separated (Jaw > Teeth > Lips for uptrend, reverse for downtrend) = trending market
-# 1d EMA50 provides higher timeframe trend filter to align with dominant momentum
-# Volume spike (2.0x 20-period average) confirms breakout conviction
-# Targets 50-150 trades over 4 years (12-37/year) for 12h timeframe
-# Works in both bull and bear markets by only trading when Alligator shows clear trend separation
+# Hypothesis: 6h Williams %R reversal with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; reversals from extreme levels (>80 or <20) with volume
+# indicate high-probability mean reversion spots. 1d EMA50 provides trend filter to trade in direction of higher timeframe momentum
+# and reduce counter-trend whipsaws. Volume spike (1.8x 24-period average) confirms reversal conviction.
+# Targets 80-180 trades over 4 years (20-45/year) for 6h timeframe, balancing opportunity with cost control.
+# Works in bull markets by buying oversold dips in uptrends and in bear markets by selling overbought rallies in downtrends.
 
-name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_Reversal_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA calculation
+    # Load 1d data ONCE before loop for EMA and Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -36,64 +34,63 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Williams Alligator from 12h data (Jaw=13, Teeth=8, Lips=5)
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2
+    # Calculate Williams %R on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw (13-period SMMA of median price, shifted 8 bars)
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMMA of median price, shifted 5 bars)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMMA of median price, shifted 3 bars)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate rolling highest high and lowest low for 1d
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Alligator trend conditions:
-    # Uptrend: Lips > Teeth > Jaw (all lines separated and ascending)
-    # Downtrend: Jaw > Teeth > Lips (all lines separated and descending)
-    # Ranging: lines are entangled (avoid trading)
-    alligator_uptrend = (lips > teeth) & (teeth > jaw)
-    alligator_downtrend = (jaw > teeth) & (teeth > lips)
+    # Williams %R: -100 * (HH - Close) / (HH - LL)
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when HH == LL
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate volume spike (2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate volume spike (1.8x 24-period average on 6h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Alligator calculation)
-    start_idx = 16  # max(13+8, 8+5, 5+3) = 21, but using 16 for safety with shifts
+    # Start after warmup (need enough for Williams %R, EMA, and volume MA)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Alligator uptrend + price > 1d EMA50 + volume spike
-            if alligator_uptrend[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+            # Long: Williams %R crosses above -80 (oversold reversal) + price > 1d EMA50 + volume spike
+            if williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and close[i] > ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator downtrend + price < 1d EMA50 + volume spike
-            elif alligator_downtrend[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+            # Short: Williams %R crosses below -20 (overbought reversal) + price < 1d EMA50 + volume spike
+            elif williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and close[i] < ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator trend changes to downtrend or ranging
-            if not alligator_uptrend[i]:  # Exit when uptrend condition breaks
+            # Exit: Williams %R crosses above -20 (overbought) or crosses below -80 (strong oversold continuation)
+            if williams_r_aligned[i] > -20 or williams_r_aligned[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Alligator trend changes to uptrend or ranging
-            if not alligator_downtrend[i]:  # Exit when downtrend condition breaks
+            # Exit: Williams %R crosses below -80 (oversold) or crosses above -20 (strong overbought continuation)
+            if williams_r_aligned[i] < -80 or williams_r_aligned[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
