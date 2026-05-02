@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA34 trend filter + volume spike confirmation
-# Uses 12h timeframe for signal generation with Williams Alligator (Jaw/Teeth/Lips) from 12h data
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades in bear markets
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX(14) regime filter
+# Uses 4h timeframe for signal generation with Donchian channel breakouts
 # Volume confirmation (2.0x 20-period average) ensures institutional participation
-# Discrete position sizing (0.25) balances return and risk
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
-# Williams Alligator identifies trend initiation and continuation, effective in ranging and trending markets
-# 1d EMA34 filters for higher timeframe direction, reducing false signals during 2022 crash and 2025 bear
-# Volume spike confirms breakout validity, reducing whipsaws
+# ADX(14) > 25 filters for trending markets only, avoiding range-bound whipsaws
+# Discrete position sizing (0.25) balances return and risk while minimizing fee drag
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
+# Donchian provides objective price channels, volume confirms breakout validity
+# ADX regime filter ensures trades only occur in favorable trending conditions
+# Works in both bull and bear markets by only taking trades in direction of trend
 
-name = "12h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX25_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,86 +27,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
-        return np.zeros(n)
-    
-    # Calculate Williams Alligator (SMMA with specific periods)
-    close_12h = df_12h['close'].values
-    # Jaw: SMMA(13, 8)
-    jaw = pd.Series(close_12h).ewm(alpha=1/13, adjust=False).mean().values
-    jaw = pd.Series(jaw).ewm(alpha=1/8, adjust=False).mean().values  # SMMA approximation
-    # Teeth: SMMA(8, 5)
-    teeth = pd.Series(close_12h).ewm(alpha=1/8, adjust=False).mean().values
-    teeth = pd.Series(teeth).ewm(alpha=1/5, adjust=False).mean().values
-    # Lips: SMMA(5, 3)
-    lips = pd.Series(close_12h).ewm(alpha=1/5, adjust=False).mean().values
-    lips = pd.Series(lips).ewm(alpha=1/3, adjust=False).mean().values
-    
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Load 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Donchian channels (20-period)
+    # Upper band = 20-period high, Lower band = 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 2.0)
     
+    # Calculate ADX(14) for regime filtering
+    # ADX calculation requires +DI and -DI
+    # +DI = 100 * EWMA of (+DM / TR) over 14 periods
+    # -DI = 100 * EWMA of (-DM / TR) over 14 periods
+    # ADX = 100 * EWMA of (|+DI - -DI| / (+DI + -DI)) over 14 periods
+    
+    # Calculate True Range (TR)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Calculate Directional Movement (+DM and -DM)
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Calculate smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/14)
+    tr_m = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_m = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_m = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * dm_plus_m / tr_m
+    minus_di = 100 * dm_minus_m / tr_m
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # ADX > 25 indicates trending market
+    adx_trend = adx > 25
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for indicators)
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(volume_confirm[i]) or np.isnan(adx_trend[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Bullish alignment: Lips > Teeth > Jaw (Alligator waking up)
-            bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-            # Bearish alignment: Jaw > Teeth > Lips (Alligator sleeping)
-            bearish = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
-            
-            # Long: Bullish alignment + price > 1d EMA34 + volume confirm
-            if bullish and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Close > Donchian upper + volume confirm + ADX > 25 (trending)
+            if close[i] > donchian_upper[i] and volume_confirm[i] and adx_trend[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + price < 1d EMA34 + volume confirm
-            elif bearish and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Close < Donchian lower + volume confirm + ADX > 25 (trending)
+            elif close[i] < donchian_lower[i] and volume_confirm[i] and adx_trend[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bearish alignment or price < 1d EMA34 (trend failure)
-            bearish = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
-            if bearish or close[i] < ema_34_1d_aligned[i]:
+            # Exit: Close < Donchian lower (breakdown) or ADX < 20 (trend weakening)
+            if close[i] < donchian_lower[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bullish alignment or price > 1d EMA34 (trend failure)
-            bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-            if bullish or close[i] > ema_34_1d_aligned[i]:
+            # Exit: Close > Donchian upper (breakout) or ADX < 20 (trend weakening)
+            if close[i] > donchian_upper[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
