@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Works in both bull and bear markets by only trading in direction of 1d trend
 # Camarilla levels provide mathematical support/resistance, reducing subjectivity in entries
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,7 +28,7 @@ def generate_signals(prices):
     
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
