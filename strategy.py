@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal breakout with 1d EMA50 trend filter and volume confirmation (>1.5x average).
-# Williams Fractals identify significant swing points (confirmed after 2 bars). Breakouts above recent
-# bearish fractals or below bullish fractals with trend alignment capture momentum moves.
-# Volume filter ensures participation. Discrete sizing 0.25 to control fees. Target: 80-180 trades over 4 years.
-# Primary timeframe: 4h, HTF: 1d for fractals and EMA50.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Donchian breakout captures strong momentum moves. 1w EMA50 ensures alignment with weekly trend.
+# Volume spike confirms institutional interest. Chop filter avoids ranging markets.
+# Discrete sizing 0.25 to minimize fee churn. Target: 30-100 trades over 4 years.
+# Primary timeframe: 1d, HTF: 1w for EMA50 trend filter.
 
-name = "4h_Williams_Fractal_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Volume_Chop"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +23,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on 1d timeframe
-    # Bearish fractal: high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n-2] and high[n] > high[n+2]
-    # Bullish fractal: low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n-2] and low[n] < low[n+2]
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Calculate Donchian channels (20-period) on 1d timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Need at least 2 bars on each side for confirmation (5-bar pattern)
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1] and 
-            high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1] and 
-            low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Williams fractals need 2 extra bars after center bar for confirmation (per Rule 2b)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: 1.5x 20-period average (balanced to avoid overtrading)
+    # Volume confirmation: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index regime filter (avoid ranging markets)
+    # CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high_atr = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low_atr = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high_atr - lowest_low_atr) / (atr_safe * np.sqrt(atr_period))) / np.log10(atr_period)
+    chop_regime = chop < 61.8  # True when trending (CHOP < 61.8), False when ranging
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,38 +65,41 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above bearish fractal AND price > 1d EMA50 AND volume spike
-            if (close[i] > bearish_fractal_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: Price breaks above upper Donchian AND price > 1w EMA50 AND volume spike AND trending regime
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_spike[i] and 
+                chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below bullish fractal AND price < 1d EMA50 AND volume spike
-            elif (close[i] < bullish_fractal_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Price breaks below lower Donchian AND price < 1w EMA50 AND volume spike AND trending regime
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_spike[i] and 
+                  chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price drops below bullish fractal OR price < 1d EMA50
-            if close[i] < bullish_fractal_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Price drops below lower Donchian OR price < 1w EMA50
+            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price rises above bearish fractal OR price > 1d EMA50
-            if close[i] > bearish_fractal_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Price rises above upper Donchian OR price > 1w EMA50
+            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
