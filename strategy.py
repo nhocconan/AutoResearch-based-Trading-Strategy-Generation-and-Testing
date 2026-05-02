@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R4/S4 breakout with 12h ADX trend filter and volume confirmation
-# Camarilla R4/S4 levels from 12h chart represent strong breakout zones - breaks often lead to sustained moves
-# 12h ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
-# Volume spike (>1.8 x 24-period EMA) confirms breakout validity
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
+# Camarilla R3/S3 levels from 1d chart represent strong intraday support/resistance - breaks often lead to sustained moves
+# 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
+# Volume spike (>2.0 x 20-period EMA) confirms breakout validity with strong participation
 # Discrete position sizing (0.25) controls fee drag while allowing meaningful exposure
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
+# Target: 80-180 total trades over 4 years (20-45/year) for optimal risk-adjusted returns
 # Works in bull markets by catching breakouts with trend, works in bear by only taking trend-aligned breaks
+# Focus on BTC/ETH as primary symbols with SOL as secondary confirmation
 
-name = "6h_Camarilla_R4_S4_Breakout_12hADX_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dADX_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +26,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (volume spike > 1.8 x 24-period EMA)
-    vol_ema_24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
-    volume_confirmation = volume > (1.8 * vol_ema_24)
+    # Volume confirmation (volume spike > 2.0 x 20-period EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (2.0 * vol_ema_20)
     
-    # 12h data for ADX trend filter and Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough data for ADX calculation
+    # 1d data for ADX trend filter and Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # 12h ADX calculation (trend strength filter)
-    # ADX requires +DI, -DI, and DX calculation
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1d ADX calculation (trend strength filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate +DM and -DM
-    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     # Pad to same length
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
     # Calculate True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[0], tr])
     
     # Smooth the values (Wilder's smoothing)
     def wilders_smoothing(data, period):
         result = np.zeros_like(data)
+        if len(data) < period:
+            return result
         result[period-1] = np.nansum(data[:period])
         for i in range(period, len(data)):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
@@ -83,27 +85,27 @@ def generate_signals(prices):
     
     adx = wilders_smoothing(dx, period)
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 12h data for Camarilla pivot calculation
-    if len(df_12h) < 2:
+    # 1d data for Camarilla pivot calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 12h bar
-    prev_high = df_12h['high'].shift(1).values
-    prev_low = df_12h['low'].shift(1).values
-    prev_close = df_12h['close'].shift(1).values
+    # Calculate Camarilla pivot levels from previous 1d bar
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla levels: R4/S4 are the extreme levels for significant breakouts
+    # Camarilla levels: R3/S3 are strong breakout levels (not extreme like R4/S4)
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_ = prev_high - prev_low
-    camarilla_r4 = pivot + (range_ * 1.1 / 2.0)   # R4 level
-    camarilla_s4 = pivot - (range_ * 1.1 / 2.0)   # S4 level
+    camarilla_r3 = pivot + (range_ * 1.1 / 4.0)   # R3 level
+    camarilla_s3 = pivot - (range_ * 1.1 / 4.0)   # S3 level
     
-    # Align Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -112,37 +114,37 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 12h ADX (need ADX > 25 for trending market)
+        # Determine trend bias from 1d ADX (need ADX > 25 for trending market)
         trending = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close breaks above Camarilla R4 with volume confirmation and trending market
-            if close[i] > camarilla_r4_aligned[i] and volume_confirmation[i] and trending:
+            # Long: Close breaks above Camarilla R3 with volume confirmation and trending market
+            if close[i] > camarilla_r3_aligned[i] and volume_confirmation[i] and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Camarilla S4 with volume confirmation and trending market
-            elif close[i] < camarilla_s4_aligned[i] and volume_confirmation[i] and trending:
+            # Short: Close breaks below Camarilla S3 with volume confirmation and trending market
+            elif close[i] < camarilla_s3_aligned[i] and volume_confirmation[i] and trending:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close drops below Camarilla S4 (reversal to downside) OR market becomes ranging (ADX < 20)
-            if close[i] < camarilla_s4_aligned[i] or adx_aligned[i] < 20:
+            # Exit: Close drops below Camarilla S3 (reversal to downside) OR market becomes ranging (ADX < 20)
+            if close[i] < camarilla_s3_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close rises above Camarilla R4 (reversal to upside) OR market becomes ranging (ADX < 20)
-            if close[i] > camarilla_r4_aligned[i] or adx_aligned[i] < 20:
+            # Exit: Close rises above Camarilla R3 (reversal to upside) OR market becomes ranging (ADX < 20)
+            if close[i] > camarilla_r3_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
