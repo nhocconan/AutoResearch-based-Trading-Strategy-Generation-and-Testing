@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Donchian breakout captures momentum in trending markets
-# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
-# Volume confirmation (>1.3x 20-period EMA) filters for institutional participation
-# Works in bull markets (price > daily EMA50 + Donchian breakout up + volume)
-# Works in bear markets (price < daily EMA50 + Donchian breakout down + volume)
-# Uses discrete position sizing (0.25) to balance return potential with drawdown control
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels (R3/S3) act as strong intraday support/resistance levels
+# Breakout above R3 or below S3 with volume confirms institutional participation
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
+# Designed for 4h timeframe targeting 19-50 trades/year (75-200 total over 4 years)
+# Works in bull markets (breakout above R3 + daily uptrend) and bear markets (breakdown below S3 + daily downtrend)
+# Uses discrete position sizing (0.30) to balance return potential with drawdown control
 
-name = "4h_Donchian20_1dEMA50_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,32 +27,30 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels (20-period) on 4h timeframe
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Typical price = (high + low + close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Camarilla width = (high - low) * 1.1 / 12
+    camarilla_width = (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    # R3 = close + (width * 1.1)
+    r3 = df_1d['close'] + (camarilla_width * 1.1)
+    # S3 = close - (width * 1.1)
+    s3 = df_1d['close'] - (camarilla_width * 1.1)
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
-    upper_channel = rolling_max(high, 20)
-    lower_channel = rolling_min(low, 20)
-    
-    # Volume confirmation
+    # Volume confirmation (>1.5x 20-period EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation = volume > (1.3 * vol_ema_20)
+    volume_confirmation = volume > (1.5 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,41 +59,41 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA50
-        bullish_bias = close[i] > ema_50_1d_aligned[i]
-        bearish_bias = close[i] < ema_50_1d_aligned[i]
+        # Determine trend bias from 1d EMA34
+        bullish_bias = close[i] > ema_34_1d_aligned[i]
+        bearish_bias = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above upper channel, daily trend up, volume confirmation
-            if close[i] > upper_channel[i] and bullish_bias and volume_confirmation[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above R3 with volume confirmation and daily uptrend
+            if close[i] > r3_aligned[i] and volume_confirmation[i] and bullish_bias:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below lower channel, daily trend down, volume confirmation
-            elif close[i] < lower_channel[i] and bearish_bias and volume_confirmation[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below S3 with volume confirmation and daily downtrend
+            elif close[i] < s3_aligned[i] and volume_confirmation[i] and bearish_bias:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below lower channel OR daily trend turns bearish
-            if close[i] < lower_channel[i] or not bullish_bias:
+            # Exit: Price breaks below S3 OR daily trend turns bearish
+            if close[i] < s3_aligned[i] or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above upper channel OR daily trend turns bullish
-            if close[i] > upper_channel[i] or not bearish_bias:
+            # Exit: Price breaks above R3 OR daily trend turns bullish
+            if close[i] > r3_aligned[i] or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
