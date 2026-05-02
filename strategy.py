@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Targets 20-50 trades per year (80-200 total over 4 years) to minimize fee drag
-# Donchian(20) provides clear structure-based breakouts
-# 1d EMA34 ensures alignment with daily trend (avoid counter-trend trades in bear markets)
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Targets 7-25 trades per year (30-100 total over 4 years) to minimize fee drag
+# Donchian(20) on 1d provides clear structure-based breakouts with lower frequency
+# 1w EMA34 ensures alignment with weekly trend (avoid counter-trend trades in bear markets)
 # Volume spike (2.0x 20-period average) confirms institutional participation
-# Uses discrete position sizing 0.25 to balance exposure and risk
 # Works in both bull and bear: trend filter prevents counter-trend trades, volume confirms validity
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA calculation
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    # Calculate 1d EMA(34)
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(34)
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4h volume spike (2.0x 20-period average)
+    # Calculate 1d volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -57,13 +56,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian upper AND price > 1d EMA34 AND volume spike
+            # Long: Price breaks above Donchian upper AND price > 1w EMA34 AND volume spike
             if (close[i] > high_ma[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower AND price < 1d EMA34 AND volume spike
+            # Short: Price breaks below Donchian lower AND price < 1w EMA34 AND volume spike
             elif (close[i] < low_ma[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_spike[i]):
@@ -73,7 +72,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Donchian lower OR price < 1d EMA34
+            # Exit: Price breaks below Donchian lower OR price < 1w EMA34
             if (close[i] < low_ma[i] or 
                 close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
@@ -82,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Donchian upper OR price > 1d EMA34
+            # Exit: Price breaks above Donchian upper OR price > 1w EMA34
             if (close[i] > high_ma[i] or 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
