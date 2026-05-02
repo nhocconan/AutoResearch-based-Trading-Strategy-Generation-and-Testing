@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves, while 1w EMA50 ensures we only trade
-# in the direction of the weekly trend. Volume confirmation filters out weak breakouts.
-# This combination should work in both bull and bear markets by following the major trend
-# with tight entry conditions to minimize fees. Target: 50-150 total trades over 4 years
-# (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla R4/S4 are stronger reversal/breakout levels than R3/S3, providing higher-probability
+# signals with fewer false breakouts. Combined with 1d EMA34 for trend alignment and volume
+# spike confirmation, this should reduce trade frequency while maintaining edge in both bull
+# and bear markets by only taking trades in direction of daily trend. Target: 75-200 trades
+# over 4 years (19-50/year) on 4h timeframe.
 
-name = "12h_Donchian20_Breakout_1wEMA50_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1w Donchian channels (20-period)
-    if len(df_1w) < 20:
+    # Calculate 1d Camarilla pivot levels (R4, S4)
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper = rolling max(high, 20), lower = rolling min(low, 20)
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: R4 = close + (high - low) * 1.1/2, S4 = close - (high - low) * 1.1/2
+    camarilla_range = high_1d - low_1d
+    r4 = close_1d + camarilla_range * 1.1 / 2
+    s4 = close_1d - camarilla_range * 1.1 / 2
     
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: 2.0x 20-period average (~10 days for 12h)
+    # Volume confirmation: 2.0x 20-period average (~3.3 days for 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for 1w EMA50 and Donchian)
-    start_idx = 50  # 1w EMA50 warmup
+    # Start after warmup (need enough data for 1d EMA)
+    start_idx = 34  # 1d EMA34 warmup
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_1w_aligned[i]) or 
-            np.isnan(lower_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above upper Donchian with volume spike AND price > 1w EMA50 (bullish trend)
-            if (close[i] > upper_1w_aligned[i] and 
+            # Long entry: price breaks above R4 with volume spike AND price > 1d EMA34 (bullish trend)
+            if (close[i] > r4_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower Donchian with volume spike AND price < 1w EMA50 (bearish trend)
-            elif (close[i] < lower_1w_aligned[i] and 
+            # Short entry: price breaks below S4 with volume spike AND price < 1d EMA34 (bearish trend)
+            elif (close[i] < s4_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price falls below lower Donchian (breakdown) OR price below 1w EMA50 (trend change)
-            if close[i] < lower_1w_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: price falls below S4 (breakdown) OR price below 1d EMA34 (trend change)
+            if close[i] < s4_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price rises above upper Donchian (breakout) OR price above 1w EMA50 (trend change)
-            if close[i] > upper_1w_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: price rises above R4 (breakout) OR price above 1d EMA34 (trend change)
+            if close[i] > r4_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
