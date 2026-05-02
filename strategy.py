@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX(14) regime filter and volume confirmation
-# Uses 12h primary timeframe for Camarilla pivot breakout signals
-# 1d ADX > 25 confirms trending market (avoids ranging/choppy conditions)
+# Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation (2x avg)
+# Uses 4h primary timeframe for Donchian breakout signals
+# 12h HMA(21) confirms medium-term trend direction (avoids counter-trend trades)
 # Volume confirmation (2.0x 20-period average) ensures strong participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Works in both bull and bear markets by only trading in trending regimes (ADX > 25)
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Donchian provides clear structure, 12h HMA adds robust trend filter, volume confirms conviction
+# Works in both bull and bear markets by only trading in direction of 12h trend
 
-name = "12h_Camarilla_R3S3_Breakout_1dADX25_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hHMA21_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,56 +26,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    # Get 12h data for HMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = pd.Series(df_1d['high'])
-    low_1d = pd.Series(df_1d['low'])
-    close_1d = pd.Series(df_1d['close'])
+    # Calculate 12h HMA(21)
+    close_12h = pd.Series(df_12h['close'])
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    wma_half = close_12h.rolling(window=half_length, min_periods=half_length).mean()
+    wma_full = close_12h.rolling(window=21, min_periods=21).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma_12h = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Directional Movement
-    dm_plus = high_1d.diff()
-    dm_minus = low_1d.diff() * -1  # Invert to get positive values
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed values
-    tr_ma = tr.rolling(window=14, min_periods=14).mean()
-    dm_plus_ma = dm_plus.rolling(window=14, min_periods=14).mean()
-    dm_minus_ma = dm_minus.rolling(window=14, min_periods=14).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * (dm_plus_ma / tr_ma)
-    di_minus = 100 * (dm_minus_ma / tr_ma)
-    
-    # ADX
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    adx_1d = adx.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Get daily OHLC from 1d data for Camarilla levels
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    camarilla_R3 = daily_close + (daily_high - daily_low) * 1.1 / 4
-    camarilla_S3 = daily_close - (daily_high - daily_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (1d -> 12h: 2 bars per day)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Calculate 4h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = high_roll.shift(1).values  # breakout on close > previous high
+    donchian_lower = low_roll.shift(1).values   # breakout on close < previous low
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -88,40 +60,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(hma_12h_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # ADX regime filter: only trade when ADX > 25 (trending market)
-        trending_market = adx_1d_aligned[i] > 25
-        
         if position == 0:  # Flat - look for new entries
-            # Camarilla breakout long: price > R3
-            # Camarilla breakout short: price < S3
-            breakout_long = close[i] > camarilla_R3_aligned[i]
-            breakout_short = close[i] < camarilla_S3_aligned[i]
+            # Donchian breakout long: close > upper band
+            # Donchian breakout short: close < lower band
+            breakout_long = close[i] > donchian_upper[i]
+            breakout_short = close[i] < donchian_lower[i]
             
-            if breakout_long and trending_market and volume_spike[i]:
+            # 12h HMA trend filter: close > HMA for longs, close < HMA for shorts
+            hma_long = close[i] > hma_12h_aligned[i]
+            hma_short = close[i] < hma_12h_aligned[i]
+            
+            if breakout_long and hma_long and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_short and trending_market and volume_spike[i]:
+            elif breakout_short and hma_short and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Camarilla breakdown (price < S3) or loss of trend
-            if close[i] < camarilla_S3_aligned[i] or adx_1d_aligned[i] <= 25:
+            # Exit: Donchian breakdown (close < lower band) or trend reversal
+            if close[i] < donchian_lower[i] or close[i] < hma_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Camarilla breakout (price > R3) or loss of trend
-            if close[i] > camarilla_R3_aligned[i] or adx_1d_aligned[i] <= 25:
+            # Exit: Donchian breakout (close > upper band) or trend reversal
+            if close[i] > donchian_upper[i] or close[i] > hma_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
