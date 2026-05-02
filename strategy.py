@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 12h Supertrend combination with volume confirmation
-# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures bull/bear conviction
-# 12h Supertrend (ATR=10, mult=3.0) provides robust trend filter across market regimes
-# Volume confirmation (>1.3x 50-period EMA) ensures institutional participation
-# Works in bull markets (Supertrend up + Bull Power > 0) and bear markets (Supertrend down + Bear Power < 0)
-# Targets 12-37 trades/year (50-150 total over 4 years) on 6h timeframe
-# Uses discrete position sizing (0.25) to minimize fee churn while maintaining return potential
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian breakout provides clear entry/exit signals based on price channels
+# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume confirmation (>1.5x 20-period EMA) filters for institutional participation
+# Designed for 4h timeframe targeting 19-50 trades/year (75-200 total over 4 years)
+# Works in bull markets (price > upper channel + daily trend up) and bear markets (price < lower channel + daily trend down)
+# Uses discrete position sizing (0.25) to balance return potential with drawdown control
 
-name = "6h_ElderRay_12hSupertrend_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +25,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for Supertrend trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 12h Supertrend (ATR=10, mult=3.0)
-    # True Range calculation
-    tr1 = pd.Series(df_12h['high']).values - pd.Series(df_12h['low']).values
-    tr2 = np.abs(pd.Series(df_12h['high']).values - pd.Series(df_12h['close']).shift(1).values)
-    tr3 = np.abs(pd.Series(df_12h['low']).values - pd.Series(df_12h['close']).shift(1).values)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Supertrend calculation
-    hl2 = (pd.Series(df_12h['high']).values + pd.Series(df_12h['low']).values) / 2
-    upperband = hl2 + (3.0 * atr)
-    lowerband = hl2 - (3.0 * atr)
-    
-    supertrend = np.full_like(hl2, np.nan, dtype=np.float64)
-    direction = np.full_like(hl2, np.nan, dtype=np.float64)  # 1 for uptrend, -1 for downtrend
-    
-    # Initialize
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(hl2)):
-        if close[i-1] > supertrend[i-1]:
-            supertrend[i] = max(lowerband[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upperband[i], supertrend[i-1])
-        
-        # Determine direction
-        if close[i] > supertrend[i]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-    
-    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # Elder Ray (6h timeframe)
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Donchian Channel (20-period) on 4h timeframe
+    # Upper band = highest high over last 20 periods
+    # Lower band = lowest low over last 20 periods
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation
-    vol_ema_50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volume_confirmation = volume > (1.3 * vol_ema_50)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (1.5 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = 100
+    # Start after warmup (need enough data for Donchian channels)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if (np.isnan(supertrend_12h_aligned[i]) or np.isnan(direction_12h_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_confirmation[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend bias from 1d EMA34
+        bullish_bias = close[i] > ema_34_1d_aligned[i]
+        bearish_bias = close[i] < ema_34_1d_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long: 12h Supertrend uptrend + Bull Power positive + volume confirmation
-            if (direction_12h_aligned[i] == 1) and (bull_power[i] > 0) and volume_confirmation[i]:
+            # Long: Price breaks above upper Donchian band + daily trend up + volume confirmation
+            if close[i] > highest_high[i] and bullish_bias and volume_confirmation[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 12h Supertrend downtrend + Bear Power negative + volume confirmation
-            elif (direction_12h_aligned[i] == -1) and (bear_power[i] < 0) and volume_confirmation[i]:
+            # Short: Price breaks below lower Donchian band + daily trend down + volume confirmation
+            elif close[i] < lowest_low[i] and bearish_bias and volume_confirmation[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: 12h Supertrend turns down OR Bull Power turns negative
-            if (direction_12h_aligned[i] == -1) or (bull_power[i] <= 0):
+            # Exit: Price breaks below lower Donchian band OR daily trend turns bearish
+            if close[i] < lowest_low[i] or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: 12h Supertrend turns up OR Bear Power turns positive
-            if (direction_12h_aligned[i] == 1) or (bear_power[i] >= 0):
+            # Exit: Price breaks above upper Donchian band OR daily trend turns bullish
+            if close[i] > highest_high[i] or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
