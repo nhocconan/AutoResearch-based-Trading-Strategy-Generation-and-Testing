@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 12h primary timeframe for lower trade frequency (target: 50-150 total over 4 years)
-# Camarilla levels from 1d provide strong support/resistance derived from daily range
-# Volume spike (2.0x 20-period average) confirms institutional participation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 4h primary timeframe for optimal trade frequency (target: 75-200 trades over 4 years)
+# Camarilla levels from 1d provide strong support/resistance levels derived from daily range
+# Volume spike (2.0x 20-period average) confirms institutional participation and reduces false breakouts
 # EMA34 trend filter ensures trades align with higher timeframe momentum, working in both bull and bear markets
 # Designed with tight entry conditions to minimize fee drag while maintaining edge
-# Target: 60-120 total trades over 4 years (15-30/year) - within proven winning range for 12h
+# Target: 100-180 total trades over 4 years (25-45/year) - within proven winning range
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
