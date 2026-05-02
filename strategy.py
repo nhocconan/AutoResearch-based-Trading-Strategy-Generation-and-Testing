@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d HMA(21) trend + volume spike confirmation
-# Uses 12h primary timeframe for Camarilla pivot breakout signals
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume spike confirmation
+# Uses 4h primary timeframe for Donchian breakout signals
 # 1d HMA(21) confirms medium-term trend direction (avoids counter-trend trades)
 # Volume confirmation (2.0x 20-period average) ensures strong participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Camarilla provides clear structure, 1d HMA adds robust trend filter, volume confirms conviction
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Donchian provides clear structure, 1d HMA adds robust trend filter, volume confirms conviction
 # Works in both bull and bear markets by only trading in direction of 1d trend
 
-name = "12h_Camarilla_R3S3_Breakout_1dHMA21_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dHMA21_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,25 +42,11 @@ def generate_signals(prices):
     hma_1d = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 12h Camarilla levels (based on previous day's OHLC)
-    # Camarilla R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # We need daily OHLC to compute these levels
-    # Since we're on 12h timeframe, we'll use the 1d data to compute levels
-    # and align them to 12h bars
-    
-    # Get daily OHLC from 1d data
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    camarilla_R3 = daily_close + (daily_high - daily_low) * 1.1 / 4
-    camarilla_S3 = daily_close - (daily_high - daily_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (1d -> 12h: 2 bars per day)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Calculate 4h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = high_roll.shift(1).values  # breakout on close > previous high
+    donchian_lower = low_roll.shift(1).values   # breakout on close < previous low
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -74,16 +60,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(hma_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Camarilla breakout long: price > R3
-            # Camarilla breakout short: price < S3
-            breakout_long = close[i] > camarilla_R3_aligned[i]
-            breakout_short = close[i] < camarilla_S3_aligned[i]
+            # Donchian breakout long: close > upper band
+            # Donchian breakout short: close < lower band
+            breakout_long = close[i] > donchian_upper[i]
+            breakout_short = close[i] < donchian_lower[i]
             
             # 1d HMA trend filter: price > HMA for longs, price < HMA for shorts
             hma_long = close[i] > hma_1d_aligned[i]
@@ -99,16 +85,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Camarilla breakdown (price < S3) or trend reversal
-            if close[i] < camarilla_S3_aligned[i] or close[i] < hma_1d_aligned[i]:
+            # Exit: Donchian breakdown (close < lower band) or trend reversal
+            if close[i] < donchian_lower[i] or close[i] < hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Camarilla breakout (price > R3) or trend reversal
-            if close[i] > camarilla_R3_aligned[i] or close[i] > hma_1d_aligned[i]:
+            # Exit: Donchian breakout (close > upper band) or trend reversal
+            if close[i] > donchian_upper[i] or close[i] > hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
