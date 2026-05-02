@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Targets 60-150 total trades over 4 years (15-37/year) to minimize fee drag
 # Camarilla R3/S3 levels provide precise intraday breakout points
-# 4h EMA50 ensures alignment with higher timeframe trend (avoid counter-trend trades)
+# 1d EMA34 ensures alignment with higher timeframe trend (avoid counter-trend trades)
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Session filter (08-20 UTC) reduces noise during low-liquidity hours
 # Discrete position sizing: 0.20 balances exposure and risk
 # Works in bull via trend continuation and bear via avoidance of false breakouts
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike_Session"
+name = "1h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -41,7 +41,7 @@ def generate_signals(prices):
     ema_50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate previous day's Camarilla levels (using 1d data)
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 2 days for previous day calculation
         return np.zeros(n)
