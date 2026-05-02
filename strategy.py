@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA34 trend filter and volume confirmation
-# Uses Camarilla pivot levels from 12h timeframe for key support/resistance (more responsive than 1d)
-# 12h EMA34 provides higher timeframe trend filter that reduces whipsaw in ranging markets
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation
+# Uses 4h Camarilla pivot levels for key support/resistance (tighter than 12h for 1h timeframe)
+# 4h EMA50 provides higher timeframe trend filter that reduces whipsaw in ranging markets
 # Volume spike (2.0x 20-period average) ensures breakouts have institutional conviction
-# Works in bull markets by buying R3 breakouts and in bear markets by selling S3 breakdowns
-# Targets 75-200 trades over 4 years (19-50/year) for 4h timeframe
+# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods
+# Works in bull markets by buying R1 breakouts and in bear markets by selling S1 breakdowns
+# Targets 60-150 total trades over 4 years (15-37/year) for 1h timeframe
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,32 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Load 12h data ONCE before loop for Camarilla and EMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session filter (08-20 UTC) - prices['open_time'] is already datetime64[ms]
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop for Camarilla and EMA calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels (R3, S3)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h Camarilla pivot levels (R1, S1)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # Pivot point calculation
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    pivot = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
     
-    # Camarilla levels: R3 = close + range * 1.1/4, S3 = close - range * 1.1/4
-    r3 = close_12h + range_12h * 1.1 / 4.0
-    s3 = close_12h - range_12h * 1.1 / 4.0
+    # Camarilla levels: R1 = close + range * 1.1/12, S1 = close - range * 1.1/12
+    r1 = close_4h + range_4h * 1.1 / 12.0
+    s1 = close_4h - range_4h * 1.1 / 12.0
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 12h bar)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
     # Calculate volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -61,38 +67,43 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # Check for NaN values in indicators
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above R3 + price > 12h EMA34 + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_34_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above R1 + price > 4h EMA50 + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S3 + price < 12h EMA34 + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_34_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below S1 + price < 4h EMA50 + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below S3
-            if close[i] < s3_aligned[i]:
+            # Exit: Price breaks below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above R3
-            if close[i] > r3_aligned[i]:
+            # Exit: Price breaks above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
