@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-# Uses 6h primary timeframe with 1d HTF for weekly pivot and trend alignment.
+# Hypothesis: 12h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
+# Uses 12h primary timeframe with 1d HTF for weekly pivot and trend alignment.
 # Weekly pivot (from 1d data) provides strong structural support/resistance.
 # Breakouts in direction of 1d trend with volume spike capture institutional moves.
-# Designed for low trade frequency (12-37/year) to minimize fee drag in 6h timeframe.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
 # Works in both bull and bear markets by following the 1d trend direction only.
 
-name = "6h_Donchian20_1dWeeklyPivot_Direction_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dWeeklyPivot_Direction_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,16 +50,16 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly pivot levels and EMA to 6h timeframe (wait for completed 1d bar)
+    # Align weekly pivot levels and EMA to 12h timeframe (wait for completed 1d bar)
     week_R1_aligned = align_htf_to_ltf(prices, df_1d, week_R1)
     week_S1_aligned = align_htf_to_ltf(prices, df_1d, week_S1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) on 6h
+    # Donchian(20) on 12h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation (2.0x 20-period average) on 6h
+    # Volume confirmation (2.0x 20-period average) on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
