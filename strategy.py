@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d HMA(34) trend + volume confirmation
-# Uses 12h primary timeframe for Donchian channel breakout signals (target: 50-150 total trades over 4 years)
-# 1d HMA(34) confirms long-term trend direction to avoid counter-trend trades in bear markets
-# Volume confirmation (2.0x 20-period average) ensures strong participation
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(34) trend + volume spike confirmation
+# Uses 4h primary timeframe for Donchian channel breakout signals
+# 1d HMA(34) confirms long-term trend direction (avoids counter-trend trades in bear markets)
+# Volume confirmation (2.5x 20-period average) ensures strong institutional participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
+# Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
+# Donchian provides clear structure, 1d HMA adds robust trend filter, volume confirms conviction
 # Works in both bull and bear markets by only trading in direction of 1d trend
-# Donchian provides clear structure, HMA adds trend filter, volume confirms conviction
 
-name = "12h_Donchian20_1dHMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dHMA34_Trend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -41,21 +42,21 @@ def generate_signals(prices):
     hma_1d = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
     upper_channel = high_ma.shift(1).values  # Use previous bar to avoid look-ahead
     lower_channel = low_ma.shift(1).values
     
-    # Volume confirmation (2.0x 20-period average)
+    # Volume confirmation (2.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for calculations)
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
