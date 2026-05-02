@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla R3/S3 levels act as intraday support/resistance where breakouts often continue
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout zones; 1d EMA34 ensures alignment with daily trend
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Discrete position sizing (0.25) minimizes fee churn
-# Targets 12-37 trades/year (50-150 total over 4 years) for 6h timeframe
+# Targets 12-37 trades/year (50-150 total over 4 years) for 12h timeframe
 # Works in bull markets via breakout continuation and in bear markets via filtered short breakdowns
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +23,8 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -36,18 +34,17 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate Camarilla levels from previous 1d bar
-    # Typical price = (high + low + close) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    typical_price_prev = typical_price.shift(1).values  # Previous day's typical price
-    range_ = (df_1d['high'] - df_1d['low']).shift(1).values  # Previous day's range
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2, etc.
+    # We use R3 (resistance 3) and S3 (support 3) for breakout signals
+    # R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla R3, S3 levels
-    # R3 = close + (high - low) * 1.1 / 4
-    # S3 = close - (high - low) * 1.1 / 4
-    camarilla_r3 = typical_price_prev + range_ * 1.1 / 4
-    camarilla_s3 = typical_price_prev - range_ * 1.1 / 4
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -58,7 +55,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Camarilla calculation and volume MA)
+    # Start after warmup (need enough for volume MA and 1d data alignment)
     start_idx = 20  # buffer for 20-period calculations
     
     for i in range(start_idx, n):
