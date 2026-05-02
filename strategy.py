@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 12h primary timeframe for lower trade frequency (target: 50-150 total trades over 4 years)
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation
+# Uses 4h primary timeframe for optimal trade frequency (target: 75-200 trades over 4 years)
 # Camarilla levels from 1d provide strong support/resistance derived from daily range
 # EMA50 trend filter ensures alignment with higher timeframe momentum, effective in bull/bear regimes
 # Volume spike (2.0x 20-period average) confirms institutional participation, reducing false breakouts
 # Designed with tight entry conditions to minimize fee drag while maintaining edge
-# Target: 75-125 total trades over 4 years (19-31/year) - within proven winning range for 12h
+# Target: 75-200 total trades over 4 years (19-50/year) - within proven winning range for 4h
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,13 +36,13 @@ def generate_signals(prices):
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Calculate Camarilla pivot levels from previous 1d bar
-    # Camarilla: R3 = close + 1.500*(high-low), S3 = close - 1.500*(high-low)
+    # Camarilla: R1 = close + 1.000*(high-low)/4, S1 = close - 1.000*(high-low)/4
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_high = close_1d + 1.500 * (high_1d - low_1d)  # R3 level
-    camarilla_low = close_1d - 1.500 * (high_1d - low_1d)   # S3 level
+    camarilla_high = close_1d + (high_1d - low_1d) * 1.000 / 4  # R1 level
+    camarilla_low = close_1d - (high_1d - low_1d) * 1.000 / 4   # S1 level
     
     camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
     camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
@@ -65,11 +65,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 + price > 1d EMA50 + volume spike
+            # Long: Price breaks above Camarilla R1 + price > 1d EMA50 + volume spike
             if close[i] > camarilla_high_aligned[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 + price < 1d EMA50 + volume spike
+            # Short: Price breaks below Camarilla S1 + price < 1d EMA50 + volume spike
             elif close[i] < camarilla_low_aligned[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
@@ -77,7 +77,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Camarilla S3 (reversal signal)
+            # Exit: Price breaks below Camarilla S1 (reversal signal)
             if close[i] < camarilla_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Camarilla R3 (reversal signal)
+            # Exit: Price breaks above Camarilla R1 (reversal signal)
             if close[i] > camarilla_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
