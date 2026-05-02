@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years)
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend entries
 # Camarilla R3/S3 levels from 1d provide significant pivot-based breakout levels
-# Volume spike (>2.0 * 20-period EMA on 12h) confirms strong participation
+# Volume spike (>2.0 * 20-period EMA on 4h) confirms strong participation
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
 # Works in bull (continuation) and bear (mean reversion via short) markets
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d_shifted + 1.1 * (high_1d - low_1d) / 4
     camarilla_s3 = close_1d_shifted - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -51,7 +51,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (12h)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (4h)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
