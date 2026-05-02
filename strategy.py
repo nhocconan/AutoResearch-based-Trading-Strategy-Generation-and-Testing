@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian channels identify key support/resistance from the past 20 days; breakouts above upper
-# or below lower band with volume confirmation indicate strong momentum. 1w EMA50 ensures trades
-# align with weekly trend to avoid false breakouts in choppy markets. Designed for 30-100 total
-# trades over 4 years (7-25/year) on 1d timeframe. Works in bull markets (buying breakouts in uptrend)
-# and bear markets (selling breakdowns in downtrend) by only taking trades in direction of 1w EMA50.
+# Hypothesis: 6h Williams %R extreme readings with 1d ADX trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; extreme readings (<-80 or >-20) 
+# with volume spike indicate potential reversals. 1d ADX > 25 ensures trades align with 
+# strong daily trend to avoid counter-trend trades in choppy markets. Designed for 
+# 50-150 total trades over 4 years (12-37/year) on 6h timeframe. Works in bull markets 
+# (buying oversold in uptrend) and bear markets (selling overbought in downtrend) by 
+# only taking trades in direction of 1d ADX trend.
 
-name = "1d_Donchian20_1wEMA50_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,75 +25,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Donchian channels (20-day) from 1d data
+    # Calculate 1d ADX for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Upper band: 20-day high, Lower band: 20-day low
-    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate ADX components
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
     
-    # Align Donchian bands to 1d timeframe (wait for 20-day period to complete)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    # Add first element (index 0) as 0 for DM and TR
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    tr = np.insert(tr, 0, high_1d[0] - low_1d[0])
     
-    # Volume confirmation: 2.0x 20-day average
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    plus_di_smooth = wilders_smooth(plus_dm, period)
+    minus_di_smooth = wilders_smooth(minus_dm, period)
+    tr_smooth = wilders_smooth(tr, period)
+    
+    # Avoid division by zero
+    plus_di = np.where(tr_smooth != 0, (plus_di_smooth / tr_smooth) * 100, 0)
+    minus_di = np.where(tr_smooth != 0, (minus_di_smooth / tr_smooth) * 100, 0)
+    dx = np.where((plus_di + minus_di) != 0, 
+                  np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
+    adx = wilders_smooth(dx, period)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Williams %R on 6h data
+    def williams_r(high, low, close, period=14):
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        wr = np.where((highest_high - lowest_low) != 0, 
+                      -100 * ((highest_high - close) / (highest_high - lowest_low)), -50)
+        return wr
+    
+    wr = williams_r(high, low, close, 14)
+    
+    # Volume confirmation: 2.0x 20-period average (20*6h = 5 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for EMA50 and Donchian)
-    start_idx = max(50, 20)  # 50 bars to ensure weekly EMA and 20-day Donchian available
+    # Start after warmup (need enough data for all indicators)
+    start_idx = max(34, 30)  # 34 for Williams %R and ADX smoothing
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(wr[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above upper band with volume spike AND price > 1w EMA50 (bullish trend)
-            if (close[i] > upper_aligned[i] and 
+            # Long entry: Williams %R oversold (<-80) with volume spike AND ADX > 25 (strong trend)
+            if (wr[i] < -80 and 
                 volume_spike[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower band with volume spike AND price < 1w EMA50 (bearish trend)
-            elif (close[i] < lower_aligned[i] and 
+            # Short entry: Williams %R overbought (>-20) with volume spike AND ADX > 25 (strong trend)
+            elif (wr[i] > -20 and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below upper band (failed breakout) OR price below 1w EMA50 (trend change)
-            if close[i] < upper_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: Williams %R rises above -50 (exit oversold) OR ADX falls below 20 (trend weakening)
+            if wr[i] > -50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above lower band (failed breakdown) OR price above 1w EMA50 (trend change)
-            if close[i] > lower_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: Williams %R falls below -50 (exit overbought) OR ADX falls below 20 (trend weakening)
+            if wr[i] < -50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
