@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian channel (20-period high/low) for clear trend structure
-# 1d EMA50 provides higher timeframe trend filter that reduces whipsaw in ranging markets
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakouts capture momentum bursts in both bull and bear markets
+# 1d EMA50 provides higher timeframe trend filter to reduce whipsaw and align with major trend
 # Volume spike (2.0x 20-period average) ensures breakouts have institutional conviction
-# Works in bull markets by buying upper band breakouts and in bear markets by selling lower band breakouts
-# Targets 75-200 trades over 4 years (19-50/year) for 4h timeframe
+# Targets 50-150 trades over 4 years (12-37/year) for 6h timeframe
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +33,7 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Donchian channels (20-period) on primary timeframe
+    # Calculate Donchian channels (20-period)
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -46,7 +45,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for Donchian and volume MA)
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
