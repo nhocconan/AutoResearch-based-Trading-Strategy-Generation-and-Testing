@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
 # H3/L3 levels are more sensitive than R3/S3, increasing trade frequency while maintaining edge.
 # Trend filter ensures alignment with daily momentum. Chop filter avoids ranging markets.
-# Discrete sizing 0.25 to minimize fee churn. Target: 75-200 trades over 4 years.
-# Primary timeframe: 4h, HTF: 1d for Camarilla levels and EMA34.
+# Discrete sizing 0.25 to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year).
+# Primary timeframe: 12h, HTF: 1d for Camarilla levels and EMA34.
 
-name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
-timeframe = "4h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +37,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 4h timeframe (they update daily)
+    # Align Camarilla levels to 12h timeframe (they update daily)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
