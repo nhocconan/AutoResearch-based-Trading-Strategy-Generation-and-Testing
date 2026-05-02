@@ -4,11 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
-# Donchian breakout captures structural moves; 1d ADX > 25 filters for trending regimes (avoid false breakouts in ranging markets)
+# Donchian breakout provides clear structure-based entries (proven on SOLUSDT)
+# 1d ADX > 25 = trending market (follow breakout direction), ADX < 20 = ranging (fade breakouts)
 # Volume confirmation (1.5x 20-period average) ensures institutional participation
-# Discrete position sizing 0.25 balances risk and minimizes fee churn
+# Discrete position sizing 0.25 minimizes fee churn while maintaining exposure
 # Targets 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
-# Works in both bull and bear markets by adapting to regime via ADX (only take breakouts in trending markets)
+# Works in both bull and bear markets by adapting to regime via ADX
+# Uses 1d for HTF regime (more stable than 6h for regime detection)
 
 name = "4h_Donchian20_1dADXRegime_VolumeConfirm_v1"
 timeframe = "4h"
@@ -62,12 +64,11 @@ def generate_signals(prices):
     # Align 1d ADX to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4x volume confirmation (1.5x 20-period average)
+    # Calculate 4h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 1.5)
     
@@ -75,46 +76,78 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for Donchian, ADX and volume MA)
-    start_idx = max(lookback, 20) + 5  # 20 for Donchian, 20 for volume MA, + buffer
+    start_idx = 50  # max(20 for Donchian, 34 for ADX) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         # Determine regime from 1d ADX
         trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # In trending market: take Donchian breakouts
+                # In trending market: follow Donchian breakout direction
                 # Long: price breaks above Donchian high
-                if close[i] > highest_high[i] and volume_confirm[i]:
+                if close[i] > donchian_high[i] and volume_confirm[i]:
                     signals[i] = 0.25
                     position = 1
                 # Short: price breaks below Donchian low
-                elif close[i] < lowest_low[i] and volume_confirm[i]:
+                elif close[i] < donchian_low[i] and volume_confirm[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
-            else:
-                # In ranging market: no entries (avoid false breakouts)
-                signals[i] = 0.0
+            else:  # ranging or transition regime
+                # In ranging market: fade Donchian breakouts (mean reversion)
+                # Long: price breaks below Donchian low (oversold bounce)
+                if close[i] < donchian_low[i] and volume_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price breaks above Donchian high (overbought fade)
+                elif close[i] > donchian_high[i] and volume_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit when price breaks below Donchian low (stoploss) or reverses
-            if close[i] < lowest_low[i]:
+            # Exit conditions
+            exit_signal = False
+            if trending:
+                # Exit trending long when price returns to Donchian midpoint (trailing stop)
+                donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] < donchian_mid:
+                    exit_signal = True
+            else:
+                # Exit ranging long when price reaches Donchian high (take profit at resistance)
+                if close[i] >= donchian_high[i]:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit when price breaks above Donchian high (stoploss) or reverses
-            if close[i] > highest_high[i]:
+            # Exit conditions
+            exit_signal = False
+            if trending:
+                # Exit trending short when price returns to Donchian midpoint (trailing stop)
+                donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] > donchian_mid:
+                    exit_signal = True
+            else:
+                # Exit ranging short when price reaches Donchian low (take profit at support)
+                if close[i] <= donchian_low[i]:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
