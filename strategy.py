@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and 1w volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13 to identify trend strength
-# 1d EMA34 provides higher timeframe trend direction to avoid counter-trend trades
-# 1w volume confirmation (1.5x 20-period average) ensures institutional participation
+# Hypothesis: 1d Camarilla pivot (R3/S3) breakout with 1w EMA34 trend filter and volume confirmation
+# Uses 1d timeframe for signal generation with Camarilla R3/S3 breakouts
+# 1w EMA34 provides multi-timeframe trend filter to avoid counter-trend trades
+# Volume confirmation (2.0x 20-period average) ensures institutional participation
+# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
 # Discrete position sizing (0.25) minimizes fee churn
-# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
-# Works in bull markets via bear power exhaustion + trend alignment, in bear via bull power failure
-# Elder Ray works in both regimes by measuring power relative to trend, not just overbought/oversold
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe
+# Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
+# Designed for low trade frequency to minimize fee drag (critical for 1d timeframe)
 
-name = "6h_ElderRay_1dEMA34_1wVolumeS_v1"
-timeframe = "6h"
+name = "1d_Camarilla_R3S3_1wEMA34_VolumeS_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +26,47 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values  # needed for Camarilla calculation
     
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Load 1w data ONCE before loop for volume confirmation
+    # Load 1w data ONCE before loop for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1w volume MA for confirmation
-    volume_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().shift(1).values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Elder Ray components on 6h timeframe
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Camarilla levels (R3, S3) from previous day's range
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_close = pd.Series(close).shift(1).values
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + (1.1 * camarilla_range / 2)
+    s3 = prev_close - (1.1 * camarilla_range / 2)
+    
+    # Volume confirmation (2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_confirm = volume > (vol_ma * 2.0)
+    
+    # Calculate 1d Chopiness Index (14) - trending when < 38.2, ranging when > 61.8
+    # True Range
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR14
+    atr1 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Max high and min low over 14 periods
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log15(sum(ATR14)/ (max(high)-min(low)) over 14 periods)
+    chop = 100 * np.log15(atr1 * 14 / (max_high - min_low))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,49 +76,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_1w_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(volume_confirm[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 1w volume MA
-        volume_confirm = volume[i] > (vol_ma_1w_aligned[i] * 1.5)
+        # Regime filter: only trade when Chop < 61.8 (not strongly ranging)
+        if chop[i] > 61.8:
+            signals[i] = 0.0
+            continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bear power weakening (less negative) + price > 1d EMA34 + volume confirm
-            # Bear power turning up from extreme low (bullish divergence)
-            if (i > start_idx and 
-                bear_power[i] > bear_power[i-1] and  # Bear power increasing (less negative)
-                bear_power[i-1] < np.percentile(bear_power[max(0, i-50):i], 10) and  # Was extremely weak
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_confirm):
+            # Long: Price breaks above Camarilla R3 + price > 1w EMA34 + volume confirm
+            if close[i] > r3[i] and close[i] > ema_34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull power weakening (less positive) + price < 1d EMA34 + volume confirm
-            # Bull power turning down from extreme high (bearish divergence)
-            elif (i > start_idx and 
-                  bull_power[i] < bull_power[i-1] and  # Bull power decreasing (less positive)
-                  bull_power[i-1] > np.percentile(bull_power[max(0, i-50):i], 90) and  # Was extremely strong
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_confirm):
+            # Short: Price breaks below Camarilla S3 + price < 1w EMA34 + volume confirm
+            elif close[i] < s3[i] and close[i] < ema_34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bull power weakening significantly or reverse signal
-            if (bull_power[i] < bull_power[i-1] and 
-                bull_power[i] < np.percentile(bull_power[max(0, i-20):i], 30)):
+            # Exit: Price breaks below Camarilla S3 or reverse signal
+            if close[i] < s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bear power strengthening significantly or reverse signal
-            if (bear_power[i] > bear_power[i-1] and 
-                bear_power[i] > np.percentile(bear_power[max(0, i-20):i], 70)):
+            # Exit: Price breaks above Camarilla R3 or reverse signal
+            if close[i] > r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
