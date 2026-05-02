@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
-# Uses H3/L3 for proven breakout levels with higher reliability than R3/S3. Volume threshold reduces churn. Discrete sizing 0.25.
-# Target: 50-150 trades over 4 years. Works in bull/bear via trend filter and regime avoidance of chop.
-# Primary timeframe: 12h, HTF: 1d for Camarilla levels and EMA34, 1w for regime context (optional).
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Uses H3/L3 for tighter breakout levels than R3/S3 to reduce false signals. Volume threshold set high to avoid churn.
+# Discrete sizing 0.30. Primary timeframe: 4h, HTF: 1d for EMA34 and Camarilla levels.
+# Designed to work in bull/bear via trend filter and regime avoidance of chop. Target: 75-150 trades over 4 years.
 
-name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
-timeframe = "12h"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (they update daily)
+    # Align Camarilla levels to 4h timeframe (they update daily)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -45,7 +45,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 2.0x 20-period average (tighter to reduce trades)
+    # Volume confirmation: 2.0x 20-period average (high threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -86,14 +86,14 @@ def generate_signals(prices):
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i] and 
                 chop_regime[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below L3 AND price < 1d EMA34 AND volume spike AND trending regime
             elif (close[i] < camarilla_l3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i] and 
                   chop_regime[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -104,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Exit: Price rises above H3 OR price > 1d EMA34
@@ -112,6 +112,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
