@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d/21 EMA trend filter and volume confirmation
-# Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends
-# Jaw (13-period): Blue line, Teeth (8-period): Red line, Lips (5-period): Green line
-# Trend is bullish when Lips > Teeth > Jaw, bearish when Lips < Teeth < Jaw
-# 1d EMA21 provides higher-timeframe trend alignment to avoid counter-trend trades
-# Volume spike (>1.5 x 20-period EMA) confirms breakout validity
-# Works in bull markets (bullish alignment + 1d EMA21 up) and bear markets (bearish alignment + 1d EMA21 down)
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation
+# Camarilla pivot levels provide institutional support/resistance with high probability reactions
+# 12h EMA50 provides higher-timeframe trend alignment to avoid counter-trend trades
+# Volume spike (>2.0 x 20-period EMA) confirms breakout validity
+# Works in bull markets (break above R1 + 12h EMA50 up) and bear markets (break below S1 + 12h EMA50 down)
 # Uses discrete position sizing (0.30) to minimize fee churn and control drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag
 
-name = "12h_WilliamsAlligator_1dEMA21_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,75 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Williams Alligator: three smoothed moving averages
-    # Jaw (13-period, smoothed by 8 periods)
-    sma_13 = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    jaw = pd.Series(sma_13).rolling(window=8, min_periods=8).mean().values
+    # Volume confirmation (volume spike > 2.0 x 20-period EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (2.0 * vol_ema_20)
     
-    # Teeth (8-period, smoothed by 5 periods)
-    sma_8 = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    teeth = pd.Series(sma_8).rolling(window=5, min_periods=5).mean().values
-    
-    # Lips (5-period, smoothed by 3 periods)
-    sma_5 = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    lips = pd.Series(sma_5).rolling(window=3, min_periods=3).mean().values
-    
-    # 1d data for trend filter (EMA21)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    # 12h data for Camarilla pivot calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # 1d EMA21 calculation
-    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
     
-    # Volume confirmation (volume spike > 1.5 x 20-period EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation = volume > (1.5 * vol_ema_20)
+    camarilla_r1 = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 / 12
+    camarilla_s1 = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe (wait for completed 12h bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for Alligator calculation)
-    start_idx = 21
+    # Start after warmup (need enough data for EMA calculation)
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_21_1d_aligned[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
-        # Determine trend bias from 1d EMA21
-        uptrend = close[i] > ema_21_1d_aligned[i]
-        downtrend = close[i] < ema_21_1d_aligned[i]
+        # Determine trend bias from 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish Alligator alignment with volume confirmation and uptrend
-            if bullish_alignment and volume_confirmation[i] and uptrend:
+            # Long: Close breaks above R1 with volume confirmation and uptrend
+            if close[i] > camarilla_r1_aligned[i] and volume_confirmation[i] and uptrend:
                 signals[i] = 0.30
                 position = 1
-            # Short: Bearish Alligator alignment with volume confirmation and downtrend
-            elif bearish_alignment and volume_confirmation[i] and downtrend:
+            # Short: Close breaks below S1 with volume confirmation and downtrend
+            elif close[i] < camarilla_s1_aligned[i] and volume_confirmation[i] and downtrend:
                 signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Loss of bullish alignment OR trend changes to downtrend
-            if not bullish_alignment or not uptrend:
+            # Exit: Close drops below S1 (reversal) OR trend changes to downtrend
+            if close[i] < camarilla_s1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Loss of bearish alignment OR trend changes to uptrend
-            if not bearish_alignment or not downtrend:
+            # Exit: Close rises above R1 (reversal) OR trend changes to uptrend
+            if close[i] > camarilla_r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
