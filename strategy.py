@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 4h timeframe for signal generation with Donchian(20) breakouts
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (1.8x 20-period average) ensures strong institutional participation
-# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
-# Discrete position sizing (0.25) minimizes fee churn
-# Target: 100-180 total trades over 4 years = 25-45/year for 4h timeframe
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and 4h volume confirmation
+# Uses Donchian breakouts for entry, 1d EMA34 for multi-timeframe trend alignment
+# Volume confirmation requires 1.8x 20-period average to ensure strong participation
+# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = ranging)
+# Discrete position sizing (0.30) balances return and drawdown control
+# Target: 120-180 total trades over 4 years = 30-45/year for 4h timeframe
 # Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
 # Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
 
@@ -96,11 +95,11 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above Donchian upper band + price > 1d EMA34 + volume confirm
             if close[i] > highest_high[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below Donchian lower band + price < 1d EMA34 + volume confirm
             elif close[i] < lowest_low[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -111,7 +110,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
             # Exit: Price breaks above Donchian upper band or reverse signal
@@ -119,6 +118,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
