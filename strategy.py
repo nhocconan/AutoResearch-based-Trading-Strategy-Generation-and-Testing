@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivot levels provide high-probability reversal/breakout zones
-# 1d EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades
-# Volume spike (>1.8 x 20-period EMA) confirms breakout validity and reduces false signals
-# Discrete position sizing (0.25) minimizes fee churn and controls drawdown
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost
-# Works in bull markets (breakout above R1 + uptrend) and bear markets (breakdown below S1 + downtrend)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels (R3/S3) provide strong intraday support/resistance
+# 1d EMA34 provides higher-timeframe trend alignment to avoid counter-trend trades
+# Volume spike (>2.0 x 20-period EMA) confirms breakout validity
+# Works in bull markets (price > R3 + 1d EMA34 up) and bear markets (price < S3 + 1d EMA34 down)
+# Uses discrete position sizing (0.25) to minimize fee churn and control drawdown
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,9 +25,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (volume spike > 1.8 x 20-period EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation = volume > (1.8 * vol_ema_20)
+    # Calculate Camarilla pivot levels for 12h
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # R3 = Close + Range * 1.1 / 4
+    # S3 = Close - Range * 1.1 / 4
+    pivot_12h = (high + low + close) / 3.0
+    range_12h = high - low
+    r3_12h = close + range_12h * 1.1 / 4.0
+    s3_12h = close - range_12h * 1.1 / 4.0
     
     # 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
@@ -38,70 +44,49 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from previous day
+    # Volume confirmation (volume spike > 2.0 x 20-period EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (2.0 * vol_ema_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need previous day data)
-    start_idx = 1
+    # Start after warmup (need enough data for EMA calculation)
+    start_idx = 34
     
     for i in range(start_idx, n):
-        # Need previous day's OHLC for Camarilla calculation
-        if i < 1:
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_12h[i]) or 
+            np.isnan(s3_12h[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
-            
-        # Check for NaN in critical values
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirmation[i]) or
-            np.isnan(high[i-1]) or np.isnan(low[i-1]) or np.isnan(close[i-1])):
-            signals[i] = 0.0
-            continue
-        
-        # Calculate Camarilla levels using previous day's OHLC
-        # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-        #          R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
-        #          S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low)
-        #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
-        range_hl = prev_high - prev_low
-        
-        # Avoid division by zero or invalid ranges
-        if range_hl <= 0:
-            signals[i] = 0.0
-            continue
-            
-        r1 = prev_close + 0.275 * range_hl
-        s1 = prev_close - 0.275 * range_hl
         
         # Determine trend bias from 1d EMA34
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Break above R1 with volume confirmation and uptrend
-            if close[i] > r1 and volume_confirmation[i] and uptrend:
+            # Long: Price breaks above R3 with volume confirmation and uptrend
+            if close[i] > r3_12h[i] and volume_confirmation[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume confirmation and downtrend
-            elif close[i] < s1 and volume_confirmation[i] and downtrend:
+            # Short: Price breaks below S3 with volume confirmation and downtrend
+            elif close[i] < s3_12h[i] and volume_confirmation[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close below R1 (failed breakout) OR trend changes to downtrend
-            if close[i] < r1 or not uptrend:
+            # Exit: Price closes below pivot (loss of bullish momentum) OR trend changes to downtrend
+            if close[i] < pivot_12h[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close above S1 (failed breakdown) OR trend changes to uptrend
-            if close[i] > s1 or not downtrend:
+            # Exit: Price closes above pivot (loss of bearish momentum) OR trend changes to uptrend
+            if close[i] > pivot_12h[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
