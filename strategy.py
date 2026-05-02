@@ -31,7 +31,7 @@ def generate_signals(prices):
     if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla pivots and EMA34 trend
+    # Load 1d data ONCE before loop for HTF indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -42,19 +42,20 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels from 1d OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = close, H = high, L = low of previous day
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
+    #            R2 = close + 0.5*(high-low), R1 = close + 0.25*(high-low)
+    #            S1 = close - 0.25*(high-low), S2 = close - 0.5*(high-low), 
+    #            S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values  # same as close_1d for current bar
+    close_1d_arr = df_1d['close'].values
     
-    # Calculate Camarilla levels using previous day's OHLC
-    camarilla_R1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
-    camarilla_S1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    camarilla_r1 = close_1d_arr + 0.25 * (high_1d - low_1d)
+    camarilla_s1 = close_1d_arr - 0.25 * (high_1d - low_1d)
     
     # Align Camarilla levels to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -69,17 +70,17 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i])):
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above Camarilla R1 + price > 1d EMA34 + volume confirm
-            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below Camarilla S1 + price < 1d EMA34 + volume confirm
-            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -87,7 +88,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: Price breaks below Camarilla S1 or reverse signal
-            if close[i] < camarilla_S1_aligned[i]:
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,7 +96,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: Price breaks above Camarilla R1 or reverse signal
-            if close[i] > camarilla_R1_aligned[i]:
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
