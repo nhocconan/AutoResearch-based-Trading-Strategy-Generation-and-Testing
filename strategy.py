@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and ATR volatility filter
-# Donchian channels provide clear breakout levels that work in both trending and ranging markets
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian channels provide clear trend-following breakouts with proven efficacy in crypto
 # 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades
-# ATR filter avoids low-volatility false breakouts. Target: 12-37 trades/year on 6h timeframe
-# Uses discrete position sizing (0.25) to minimize fee churn while maintaining edge
-# Works in bull markets (breakout above upper channel + 1d EMA50 up) and bear markets (breakout below lower channel + 1d EMA50 down)
+# Volume confirmation filters false breakouts. Target: 12-37 trades/year on 12h timeframe
+# Uses discrete position sizing (0.25) to balance return and drawdown control
+# Works in bull markets (breakout above upper + 1d EMA50 up) and bear markets (breakout below lower + 1d EMA50 down)
 
-name = "6h_Donchian20_1dEMA50_Trend_ATRFilter"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,6 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
@@ -32,31 +33,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) on 6h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # 1d data for Donchian channel calculation (20-period)
+    donchian_period = 20
+    if len(df_1d) < donchian_period:
+        return np.zeros(n)
     
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # Calculate Donchian levels from 1d data
+    highest_20 = pd.Series(df_1d['high'].values).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_20 = pd.Series(df_1d['low'].values).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align Donchian levels to 12h timeframe (wait for 1d bar to close)
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
+    
+    # Volume confirmation (volume spike > 1.8 x 20-period EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (1.8 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = max(50, lookback - 1, 14)
+    # Start after warmup (need enough data for EMA and Donchian calculation)
+    start_idx = max(50, donchian_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20_aligned[i]) or 
+            np.isnan(lowest_20_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
@@ -64,33 +66,29 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volatility filter: avoid low-volatility environments
-        atr_ratio = atr_14[i] / close[i] if close[i] > 0 else 0
-        vol_filter = atr_ratio > 0.01  # Avoid extremely low volatility
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above upper Donchian channel with uptrend and sufficient volatility
-            if high[i] > highest_high[i] and uptrend and vol_filter:
+            # Long: Breakout above Donchian upper with volume confirmation and uptrend
+            if high[i] > highest_20_aligned[i] and volume_confirmation[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below lower Donchian channel with downtrend and sufficient volatility
-            elif low[i] < lowest_low[i] and downtrend and vol_filter:
+            # Short: Breakout below Donchian lower with volume confirmation and downtrend
+            elif low[i] < lowest_20_aligned[i] and volume_confirmation[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below lower Donchian channel OR trend changes to downtrend
-            if low[i] < lowest_low[i] or not uptrend:
+            # Exit: Price breaks below Donchian lower (reversal) OR trend changes to downtrend
+            if low[i] < lowest_20_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above upper Donchian channel OR trend changes to uptrend
-            if high[i] > highest_high[i] or not downtrend:
+            # Exit: Price breaks above Donchian upper (reversal) OR trend changes to uptrend
+            if high[i] > highest_20_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
