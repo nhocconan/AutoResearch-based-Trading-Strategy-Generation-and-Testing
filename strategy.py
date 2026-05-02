@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# Uses 6h Donchian channel breakouts (20-period) for entry signals
-# Trend filter: 1d ADX > 25 to ensure we only trade in trending markets
-# Volume confirmation: 2.0x 20-period average volume on breakout bar
-# Works in both bull and bear markets by trading breakouts in the direction of the 1d trend
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Hypothesis: 12h Williams Fractal Breakout with 1w EMA34 Trend Filter and Volume Confirmation
+# Uses weekly Williams Fractals to identify potential reversal points
+# Entry logic: Bullish fractal break above weekly high with volume spike in uptrend (price > 1w EMA34) for long
+#              Bearish fractal break below weekly low with volume spike in downtrend (price < 1w EMA34) for short
+# Works in both bull and bear markets by trading with the 1w trend
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Discrete sizing 0.25 balances profit potential and fee drag
 
-name = "6h_Donchian20_Breakout_1dADX_Volume"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1wEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +25,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_period = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Calculate 1d ADX for trend filter (min_periods=14 for ADX calculation)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate True Range (TR)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Calculate weekly Williams Fractals
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Directional Movement (+DM and -DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
+    from mtf_data import compute_williams_fractals
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1w, low_1w)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Williams Fractals need 2 extra 1w bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current_value) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Weekly high and low from fractal points
+    weekly_high = np.full(len(high_1w), np.nan)
+    weekly_low = np.full(len(low_1w), np.nan)
     
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    # For bullish fractal (low point), weekly low is the fractal low
+    for i in range(len(bullish_fractal)):
+        if not np.isnan(bullish_fractal[i]):
+            weekly_low[i] = bullish_fractal[i]
     
-    # Calculate DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
-                  0.0)
-    adx = wilders_smoothing(dx, 14)
+    # For bearish fractal (high point), weekly high is the fractal high
+    for i in range(len(bearish_fractal)):
+        if not np.isnan(bearish_fractal[i]):
+            weekly_high[i] = bearish_fractal[i]
     
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align weekly high/low to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
     # Volume confirmation: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,15 +90,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Break above upper channel AND ADX > 25 (trending) AND volume spike
-            if (close[i] > upper_channel[i] and 
-                adx_aligned[i] > 25 and 
+            # Long entry: Break above weekly high AND price > 1w EMA34 (uptrend) AND volume spike
+            if (close[i] > weekly_high_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Break below lower channel AND ADX > 25 (trending) AND volume spike
-            elif (close[i] < lower_channel[i] and 
-                  adx_aligned[i] > 25 and 
+            # Short entry: Break below weekly low AND price < 1w EMA34 (downtrend) AND volume spike
+            elif (close[i] < weekly_low_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -121,18 +106,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close below lower channel (breakdown) OR ADX < 20 (trend weakening)
-            if (close[i] < lower_channel[i] or 
-                adx_aligned[i] < 20):
+            # Exit: Close below 1w EMA34 (trend change) OR break below weekly low (reversal)
+            if (close[i] < ema_34_1w_aligned[i] or 
+                close[i] < weekly_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close above upper channel (breakout) OR ADX < 20 (trend weakening)
-            if (close[i] > upper_channel[i] or 
-                adx_aligned[i] < 20):
+            # Exit: Close above 1w EMA34 (trend change) OR break above weekly high (reversal)
+            if (close[i] > ema_34_1w_aligned[i] or 
+                close[i] > weekly_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
