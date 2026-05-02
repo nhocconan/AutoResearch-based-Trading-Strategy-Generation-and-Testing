@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h primary timeframe for optimal trade frequency (target: 12-37 trades/year)
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend entries
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 4h primary timeframe for optimal trade frequency (target: 19-50 trades/year)
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend entries
 # Camarilla R3/S3 levels from 1d provide clear breakout levels based on prior day's action
 # Volume spike (>2.0 * 20-period EMA) confirms strong institutional participation
+# Novelty: Using 1d HTF trend filter (proven in session best) balances responsiveness with stability
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
+# Works in bull markets via breakout continuation and bear markets via mean reversion at extremes
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,15 +41,17 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + camarilla_range * 1.1 / 4
     camarilla_s3 = close_1d - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 1d EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (12h * 2 = ~24 periods)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (4h)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
