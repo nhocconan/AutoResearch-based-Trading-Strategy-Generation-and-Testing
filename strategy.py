@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Camarilla levels derived from prior 1d range provide institutional support/resistance
-# Breakout of R3 (short) or S3 (long) with volume > 2x average and 1d trend alignment
-# Works in bull/bear by capturing institutional breakouts with volume confirmation
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
+# Hypothesis: 4h Williams Alligator with 12h EMA50 trend filter and volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend absence when lines intertwine
+# Trade when price breaks above/below Alligator with alignment to 12h EMA50 trend and volume spike
+# Works in ranging markets by capturing breakouts from consolidation and in trends by filtering counter-trend
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,75 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot calculation (prior day's range)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Williams Alligator on 4h
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Camarilla levels: based on prior 1d range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    rang = high_1d - low_1d
-    camarilla_s3 = close_1d - 1.1 * rang  # S3 level
-    camarilla_r3 = close_1d + 1.1 * rang   # R3 level
-    
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 2.0x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50  # Need enough data for EMA50 and volume MA
+    start_idx = 60  # Need enough data for Alligator lines
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Alligator lines intertwined (no trend) when jaws < teeth < lips or reverse
+        alligator_entwined = (jaw[i] < teeth[i] < lips[i]) or (jaw[i] > teeth[i] > lips[i])
+        
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above S3 with bullish 1d trend and volume spike
-            if (close[i] > camarilla_s3_aligned[i] and 
-                close[i-1] <= camarilla_s3_aligned[i-1] and  # Just broke above
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: Price breaks above Alligator with bullish 12h trend and volume spike
+            if (close[i] > lips[i] and close[i-1] <= lips[i-1] and  # Just broke above lips
+                close[i] > ema_50_12h_aligned[i] and               # Above 12h EMA50 (bullish trend)
+                volume_spike[i] and                              # Volume confirmation
+                alligator_entwined):                             # Only trade after consolidation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R3 with bearish 1d trend and volume spike
-            elif (close[i] < camarilla_r3_aligned[i] and 
-                  close[i-1] >= camarilla_r3_aligned[i-1] and  # Just broke below
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Price breaks below Alligator with bearish 12h trend and volume spike
+            elif (close[i] < jaw[i] and close[i-1] >= jaw[i-1] and  # Just broke below jaw
+                  close[i] < ema_50_12h_aligned[i] and              # Below 12h EMA50 (bearish trend)
+                  volume_spike[i] and                               # Volume confirmation
+                  alligator_entwined):                              # Only trade after consolidation
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price closes below S3 OR trend turns bearish
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Price re-enters Alligator (teeth) OR 12h trend turns bearish
+            if close[i] < teeth[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price closes above R3 OR trend turns bullish
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Price re-enters Alligator (teeth) OR 12h trend turns bullish
+            if close[i] > teeth[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
