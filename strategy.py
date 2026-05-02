@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+# Hypothesis: 12h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
 # Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 # Donchian channels provide clear breakout levels with proven structure
 # 1d weekly pivot determines longer-term bias: long when price > weekly pivot, short when price < weekly pivot
@@ -11,8 +11,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Works in bull markets via breakouts with trend alignment and bear markets via fade of false breakouts
 # Discrete position sizing: 0.25 (25% of capital) balances exposure and risk
 
-name = "6h_Donchian20_1dWeeklyPivot_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dWeeklyPivot_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,18 +45,18 @@ def generate_signals(prices):
         weekly_r1 = 2 * weekly_pivot - week_low
         weekly_s1 = 2 * weekly_pivot - week_high
         
-        # Align to 6h timeframe (wait for completed 1d bar)
+        # Align to 12h timeframe (wait for completed 1d bar)
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
         weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
         weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     else:
         return np.zeros(n)
     
-    # Calculate 6h Donchian(20) channels (prior completed 6h bar's range)
+    # Calculate 12h Donchian(20) channels (prior completed 12h bar's range)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 6h volume spike (1.5x 20-period average)
+    # Calculate 12h volume spike (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 1.5)
     
