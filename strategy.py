@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (1.8x 20-period average)
-# Donchian breakouts capture strong momentum moves. 1d EMA34 ensures alignment with higher timeframe trend.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike (2.5x 20-period average)
+# Donchian breakouts capture strong momentum moves. 1d EMA34 ensures alignment with daily trend.
 # Volume confirmation filters false breakouts. Works in both bull/bear markets by only taking breakouts
-# aligned with 1d EMA34 trend. Discrete sizing 0.25 targets ~50-150 total trades over 4 years (12-37/year).
+# aligned with 1d EMA34 trend. Discrete sizing 0.25 targets ~75-150 trades over 4 years (19-38/year).
 
-name = "12h_Donchian20_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,13 +31,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 12h
+    # Calculate Donchian channels (20-period) on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation (1.8x 20-period average)
+    # Volume confirmation (2.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
