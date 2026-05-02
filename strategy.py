@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses 1w HTF for EMA50 to capture weekly trend and reduce false breakouts in bear markets.
-# Donchian breakout provides proven structure for capturing strong moves.
-# Volume confirmation at 1.8x average ensures strong participation while limiting trades.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses 1w HTF for EMA50 to capture weekly trend and reduce false breakouts.
+# Donchian(20) from 1d provides proven price channel structure for breakouts.
+# Volume confirmation at 1.8x average ensures strong participation while limiting trades (~12-37/year target).
 # Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
 # Discrete sizing 0.25 to minimize fee churn. Works in bull/bear: trend filter ensures trades only with momentum.
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
-name = "4h_Donchian20_Breakout_1wEMA50_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,18 +30,19 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Donchian(20) upper and lower bands from prior completed 4h bar
-    # For 4h timeframe, we need to use the prior completed 4h bar's OHLC
-    if len(prices) < 21:
+    # Calculate Donchian levels from 1d timeframe (using prior completed 1d bar)
+    # For 12h timeframe, we need to use the prior completed 1d bar's OHLC
+    if len(prices) < 2:
         return np.zeros(n)
     
-    # Get prior completed 4h bar's high/low (shift by 1 for 4h timeframe)
-    prev_high = prices['high'].shift(1).values
-    prev_low = prices['low'].shift(1).values
+    # Get prior completed 1d bar's OHLC (shift by 2 for 12h timeframe: 24h/12h=2)
+    prev_high_1d = prices['high'].shift(2).values
+    prev_low_1d = prices['low'].shift(2).values
+    prev_close_1d = prices['close'].shift(2).values
     
-    # Donchian(20) upper and lower bands (proven breakout levels)
-    donchian_upper = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) upper and lower bands from 1d timeframe
+    donchian_upper = pd.Series(prev_high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(prev_low_1d).rolling(window=20, min_periods=20).min().values
     
     # 1w EMA50 for trend filter (weekly trend)
     df_1w = get_htf_data(prices, '1w')
