@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Reversal with 1d EMA34 trend filter and volume spike confirmation
-# Uses 4h timeframe for signal generation with Williams %R (momentum oscillator) 
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
+# Hypothesis: 6h Williams %R Reversal with 1d EMA34 trend filter and volume spike confirmation
+# Uses 6h timeframe for signal generation with Williams %R (14-period) to identify overbought/oversold conditions
+# 1d EMA34 provides higher timeframe trend filter to ensure trades align with daily trend
 # Volume confirmation (2.0x 20-period average) ensures institutional participation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries
 # Discrete position sizing (0.25) balances return and risk
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Williams %R effective in ranging markets (2025+ bearish bias) with trend filter to avoid false signals
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
+# Williams %R is effective at identifying reversal points in both trending and ranging markets
+# Trend filter prevents counter-trend trades, volume spike confirms validity of reversal
 
-name = "4h_WilliamsR_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,14 +36,11 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R on 4h data (primary timeframe)
+    # Calculate Williams %R on 6h data (primary timeframe)
     # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # We'll use 14-period lookback
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Replace division by zero with -50 (neutral)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
