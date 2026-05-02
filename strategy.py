@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses 4h timeframe for signal direction (trend filter) and 1d for regime filter (chop < 61.8 = trending)
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d Chop regime filter
+# Uses 4h for trend direction (price > EMA50 = bullish bias, < EMA50 = bearish bias)
+# Uses 1d Chop < 61.8 to avoid ranging markets where breakouts fail
 # 1h only for precise entry timing via Camarilla R3/S3 breakouts
-# Volume confirmation (2.0x 24-period average on 1h) ensures institutional participation
+# Volume confirmation (2.0x 24-period average) ensures institutional participation
 # Session filter (08-20 UTC) reduces noise trades outside active hours
+# Position size fixed at 0.20 to manage drawdown and minimize fee churn
 # Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
-# Works in bull markets via trend-aligned breakouts, in bear via chop regime filter avoiding false signals
-# Designed for low trade frequency to minimize fee drag (critical for 1h timeframe)
+# Designed for low trade frequency to overcome fee drag (critical for 1h timeframe)
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dChop_Trend_Volume_v1"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dChop_Trend_Volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -72,8 +73,6 @@ def generate_signals(prices):
     rng = high - low
     camarilla_h4 = typical_price + 1.1 * rng / 2.0  # R3
     camarilla_l4 = typical_price - 1.1 * rng / 2.0  # S3
-    camarilla_h3 = typical_price + 1.1 * rng / 4.0  # R2
-    camarilla_l3 = typical_price - 1.1 * rng / 4.0  # S2
     camarilla_h2 = typical_price + 1.1 * rng / 6.0  # R1
     camarilla_l2 = typical_price - 1.1 * rng / 6.0  # S1
     
