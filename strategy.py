@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Uses Ichimoku components from 1d for trend direction and cloud filter
-# Tenkan/Kijun cross from 6h for entry timing with 1d cloud as support/resistance
-# Volume spike (2.0x 20-period average) ensures participation
-# Only takes signals aligned with 1d cloud direction (price above/below cloud)
+# Hypothesis: 12h Williams Fractal breakout with 1w trend filter and volume confirmation
+# Uses 1w EMA(34) for primary trend direction to avoid counter-trend whipsaws
+# Williams Fractals from 1d for precise swing high/low breakout signals
+# Volume spike (2.0x 20-period average) ensures participation and reduces false breakouts
+# Only takes breakouts in the direction of the 1w trend for higher probability trades
 # Discrete position sizing 0.25 balances risk and minimizes fee churn
 # Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# Ichimoku provides multiple confirmation layers reducing false signals in sideways markets
+# Williams Fractals work in both bull and bear markets by identifying key reversal points
+# 1w trend filter provides strong directional bias suitable for 12h timeframe
 
-name = "6h_Ichimoku_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsFractal_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,93 +27,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Ichimoku components
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate 1d Ichimoku components
+    # Load 1d data ONCE before loop for Williams Fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Williams Fractals from 1d data
+    from mtf_data import compute_williams_fractals
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Williams Fractals need 2 extra bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2.0)
-    
-    # Align 1d Ichimoku components to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Calculate 6h Tenkan/Kijun cross for entry timing
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen_6h = (period9_high_6h + period9_low_6h) / 2.0
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen_6h = (period26_high_6h + period26_low_6h) / 2.0
-    
-    # Calculate 6h volume confirmation (2.0x 20-period average)
+    # Calculate 12h volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Ichimoku calculations)
-    start_idx = 60  # max(26 for base line, 52 for span B) + buffer
+    # Start after warmup (need enough for Williams Fractals, EMA and volume MA)
+    start_idx = 70  # max(20 for volume, 34 for EMA, 5 for fractals) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries and trend
-        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
-        
-        # Tenkan/Kijun cross signals
-        tk_cross_up = tenkan_sen_6h[i] > kijun_sen_6h[i] and tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1]
-        tk_cross_down = tenkan_sen_6h[i] < kijun_sen_6h[i] and tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1]
-        
-        # 1d trend from Ichimoku: price relative to cloud
-        uptrend_1d = price_above_cloud
-        downtrend_1d = price_below_cloud
+        # Determine trend direction from 1w EMA
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: TK cross up AND price above 1d cloud AND volume confirm
-            if (tk_cross_up and 
-                uptrend_1d and 
+            # Long: price breaks above bullish fractal AND uptrend AND volume confirm
+            if (close[i] > bullish_fractal_aligned[i] and 
+                uptrend and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross down AND price below 1d cloud AND volume confirm
-            elif (tk_cross_down and 
-                  downtrend_1d and 
+            # Short: price breaks below bearish fractal AND downtrend AND volume confirm
+            elif (close[i] < bearish_fractal_aligned[i] and 
+                  downtrend and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
@@ -120,18 +89,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: TK cross down OR price breaks below 1d cloud
-            if (tk_cross_down or 
-                not uptrend_1d):  # exited if price closes below 1d cloud
+            # Exit: price breaks below bearish fractal OR trend reverses to downtrend
+            if (close[i] < bearish_fractal_aligned[i] or 
+                not uptrend):  # exited if price closes below 1w EMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: TK cross up OR price breaks above 1d cloud
-            if (tk_cross_up or 
-                not downtrend_1d):  # exited if price closes above 1d cloud
+            # Exit: price breaks above bullish fractal OR trend reverses to uptrend
+            if (close[i] > bullish_fractal_aligned[i] or 
+                not downtrend):  # exited if price closes above 1w EMA
                 signals[i] = 0.0
                 position = 0
             else:
