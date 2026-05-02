@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d Elder Ray (Bull/Bear Power) trend filter + volume confirmation
-# Uses 6h primary timeframe for Williams %R oversold/overbought signals (mean reversion)
-# 1d Elder Ray confirms trend direction: Bull Power > 0 for longs, Bear Power < 0 for shorts
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1d HMA(21) trend + volume confirmation
+# Uses 12h primary timeframe for Camarilla pivot breakout signals (R3/S3 levels)
+# 1d HMA(21) confirms medium-term trend direction (avoids counter-trend trades)
 # Volume confirmation (2.0x 20-period average) ensures strong participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Williams %R captures short-term exhaustion, Elder Ray filters by higher-timeframe trend, volume confirms conviction
-# Works in both bull and bear markets by only trading mean reversion in direction of 1d trend
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla provides precise support/resistance, HMA adds trend filter, volume confirms conviction
+# Works in both bull and bear markets by only trading in direction of 1d trend
 
-name = "6h_WilliamsR_1dElderRay_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dHMA21_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +27,36 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_ = prices['open'].values
     
-    # Get 1d data for Elder Ray trend filter
+    # Get 1d data for HMA trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate 1d Elder Ray (Bull Power and Bear Power)
-    # Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    # Calculate 1d HMA(21)
     close_1d = pd.Series(df_1d['close'])
-    high_1d = pd.Series(df_1d['high'])
-    low_1d = pd.Series(df_1d['low'])
-    ema_13 = close_1d.ewm(span=13, adjust=False, min_periods=13).mean()
-    bull_power = (high_1d - ema_13).values
-    bear_power = (low_1d - ema_13).values
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # Calculate 6h Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max()
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min()
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
+    wma_half = close_1d.rolling(window=half_length, min_periods=half_length).mean()
+    wma_full = close_1d.rolling(window=21, min_periods=21).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma_1d = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    
+    # Calculate 1d Camarilla levels (using previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # We use previous day's data to avoid look-ahead
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -63,40 +70,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(hma_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Williams %R oversold (< -80) for longs, overbought (> -20) for shorts
-            williams_long = williams_r[i] < -80
-            williams_short = williams_r[i] > -20
+            # Camarilla breakout long: price > R3
+            # Camarilla breakout short: price < S3
+            breakout_long = close[i] > camarilla_r3_aligned[i]
+            breakout_short = close[i] < camarilla_s3_aligned[i]
             
-            # 1d Elder Ray trend filter: Bull Power > 0 for longs, Bear Power < 0 for shorts
-            elder_long = bull_power_aligned[i] > 0
-            elder_short = bear_power_aligned[i] < 0
+            # 1d HMA trend filter: price > HMA for longs, price < HMA for shorts
+            hma_long = close[i] > hma_1d_aligned[i]
+            hma_short = close[i] < hma_1d_aligned[i]
             
-            if williams_long and elder_long and volume_spike[i]:
+            if breakout_long and hma_long and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif williams_short and elder_short and volume_spike[i]:
+            elif breakout_short and hma_short and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (mean reversion complete) or Elder Ray turns negative
-            if williams_r[i] > -50 or bull_power_aligned[i] <= 0:
+            # Exit: Camarilla breakdown (price < S3) or trend reversal
+            if close[i] < camarilla_s3_aligned[i] or close[i] < hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (mean reversion complete) or Elder Ray turns positive
-            if williams_r[i] < -50 or bear_power_aligned[i] >= 0:
+            # Exit: Camarilla breakout (price > R3) or trend reversal
+            if close[i] > camarilla_r3_aligned[i] or close[i] > hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
