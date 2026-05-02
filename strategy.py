@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + choppiness regime filter
-# Long: price breaks above Donchian upper channel + volume spike + chop > 61.8 (range) for mean reversion
-# Short: price breaks below Donchian lower channel + volume spike + chop > 61.8 (range) for mean reversion
-# Uses discrete sizing 0.25 to balance profit and fee drag. Target: 20-50 trades/year.
-# Works in both bull and bear markets by fading breakouts in ranging regimes (chop > 61.8)
+# Hypothesis: 1d Williams %R Extreme with 1w EMA34 trend filter and volume confirmation
+# Uses Williams %R to identify overbought/oversold conditions (long when %R < -80, short when %R > -20)
+# 1w EMA34 ensures alignment with weekly trend to reduce counter-trend signals
+# Volume confirmation at 1.5x average filters low-participation moves
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Discrete sizing 0.25 balances profit potential and fee drag
+# Works in both bull and bear markets by combining trend filter with momentum extremes
 
-name = "4h_Donchian20_Breakout_Volume_Chop"
-timeframe = "4h"
+name = "1d_WilliamsR_Extreme_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,73 +25,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Volume confirmation: 2.0x 20-period average
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Volume confirmation: 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Choppiness Index (14-period) - range detection
-    def choppiness_index(high, low, close, window=14):
-        atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1))))
-        atr[0] = high[0] - low[0]  # first ATR
-        atr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        
-        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        highest_lowest_diff = highest_high - lowest_low
-        
-        chop = np.where(
-            (highest_lowest_diff != 0) & (atr_sum != 0),
-            100 * np.log10(atr_sum / highest_lowest_diff) / np.log10(window),
-            50.0
-        )
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
-    chop_range = chop > 61.8  # ranging market (mean reversion regime)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above upper Donchian + volume spike + ranging market
-            if (close[i] > high_ma[i] and 
-                volume_spike[i] and 
-                chop_range[i]):
+            # Long entry: Williams %R < -80 (oversold) AND price > 1w EMA34 (uptrend) AND volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower Donchian + volume spike + ranging market
-            elif (close[i] < low_ma[i] and 
-                  volume_spike[i] and 
-                  chop_range[i]):
+            # Short entry: Williams %R > -20 (overbought) AND price < 1w EMA34 (downtrend) AND volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below lower Donchian (mean reversion) OR chop exits ranging regime
-            if close[i] < low_ma[i] or not chop_range[i]:
+            # Exit: Williams %R >= -50 (recovering from oversold) OR price < 1w EMA34 (trend change)
+            if williams_r[i] >= -50 or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian (mean reversion) OR chop exits ranging regime
-            if close[i] > high_ma[i] or not chop_range[i]:
+            # Exit: Williams %R <= -50 (declining from overbought) OR price > 1w EMA34 (trend change)
+            if williams_r[i] <= -50 or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
