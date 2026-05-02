@@ -3,99 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Williams %R Regime Filter
-# Combines Elder Ray (bull/bear power) for momentum strength with Williams %R for overbought/oversold extremes
-# Uses 6h timeframe to balance responsiveness and noise reduction
-# 1d Williams %R acts as regime filter: only take Elder Ray signals when not in extreme territory
-# This avoids buying strength in overbought conditions or selling weakness in oversold conditions
-# Works in both bull and bear markets by focusing on momentum extremes within non-extreme regimes
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Uses 12h timeframe to capture medium-term moves with low trade frequency
+# Camarilla R3/S3 levels act as strong support/resistance from 1d OHLC
+# 1d EMA34 ensures trend alignment to avoid counter-trend trades
+# Volume spike confirms breakout authenticity
+# Works in both bull and bear markets via trend-following logic
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Discrete position sizing: 0.25 (25% of capital) for balanced risk exposure
+# Discrete position sizing: 0.25 (25% of capital) balances exposure and risk
 
-name = "6h_ElderRay_WilliamsR_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 13-period EMA for Elder Ray (standard setting)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Measures bullish strength (high vs EMA)
-    bear_power = low - ema13   # Measures bearish strength (low vs EMA)
-    
-    # Calculate 1d Williams %R for regime filter (14-period standard)
+    # Calculate 1d OHLC for Camarilla levels (from previous 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Previous 1d bar's OHLC (shifted by 1 to avoid look-ahead)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate Camarilla levels: R3, S3, R4, S4
+    # R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    hl_range = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * hl_range / 2
+    camarilla_s3 = close_1d - 1.1 * hl_range / 2
+    camarilla_r4 = close_1d + 1.1 * hl_range
+    camarilla_s4 = close_1d - 1.1 * hl_range
     
-    # Align HTF indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate 12h volume average (20-period) for volume confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(13, 14)
+    # Start after warmup (need enough data for all indicators)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        # Check for NaN values
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(williams_r_aligned[i])):
+        # Check for NaN values in indicators
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R regime: avoid extremes (> -20 = overbought, < -80 = oversold)
-        # Only trade when -80 <= Williams %R <= -20 (non-extreme territory)
-        in_regime = (williams_r_aligned[i] >= -80) and (williams_r_aligned[i] <= -20)
-        
         if position == 0:  # Flat - look for new entries
-            # Long entry: strong bull power (buying conviction) AND in non-extreme regime
-            if (bull_power_aligned[i] > 0 and 
-                bull_power_aligned[i] > abs(bear_power_aligned[i]) and 
-                in_regime):
+            # Long entry: price breaks above Camarilla R3 AND price > 1d EMA34 (bullish trend) AND volume > 1.5x average
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: strong bear power (selling conviction) AND in non-extreme regime
-            elif (bear_power_aligned[i] < 0 and 
-                  abs(bear_power_aligned[i]) > bull_power_aligned[i] and 
-                  in_regime):
+            # Short entry: price breaks below Camarilla S3 AND price < 1d EMA34 (bearish trend) AND volume > 1.5x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: bear power exceeds bull power (momentum shift) OR Williams %R enters extreme
-            if (bear_power_aligned[i] > bull_power_aligned[i]) or (williams_r_aligned[i] < -80):
+            # Exit: price falls below Camarilla S3 OR below 1d EMA34 (trend change)
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: bull power exceeds bear power (momentum shift) OR Williams %R enters extreme
-            if (bull_power_aligned[i] > abs(bear_power_aligned[i])) or (williams_r_aligned[i] > -20):
+            # Exit: price rises above Camarilla R3 OR above 1d EMA34 (trend change)
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
