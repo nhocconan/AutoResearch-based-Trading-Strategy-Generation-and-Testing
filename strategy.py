@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 4h timeframe for signal generation with Donchian channel breakouts
+# Hypothesis: 4h Donchian channel breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 4h timeframe for signal generation with Donchian(20) breakouts
 # 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (1.8x 20-period average) ensures institutional participation
+# Volume confirmation (1.5x 20-period average) ensures institutional participation
 # Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
-# Discrete position sizing (0.30) balances return and drawdown
+# Discrete position sizing (0.25) minimizes fee churn
 # Target: 100-180 total trades over 4 years = 25-45/year for 4h timeframe
 # Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
 # Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
@@ -44,12 +44,12 @@ def generate_signals(prices):
     # Calculate 1d Chopiness Index (14) - trending when < 38.2, ranging when > 61.8
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d_arr[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d_arr[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR14
@@ -65,9 +65,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation (1.8x 20-period average)
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -96,11 +96,11 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above Donchian upper band + price > 1d EMA34 + volume confirm
             if close[i] > highest_high[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below Donchian lower band + price < 1d EMA34 + volume confirm
             elif close[i] < lowest_low[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -111,7 +111,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Exit: Price breaks above Donchian upper band or reverse signal
@@ -119,6 +119,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
