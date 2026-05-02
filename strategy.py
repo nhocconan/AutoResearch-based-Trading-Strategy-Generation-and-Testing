@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal potential reversals
-# Combined with 1d EMA50 trend filter to ensure trades align with higher timeframe direction
-# Volume confirmation (2.0x 24-bar MA) ensures institutional participation
-# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe
-# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter
+# Uses discrete sizing (0.25) to minimize fee drag while capturing institutional breakouts
+# Volume spike (2.0x 24-bar MA) confirms participation
+# Trend filter ensures alignment with higher timeframe direction
+# Designed for 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+# Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes)
 
-name = "12h_WilliamsR_Extreme_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 14-period Williams %R on 12h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian(20) channels on 4h data
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 2.0x 24-period average (2x for 12h = ~1 day)
+    # Volume confirmation: 2.0x 24-period average (~1 day for 4h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -50,25 +49,25 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = max(50, lookback, 24)  # EMA50, Williams %R, and volume MA warmup
+    start_idx = 50  # EMA50 warmup
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -90 (oversold) AND price > 1d EMA50 (uptrend bias) AND volume spike
-            if (williams_r[i] < -90 and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long entry: Price breaks above Donchian upper AND price > 12h EMA50 (uptrend bias) AND volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R > -10 (overbought) AND price < 1d EMA50 (downtrend bias) AND volume spike
-            elif (williams_r[i] > -10 and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short entry: Price breaks below Donchian lower AND price < 12h EMA50 (downtrend bias) AND volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -76,16 +75,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R > -50 (return to neutral) OR price below 1d EMA50 (trend failure)
-            if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Price breaks below Donchian lower OR price below 12h EMA50 (trend failure)
+            if close[i] < donchian_lower[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R < -50 (return to neutral) OR price above 1d EMA50 (trend failure)
-            if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Price breaks above Donchian upper OR price above 12h EMA50 (trend failure)
+            if close[i] > donchian_upper[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
