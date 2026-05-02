@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 1d Williams Fractal breakout with 1w EMA50 trend filter and volume confirmation
 # Uses Williams Fractals (lagging indicator requiring 2-bar confirmation) for high-probability reversal/continuation signals.
-# 1d EMA34 ensures trades only with longer-term trend, reducing false breakouts in choppy markets.
+# 1w EMA50 ensures trades only with longer-term trend, reducing false breakouts in choppy markets.
 # Volume confirmation at 2.0x average filters low-participation moves.
 # Session filter (08-20 UTC) avoids low-liquidity periods.
-# Discrete sizing 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+# Discrete sizing 0.25 to minimize fee churn. Target: 30-100 total trades over 4 years (7-25/year).
 # Williams Fractals provide structural support/resistance levels that work in both bull and bear markets.
-# Adding 1d EMA34 as HTF filter should improve BTC/ETH performance vs 1w EMA50 alone.
+# Adding 1w EMA50 as HTF filter should improve BTC/ETH performance vs shorter-term EMAs alone.
 
-name = "4h_WilliamsFractal_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_WilliamsFractal_Breakout_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,14 +44,14 @@ def generate_signals(prices):
     # Bullish fractal: current low is lowest of previous 2, current, and next 2
     bullish_fractal = (low_series.rolling(window=5, center=True, min_periods=5).min() == low_series).values
     
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: 2.0x 20-period average (stricter threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,21 +70,21 @@ def generate_signals(prices):
             continue
         
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
             i >= len(bearish_fractal) or i >= len(bullish_fractal)):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish fractal confirmed AND price > 1d EMA34 AND volume spike
+            # Long: Bullish fractal confirmed AND price > 1w EMA50 AND volume spike
             if (bullish_fractal[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish fractal confirmed AND price < 1d EMA34 AND volume spike
+            # Short: Bearish fractal confirmed AND price < 1w EMA50 AND volume spike
             elif (bearish_fractal[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -92,16 +92,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price drops below 1d EMA34 OR bearish fractal forms
-            if close[i] < ema_34_1d_aligned[i] or bearish_fractal[i]:
+            # Exit: Price drops below 1w EMA50 OR bearish fractal forms
+            if close[i] < ema_50_1w_aligned[i] or bearish_fractal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price rises above 1d EMA34 OR bullish fractal forms
-            if close[i] > ema_34_1d_aligned[i] or bullish_fractal[i]:
+            # Exit: Price rises above 1w EMA50 OR bullish fractal forms
+            if close[i] > ema_50_1w_aligned[i] or bullish_fractal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
