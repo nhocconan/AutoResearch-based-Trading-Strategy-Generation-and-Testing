@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h session-filtered strategy using 4h Donchian breakout for direction and 1d volume spike for confirmation
-# Works in bull markets: breakout above 4h upper band + 1d volume spike + uptrend bias (price > 4h EMA20)
-# Works in bear markets: breakout below 4h lower band + 1d volume spike + downtrend bias (price < 4h EMA20)
-# Session filter (08-20 UTC) reduces noise trades. Discrete sizing (0.20) controls fee drag.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years) to avoid fee drag kill zone.
+# Hypothesis: 6h Williams Alligator + Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter
+# Williams Alligator identifies trend presence (jaws/teeth/lips alignment) to avoid choppy markets
+# Elder Ray measures bull/bear power via EMA13 relative to high/low for entry timing
+# 1d EMA50 ensures alignment with higher timeframe trend for multi-timeframe confluence
+# Designed for 6h timeframe targeting 12-37 trades/year (50-150 total over 4 years)
+# Uses discrete position sizing (0.25) to minimize fee churn and control drawdown
+# Works in bull markets (bull power > 0 + alligator aligned up + price > 1d EMA50)
+# Works in bear markets (bear power > 0 + alligator aligned down + price < 1d EMA50)
 
-name = "1h_Session_Filtered_4hDonchian_1dVolSpike"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1dEMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,91 +21,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex from parquet
-    in_session = (hours >= 8) & (hours <= 20)
-    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h data for Donchian channels and EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:  # Need enough for Donchian(20) and EMA(20)
-        return np.zeros(n)
-    
-    # 4h Donchian channels (20-period)
-    highest_20_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_20_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
-    # 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align 4h indicators to 1h timeframe (waits for completed 4h bar)
-    highest_20_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_20_4h)
-    lowest_20_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_20_4h)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # 1d data for volume spike confirmation
+    # 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    # 1d volume EMA20 for spike detection
-    vol_ema_20_1d = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Volume spike: current 1d volume > 2.0 * 20-period EMA
-    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_ema_20_1d)
-    # Align volume spike to 1h timeframe (waits for completed 1d candle)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    # 1d EMA50 calculation
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Williams Alligator (6h timeframe)
+    # Jaw: 13-period SMMA shifted 8 bars ahead
+    # Teeth: 8-period SMMA shifted 5 bars ahead  
+    # Lips: 5-period SMMA shifted 3 bars ahead
+    # Using EMA as proxy for SMMA (standard practice) with proper alignment
+    close_series = pd.Series(close)
+    jaw = close_series.ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
+    teeth = close_series.ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
+    lips = close_series.ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
+    
+    # Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Skip if any indicator is NaN (not enough data yet)
-        if (np.isnan(highest_20_4h_aligned[i]) or np.isnan(lowest_20_4h_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 4h EMA20
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
+        # Determine Alligator alignment
+        # Uptrend: Lips > Teeth > Jaw (alligator mouth opening up)
+        # Downtrend: Jaw > Teeth > Lips (alligator mouth opening down)
+        alligator_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_down = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        
+        # Determine trend bias from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above 4h upper Donchian band + volume spike + uptrend
-            if high[i] > highest_20_4h_aligned[i-1] and volume_spike_1d_aligned[i] and uptrend:
-                signals[i] = 0.20
+            # Long: Bull power positive + alligator aligned up + price above 1d EMA50
+            if bull_power[i] > 0 and alligator_up and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: Breakout below 4h lower Donchian band + volume spike + downtrend
-            elif low[i] < lowest_20_4h_aligned[i-1] and volume_spike_1d_aligned[i] and downtrend:
-                signals[i] = -0.20
+            # Short: Bear power positive + alligator aligned down + price below 1d EMA50
+            elif bear_power[i] > 0 and alligator_down and downtrend:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below 4h lower Donchian band (reversal) OR trend changes to down
-            if low[i] < lowest_20_4h_aligned[i-1] or not uptrend:
+            # Exit: Bear power becomes positive OR alligator alignment breaks down OR trend changes
+            if bear_power[i] > 0 or not alligator_up or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above 4h upper Donchian band (reversal) OR trend changes to up
-            if high[i] > highest_20_4h_aligned[i-1] or not downtrend:
+            # Exit: Bull power becomes positive OR alligator alignment breaks up OR trend changes
+            if bull_power[i] > 0 or not alligator_down or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
