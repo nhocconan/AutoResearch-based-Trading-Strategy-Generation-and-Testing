@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band %B + 1d ADX regime filter + volume confirmation
-# Bollinger %B measures price position within bands: %B = (price - lower) / (upper - lower)
-# %B < 0 = oversold (long signal), %B > 1 = overbought (short signal)
-# 1d ADX > 25 indicates trending market (fade extremes less), ADX < 20 indicates ranging (fade extremes more)
-# Volume confirmation (1.5x 20-period average) ensures participation
+# Hypothesis: 12h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
+# Donchian breakout captures momentum in trending markets, fades in ranging markets
+# 1d ADX > 25 = trending (trade breakouts), ADX < 20 = ranging (fade breakouts)
+# Volume confirmation (1.5x 20-period average) ensures institutional participation
 # Discrete position sizing 0.25 balances risk and minimizes fee churn
 # Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 # Works in both bull and bear markets by adapting to regime via ADX
+# Uses 1d for HTF regime and Donchian channels for stability
 
-name = "6h_BBpercentB_1dADXRegime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADXRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,24 +26,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX regime and Bollinger Bands
+    # Load 1d data ONCE before loop for ADX regime and Donchian calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    bb_len = 20
-    bb_mult = 2.0
-    basis = pd.Series(df_1d['close']).rolling(window=bb_len, min_periods=bb_len).mean().values
-    dev = bb_mult * pd.Series(df_1d['close']).rolling(window=bb_len, min_periods=bb_len).std().values
-    upper = basis + dev
-    lower = basis - dev
-    
-    # Calculate 1d Bollinger %B: %B = (close - lower) / (upper - lower)
-    # Avoid division by zero
-    bb_range = upper - lower
-    bb_range_safe = np.where(bb_range == 0, 1e-10, bb_range)
-    percent_b = (df_1d['close'].values - lower) / bb_range_safe
+    # Calculate 1d Donchian(20) channels
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1d ADX for regime filter (trending vs ranging)
     # True Range
@@ -75,24 +65,25 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d indicators to 6h
-    percent_b_aligned = align_htf_to_ltf(prices, df_1d, percent_b)
+    # Align 1d indicators to 12h
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 6h volume confirmation (1.5x 20-period average)
+    # Calculate 12h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Bollinger Bands, ADX and volume MA)
-    start_idx = 50  # max(20 for Bollinger, 34 for ADX) + buffer
+    # Start after warmup (need enough for Donchian, ADX and volume MA)
+    start_idx = 50  # max(20 for Donchian/volume, 34 for ADX) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(percent_b_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
@@ -102,28 +93,32 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             if trending:
-                # In trending market: only trade with stronger signals to avoid whipsaw
-                # Long: %B < -0.2 (deep oversold) AND volume confirmation
-                if (percent_b_aligned[i] < -0.2 and 
+                # In trending market: trade Donchian breakouts
+                # Long: price breaks above upper Donchian channel
+                if (close[i] > high_20_aligned[i] and 
+                    i > start_idx and close[i-1] <= high_20_aligned[i-1] and
                     volume_confirm[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: %B > 1.2 (deep overbought) AND volume confirmation
-                elif (percent_b_aligned[i] > 1.2 and 
+                # Short: price breaks below lower Donchian channel
+                elif (close[i] < low_20_aligned[i] and 
+                      i > start_idx and close[i-1] >= low_20_aligned[i-1] and
                       volume_confirm[i]):
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:  # ranging or transition regime
-                # In ranging market: fade extremes more aggressively
-                # Long: %B < 0 (oversold) AND volume confirmation
-                if (percent_b_aligned[i] < 0 and 
+                # In ranging market: fade Donchian breakouts (mean reversion)
+                # Long: price breaks below lower Donchian then reverses back up
+                if (close[i] > low_20_aligned[i] and 
+                    i > start_idx and close[i-1] <= low_20_aligned[i-1] and
                     volume_confirm[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: %B > 1 (overbought) AND volume confirmation
-                elif (percent_b_aligned[i] > 1 and 
+                # Short: price breaks above upper Donchian then reverses back down
+                elif (close[i] < high_20_aligned[i] and 
+                      i > start_idx and close[i-1] >= high_20_aligned[i-1] and
                       volume_confirm[i]):
                     signals[i] = -0.25
                     position = -1
@@ -134,12 +129,13 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             if trending:
-                # Exit trending long when %B rises above 0.5 (recovering from oversold)
-                if percent_b_aligned[i] > 0.5:
+                # Exit trending long when price returns to middle of channel
+                mid_20 = (high_20_aligned[i] + low_20_aligned[i]) / 2
+                if close[i] <= mid_20:
                     exit_signal = True
             else:
-                # Exit ranging long when %B rises above 0.8 (approaching fair value)
-                if percent_b_aligned[i] > 0.8:
+                # Exit ranging long when price reaches upper Donchian (overbought)
+                if close[i] >= high_20_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -152,12 +148,13 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             if trending:
-                # Exit trending short when %B falls below 0.5 (declining from overbought)
-                if percent_b_aligned[i] < 0.5:
+                # Exit trending short when price returns to middle of channel
+                mid_20 = (high_20_aligned[i] + low_20_aligned[i]) / 2
+                if close[i] >= mid_20:
                     exit_signal = True
             else:
-                # Exit ranging short when %B falls below 0.2 (approaching fair value)
-                if percent_b_aligned[i] < 0.2:
+                # Exit ranging short when price reaches lower Donchian (oversold)
+                if close[i] <= low_20_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
