@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray Power combination with 1d trend filter
-# Williams Alligator (jaw/teeth/lips) identifies trend direction and strength
-# Elder Ray (Bull/Bear Power) measures momentum behind price moves
-# 1d EMA34 filter ensures we only trade in alignment with higher timeframe trend
-# Volume confirmation (>1.5x average) filters weak breakouts
-# Discrete sizing 0.25 to minimize fee churn. Target: 50-150 trades over 4 years.
-# Primary timeframe: 6h, HTF: 1d for EMA34 trend filter
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Uses 1w HTF for Camarilla levels and EMA34 to reduce noise and false breakouts.
+# Volume confirmation at 2.0x average ensures strong institutional participation.
+# Chop regime filter ensures trades only in trending markets, avoiding range-bound losses.
+# Discrete sizing 0.25 to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year).
+# Primary timeframe: 12h, HTF: 1w for Camarilla levels and EMA34.
 
-name = "6h_WilliamsAlligator_ElderRay_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_Breakout_1wEMA34_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,82 +24,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator from 6h data
-    # Jaw: 13-period SMMA shifted 8 bars ahead
-    # Teeth: 8-period SMMA shifted 5 bars ahead  
-    # Lips: 5-period SMMA shifted 3 bars ahead
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Elder Ray Power (1-period EMA)
-    bull_power = high - pd.Series(close).ewm(span=1, adjust=False).mean().values
-    bear_power = low - pd.Series(close).ewm(span=1, adjust=False).mean().values
-    
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Camarilla levels H3 and L3 from 1w timeframe
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Prior 1w bar's high, low, close for Camarilla calculation
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Volume confirmation: 1.5x 20-period average
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: 2.0x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index regime filter (avoid ranging markets)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * np.sqrt(atr_period))) / np.log10(atr_period)
+    chop_regime = chop < 61.8  # True when trending (CHOP < 61.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator signals: Mouth open (teeth above/below lips) indicates trend
-        # Jaw below teeth/lips = uptrend, Jaw above teeth/lips = downtrend
-        alligator_long = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        alligator_short = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        
-        # Elder Ray: Positive bull power = buying pressure, negative bear power = selling pressure
-        elder_long = bull_power[i] > 0
-        elder_short = bear_power[i] < 0
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Alligator uptrend + Elder Ray bull power + price > 1d EMA34 + volume spike
-            if (alligator_long and elder_long and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: Price breaks above H3 AND price > 1w EMA34 AND volume spike AND trending regime
+            if (close[i] > camarilla_h3_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume_spike[i] and 
+                chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator downtrend + Elder Ray bear power + price < 1d EMA34 + volume spike
-            elif (alligator_short and elder_short and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Price breaks below L3 AND price < 1w EMA34 AND volume spike AND trending regime
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume_spike[i] and 
+                  chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator trend reverses OR Elder Ray turns negative OR price < 1d EMA34
-            if (not alligator_long or not elder_long or 
-                close[i] < ema_34_1d_aligned[i]):
+            # Exit: Price drops below L3 OR price < 1w EMA34
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Alligator trend reverses OR Elder Ray turns positive OR price > 1d EMA34
-            if (not alligator_short or not elder_short or 
-                close[i] > ema_34_1d_aligned[i]):
+            # Exit: Price rises above H3 OR price > 1w EMA34
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
