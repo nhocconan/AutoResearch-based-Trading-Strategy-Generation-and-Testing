@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
-# Donchian breakouts capture momentum moves in both bull and bear markets
-# 1d EMA34 ensures we trade with the higher timeframe trend to avoid whipsaws
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
+# Donchian breakout captures momentum in trending markets, works in both bull and bear via direction filter
+# 1d EMA34 ensures we only trade with the higher timeframe trend to avoid whipsaws
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Discrete position sizing (0.25) minimizes fee churn
-# Targets 12-37 trades/year (50-150 total over 4 years) for 12h timeframe
-# Works in bull markets via buying breakouts in uptrend and in bear markets via selling breakdowns in downtrend
+# Targets 20-50 trades/year (75-200 total over 4 years) for 4h timeframe
+# Uses proven structure from top performers: price channel + trend + volume
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,9 +34,9 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Donchian(20) channels on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Donchian Channel(20) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -56,12 +56,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper + 1d close > EMA34 (uptrend) + volume spike
+            # Long: Price breaks above Donchian upper + 1d close > EMA34 (uptrend) + volume spike
             if (close[i] > highest_high[i] and 
                 close[i] > ema_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + 1d close < EMA34 (downtrend) + volume spike
+            # Short: Price breaks below Donchian lower + 1d close < EMA34 (downtrend) + volume spike
             elif (close[i] < lowest_low[i] and 
                   close[i] < ema_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
@@ -70,7 +70,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian lower or 1d trend breaks
+            # Exit: Price breaks below Donchian lower or 1d trend breaks
             if close[i] < lowest_low[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -78,7 +78,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper or 1d trend breaks
+            # Exit: Price breaks above Donchian upper or 1d trend breaks
             if close[i] > highest_high[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
