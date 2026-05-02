@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses 1d HTF for EMA34 to capture long-term trend and reduce false breakouts in bear markets.
-# Camarilla H3/L3 from 12h provides proven reversal/continuation levels with tighter stops.
-# Volume confirmation at 2.5x average ensures strong participation while limiting trades (~12-30/year target).
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
+# Camarilla H3/L3 from 4h provides proven intraday reversal/continuation levels.
+# Volume confirmation at 2.5x average ensures strong participation while limiting trades (~20-50/year target).
 # Discrete sizing 0.25 to balance opportunity and fee drag. Works in bull/bear: trend filter ensures trades only with momentum.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and maximize test generalization.
+# Target: 80-200 total trades over 4 years (20-50/year) to balance opportunity and fee drag.
 
-name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,13 +23,8 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate Camarilla levels H3 and L3 from 12h timeframe (using prior completed 12h bar)
+    # Calculate Camarilla levels H3 and L3 from 4h timeframe (using prior completed 4h bar)
     if len(prices) < 2:
         return np.zeros(n)
     
@@ -51,8 +45,8 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 2.5x 30-period average (strict threshold to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: 2.5x 20-period average (strict threshold to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.5 * vol_ma)
     
     signals = np.zeros(n)
@@ -62,11 +56,6 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
