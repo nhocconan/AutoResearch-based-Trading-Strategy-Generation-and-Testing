@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-# Donchian breakout captures strong momentum moves, proven effective on SOLUSDT
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Camarilla R3/S3 levels provide high-probability reversal/continuation points from 1d price action
 # 1d EMA34 ensures alignment with daily trend (avoid counter-trend trades)
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Uses discrete position sizing 0.25 to balance exposure and risk
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,11 +34,21 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Calculate 4h volume spike (2.0x 20-period average)
+    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/4
+    camarilla_range = (high_1d - low_1d) * 1.1 / 4
+    r3_level = close_1d_arr + camarilla_range
+    s3_level = close_1d_arr - camarilla_range
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+    
+    # Calculate 6h volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -50,20 +60,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above upper Donchian AND price > 1d EMA34 AND volume spike
-            if (close[i] > high_roll[i] and 
+            # Long: Price breaks above R3 AND price > 1d EMA34 AND volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian AND price < 1d EMA34 AND volume spike
-            elif (close[i] < low_roll[i] and 
+            # Short: Price breaks below S3 AND price < 1d EMA34 AND volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -72,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below lower Donchian OR price < 1d EMA34
-            if (close[i] < low_roll[i] or 
+            # Exit: Price breaks below S3 OR price < 1d EMA34
+            if (close[i] < s3_aligned[i] or 
                 close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -81,8 +91,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above upper Donchian OR price > 1d EMA34
-            if (close[i] > high_roll[i] or 
+            # Exit: Price breaks above R3 OR price > 1d EMA34
+            if (close[i] > r3_aligned[i] or 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
