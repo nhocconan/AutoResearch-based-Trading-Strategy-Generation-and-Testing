@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Targets 12-37 trades per year (50-150 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Targets 20-50 trades per year (80-200 total over 4 years) to minimize fee drag
 # Camarilla levels provide mathematically derived support/resistance from prior day
 # 1d EMA34 ensures alignment with daily trend (avoid counter-trend trades)
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Uses discrete position sizing 0.25 to balance exposure and risk
 # Works in both bull and bear: trend filter prevents counter-trend trades, volume confirms validity
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + camarilla_range * 1.1 / 4
     camarilla_s3 = prior_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -52,7 +52,7 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h volume spike (2.0x 20-period average)
+    # Calculate 4h volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
