@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian channel breakouts capture strong momentum moves. 1d EMA34 ensures trades align with
-# daily trend to avoid false breakouts. Volume confirmation filters weak breakouts.
-# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
-# by only taking trades in direction of 1d EMA34.
+# Hypothesis: 1d KAMA direction + RSI(2) extremes + 1w ADX regime filter
+# KAMA adapts to market efficiency, providing smooth trend direction with less whipsaw.
+# RSI(2) identifies short-term overextensions for mean-reversion entries in the direction of KAMA trend.
+# 1w ADX > 25 ensures we only trade in trending regimes (avoiding chop).
+# Designed for 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# Works in bull markets (buying pullbacks in uptrend) and bear markets (selling rallies in downtrend)
+# by only taking mean-reversion entries aligned with the weekly trend.
 
-name = "12h_Donchian20_VolumeSpike_1dEMA34_Trend"
-timeframe = "12h"
+name = "1d_KAMA_RSI2_1wADX25_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,71 +23,101 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1d KAMA for trend direction
+    # KAMA: Efficiency Ratio (ER) smoothed with fast/slow SC
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[-10:])  # 10-period volatility
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate 1w ADX for regime filter (trending vs ranging)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian(20) channels from 1d data (prior completed day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # Upper channel: 20-period high, Lower channel: 20-period low
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    # Align to 12h timeframe (wait for prior day to complete)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    # True Range
+    tr1 = np.abs(np.diff(high_1w, prepend=high_1w[0]))
+    tr2 = np.abs(np.diff(low_1w, prepend=low_1w[0]))
+    tr3 = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: 2.0x 20-period average (20*12h = 10 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM and TR
+    plus_di_1w = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1w
+    minus_di_1w = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w + 1e-10)
+    adx_1w = pd.Series(dx_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate RSI(2) for mean-reversion entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_2 = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for EMA34 and Donchian)
-    start_idx = max(34, 20)  # 34 bars for EMA34, 20 bars for Donchian
+    # Start after warmup
+    start_idx = 30  # need enough data for KAMA, RSI(2), and aligned ADX
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi_2[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in trending regimes (ADX > 25 on weekly)
+        if adx_1w_aligned[i] <= 25:
+            # In ranging markets, flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above upper channel with volume spike AND price > 1d EMA34 (bullish trend)
-            if (close[i] > upper_channel_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long entry: price < KAMA (pullback in uptrend) AND RSI(2) < 10 (extreme oversold)
+            if close[i] < kama[i] and rsi_2[i] < 10:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower channel with volume spike AND price < 1d EMA34 (bearish trend)
-            elif (close[i] < lower_channel_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short entry: price > KAMA (rally in downtrend) AND RSI(2) > 90 (extreme overbought)
+            elif close[i] > kama[i] and rsi_2[i] > 90:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below upper channel (failed breakout) OR price below 1d EMA34 (trend change)
-            if close[i] < upper_channel_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: price >= KAMA (trend resumption) OR RSI(2) > 50 (mean reversion complete)
+            if close[i] >= kama[i] or rsi_2[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above lower channel (failed breakdown) OR price above 1d EMA34 (trend change)
-            if close[i] > lower_channel_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: price <= KAMA (trend resumption) OR RSI(2) < 50 (mean reversion complete)
+            if close[i] <= kama[i] or rsi_2[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
