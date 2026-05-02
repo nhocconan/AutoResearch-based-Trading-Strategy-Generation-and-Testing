@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend + volume spike confirmation
-# Uses 4h primary timeframe for Donchian channel breakout signals
-# 12h HMA(21) confirms medium-term trend direction (avoids counter-trend trades)
+# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend + volume spike confirmation
+# Uses 1d primary timeframe for Donchian channel breakout signals
+# 1w HMA(21) confirms long-term trend direction (avoids counter-trend trades)
 # Volume confirmation (2.0x 20-period average) ensures strong participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 75-150 total trades over 4 years (19-38/year) for 4h timeframe
-# Donchian provides clear structure, 12h HMA adds robust trend filter, volume confirms conviction
-# Works in both bull and bear markets by only trading in direction of 12h trend
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Donchian provides clear structure, 1w HMA adds robust trend filter, volume confirms conviction
+# Works in both bull and bear markets by only trading in direction of 1w trend
 
-name = "4h_Donchian20_12hHMA21_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wHMA21_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +26,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Get 1w data for HMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate 12h HMA(21)
-    close_12h = pd.Series(df_12h['close'])
+    # Calculate 1w HMA(21)
+    close_1w = pd.Series(df_1w['close'])
     half_length = 21 // 2
     sqrt_length = int(np.sqrt(21))
     
-    wma_half = close_12h.rolling(window=half_length, min_periods=half_length).mean()
-    wma_full = close_12h.rolling(window=21, min_periods=21).mean()
+    wma_half = close_1w.rolling(window=half_length, min_periods=half_length).mean()
+    wma_full = close_1w.rolling(window=21, min_periods=21).mean()
     raw_hma = 2 * wma_half - wma_full
-    hma_12h = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    hma_1w = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
     upper_channel = high_ma.shift(1).values  # Use previous bar to avoid look-ahead
@@ -61,7 +61,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(hma_12h_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
@@ -71,9 +71,9 @@ def generate_signals(prices):
             breakout_long = close[i] > upper_channel[i]
             breakout_short = close[i] < lower_channel[i]
             
-            # 12h HMA trend filter: price > HMA for longs, price < HMA for shorts
-            hma_long = close[i] > hma_12h_aligned[i]
-            hma_short = close[i] < hma_12h_aligned[i]
+            # 1w HMA trend filter: price > HMA for longs, price < HMA for shorts
+            hma_long = close[i] > hma_1w_aligned[i]
+            hma_short = close[i] < hma_1w_aligned[i]
             
             if breakout_long and hma_long and volume_spike[i]:
                 signals[i] = 0.25
@@ -86,7 +86,7 @@ def generate_signals(prices):
         
         elif position == 1:  # Long position
             # Exit: Donchian breakdown (price < lower channel) or trend reversal
-            if close[i] < lower_channel[i] or close[i] < hma_12h_aligned[i]:
+            if close[i] < lower_channel[i] or close[i] < hma_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,7 +94,7 @@ def generate_signals(prices):
         
         elif position == -1:  # Short position
             # Exit: Donchian breakout (price > upper channel) or trend reversal
-            if close[i] > upper_channel[i] or close[i] > hma_12h_aligned[i]:
+            if close[i] > upper_channel[i] or close[i] > hma_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
