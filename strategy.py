@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze Breakout + 1d Volume Regime + 1w Trend Filter
-# Bollinger Band squeeze (low volatility) precedes explosive moves. Breakout direction 
-# filtered by 1d volume regime (high/low volume environment) and 1w EMA50 trend.
-# Works in bull/bear markets by capturing volatility expansion after consolidation.
-# Target: 50-150 trades over 4 years (12-37/year) on 6h.
+# Hypothesis: 12h Williams %R Extreme + 1w EMA34 Trend + Volume Spike
+# Williams %R identifies overbought/oversold conditions. Extreme readings (<-90 or >-10) 
+# combined with 1w EMA34 trend filter and volume confirmation capture mean reversion 
+# in the direction of the weekly trend. Works in both bull and bear markets by aligning 
+# with higher-timeframe trend. Target: 50-150 trades over 4 years (12-37/year) on 12h.
 
-name = "6h_BBSqueeze_1dVolRegime_1wEMA50"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1wEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d volume regime: ratio of current volume to 20-period average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.where(vol_ma_20 > 0, vol_1d / vol_ma_20, 1.0)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
-    
-    # Calculate 1w EMA50 for trend filter
+    # Calculate 1w EMA34 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Bollinger Bands (20, 2) on 6h
-    if len(close) < 20:
+    # Calculate Williams %R (14-period) on 12h data
+    if len(high) < 14 or len(low) < 14 or len(close) < 14:
         return np.zeros(n)
     
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + (2 * std_20)
-    lower_bb = ma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / ma_20  # Normalized width
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Bollinger Band Squeeze: width below 20-period mean width
-    mean_width_20 = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < mean_width_20
+    # Volume confirmation: 2.0x 20-period average (~10 days for 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = max(50, 20)  # 1w EMA50 and BB warmup
+    # Start after warmup (need enough data for Williams %R and 1w EMA)
+    start_idx = max(34, 14)  # 1w EMA34 warmup
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
-            np.isnan(ma_20[i]) or np.isnan(std_20[i]) or np.isnan(mean_width_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bollinger Band breakout above upper band + 
-            #            1d volume expansion (ratio > 1.5) + 
-            #            1w uptrend (price > EMA50)
-            if (close[i] > upper_bb[i] and 
-                vol_ratio_1d_aligned[i] > 1.5 and 
-                close[i] > ema_50_1w_aligned[i] and 
-                squeeze[i]):
+            # Long entry: Williams %R extremely oversold (<-90) with volume spike AND price > 1w EMA34 (bullish trend)
+            if (williams_r[i] < -90 and 
+                volume_spike[i] and 
+                close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bollinger Band breakout below lower band + 
-            #             1d volume expansion (ratio > 1.5) + 
-            #             1w downtrend (price < EMA50)
-            elif (close[i] < lower_bb[i] and 
-                  vol_ratio_1d_aligned[i] > 1.5 and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  squeeze[i]):
+            # Short entry: Williams %R extremely overbought (>-10) with volume spike AND price < 1w EMA34 (bearish trend)
+            elif (williams_r[i] > -10 and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price re-enters Bollinger Bands (mean reversion) OR 
-            #       1d volume contraction (ratio < 0.7) suggesting weak momentum
-            if (close[i] < ma_20[i] or 
-                vol_ratio_1d_aligned[i] < 0.7):
+            # Exit: Williams %R rises above -50 (exit oversold) OR price below 1w EMA34 (trend change)
+            if williams_r[i] > -50 or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price re-enters Bollinger Bands (mean reversion) OR 
-            #       1d volume contraction (ratio < 0.7) suggesting weak momentum
-            if (close[i] > ma_20[i] or 
-                vol_ratio_1d_aligned[i] < 0.7):
+            # Exit: Williams %R falls below -50 (exit overbought) OR price above 1w EMA34 (trend change)
+            if williams_r[i] < -50 or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
