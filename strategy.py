@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal Breakout with weekly EMA50 Trend Filter and Volume Confirmation
+# Hypothesis: 12h Williams Fractal Breakout with 1w EMA50 Trend Filter and Volume Confirmation
 # Uses Williams Fractals to identify potential reversal points, confirmed by 1w EMA50 trend direction
 # Volume spike (>2.0x 20-period average) ensures institutional participation
 # Works in both bull and bear markets by trading breakouts in the direction of the weekly trend
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Discrete sizing 0.25 balances profit potential and fee drag
 
-name = "6h_WilliamsFractal_Breakout_1wEMA50_Volume"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
