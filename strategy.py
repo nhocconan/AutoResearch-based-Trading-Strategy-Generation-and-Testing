@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
 # Camarilla R3/S3 levels from 1d chart represent strong intraday support/resistance - breaks often lead to sustained moves
 # 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
 # Volume spike (>2.0 x 20-period EMA) confirms breakout validity with strong participation
 # Discrete position sizing (0.25) controls fee drag while allowing meaningful exposure
-# Target: 80-180 total trades over 4 years (20-45/year) for optimal risk-adjusted returns
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
 # Works in bull markets by catching breakouts with trend, works in bear by only taking trend-aligned breaks
 # Focus on BTC/ETH as primary symbols with SOL as secondary confirmation
 
-name = "4h_Camarilla_R3_S3_Breakout_1dADX_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dADX_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -85,7 +85,7 @@ def generate_signals(prices):
     
     adx = wilders_smoothing(dx, period)
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 1d data for Camarilla pivot calculation
@@ -103,7 +103,7 @@ def generate_signals(prices):
     camarilla_r3 = pivot + (range_ * 1.1 / 4.0)   # R3 level
     camarilla_s3 = pivot - (range_ * 1.1 / 4.0)   # S3 level
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
