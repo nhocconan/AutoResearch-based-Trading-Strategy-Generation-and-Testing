@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian(20) breakout + 4h EMA50 trend filter + Volume spike
-# Uses 4h EMA50 for trend direction and 1h Donchian breakouts for entry timing.
-# Volume spike confirms momentum. Works in both bull and bear markets by
-# aligning with higher-timeframe trend. Target: 60-150 trades over 4 years (15-37/year) on 1h.
+# Hypothesis: 6h Volume-Weighted Average Price (VWAP) Deviation + 1w Trend Filter + Volume Confirmation
+# VWAP acts as a dynamic support/resistance level. Price deviations from VWAP combined with 
+# weekly trend filter and volume spikes capture mean reversion in the direction of the higher 
+# timeframe trend. Works in both bull and bear markets by aligning with weekly trend. 
+# Target: 50-150 trades over 4 years (12-37/year) on 6h.
 
-name = "1h_Donchian20_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "6h_VWAP_Deviation_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,77 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h EMA50 for trend filter ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate VWAP (session-based: reset daily)
+    typical_price = (high + low + close) / 3.0
+    tp_volume = typical_price * volume
     
-    # Volume confirmation: 2.0x 20-period average
+    # Get unique dates for daily reset
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
+    vwap = np.full(n, np.nan)
+    
+    for date in unique_dates:
+        mask = (dates == date)
+        if not np.any(mask):
+            continue
+        cum_tp_volume = np.nancumsum(tp_volume * mask)
+        cum_volume = np.nancumsum(volume * mask)
+        # Avoid division by zero
+        vwap[mask] = np.divide(cum_tp_volume, cum_volume, 
+                               out=np.full_like(cum_tp_volume, np.nan), 
+                               where=(cum_volume != 0))
+    
+    # Calculate price deviation from VWAP (normalized by ATR-like measure)
+    price_dev = (close - vwap) / vwap * 100  # Percentage deviation
+    
+    # Volume confirmation: 2.0x 20-period average (~8.3 days for 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for Donchian and 4h EMA)
-    start_idx = max(50, 20)  # 4h EMA50 warmup
+    # Start after warmup (need enough data for VWAP and 1w EMA)
+    start_idx = max(50, 20)  # 1w EMA50 warmup
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(price_dev[i]) or 
+            np.isnan(vwap[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band with volume spike AND price > 4h EMA50 (bullish trend)
-            if (close[i] > highest_high[i] and 
+            # Long entry: Price significantly below VWAP (<-1.5%) with volume spike AND price > 1w EMA50 (bullish trend)
+            if (price_dev[i] < -1.5 and 
                 volume_spike[i] and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+                close[i] > ema_50_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower band with volume spike AND price < 4h EMA50 (bearish trend)
-            elif (close[i] < lowest_low[i] and 
+            # Short entry: Price significantly above VWAP (>1.5%) with volume spike AND price < 1w EMA50 (bearish trend)
+            elif (price_dev[i] > 1.5 and 
                   volume_spike[i] and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+                  close[i] < ema_50_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price falls below Donchian middle OR below 4h EMA50 (trend change)
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < donchian_middle or close[i] < ema_50_4h_aligned[i]:
+            # Exit: Price crosses above VWAP (mean reversion complete) OR price below 1w EMA50 (trend change)
+            if close[i] > vwap[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian middle OR above 4h EMA50 (trend change)
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > donchian_middle or close[i] > ema_50_4h_aligned[i]:
+            # Exit: Price crosses below VWAP (mean reversion complete) OR price above 1w EMA50 (trend change)
+            if close[i] < vwap[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
