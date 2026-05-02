@@ -4,12 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and session filter (08-20 UTC)
-# Camarilla pivot levels provide precise intraday support/resistance; R3/S3 are strong breakout levels
-# 4h EMA34 ensures we trade only in the direction of the higher timeframe trend, reducing whipsaws
-# Session filter (08-20 UTC) avoids low-volume Asian session noise
-# Discrete position sizing (0.20) controls fee drag while allowing meaningful exposure
-# Target: 60-150 total trades over 4 years (15-37/year) for optimal risk-adjusted returns
-# Works in bull markets by capturing breakouts with trend, works in bear by only taking trend-aligned breaks
+# Uses prior day's OHLC for Camarilla levels to avoid look-ahead, 4h EMA34 for trend alignment,
+# and session filter to reduce noise. Discrete position sizing (0.20) controls fee drag.
+# Target: 60-150 total trades over 4 years (15-37/year) by requiring confluence of
+# daily breakout level, 4h trend, and active session. Works in bull markets by capturing
+# breakouts with trend, works in bear by only taking trend-aligned breaks.
 
 name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Trend_Session"
 timeframe = "1h"
