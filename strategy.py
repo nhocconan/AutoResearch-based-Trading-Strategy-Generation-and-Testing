@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Extreme Reversal with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -90 or > -10) signal exhaustion
-# Entry: Long when Williams %R crosses above -90 from below AND price > 1d EMA34 (uptrend) AND volume spike
-#        Short when Williams %R crosses below -10 from above AND price < 1d EMA34 (downtrend) AND volume spike
-# Exit: Williams %R returns to neutral zone (-50) or price crosses 1d EMA34 (trend reversal)
-# Works in both bull and bear markets by trading mean reversions within the dominant 1d trend
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 1d EMA34 for trend filter and 1d Camarilla pivot levels (R3/S3) for structure
+# Entry: Long when price breaks above 1d Camarilla R3 with volume spike and price > 1d EMA34 (uptrend)
+#        Short when price breaks below 1d Camarilla S3 with volume spike and price < 1d EMA34 (downtrend)
+# Exit: Close crosses 1d EMA34 (trend reversal) or price retests 1d Camarilla pivot point (PP)
+# Works in both bull and bear markets by trading with 1d trend using Camarilla structure
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Discrete sizing 0.25 balances profit potential and fee drag
 
-name = "4h_WilliamsR_Extreme_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,14 +35,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Lookback period 14
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 1d Camarilla pivot levels (PP, R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
+    # Camarilla levels: based on previous day's range
+    # PP = (high + low + close) / 3
+    # R3 = close + 1.1 * (high - low) * 1.1 / 4
+    # S3 = close - 1.1 * (high - low) * 1.1 / 4
+    camarilla_pp = (high_1d + low_1d + close_1d_arr) / 3
+    camarilla_r3 = close_1d_arr + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d_arr - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (use previous completed 1d bar's levels)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,20 +65,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R crosses above -90 from below AND price > 1d EMA34 (uptrend) AND volume spike
-            if (williams_r[i] > -90 and williams_r[i-1] <= -90 and 
+            # Long entry: Break above 1d Camarilla R3 AND price > 1d EMA34 (uptrend) AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R crosses below -10 from above AND price < 1d EMA34 (downtrend) AND volume spike
-            elif (williams_r[i] < -10 and williams_r[i-1] >= -10 and 
+            # Short entry: Break below 1d Camarilla S3 AND price < 1d EMA34 (downtrend) AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -78,16 +88,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R returns to neutral zone (-50) OR price crosses below 1d EMA34 (trend change)
-            if williams_r[i] >= -50 or close[i] < ema_34_1d_aligned[i]:
+            # Exit: Close below 1d EMA34 (trend change) OR price retests Camarilla PP (take profit)
+            if close[i] < ema_34_1d_aligned[i] or close[i] < camarilla_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to neutral zone (-50) OR price crosses above 1d EMA34 (trend change)
-            if williams_r[i] <= -50 or close[i] > ema_34_1d_aligned[i]:
+            # Exit: Close above 1d EMA34 (trend change) OR price retests Camarilla PP (take profit)
+            if close[i] > ema_34_1d_aligned[i] or close[i] > camarilla_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
