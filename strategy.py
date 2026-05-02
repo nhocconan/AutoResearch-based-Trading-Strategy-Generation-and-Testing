@@ -3,23 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA34 trend + volume spike + chop regime filter
-# Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag
-# Donchian(20) on 1d provides clear breakout structure with low trade frequency
-# 1w EMA34 determines higher timeframe trend bias: long when price > EMA34, short when price < EMA34
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume spike
+# Uses Camarilla pivot levels from prior 1d for precise entry/exit levels
+# 1d EMA34 determines trend bias: long when price > EMA34, short when price < EMA34
 # Volume spike (2x 20-period average) confirms institutional participation
-# Choppiness Index regime filter: only trade when CHOP(14) < 61.8 (trending market)
+# Designed for low frequency (target: 50-150 total trades over 4 years) to minimize fee drag
 # Works in bull markets via breakouts with trend alignment and bear markets via fade of false breakouts
-# Discrete position sizing: 0.25 (25% of capital) balances exposure and risk
-# Uses 1d primary timeframe as specified in experiment #117278
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_Chop"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,85 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian(20) channels (prior completed 1d bar's range)
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Calculate 1w EMA34 trend (prior completed 1w bar's EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # Need at least 34 periods for EMA34
+    # Calculate 1d OHLC for Camarilla pivot levels (prior completed 1d bar)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:  # Need at least 2 days for prior day's data
         return np.zeros(n)
     
-    ema_34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # Prior 1day's OHLC (shifted by 1 to avoid look-ahead)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate 1d volume spike (2x 20-period average)
+    # Calculate Camarilla levels for prior 1d
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 1d EMA34 trend (prior completed 1d bar's EMA)
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().shift(1).values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate 6h volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
-    
-    # Calculate Choppiness Index (14-period) for regime filter
-    def calculate_chop(high, low, close, window=14):
-        """Calculate Choppiness Index: higher values = more choppy/ranging"""
-        atr = pd.Series(np.maximum.reduce([
-            high[1:] - low[:-1],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        ])).rolling(window=window, min_periods=window).sum()
-        
-        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max()
-        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min()
-        range_hl = highest_high - lowest_low
-        
-        chop = 100 * np.log10(atr / range_hl) / np.log10(window)
-        # Prepend NaN for the first element lost in ATR calculation
-        return np.concatenate([[np.nan], chop.values])
-    
-    chop = calculate_chop(high, low, close, 14)
-    chop_filter = chop < 61.8  # Only trade in trending markets (CHOP < 61.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = max(20, 34, 14)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(chop_filter[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when chop filter indicates trending market
-        if not chop_filter[i]:
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                # Exit long: price falls below Donchian low OR below 1w EMA34 (trend change)
-                if close[i] < low_ma[i] or close[i] < ema_34_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short: price rises above Donchian high OR above 1w EMA34 (trend change)
-                if close[i] > high_ma[i] or close[i] > ema_34_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            continue
-        
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high AND price > 1w EMA34 (bullish bias) AND volume spike
-            if (close[i] > high_ma[i] and 
+            # Long entry: price breaks above R3 AND price > 1d EMA34 (bullish bias) AND volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low AND price < 1w EMA34 (bearish bias) AND volume spike
-            elif (close[i] < low_ma[i] and 
+            # Short entry: price breaks below S3 AND price < 1d EMA34 (bearish bias) AND volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -114,16 +87,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price falls below Donchian low OR below 1w EMA34 (trend change)
-            if close[i] < low_ma[i] or close[i] < ema_34_aligned[i]:
+            # Exit: price falls below S3 OR below 1d EMA34 (trend change)
+            if close[i] < s3_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high OR above 1w EMA34 (trend change)
-            if close[i] > high_ma[i] or close[i] > ema_34_aligned[i]:
+            # Exit: price rises above R3 OR above 1d EMA34 (trend change)
+            if close[i] > r3_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
