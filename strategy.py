@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
-# Williams Fractals on 12h timeframe provide structural support/resistance levels that work in both bull and bear markets
-# 1d EMA34 ensures trades only with medium-term trend, reducing false breakouts in choppy markets
-# Volume confirmation at 1.8x average filters low-participation moves
-# Target: 80-150 total trades over 4 years (20-37/year) for 12h timeframe
+# Hypothesis: 6h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
+# Williams Fractals on 6h timeframe provide structural support/resistance levels with higher frequency than 1d
+# 1d EMA34 ensures trades only with intermediate-term trend, reducing false breakouts in choppy markets
+# Volume confirmation at 1.5x average filters low-participation moves
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
 # Discrete sizing 0.25 to minimize fee churn
+# Works in both bull and bear markets by following trend with structural breakouts
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "6h_WilliamsFractal_Breakout_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,20 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Fractals on 12h data (requires 5-bar window: n-2, n-1, n, n+1, n+2)
-    # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
-    # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
-    # We calculate on completed candles only, so we shift by 2 to avoid look-ahead
+    # Calculate Williams Fractals on 6h timeframe (requires 5-bar window)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     
-    # Bearish fractal: current high is highest of previous 2, current, and next 2
-    # We use rolling window of 5, centered, but shift by 2 to ensure we only use completed data
+    # Bearish fractal: current high is highest of [n-2, n-1, n, n+1, n+2]
+    # Bullish fractal: current low is lowest of [n-2, n-1, n, n+1, n+2]
     bearish_fractal = (high_series.rolling(window=5, center=True, min_periods=5).max() == high_series).values
-    # Bullish fractal: current low is lowest of previous 2, current, and next 2
     bullish_fractal = (low_series.rolling(window=5, center=True, min_periods=5).min() == low_series).values
     
-    # 1d EMA34 for trend filter
+    # 1d EMA34 for trend filter - loaded ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -46,9 +43,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 1.8x 20-period average (stricter threshold to reduce trades)
+    # Volume confirmation: 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
