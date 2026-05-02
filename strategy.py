@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivot levels from daily data provide key intraday support/resistance; breakouts from R3/S3 indicate strong momentum
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume spike (2.0x 20-period average) confirms institutional participation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses higher timeframe 1d trend for stronger regime alignment vs 12h EMA50
+# Volume spike confirms institutional participation in breakouts
 # Discrete position sizing (0.25) minimizes fee churn
-# Targets 12-37 trades/year (50-150 total over 4 years) for 12h timeframe
+# Targets 19-50 trades/year for 4h timeframe
 # Works in bull markets via breakout continuation and in bear markets via filtered short breakdowns
+# Uses proper min_periods and discrete signal levels to avoid overtrading
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,9 +25,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF indicators
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend filter
@@ -43,7 +43,7 @@ def generate_signals(prices):
     r3_level = prev_close + camarilla_range
     s3_level = prev_close - camarilla_range
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
@@ -54,8 +54,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Camarilla calculation and volume MA)
-    start_idx = 20  # buffer for 20-period volume MA
+    # Start after warmup (need enough for 1d EMA34 and Camarilla calculation)
+    start_idx = 35  # buffer for 1d EMA34 (34 periods) + 1 for shift
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
