@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with volume confirmation and 1d EMA34 trend filter
+# Hypothesis: 4h Camarilla R3/S3 breakout with volume confirmation and 1d EMA34 trend filter
 # Uses discrete sizing (0.25) to minimize fee drag while capturing breakouts
 # Volume spike (2.0x 24-bar MA) confirms institutional participation
 # Trend filter ensures alignment with higher timeframe direction
-# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Designed for 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 # Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes)
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,14 +52,14 @@ def generate_signals(prices):
     s3_1d = close_1d_arr - range_1d * 1.1 / 4.0
     s4_1d = close_1d_arr - range_1d * 1.1 / 2.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume confirmation: 2.0x 24-period average (2x for 12h = ~1 day)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: 2.0x 6-period average (6x4h = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
