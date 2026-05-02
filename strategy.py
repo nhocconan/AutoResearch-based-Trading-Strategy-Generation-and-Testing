@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>1.5x 20-bar average), and chop regime filter (CHOP < 61.8)
-# Uses H3/L3 for proven breakout levels. Volume threshold reduces churn. Discrete sizing 0.25.
-# Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via trend filter and regime avoidance of chop.
-# Primary timeframe: 4h, HTF: 1d for Camarilla and EMA34.
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Uses H3/L3 for proven breakout levels with higher reliability than R3/S3. Volume threshold reduces churn. Discrete sizing 0.25.
+# Target: 50-150 trades over 4 years. Works in bull/bear via trend filter and regime avoidance of chop.
+# Primary timeframe: 12h, HTF: 1d for Camarilla levels and EMA34, 1w for regime context (optional).
 
-name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
-timeframe = "4h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,17 +36,18 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (they update daily)
+    # Align Camarilla levels to 12h timeframe (they update daily)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 1.5x 20-period average (balanced to avoid too many/few trades)
+    # Volume confirmation: 2.0x 20-period average (tighter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Choppiness Index regime filter (avoid ranging markets)
     # CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
