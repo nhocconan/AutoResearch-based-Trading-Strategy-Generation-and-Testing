@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses 1h primary timeframe for signal generation with Camarilla pivot breakouts
-# 4h EMA50 trend filter provides higher timeframe bias (price > EMA50 for longs, < for shorts)
-# Volume confirmation (1.8x 20-period average) filters for strong participation
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods
-# Discrete position sizing (0.20) balances profit potential with fee drag minimization
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Camarilla levels provide objective support/resistance, reducing false signals
-# Works in both bull and bear markets by only trading in direction of 4h trend
+# Hypothesis: 6h Williams Alligator (13/8/5) + 1d Elder Ray (Bull/Bear Power) with volume confirmation
+# Uses 6h primary timeframe for Alligator trend identification (JAW=13, TEETH=8, LIPS=5)
+# 1d Elder Ray confirms trend strength: Bull Power > 0 and Bear Power < 0 for longs, inverse for shorts
+# Volume confirmation (1.5x 20-period average) ensures strong participation
+# Discrete position sizing (0.25) balances profit potential with fee drag minimization
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Alligator provides smooth trend identification, Elder Ray confirms momentum behind the move
+# Works in both bull and bear markets by only trading when both indicators agree on direction
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_Volume_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dElderRay_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,77 +26,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    close_1d = pd.Series(df_1d['close'])
+    high_1d = pd.Series(df_1d['high'])
+    low_1d = pd.Series(df_1d['low'])
+    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = (high_1d - ema13_1d).values
+    bear_power = (low_1d - ema13_1d).values
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate Camarilla levels from previous day (using typical price)
-    typical_price = (high + low + close) / 3
-    typical_series = pd.Series(typical_price)
-    typical_ma = typical_series.rolling(window=24, min_periods=24).mean().shift(1).values  # 24*1h = 1 day
-    typical_std = typical_series.rolling(window=24, min_periods=24).std().shift(1).values
-    camarilla_h3 = typical_ma + 1.1 * typical_std * 1.5  # R3 level
-    camarilla_l3 = typical_ma - 1.1 * typical_std * 1.5  # S3 level
-    camarilla_h4 = typical_ma + 1.1 * typical_std * 2.0  # R4 level (stop)
-    camarilla_l4 = typical_ma - 1.1 * typical_std * 2.0  # S4 level (stop)
+    # Calculate Williams Alligator on 6h data (JAW=13, TEETH=8, LIPS=5)
+    # Alligator lines are SMMA (Smoothed Moving Average) of median price
+    median_price = (high + low) / 2
+    median_series = pd.Series(median_price)
     
-    # Volume confirmation (1.8x 20-period average)
+    def smma(series, period):
+        """Smoothed Moving Average"""
+        sma = series.rolling(window=period, min_periods=period).mean()
+        result = np.full_like(series.values, np.nan, dtype=float)
+        result[period-1] = sma.iloc[period-1]
+        for i in range(period, len(series)):
+            result[i] = (result[i-1] * (period-1) + series.iloc[i]) / period
+        return result
+    
+    jaw = smma(median_series, 13)  # Blue line
+    teeth = smma(median_series, 8)  # Red line
+    lips = smma(median_series, 5)   # Green line
+    
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.8)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for EMA and Camarilla calculations)
+    # Start after warmup (need enough for Alligator and Elder Ray calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(camarilla_h3[i]) or 
-            np.isnan(camarilla_l3[i]) or np.isnan(volume_spike[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Skip if outside trading session
-        if not session_filter[i]:
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Break above Camarilla H3 + volume spike + price > 4h EMA50
-            if close[i] > camarilla_h3[i] and volume_spike[i] and close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.20
+            # Alligator long: Lips > Teeth > Jaw (green > red > blue)
+            # Alligator short: Lips < Teeth < Jaw (green < red < blue)
+            alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+            
+            # Elder Ray confirmation: Bull Power > 0 and Bear Power < 0 for longs
+            # Bear Power < 0 and Bull Power > 0 for shorts (same condition)
+            elder_long = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
+            elder_short = bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0
+            
+            if alligator_long and elder_long and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla L3 + volume spike + price < 4h EMA50
-            elif close[i] < camarilla_l3[i] and volume_spike[i] and close[i] < ema50_4h_aligned[i]:
-                signals[i] = -0.20
+            elif alligator_short and elder_short and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close below Camarilla L3 or price < 4h EMA50
-            if close[i] < camarilla_l3[i] or close[i] < ema50_4h_aligned[i]:
+            # Exit: Alligator reverses (Lips < Teeth) or Elder Ray weakens
+            if lips[i] < teeth[i] or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close above Camarilla H3 or price > 4h EMA50
-            if close[i] > camarilla_h3[i] or close[i] > ema50_4h_aligned[i]:
+            # Exit: Alligator reverses (Lips > Teeth) or Elder Ray weakens
+            if lips[i] > teeth[i] or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
