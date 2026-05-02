@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation
-# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Elder Ray measures bull/bear power relative to EMA13 - effective in both trending and ranging markets
-# 12h EMA50 ensures alignment with intermediate trend (avoid counter-trend trades)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Donchian breakout provides clear structure, EMA34 filters for intermediate trend direction
 # Volume spike (2.0x 20-period average) confirms institutional participation
-# Works in bull via trend continuation and bear via power divergence signals
+# Works in bull via trend continuation and bear via breakout of ranges
 # Uses discrete position sizing 0.25 to balance exposure and risk
 
-name = "6h_ElderRay_12hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,25 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need enough for EMA calculation
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need enough for EMA calculation
         return np.zeros(n)
     
-    # Calculate 12h EMA(50)
-    close_12h = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA(34)
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Elder Ray components (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    # Using 13-period EMA as standard for Elder Ray
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Donchian channels (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
-    
-    # Calculate 6h volume spike (2.0x 20-period average)
+    # Calculate 4h volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -55,21 +50,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(high_ma[i]) or 
+            np.isnan(low_ma[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Bull Power > 0 (strong buying pressure) AND price > 12h EMA50 AND volume spike
-            if (bull_power[i] > 0 and 
-                close[i] > ema_50_aligned[i] and 
+            # Long: Price breaks above upper Donchian AND price > 1d EMA34 AND volume spike
+            if (close[i] > high_ma[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (strong selling pressure) AND price < 12h EMA50 AND volume spike
-            elif (bear_power[i] < 0 and 
-                  close[i] < ema_50_aligned[i] and 
+            # Short: Price breaks below lower Donchian AND price < 1d EMA34 AND volume spike
+            elif (close[i] < low_ma[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -77,18 +72,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bull Power <= 0 (weakening buying pressure) OR price < 12h EMA50
-            if (bull_power[i] <= 0 or 
-                close[i] < ema_50_aligned[i]):
+            # Exit: Price breaks below lower Donchian OR price < 1d EMA34
+            if (close[i] < low_ma[i] or 
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bear Power >= 0 (weakening selling pressure) OR price > 12h EMA50
-            if (bear_power[i] >= 0 or 
-                close[i] > ema_50_aligned[i]):
+            # Exit: Price breaks above upper Donchian OR price > 1d EMA34
+            if (close[i] > high_ma[i] or 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
