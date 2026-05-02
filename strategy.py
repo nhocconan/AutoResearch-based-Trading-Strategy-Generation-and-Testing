@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses 12h timeframe for signal generation with Camarilla pivot level breakouts
-# 1d EMA(34) determines primary trend direction - multi-timeframe alignment
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses 4h timeframe for signal generation with Camarilla pivot level breakouts
+# 1d EMA(34) determines primary trend direction - multi-timeframe alignment with daily trend
 # Volume spike (2.0x 20-period average) ensures strong institutional participation
 # Discrete position sizing (0.25) minimizes fee drag while maintaining profitability
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 # Camarilla levels provide mathematically derived support/resistance based on prior day
 # Works in both bull and bear markets by only taking trades aligned with 1d trend
 # Prioritizes BTC/ETH over SOL by requiring volume confirmation and trend alignment
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,6 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values  # datetime64[ms]
     
     # Load 1d HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -52,7 +53,7 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + 1.1 * camarilla_range
     camarilla_s3 = prior_close - 1.1 * camarilla_range
     
-    # Align Camarilla levels to 12h timeframe (they update only when new 1d bar forms)
+    # Align Camarilla levels to 4h timeframe (they update only when new 1d bar forms)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
