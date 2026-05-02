@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + 1d EMA50 trend + volume confirmation
-# Uses Williams Alligator (JAW=TEETH=LIPS SMMA) from 6h to identify trending vs ranging markets
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Uses Donchian channel (20-period high/low) from 12h candles for structural breakouts
 # 1d EMA50 ensures alignment with long-term trend to avoid counter-trend trades
 # Volume spike (2.0x 20-bar MA) confirms institutional participation
-# Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe
-# Works in bull markets (trend following with Alligator) and bear markets (mean reversion at extremes)
+# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Works in bull markets (breakouts with trend) and bear markets (mean reversion at channel extremes)
 
-name = "6h_Williams_Alligator_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,54 +33,36 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator on 6h: SMMA(13,8), SMMA(8,5), SMMA(5,3)
-    def smma(source, period):
-        result = np.full_like(source, np.nan, dtype=np.float64)
-        if len(source) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(source[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
-        return result
-    
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
-    
-    # Volume confirmation: 2.0x 20-period average
+    # Volume confirmation: 2.0x 20-period average (20*12h = 10 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate 12h Donchian channels (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for Alligator and volume MA)
-    start_idx = 20
+    # Start after warmup (need enough data for Donchian, volume MA and HTF alignment)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(high_ma[i]) or np.isnan(low_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Trending market: Alligator lines are separated and ordered
-            # Bullish: Lips > Teeth > Jaw (green > red > blue)
-            # Bearish: Lips < Teeth < Jaw (green < red < blue)
-            bullish_trend = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            bearish_trend = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            # Long entry: Bullish trend AND price > 1d EMA50 AND volume spike
-            if (bullish_trend and 
+            # Long entry: Price breaks above upper Donchian AND price > 1d EMA50 (bullish trend) AND volume spike
+            if (close[i] > high_ma[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bearish trend AND price < 1d EMA50 AND volume spike
-            elif (bearish_trend and 
+            # Short entry: Price breaks below lower Donchian AND price < 1d EMA50 (bearish trend) AND volume spike
+            elif (close[i] < low_ma[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -89,27 +71,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Market becomes ranging (Alligator lines intertwine) OR price below 1d EMA50
-            # Alligator is sleeping when lines are close together (market ranging)
-            jaw_to_lips = abs(jaw[i] - lips[i])
-            teeth_to_lips = abs(teeth[i] - lips[i])
-            avg_price = (high[i] + low[i]) / 2
-            ranging_market = (jaw_to_lips < avg_price * 0.01) and (teeth_to_lips < avg_price * 0.01)
-            
-            if ranging_market or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Price breaks below lower Donchian (reversion to mean) OR price below 1d EMA50 (trend change)
+            if close[i] < low_ma[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Market becomes ranging (Alligator lines intertwine) OR price above 1d EMA50
-            jaw_to_lips = abs(jaw[i] - lips[i])
-            teeth_to_lips = abs(teeth[i] - lips[i])
-            avg_price = (high[i] + low[i]) / 2
-            ranging_market = (jaw_to_lips < avg_price * 0.01) and (teeth_to_lips < avg_price * 0.01)
-            
-            if ranging_market or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Price breaks above upper Donchian (reversion to mean) OR price above 1d EMA50 (trend change)
+            if close[i] > high_ma[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
