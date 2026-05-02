@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Camarilla R3/S3 levels from 1d provide high-probability reversal/continuation zones
 # 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend entries
 # Volume spike (>2.0 * 20-period EMA) confirms institutional participation
-# Designed for low trade frequency: ~20-40 trades/year per symbol with 0.25 sizing
+# Designed for low trade frequency: ~25-35 trades/year per symbol with 0.25 sizing
 # Works in bull markets via breakout continuation and bear markets via trend-following alignment
 # Avoids overtrading by requiring confluence of price level, trend, and volume
 
@@ -32,6 +32,7 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels (based on previous 1d bar)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -67,7 +68,7 @@ def generate_signals(prices):
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (4h * 5 = 20 periods = ~3.33 days)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (4h * 5 = 20 periods = ~1.67 days)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
