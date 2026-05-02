@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ADX trend filter (>25) and volume confirmation (>1.5x 20-period average)
-# Donchian breakouts capture strong momentum moves. 1d ADX ensures we only trade in trending regimes (bull or bear),
-# avoiding whipsaws in ranging markets. Volume confirmation adds conviction. Discrete position sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in both bull and bear by filtering for strong trends.
+# Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter, volume confirmation (>2.0x average), and chop regime filter (CHOP < 61.8)
+# Williams %R identifies overbought/oversold conditions. Reversals from extreme levels often capture swings.
+# 1d EMA34 ensures trading with higher timeframe trend for reliability.
+# Volume spike (>2.0x 20-period average) confirms conviction and reduces false signals.
+# Chop regime filter avoids whipsaws in ranging markets (CHOP > 61.8 = ranging, avoid).
+# Discrete position sizing 0.25 to minimize fee churn. Target: 75-200 trades over 4 years.
 
-name = "6h_Donchian20_Breakout_1dADX_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_Reversal_1dEMA34_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,52 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Calculate Williams %R (14-period)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    hl_range_safe = np.where(hl_range == 0, 1e-10, hl_range)
+    williams_r = -100 * (hl_range_safe - (high - low)) / hl_range_safe
+    
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 1d ADX calculation (trend strength filter)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Volume confirmation: 2.0x 20-period average (stricter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Choppiness Index regime filter (avoid ranging markets)
+    # CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
     
-    # Smooth TR, DM+, DM- with Wilder's smoothing (using EMA as approximation)
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe (wait for completed 1d bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian(20) on 6h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: >1.5x 20-period average (stricter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * np.sqrt(atr_period))) / np.log10(atr_period)
+    chop_regime = chop < 61.8  # True when trending (CHOP < 61.8), False when ranging
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,38 +71,40 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian upper band AND ADX > 25 AND volume spike
-            if (close[i] > highest_high[i] and 
-                adx_aligned[i] > 25 and 
-                volume_spike[i]):
+            # Long: Williams %R crosses above -80 from oversold AND price > 1d EMA34 AND volume spike AND trending regime
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike[i] and 
+                chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower band AND ADX > 25 AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  adx_aligned[i] > 25 and 
-                  volume_spike[i]):
+            # Short: Williams %R crosses below -20 from overbought AND price < 1d EMA34 AND volume spike AND trending regime
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price drops below Donchian lower band OR ADX falls below 20 (trend weakening)
-            if close[i] < lowest_low[i] or adx_aligned[i] < 20:
+            # Exit: Williams %R crosses below -50 OR price < 1d EMA34
+            if williams_r[i] < -50 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price rises above Donchian upper band OR ADX falls below 20 (trend weakening)
-            if close[i] > highest_high[i] or adx_aligned[i] < 20:
+            # Exit: Williams %R crosses above -50 OR price > 1d EMA34
+            if williams_r[i] > -50 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
