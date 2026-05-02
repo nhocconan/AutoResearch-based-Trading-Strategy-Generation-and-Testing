@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d HTF for EMA34 to capture daily trend and reduce false breakouts.
-# Camarilla H3/L3 from 12h provides proven swing reversal/continuation levels.
-# Volume confirmation at 2.5x average ensures strong participation while limiting trades (~12-37/year target).
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 1d HTF for EMA34 to capture long-term trend and reduce false breakouts.
+# Camarilla H3/L3 from 4h provides proven intraday reversal/continuation levels.
+# Volume confirmation at 2.0x average ensures strong participation while limiting trades (~20-50/year target).
 # Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
 # Discrete sizing 0.25 to balance opportunity and fee drag. Works in bull/bear: trend filter ensures trades only with momentum.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve test generalization.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
 
-name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,8 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate Camarilla levels H3 and L3 from 12h timeframe (using prior completed 12h bar)
+    # Calculate Camarilla levels H3 and L3 from 4h timeframe (using prior completed 4h bar)
+    # For 4h timeframe, we need to use the prior completed 4h bar's OHLC
     if len(prices) < 2:
         return np.zeros(n)
     
@@ -42,7 +43,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # 1d EMA34 for trend filter (daily trend)
+    # 1d EMA34 for trend filter (long-term trend)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -51,9 +52,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 2.5x 20-period average (strict threshold to reduce trades)
+    # Volume confirmation: 2.0x 20-period average (strict threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
