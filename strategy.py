@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter, volume spike, and chop regime filter
-# Camarilla R3/S3 are strong intraday support/resistance levels. Breakouts often continue.
-# 12h EMA50 ensures trading with higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and chop regime filter
+# Camarilla R3/S3 are strong daily support/resistance levels. Breakouts often continue.
+# 1d EMA34 ensures trading with higher timeframe trend.
 # Volume spike (>1.5x average) confirms conviction.
-# Chop regime filter (CHOP > 61.8) avoids whipsaws in ranging markets.
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Chop regime filter (CHOP < 61.8) favors trending markets, avoids whipsaws in ranging markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Designed to work in both bull and bear markets via trend filter and regime adaptation
 
-name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Volume_Chop"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +26,6 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate Camarilla levels for R3 and S3 (using prior day's range)
-    # For intraday, we use prior 1d range (but need to align properly)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,18 +39,14 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (they update daily)
+    # Align Camarilla levels to 12h timeframe (they update daily)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,22 +78,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above R3 AND price > 12h EMA50 AND volume spike AND trending regime
+            # Long: Price breaks above R3 AND price > 1d EMA34 AND volume spike AND trending regime
             if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i] and 
                 chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 AND price < 12h EMA50 AND volume spike AND trending regime
+            # Short: Price breaks below S3 AND price < 1d EMA34 AND volume spike AND trending regime
             elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i] and 
                   chop_regime[i]):
                 signals[i] = -0.25
@@ -106,16 +102,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price drops below S3 OR price < 12h EMA50
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit: Price drops below S3 OR price < 1d EMA34
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price rises above R3 OR price > 12h EMA50
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit: Price rises above R3 OR price > 1d EMA34
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
