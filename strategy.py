@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
 # Uses Williams Fractals (lagging indicator requiring 2-bar confirmation) for high-probability reversal/continuation signals.
-# 1d EMA34 ensures trades only with long-term trend, reducing false breakouts in choppy markets.
+# 1d EMA34 ensures trades only with longer-term trend, reducing false breakouts in choppy markets.
 # Volume confirmation at 2.0x average filters low-participation moves.
 # Session filter (08-20 UTC) avoids low-liquidity periods.
-# Discrete sizing 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# Discrete sizing 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 # Williams Fractals provide structural support/resistance levels that work in both bull and bear markets.
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_WilliamsFractal_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
