@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA(34) trend filter and volume spike (2.5x) confirmation
-# Uses discrete position sizing 0.25 to minimize fee churn. Targets 12-30 trades/year (50-120 total over 4 years)
-# Volume spike filter reduces false breakouts; 1d EMA ensures alignment with primary trend
-# Works in bull markets via breakout momentum and in bear markets via short-side symmetry
-# Uses 6h timeframe to balance trade frequency and signal quality
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA trend filter and volume spike confirmation
+# Camarilla pivot levels provide precise intraday support/resistance; breakout above R3 or below S3 indicates strong momentum
+# 1w EMA filter ensures alignment with primary weekly trend to avoid counter-trend trades
+# Volume spike (2.0x 20-period average) confirms institutional participation and reduces false breakouts
+# Discrete position sizing 0.25 minimizes fee churn; target 12-37 trades/year (50-150 total over 4 years)
+# Works in both bull and bear markets by requiring volume confirmation and primary trend alignment
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w EMA(50) for trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate volume spike (2.5x 20-period average)
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    camarilla_R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    
+    # Calculate volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Donchian, EMA and volume MA)
-    start_idx = 55  # max(20 for Donchian/volume, 34 for EMA) + buffer
+    # Start after warmup (need enough for volume MA and HTF alignment)
+    start_idx = 50  # max(20 for volume, 50 for EMA) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
+            np.isnan(camarilla_S3_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: price breaks above Donchian upper channel + price > 1d EMA + volume spike
-            if close[i] > highest_high[i] and close[i] > ema_1d_aligned[i] and volume_spike[i]:
+            # Long: price breaks above Camarilla R3 + price > 1w EMA + volume spike
+            if close[i] > camarilla_R3_aligned[i] and close[i] > ema_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower channel + price < 1d EMA + volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below Camarilla S3 + price < 1w EMA + volume spike
+            elif close[i] < camarilla_S3_aligned[i] and close[i] < ema_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price retreats to midpoint of Donchian channel
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midpoint:
+            # Exit: price retreats to Camarilla S3 level
+            if close[i] < camarilla_S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price rises to midpoint of Donchian channel
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midpoint:
+            # Exit: price rises to Camarilla R3 level
+            if close[i] > camarilla_R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
