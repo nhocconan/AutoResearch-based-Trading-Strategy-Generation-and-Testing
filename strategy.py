@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses Camarilla R3/S3 levels for breakout signals. 1d EMA34 provides robust trend filter.
-# Volume spike (2.0x 20-period average) confirms institutional participation.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla R3/S3 levels (strong intraday support/resistance) for breakout entries.
+# 1d EMA34 provides medium-term trend filter to avoid counter-trend trades.
+# Volume confirmation (2.0x 20-period average) ensures institutional participation.
+# Designed for moderate trade frequency (~100-150 total trades) to balance edge and fee drag.
 # Works in bull markets via breakouts with trend, in bear via avoidance of false breakouts.
-# Timeframe: 12h (as required), HTF: 1d
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,13 +48,13 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (tr * 1.1 / 4)
     camarilla_s3 = prev_close - (tr * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate volume spike (2.0x 20-period average) - balanced confirmation
+    # Calculate volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,17 +65,17 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume spike
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_aligned[i] and volume_spike[i]:
+            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume confirm
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume spike
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_aligned[i] and volume_spike[i]:
+            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume confirm
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
