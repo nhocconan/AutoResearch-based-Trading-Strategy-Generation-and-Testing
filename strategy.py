@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + Elder Ray + Volume Spike strategy
-# Uses Williams Alligator (13/8/5 SMAs) to identify trend direction and market structure
-# Elder Ray (13-period EMA) measures bull/bear power relative to trend
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 6h timeframe for signal generation with Camarilla R3/S3 breakouts from 1d pivot
+# 1d EMA34 provides multi-timeframe trend filter to avoid counter-trend trades
 # Volume confirmation (2.0x 20-period average) ensures institutional participation
-# Primary timeframe: 1d for lower trade frequency and better signal quality
-# HTF: 1w for major trend context
-# Designed for 30-80 trades over 4 years (7-20/year) to minimize fee drag
-# Works in bull markets via trend-following signals, in bear via reversal signals from Elder Ray extremes
-# Alligator jaw/teeth/lips provide dynamic support/resistance for trend confirmation
+# Discrete position sizing (0.25) minimizes fee churn
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
+# Works in bull markets via trend-aligned breakouts, in bear via volatility filters
 
-name = "1d_WilliamsAlligator_ElderRay_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,30 +29,44 @@ def generate_signals(prices):
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1w data ONCE before loop for major trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for Camarilla pivot, EMA trend, and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for major trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator components (13/8/5 periods)
-    # Jaw (13-period SMA, shifted 8 bars)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMA, shifted 5 bars)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMA, shifted 3 bars)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray components (13-period EMA)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema_13
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range
+    s3 = prev_close - 1.1 * camarilla_range
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -64,7 +76,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -73,39 +85,34 @@ def generate_signals(prices):
             continue
             
         # Check for NaN values in indicators
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
-        bullish_alignment = lips[i] > teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] < jaw[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Bullish Alligator alignment + Bull Power > 0 (strength) + volume confirm + price above 1w EMA50
-            if bullish_alignment and bull_power[i] > 0 and volume_confirm[i] and close[i] > ema_50_1w_aligned[i]:
+            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume confirm
+            if close[i] > r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Alligator alignment + Bear Power < 0 (strength) + volume confirm + price below 1w EMA50
-            elif bearish_alignment and bear_power[i] < 0 and volume_confirm[i] and close[i] < ema_50_1w_aligned[i]:
+            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume confirm
+            elif close[i] < s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bearish Alligator alignment OR Bear Power < 0 (trend weakness)
-            if bearish_alignment or bear_power[i] < 0:
+            # Exit: Price breaks below Camarilla S3 or reverse signal
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bullish Alligator alignment OR Bull Power > 0 (trend strength)
-            if bullish_alignment or bull_power[i] > 0:
+            # Exit: Price breaks above Camarilla R3 or reverse signal
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
