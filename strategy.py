@@ -4,7 +4,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian channel breakouts capture strong momentum moves in both bull and bear markets
+# Donchian channel breakouts capture strong momentum moves
 # 1d EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades
 # Volume spike (>2.0 x 30-period EMA) confirms breakout validity
 # Discrete position sizing (0.25) controls fee drag
