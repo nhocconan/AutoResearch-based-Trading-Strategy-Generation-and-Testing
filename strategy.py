@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume spike
-# Uses 4h/1d for signal direction (trend/volume regime) and 1h only for entry timing precision
-# Targets 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
-# Camarilla levels provide institutional pivot points with proven effectiveness
-# 4h EMA34 determines trend bias; volume spike confirms participation
-# Works in bull via breakouts with trend, bear via fade of false breakouts at key levels
-# Discrete position sizing: 0.20 (20% of capital) balances exposure and risk
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses weekly pivot context for higher timeframe bias: long only when weekly pivot shows bullish bias
+# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Camarilla R3/S3 levels provide high-probability reversal/breakout zones
+# 1d EMA34 ensures alignment with daily trend
+# Volume confirmation (1.5x 20-period average) filters low-quality breakouts
+# Weekly pivot bias prevents trading against higher timeframe structure
+# Works in bull markets via breakouts with trend alignment and bear markets via mean reversion at R3/S3
+# Discrete position sizing: 0.25 (25% of capital) balances exposure and risk
 
-name = "1h_Camarilla_R3S3_4hEMA34_VolumeSpike"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_WeeklyBias"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +27,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 6h Camarilla levels from prior completed 6h bar
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    # Using prior bar to avoid look-ahead
+    prior_close = np.roll(close, 1)
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_close[0] = close[0]  # avoid NaN on first bar
+    prior_high[0] = high[0]
+    prior_low[0] = low[0]
     
-    # Calculate 1h Camarilla levels (prior completed 1h bar's range)
-    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4, etc.
-    # Simplified: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    # Using prior completed bar: shift(1)
-    hl_range = pd.Series(high - low).shift(1).values
-    prev_close = pd.Series(close).shift(1).values
-    camarilla_r3 = prev_close + 1.1 * hl_range * 1.1 / 4
-    camarilla_s3 = prev_close - 1.1 * hl_range * 1.1 / 4
+    rang = prior_high - prior_low
+    r3 = prior_close + 1.1 * rang
+    s3 = prior_close - 1.1 * rang
     
-    # Calculate 4h EMA34 trend (prior completed 4h bar's EMA)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
-    
-    ema_34 = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34)
-    
-    # Calculate 1d volume regime (prior completed 1d bar's volume average)
+    # Calculate 1d EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().shift(1).values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    volume_spike = volume > (vol_ma_20_aligned * 2.0)
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate 1w pivot bias (bullish if price > weekly pivot, bearish if <)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Weekly pivot: (weekly_high + weekly_low + weekly_close) / 3
+    wp_high = df_1w['high'].values
+    wp_low = df_1w['low'].values
+    wp_close = df_1w['close'].values
+    weekly_pivot = (wp_high + wp_low + wp_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Calculate 6h volume confirmation (1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,47 +73,48 @@ def generate_signals(prices):
     start_idx = max(20, 34)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R3 AND price > 4h EMA34 (bullish bias) AND volume spike
-            if (close[i] > camarilla_r3[i] and 
+            # Long entry: price breaks above R3 AND price > 1d EMA34 (bullish bias) 
+            #            AND price > weekly pivot (weekly bullish bias) AND volume spike
+            if (close[i] > r3[i] and 
                 close[i] > ema_34_aligned[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Camarilla S3 AND price < 4h EMA34 (bearish bias) AND volume spike
-            elif (close[i] < camarilla_s3[i] and 
+            # Short entry: price breaks below S3 AND price < 1d EMA34 (bearish bias)
+            #            AND price < weekly pivot (weekly bearish bias) AND volume spike
+            elif (close[i] < s3[i] and 
                   close[i] < ema_34_aligned[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price falls below Camarilla S3 OR below 4h EMA34 (trend change)
-            if close[i] < camarilla_s3[i] or close[i] < ema_34_aligned[i]:
+            # Exit: price falls below S3 OR below 1d EMA34 (trend change)
+            if close[i] < s3[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price rises above Camarilla R3 OR above 4h EMA34 (trend change)
-            if close[i] > camarilla_r3[i] or close[i] > ema_34_aligned[i]:
+            # Exit: price rises above R3 OR above 1d EMA34 (trend change)
+            if close[i] > r3[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
