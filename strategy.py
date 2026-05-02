@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h volume spike and 1d ADX trend filter
-# Camarilla pivot levels (R1/S1) provide tight support/resistance for precise entries
-# Breakout above R1 or below S1 with volume confirmation (2x 20-bar EMA) captures momentum
-# 1d ADX > 20 ensures alignment with higher timeframe trend to avoid range-bound whipsaws
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Designed for 1h timeframe targeting 15-37 trades/year (60-150 total over 4 years)
-# Uses discrete position sizing (0.20) to minimize fee churn and control drawdown
-# Works in bull markets (breakout above R1 + 1d ADX up-trend) and bear markets (breakout below S1 + 1d ADX down-trend)
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ADX Trend Filter and Volume Spike
+# Bollinger Band Squeeze (low volatility) precedes explosive moves in both bull and bear markets
+# Breakout above upper BB or below lower BB with volume confirmation captures the move
+# 1d ADX > 20 ensures alignment with trending market to avoid false breakouts in ranges
+# Uses discrete position sizing (0.25) to minimize fee churn and control drawdown
+# Target: 12-37 trades/year (50-150 total over 4 years) on 6h timeframe
 
-name = "1h_Camarilla_R1S1_Breakout_4hVolume_1dADX_Trend"
-timeframe = "1h"
+name = "6h_BollingerSqueeze_Breakout_1dADX_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC) - prices.index is already DatetimeIndex
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h data for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:  # Need enough for EMA calculation
-        return np.zeros(n)
-    
-    # 4h volume EMA for confirmation
-    vol_ema_20_4h = pd.Series(df_4h['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation_4h = df_4h['volume'].values > (2.0 * vol_ema_20_4h)
-    volume_confirmation_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_confirmation_4h)
-    
-    # 1d data for ADX trend filter and Camarilla pivot levels
+    # 1d data for trend filter (ADX)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
@@ -74,29 +58,32 @@ def generate_signals(prices):
     adx_values = adx.values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
-    # Calculate Camarilla levels for each 1d bar (based on same day's OHLC)
-    # Standard Camarilla: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    camarilla_r1 = df_1d['close'].values + (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
-    camarilla_s1 = df_1d['close'].values - (df_1d['high'].values - df_1d['low'].values) * 1.1 / 12
+    # Bollinger Bands (20, 2) on 6h close
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
     
-    # Align Camarilla levels to 1h timeframe (use same day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Bollinger Band Squeeze: width below 20-period rolling mean of width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_squeeze = bb_width < bb_width_ma
+    
+    # Volume confirmation: spike above 2.0 * 20-period EMA
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = 100
+    start_idx = 40  # Need 20 for BB + 20 for BB width MA + buffer
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_confirmation_4h_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bb_squeeze[i]) or 
+            np.isnan(volume_confirmation[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i])):
             signals[i] = 0.0
             continue
         
@@ -104,31 +91,31 @@ def generate_signals(prices):
         trending_market = adx_1d_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
-            # Long: Breakout above R1 with volume confirmation and trending market
-            if close[i] > camarilla_r1_aligned[i] and trending_market and volume_confirmation_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: BB squeeze breakout above upper BB with volume confirmation and trending market
+            if bb_squeeze[i-1] and close[i] > bb_upper[i] and trending_market and volume_confirmation[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Breakout below S1 with volume confirmation and trending market
-            elif close[i] < camarilla_s1_aligned[i] and trending_market and volume_confirmation_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: BB squeeze breakout below lower BB with volume confirmation and trending market
+            elif bb_squeeze[i-1] and close[i] < bb_lower[i] and trending_market and volume_confirmation[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below S1 (reversal) OR market loses trend
-            if close[i] < camarilla_s1_aligned[i] or not trending_market:
+            # Exit: Price closes below middle BB (mean reversion) OR market loses trend
+            if close[i] < bb_middle[i] or not trending_market:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above R1 (reversal) OR market loses trend
-            if close[i] > camarilla_r1_aligned[i] or not trending_market:
+            # Exit: Price closes above middle BB (mean reversion) OR market loses trend
+            if close[i] > bb_middle[i] or not trending_market:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
