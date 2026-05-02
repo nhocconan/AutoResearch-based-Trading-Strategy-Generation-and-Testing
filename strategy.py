@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and session (08-20 UTC)
-# Uses Camarilla pivot levels (R3/S3) from prior 4h bar for structure-based breakouts
-# 4h EMA50 confirms trend direction to avoid counter-trend trades in ranging markets
-# Session filter (08-20 UTC) reduces noise during low-liquidity Asian hours
-# Discrete position sizing (0.20) minimizes fee drag while allowing meaningful exposure
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Camarilla levels provide mathematical support/resistance, EMA adds trend filter
+# Hypothesis: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
+# Uses 6h primary timeframe for Donchian channel breakout signals
+# 1w pivot (weekly high/low) determines trend direction (avoids counter-trend trades)
+# Volume confirmation (2.0x 20-period average) ensures strong participation
+# Discrete position sizing (0.25) balances profit potential with fee drag minimization
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Donchian provides clear structure, weekly pivot adds higher timeframe bias,
+# volume confirms conviction. Works in both bull and bear markets by only
+# trading in direction of weekly trend.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_Session_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wPivot_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +26,96 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA trend filter and Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = pd.Series(df_4h['close'])
-    ema_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1w pivot points (using prior week's high/low/close)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # We only need the weekly high and low for trend filter
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla levels from prior 4h bar (HLC of completed 4h bar)
-    # Typical price = (High + Low + Close) / 3
-    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3.0
-    # Camarilla width = (High - Low) * 1.1 / 8
-    camarilla_width = (df_4h['high'] - df_4h['low']) * 1.1 / 8.0
-    # R3 = Typical + 4 * width, S3 = Typical - 4 * width
-    camarilla_r3 = typical_price_4h + 4.0 * camarilla_width
-    camarilla_s3 = typical_price_4h - 4.0 * camarilla_width
+    # Calculate pivot and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
     
-    # Align Camarilla levels to 1h timeframe (use completed 4h bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3.values)
+    # Trend filter: price above pivot = bullish bias, below = bearish bias
+    trend_bullish = pivot  # we'll use pivot level directly for comparison
+    trend_bearish = pivot
+    
+    # Align weekly levels to 6h timeframe (completed weekly bars only)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Calculate 6h Donchian channels (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_channel = high_ma.shift(1).values  # Use previous bar to avoid look-ahead
+    lower_channel = low_ma.shift(1).values
+    
+    # Volume confirmation (2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for 4h EMA50 calculation)
+    # Start after warmup (need enough for calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Camarilla breakout long: price > R3 level
-            # Camarilla breakout short: price < S3 level
-            breakout_long = close[i] > camarilla_r3_aligned[i]
-            breakout_short = close[i] < camarilla_s3_aligned[i]
+            # Donchian breakout long: price > upper channel
+            # Donchian breakout short: price < lower channel
+            breakout_long = close[i] > upper_channel[i]
+            breakout_short = close[i] < lower_channel[i]
             
-            # 4h EMA50 trend filter: price > EMA for longs, price < EMA for shorts
-            ema_long = close[i] > ema_4h_aligned[i]
-            ema_short = close[i] < ema_4h_aligned[i]
+            # 1w pivot trend filter: price > pivot for longs, price < pivot for shorts
+            # This ensures we only trade in the direction of the weekly trend
+            hma_long = close[i] > pivot_aligned[i]
+            hma_short = close[i] < pivot_aligned[i]
             
-            if breakout_long and ema_long:
-                signals[i] = 0.20
+            if breakout_long and hma_long and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            elif breakout_short and ema_short:
-                signals[i] = -0.20
+            elif breakout_short and hma_short and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below S3 level (reversal) or trend change
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_4h_aligned[i]:
+            # Exit: Donchian breakdown (price < lower channel) or price below pivot
+            if close[i] < lower_channel[i] or close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 level (reversal) or trend change
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_4h_aligned[i]:
+            # Exit: Donchian breakout (price > upper channel) or price above pivot
+            if close[i] > upper_channel[i] or close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
