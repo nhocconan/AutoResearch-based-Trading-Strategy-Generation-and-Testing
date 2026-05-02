@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA50 trend filter and volume confirmation
-# Williams Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to identify trend and convergence/divergence
-# In trending markets: Jaw > Teeth > Lips (bullish) or Jaw < Teeth < Lips (bearish)
-# In ranging markets: lines intertwine (Alligator sleeping)
-# 1d EMA50 ensures alignment with longer-term trend to avoid counter-trend trades
-# Volume spike (2.0x 20-bar MA) confirms institutional participation
-# Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe
-# Works in bull markets (trend following with Alligator alignment) and bear markets (mean reversion when Alligator sleeps)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Donchian channel from 1d HTF for institutional breakout zones
+# 1d EMA34 ensures alignment with long-term trend to avoid counter-trend trades
+# Volume spike (2.0x 20-bar MA on 12h) confirms institutional participation
+# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes)
+# Focus on BTC/ETH as primary targets, SOL as secondary
 
-name = "6h_Williams_Alligator_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,52 +25,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator on 6h timeframe (Jaw=13, Teeth=8, Lips=5)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    
-    # Volume confirmation: 2.0x 20-period average
+    # Volume confirmation: 2.0x 20-period average on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Upper channel: highest high of last 20 days
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low of last 20 days
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (wait for daily close)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for Alligator and volume MA)
-    start_idx = 20
+    # Start after warmup (need enough data for EMA34 and Donchian channels)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Bullish Alligator: Jaw > Teeth > Lips (trending up)
-            bullish_alligator = jaw[i] > teeth[i] and teeth[i] > lips[i]
-            # Bearish Alligator: Jaw < Teeth < Lips (trending down)
-            bearish_alligator = jaw[i] < teeth[i] and teeth[i] < lips[i]
-            
-            # Long entry: Bullish Alligator AND price > 1d EMA50 AND volume spike
-            if (bullish_alligator and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long entry: Price breaks above upper Donchian AND price > 1d EMA34 (bullish trend) AND volume spike
+            if (close[i] > upper_20_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Bearish Alligator AND price < 1d EMA50 AND volume spike
-            elif (bearish_alligator and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short entry: Price breaks below lower Donchian AND price < 1d EMA34 (bearish trend) AND volume spike
+            elif (close[i] < lower_20_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -79,19 +81,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator sleeps (lines intertwine) OR price below 1d EMA50 (trend change)
-            # Alligator sleeping: not (Jaw > Teeth > Lips) and not (Jaw < Teeth < Lips)
-            alligator_sleeping = not (jaw[i] > teeth[i] and teeth[i] > lips[i]) and not (jaw[i] < teeth[i] and teeth[i] < lips[i])
-            if alligator_sleeping or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Price breaks below lower Donchian (reversion to mean) OR price below 1d EMA34 (trend change)
+            if close[i] < lower_20_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Alligator sleeps (lines intertwine) OR price above 1d EMA50 (trend change)
-            alligator_sleeping = not (jaw[i] > teeth[i] and teeth[i] > lips[i]) and not (jaw[i] < teeth[i] and teeth[i] < lips[i])
-            if alligator_sleeping or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Price breaks above upper Donchian (reversion to mean) OR price above 1d EMA34 (trend change)
+            if close[i] > upper_20_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
