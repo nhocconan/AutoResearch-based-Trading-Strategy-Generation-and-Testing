@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
-# Donchian breakout captures strong momentum moves, volume spike confirms participation,
-# chop regime (CHOP > 61.8) filters for ranging markets where we mean revert at Donchian bands
-# Works in both bull and bear markets by adapting to regime: trend follow in trending (CHOP < 38.2),
-# mean revert in ranging (CHOP > 61.8). Uses 1d for HTF regime and volume confirmation.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend filter and volume spike
+# Camarilla levels from 12h: R3/S3 = strong intraday support/resistance, R4/S4 = breakout levels
+# 12h EMA50 trend filter ensures we trade with higher timeframe momentum
+# Volume spike (2.0x 20-period average) confirms participation
+# Discrete position sizing 0.25 balances risk and minimizes fee churn
+# Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# Works in both bull and bear markets by using 12h trend filter to avoid counter-trend trades
+# Uses 12h for HTF regime and Camarilla calculation for stability
 
-name = "4h_Donchian20_1dVolumeSpike_ChopRegime_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,119 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for regime filter and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop for Camarilla levels and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d True Range for Chopiness Index
-    tr1 = np.abs(df_1d['high'].values - df_1d['low'].values)
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Chopiness Index: CHOP = 100 * log10(sum(TR,14) / (max(HH,14) - min(LL,14))) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    denominator = hh - ll
-    chop_raw = 100 * np.log10(tr_sum / (denominator + 1e-10)) / np.log10(14)
-    chop = pd.Series(chop_raw).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h Camarilla levels (based on previous 12h bar)
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    # Use previous bar's high/low/close to avoid look-ahead
+    prev_high = np.roll(df_12h['high'].values, 1)
+    prev_low = np.roll(df_12h['low'].values, 1)
+    prev_close = np.roll(df_12h['close'].values, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = 0  # first bar
     
-    # Calculate 1d volume MA for spike detection
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (vol_ma * 2.0)  # 2x volume spike
+    # Calculate Camarilla levels
+    camarilla_factor = 1.1 * (prev_high - prev_low) * 1.1
+    r4 = prev_close + camarilla_factor / 2
+    r3 = prev_close + camarilla_factor / 4
+    s3 = prev_close - camarilla_factor / 4
+    s4 = prev_close - camarilla_factor / 2
     
-    # Align 1d indicators to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Align 12h indicators to 6h
+    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_period = 20
-    dc_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    dc_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    dc_mid = (dc_high + dc_low) / 2
+    # Calculate 6h volume confirmation (2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Donchian, chop and volume MA)
-    start_idx = max(donchian_period, 30) + 5
+    # Start after warmup (need enough for EMA50 and volume MA)
+    start_idx = 60  # max(20 for volume, 50 for EMA50) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_aligned[i]
-        vol_spike = volume_spike_aligned[i]
+        # Determine 12h trend
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Determine regime from Chopiness Index
-            trending = chop_val < 38.2   # Strong trend
-            ranging = chop_val > 61.8    # Strong ranging
-            transition = not (trending or ranging)  # Weak trend/range
-            
-            if trending and vol_spike:
-                # In trending market with volume spike: follow Donchian breakout
-                if close[i] > dc_high[i-1]:  # Bullish breakout
-                    signals[i] = 0.30
-                    position = 1
-                elif close[i] < dc_low[i-1]:  # Bearish breakout
-                    signals[i] = -0.30
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif ranging and vol_spike:
-                # In ranging market with volume spike: mean revert at Donchian bands
-                if close[i] < dc_low[i-1]:  # Oversold bounce
-                    signals[i] = 0.30
-                    position = 1
-                elif close[i] > dc_high[i-1]:  # Overbought fade
-                    signals[i] = -0.30
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            else:  # transition regime or no volume spike
+            # Long: price breaks above R3 with volume in uptrend, or breaks above R4 in any trend
+            if ((close[i] > r3_aligned[i] and uptrend and volume_confirm[i]) or
+                (close[i] > r4_aligned[i] and volume_confirm[i])):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S3 with volume in downtrend, or breaks below S4 in any trend
+            elif ((close[i] < s3_aligned[i] and downtrend and volume_confirm[i]) or
+                  (close[i] < s4_aligned[i] and volume_confirm[i])):
+                signals[i] = -0.25
+                position = -1
+            else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions
-            exit_signal = False
-            if trending:
-                # Exit trending long when price crosses below Donchian mid
-                if close[i] < dc_mid[i]:
-                    exit_signal = True
-            else:
-                # Exit ranging long when price reaches Donchian high (mean reversion target)
-                if close[i] >= dc_high[i-1]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit conditions: price falls below S3 (in uptrend) or S4 (any trend)
+            if (close[i] < s3_aligned[i] and uptrend) or (close[i] < s4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_signal = False
-            if trending:
-                # Exit trending short when price crosses above Donchian mid
-                if close[i] > dc_mid[i]:
-                    exit_signal = True
-            else:
-                # Exit ranging short when price reaches Donchian low (mean reversion target)
-                if close[i] <= dc_low[i-1]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit conditions: price rises above R3 (in downtrend) or R4 (any trend)
+            if (close[i] > r3_aligned[i] and downtrend) or (close[i] > r4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
