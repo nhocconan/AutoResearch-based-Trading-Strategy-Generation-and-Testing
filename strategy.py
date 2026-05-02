@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
-# Donchian breakout captures trend continuation; 1d ADX > 25 filters for trending regimes (avoid whipsaws in ranging markets)
-# Volume confirmation (1.5x 20-period average) ensures institutional participation
-# Discrete position sizing 0.25 balances risk and minimizes fee churn
-# Targets 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# Works in both bull and bear markets by using ADX regime to avoid false breakouts
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+# Donchian breakout captures strong directional moves; 1d ADX > 25 ensures we only trade in trending regimes (avoiding whipsaws in ranging markets)
+# Volume confirmation (1.5x 20-period average) filters for institutional participation
+# Discrete position sizing 0.25 minimizes fee churn while maintaining adequate exposure
+# Designed to work in both bull and bear markets by using ADX regime to avoid false breakouts during ranging periods
+# Target: 25-40 trades/year (100-160 total over 4 years) to stay well within fee drag limits
 
-name = "4h_Donchian20_1dADXRegime_VolumeConfirm_v1"
+name = "4h_Donchian20_1dADXRegime_VolumeConfirm_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -66,7 +66,7 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4x volume confirmation (1.5x 20-period average)
+    # Calculate 4h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 1.5)
     
