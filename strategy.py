@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 4h primary timeframe for optimal trade frequency (target: 19-50 trades/year)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 12h primary timeframe for optimal trade frequency (target: 12-37 trades/year)
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend entries
 # Donchian(20) provides clear breakout levels based on recent price action
 # Volume spike (>2.0 * 20-period EMA) confirms strong institutional participation
 # Novelty: Tight volume threshold (2.0x) reduces trades while maintaining edge in both bull/bear markets
+# Works in bull markets via trend-following breakouts and in bear markets via short breakdowns
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,16 +34,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) from previous completed 4h bar
+    # Calculate Donchian channels (20-period) from previous completed 12h bar
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (4h * 6 = ~24 periods)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (12h * 1 = ~12 periods)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
