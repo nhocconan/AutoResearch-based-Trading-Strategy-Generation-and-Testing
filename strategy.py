@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla pivot levels provide precise intraday support/resistance, proven effective in ranging and trending markets
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades
-# Volume spike confirmation filters false breakouts. Target: 20-30 trades/year on 4h timeframe
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1h EMA20 trend filter and volume spike
+# Camarilla pivot levels provide precise intraday support/resistance
+# 1h EMA20 ensures alignment with short-term trend to avoid counter-trend trades
+# Volume spike confirmation filters false breakouts
+# Works in bull markets (breakout above R3 + 1h EMA20 up) and bear markets (breakout below S3 + 1h EMA20 down)
 # Uses discrete position sizing (0.25) to balance return and drawdown control
-# Works in bull markets (breakout above R3 + 1d EMA34 up) and bear markets (breakout below S3 + 1d EMA34 down)
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1hEMA20_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,16 +24,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1h data for trend filter (EMA20)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
-    # 1d EMA34 calculation
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1h EMA20 calculation
+    ema_20_1h = pd.Series(df_1h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_20_1h)
     
     # 1d data for Camarilla pivot levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -58,17 +59,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for EMA calculation)
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+        if (np.isnan(ema_20_1h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Determine trend bias from 1h EMA20
+        uptrend = close[i] > ema_20_1h_aligned[i]
+        downtrend = close[i] < ema_20_1h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Breakout above Camarilla R3 with volume confirmation and uptrend
