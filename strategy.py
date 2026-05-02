@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h timeframe for signal generation with Camarilla pivot breakouts from R3/S3 levels
-# 1d EMA(34) determines primary trend direction - avoids counter-trend trades
-# Volume spike (2.0x 20-period average) ensures strong participation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 4h timeframe for signal generation with Camarilla pivot breakouts from R3/S3 levels
+# 1d EMA(34) determines primary trend direction - avoids counter-trend trades in bear markets
+# Volume spike (1.8x 24-period average) ensures strong participation
 # Discrete position sizing (0.25) minimizes fee drag while maintaining profitability
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
-# Camarilla pivots provide mathematically derived support/resistance levels
+# Target: 75-150 total trades over 4 years = 19-38/year for 4h timeframe
 # Works in both bull and bear markets by only taking trades aligned with 1d trend
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,13 +48,13 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + rang * 1.1 / 2
     camarilla_s3 = prior_close - rang * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation (2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Volume confirmation (1.8x 24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
