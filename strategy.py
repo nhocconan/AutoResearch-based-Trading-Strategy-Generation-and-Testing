@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 1d EMA50 for trend filter (longer-term trend) and 4h Donchian channels for breakout signals
-# Entry logic: Long when price breaks above 4h Donchian upper channel with volume spike and price > 1d EMA50
-#              Short when price breaks below 4h Donchian lower channel with volume spike and price < 1d EMA50
-# Exit logic: Exit when price crosses the 1d EMA50 (trend reversal) or opposite Donchian channel
-# Works in both bull and bear markets by trading with the 1d trend
+# Hypothesis: 4h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Williams Fractals on 1d for structure (bearish = sell fractal, bullish = buy fractal)
+# Entry: Long when bullish fractal breaks above with volume spike and price > 1d EMA34 (uptrend)
+#        Short when bearish fractal breaks below with volume spike and price < 1d EMA34 (downtrend)
+# Exit: Opposite fractal break or EMA34 cross
+# Works in both bull/bear by trading with 1d trend, fractals provide structure in ranging markets
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Discrete sizing 0.25 balances profit potential and fee drag
+# Discrete sizing 0.25 balances profit and fees
 
-name = "4h_Donchian20_Breakout_1dEMA50_Volume"
+name = "4h_WilliamsFractal_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,31 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate Williams Fractals on 1d (need 5 bars: 2 left, center, 2 right)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Williams Fractal: bearish = high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
+    #               bullish = low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Donchian channels: upper = max(high, period), lower = min(low, period)
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 4h timeframe (use previous completed 4h bar's levels)
-    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    # Align fractals to 4h timeframe (need extra delay for confirmation)
+    # Williams Fractal needs 2 extra 1d bars after center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     # Volume confirmation: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,21 +68,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Break above 4h Donchian upper channel AND price > 1d EMA50 (uptrend) AND volume spike
-            if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long entry: Break above bullish fractal AND price > 1d EMA34 (uptrend) AND volume spike
+            if (close[i] > bullish_fractal_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Break below 4h Donchian lower channel AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short entry: Break below bearish fractal AND price < 1d EMA34 (downtrend) AND volume spike
+            elif (close[i] < bearish_fractal_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -86,18 +90,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close below 1d EMA50 (trend change) OR break below 4h Donchian lower channel (reversal)
-            if (close[i] < ema_50_1d_aligned[i] or 
-                close[i] < lower_20_aligned[i]):
+            # Exit: Close below bearish fractal (structure break) OR below 1d EMA34 (trend change)
+            if (close[i] < bearish_fractal_aligned[i] or 
+                close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close above 1d EMA50 (trend change) OR break above 4h Donchian upper channel (reversal)
-            if (close[i] > ema_50_1d_aligned[i] or 
-                close[i] > upper_20_aligned[i]):
+            # Exit: Close above bullish fractal (structure break) OR above 1d EMA34 (trend change)
+            if (close[i] > bullish_fractal_aligned[i] or 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
