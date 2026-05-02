@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout provides clear entry/exit signals based on price channels
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide precise intraday support/resistance for breakout entries
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
 # Volume confirmation (>1.5x 20-period EMA) filters for institutional participation
 # Designed for 4h timeframe targeting 19-50 trades/year (75-200 total over 4 years)
-# Works in bull markets (price > upper channel + daily trend up) and bear markets (price < lower channel + daily trend down)
-# Uses discrete position sizing (0.25) to balance return potential with drawdown control
+# Works in bull markets (price > daily EMA34 + break above R3) and bear markets (price < daily EMA34 + break below S3)
+# Uses discrete position sizing (0.30) to balance return potential with drawdown control
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,11 +34,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian Channel (20-period) on 4h timeframe
-    # Upper band = highest high over last 20 periods
-    # Lower band = lowest low over last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous day
+    # Typical Price = (High + Low + Close) / 3
+    # Range = High - Low
+    # R3 = Close + (Range * 1.1/2) = Close + (Range * 0.55)
+    # S3 = Close - (Range * 1.1/2) = Close - (Range * 0.55)
+    typical_price = (high + low + close) / 3
+    price_range = high - low
+    camarilla_r3 = typical_price + (price_range * 0.55)
+    camarilla_s3 = typical_price - (price_range * 0.55)
     
     # Volume confirmation
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -47,12 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for Donchian channels)
-    start_idx = 20
+    # Start after warmup (need enough data for all indicators)
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
@@ -61,31 +65,31 @@ def generate_signals(prices):
         bearish_bias = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above upper Donchian band + daily trend up + volume confirmation
-            if close[i] > highest_high[i] and bullish_bias and volume_confirmation[i]:
-                signals[i] = 0.25
+            if bullish_bias and close[i] > camarilla_r3[i] and volume_confirmation[i]:
+                # Long: Daily trend up, price breaks above R3, volume confirmation
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below lower Donchian band + daily trend down + volume confirmation
-            elif close[i] < lowest_low[i] and bearish_bias and volume_confirmation[i]:
-                signals[i] = -0.25
+            elif bearish_bias and close[i] < camarilla_s3[i] and volume_confirmation[i]:
+                # Short: Daily trend down, price breaks below S3, volume confirmation
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below lower Donchian band OR daily trend turns bearish
-            if close[i] < lowest_low[i] or not bullish_bias:
+            # Exit: Daily trend turns bearish OR price falls below S3 (reversal signal)
+            if (not bullish_bias) or (close[i] < camarilla_s3[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above upper Donchian band OR daily trend turns bullish
-            if close[i] > highest_high[i] or not bearish_bias:
+            # Exit: Daily trend turns bullish OR price rises above R3 (reversal signal)
+            if (not bearish_bias) or (close[i] > camarilla_r3[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
