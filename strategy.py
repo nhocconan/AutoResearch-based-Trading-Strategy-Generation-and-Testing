@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 4h timeframe for signal generation and 1d for trend filter (EMA34) and Chop regime (<61.8 = trending)
-# Volume confirmation (2.0x 24-period average on 4h) ensures institutional participation
-# Session filter (08-20 UTC) reduces noise trades outside active hours
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
+# Hypothesis: 12h Camarilla pivot breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 12h timeframe for primary signals, 1d for trend regime (EMA34 slope) and chop filter (<61.8 = trending)
+# Volume confirmation (2.0x 24-period average on 12h) ensures institutional participation
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
 # Works in bull markets via trend-aligned breakouts, in bear via chop regime filter avoiding false signals
-# Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
+# Designed for low trade frequency to minimize fee drag (critical for lower timeframes)
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,9 +28,9 @@ def generate_signals(prices):
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA trend filter and Chop regime
+    # Load 1d data ONCE before loop for EMA trend filter and Chop regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -59,7 +58,7 @@ def generate_signals(prices):
     chop = 100 * np.log15(atr1 * 14 / (max_high - min_low))
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate Camarilla pivot levels from previous 4h bar
+    # Calculate Camarilla pivot levels from previous 12h bar
     # Typical Price = (H + L + C)/3
     typical_price = (high + low + close) / 3.0
     # Camarilla levels based on previous bar's range
@@ -79,7 +78,7 @@ def generate_signals(prices):
     camarilla_h2[0] = np.nan
     camarilla_l2[0] = np.nan
     
-    # Volume confirmation (2.0x 24-period average on 4h)
+    # Volume confirmation (2.0x 24-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 2.0)
     
@@ -108,6 +107,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Trend filter: only trade in direction of 1d EMA34 (price above/below EMA)
         if position == 0:  # Flat - look for new entries
             # Long: Price breaks above Camarilla H4 (R3) + price > 1d EMA34 + volume confirm
             if close[i] > camarilla_h4[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
