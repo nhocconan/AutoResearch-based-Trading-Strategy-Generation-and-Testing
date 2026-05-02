@@ -50,6 +50,9 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i - lookback + 1:i + 1])
         lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
+    # Pre-compute aligned 12h close for trend calculation
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -58,17 +61,13 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirmation_12h_aligned[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirmation_12h_aligned[i]) or
+            np.isnan(close_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Determine trend bias from 12h EMA50 (price vs EMA)
-        bullish_trend_aligned = close_12h[-1] > ema_50_12h[-1] if len(close_12h) > 0 else False  # Current 12h trend
-        # For bar i, we need the 12h trend as of the close of the 12h bar that contains bar i
-        # Since we aligned the EMA, we can use the aligned values
-        # Re-calculate: get 12h close aligned
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        bullish_trend_aligned = close_12h_aligned > ema_50_12h_aligned
+        bullish_trend_aligned = close_12h_aligned[i] > ema_50_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Close breaks above Donchian upper band with volume confirmation and bullish 12h trend
