@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w HMA(34) trend + volume spike confirmation
-# Uses 1d primary timeframe for Donchian channel breakout signals
-# 1w HMA(34) confirms long-term trend direction (avoids counter-trend trades in bear markets)
-# Volume confirmation (2.5x 20-period average) ensures strong institutional participation
-# Discrete position sizing (0.30) balances profit potential with fee drag minimization
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Donchian provides clear structure, 1w HMA adds robust trend filter, volume confirms conviction
-# Works in both bull and bear markets by only trading in direction of 1w trend
+# Hypothesis: 6h Williams %R + 12h Camarilla Pivot + Volume Spike
+# Uses 6h primary timeframe for Williams %R (14) mean reversion signals
+# 12h Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) provide institutional reference
+# Volume confirmation (2.0x 20-period average) ensures strong participation
+# Discrete position sizing (0.25) controls fee drag
+# Target: 80-160 total trades over 4 years (20-40/year) for 6h timeframe
+# Williams %R identifies overbought/oversold conditions, Camarilla adds structure, volume confirms conviction
+# Works in both bull and bear markets by fading at R3/S3 and breaking out at R4/S4
 
-name = "1d_Donchian20_1wHMA34_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_12hCamarilla_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +26,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 1w HMA(34)
-    close_1w = pd.Series(df_1w['close'])
-    half_length = 34 // 2
-    sqrt_length = int(np.sqrt(34))
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    wma_half = close_1w.rolling(window=half_length, min_periods=half_length).mean()
-    wma_full = close_1w.rolling(window=34, min_periods=34).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma_1w = raw_hma.rolling(window=sqrt_length, min_periods=sqrt_length).mean().values
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Pivot point = (H + L + C) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Range = H - L
+    range_12h = high_12h - low_12h
     
-    # Calculate 1d Donchian channels (20-period)
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper_channel = high_ma.shift(1).values  # Use previous bar to avoid look-ahead
-    lower_channel = low_ma.shift(1).values
+    # Camarilla levels
+    R3_12h = pivot_12h + range_12h * 1.1 / 2
+    S3_12h = pivot_12h - range_12h * 1.1 / 2
+    R4_12h = pivot_12h + range_12h * 1.1
+    S4_12h = pivot_12h - range_12h * 1.1
     
-    # Volume confirmation (2.5x 20-period average)
+    # Align Camarilla levels to 6h timeframe (wait for 12h bar close)
+    R3_12h_aligned = align_htf_to_ltf(prices, df_12h, R3_12h)
+    S3_12h_aligned = align_htf_to_ltf(prices, df_12h, S3_12h)
+    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, R4_12h)
+    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, S4_12h)
+    
+    # Calculate 6h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    williams_r = williams_r.values
+    
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,44 +72,44 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(hma_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R3_12h_aligned[i]) or np.isnan(S3_12h_aligned[i]) or 
+            np.isnan(R4_12h_aligned[i]) or np.isnan(S4_12h_aligned[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Donchian breakout long: price > upper channel
-            # Donchian breakout short: price < lower channel
-            breakout_long = close[i] > upper_channel[i]
-            breakout_short = close[i] < lower_channel[i]
+            # Fade at R3/S3: short at R3, long at S3 (mean reversion)
+            fade_short = close[i] > R3_12h_aligned[i] and williams_r[i] > -20  # Overbought at R3
+            fade_long = close[i] < S3_12h_aligned[i] and williams_r[i] < -80   # Oversold at S3
             
-            # 1w HMA trend filter: price > HMA for longs, price < HMA for shorts
-            hma_long = close[i] > hma_1w_aligned[i]
-            hma_short = close[i] < hma_1w_aligned[i]
+            # Breakout at R4/S4: long at R4 break, short at S4 break (continuation)
+            breakout_long = close[i] > R4_12h_aligned[i] and williams_r[i] > -50  # Bullish momentum
+            breakout_short = close[i] < S4_12h_aligned[i] and williams_r[i] < -50  # Bearish momentum
             
-            if breakout_long and hma_long and volume_spike[i]:
-                signals[i] = 0.30
+            if (fade_long or breakout_long) and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            elif breakout_short and hma_short and volume_spike[i]:
-                signals[i] = -0.30
+            elif (fade_short or breakout_short) and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Donchian breakdown (price < lower channel) or trend reversal
-            if close[i] < lower_channel[i] or close[i] < hma_1w_aligned[i]:
+            # Exit: price returns to pivot or Williams %R reverses
+            if close[i] < pivot_12h_aligned[i] or williams_r[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Donchian breakout (price > upper channel) or trend reversal
-            if close[i] > upper_channel[i] or close[i] > hma_1w_aligned[i]:
+            # Exit: price returns to pivot or Williams %R reverses
+            if close[i] > pivot_12h_aligned[i] or williams_r[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
