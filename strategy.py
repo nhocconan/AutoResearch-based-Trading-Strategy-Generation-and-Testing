@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d ATR regime filter
-# Uses Williams Alligator (JAW=13, TEETH=8, LIPS=5) from 6h for trend direction
-# 1d ATR(14) percentile filter to avoid low-volatility chop regimes
-# Volume spike confirmation (2x 20-period average) for breakout validity
-# Discrete position sizing 0.25 to balance risk and minimize fee churn
-# Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# Alligator provides trend-following edge in both bull and bear markets
-# ATR regime filter prevents whipsaws during ranging periods
-# Works on BTC/ETH by capturing sustained moves with volatility confirmation
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and session filter (08-20 UTC)
+# Uses 4h EMA34 for trend direction, 1h Camarilla levels from 1d for entry timing
+# Volume confirmation ensures participation, session filter reduces noise trades
+# Discrete position sizing 0.20 minimizes fee churn while maintaining exposure
+# Targets 15-37 trades/year (60-150 total over 4 years) to stay within fee drag limits
+# Works in both bull and bear markets by aligning with 4h trend and requiring volume
 
-name = "6h_WilliamsAlligator_1dATR_VolumeSpike_v1"
-timeframe = "6h"
+name = "1h_Camarilla_R3S3_4hEMA34_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,112 +23,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Load 6h data ONCE before loop for Alligator
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for ATR regime filter
+    # Load 1d data ONCE for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Williams Alligator from 6h
-    # JAW (13-period SMMA, offset 8 bars)
-    jaw_6h = pd.Series(df_6h['close'].values).rolling(window=13, min_periods=13).mean().shift(8).values
-    # TEETH (8-period SMMA, offset 5 bars)
-    teeth_6h = pd.Series(df_6h['close'].values).rolling(window=8, min_periods=8).mean().shift(5).values
-    # LIPS (5-period SMMA, offset 3 bars)
-    lips_6h = pd.Series(df_6h['close'].values).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Align Alligator lines to primary 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_6h, jaw_6h)
-    teeth_aligned = align_htf_to_ltf(prices, df_6h, teeth_6h)
-    lips_aligned = align_htf_to_ltf(prices, df_6h, lips_6h)
-    
-    # Calculate 1d ATR(14) for regime filter
+    # Calculate 1d Camarilla pivot levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_1d index
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3 = pivot + range_1d * 1.1 / 2.0
+    s3 = pivot - range_1d * 1.1 / 2.0
     
-    # Calculate 1d ATR percentile rank (50-period lookback) for regime filter
-    atr_percentile = pd.Series(atr_14).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Align Camarilla levels to 1h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align ATR percentile to primary 6h timeframe
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Load 4h data ONCE for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 35:
+        return np.zeros(n)
     
-    # Calculate 6h volume confirmation (2x 20-period average)
+    # Calculate 4h EMA34 for trend
+    close_4h = df_4h['close'].values
+    ema_34 = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34)
+    
+    # Calculate 1h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Alligator and ATR percentile)
-    start_idx = 50  # max(13,8,5) + offsets + ATR percentile lookback
+    # Start after warmup (need enough for EMA and volume MA)
+    start_idx = 55  # max(34 for EMA, 20 for volume) + buffer
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Check for NaN values in indicators
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # ATR regime filter: only trade when volatility is above 30th percentile
-        # Avoids low-volatility chop regimes where Alligator whipsaws
-        if atr_percentile_aligned[i] < 30:
-            volatility_filter = False
-        else:
-            volatility_filter = True
-        
         if position == 0:  # Flat - look for new entries
-            # Alligator bullish: LIPS > TEETH > JAW (green alignment)
-            bullish = (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])
-            # Alligator bearish: LIPS < TEETH < JAW (red alignment)
-            bearish = (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])
-            
-            # Long: Alligator bullish AND volume confirm AND volatility filter
-            if (bullish and 
-                volume_confirm[i] and 
-                volatility_filter):
-                signals[i] = 0.25
+            # Long: price breaks above R3 AND above 4h EMA34 AND volume confirm
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                volume_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Alligator bearish AND volume confirm AND volatility filter
-            elif (bearish and 
-                  volume_confirm[i] and 
-                  volatility_filter):
-                signals[i] = -0.25
+            # Short: price breaks below S3 AND below 4h EMA34 AND volume confirm
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_confirm[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator turns bearish OR volatility drops significantly
-            bearish = (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])
-            if bearish or (not volatility_filter and atr_percentile_aligned[i] < 20):
+            # Exit: price breaks below S3 OR below 4h EMA34
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: Alligator turns bullish OR volatility drops significantly
-            bullish = (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])
-            if bullish or (not volatility_filter and atr_percentile_aligned[i] < 20):
+            # Exit: price breaks above R3 OR above 4h EMA34
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
