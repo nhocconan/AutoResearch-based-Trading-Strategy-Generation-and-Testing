@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike
-# Camarilla pivot levels provide precise support/resistance on 1d timeframe, proven effective in ranging and trending markets
-# 1w EMA50 ensures alignment with long-term trend to avoid counter-trend trades
-# Volume spike confirmation filters false breakouts. Target: 12-37 trades/year on 12h timeframe
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike
+# Camarilla pivot levels provide precise intraday support/resistance, proven effective in ranging and trending markets
+# 1d EMA50 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume spike confirmation filters false breakouts. Target: 20-50 trades/year on 4h timeframe
 # Uses discrete position sizing (0.30) to balance return and drawdown control
-# Works in bull markets (breakout above R3 + 1w EMA50 up) and bear markets (breakout below S3 + 1w EMA50 down)
+# Works in bull markets (breakout above R3 + 1d EMA50 up) and bear markets (breakout below S3 + 1d EMA50 down)
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,22 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # 1w EMA50 calculation
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # 1d data for Camarilla pivot levels (R3, S3)
+    # 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # 1d EMA50 calculation
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d data for Camarilla pivot levels (R3, S3) from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -47,7 +41,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
     camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -62,14 +56,14 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Determine trend bias from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long: Breakout above Camarilla R3 with volume confirmation and uptrend
