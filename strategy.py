@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels from prior day provide high-probability breakout zones.
-# Volume confirmation (2.0x 20-period MA) ensures institutional participation.
-# 1d EMA34 filter aligns trades with daily trend to avoid false breakouts in chop.
-# Designed for 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# Works in bull markets (buying R3 breakouts in uptrend) and bear markets
-# (selling S3 breakdowns in downtrend) by only taking trades in direction of 1d EMA34.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Donchian channels identify key breakout levels; breakouts above upper or below lower band
+# with volume confirmation indicate strong momentum. 1d EMA34 ensures trades align with daily trend
+# to avoid false breakouts in choppy markets. Designed for 75-200 total trades over 4 years (19-50/year)
+# on 4h timeframe. Works in bull markets (buying breakouts in uptrend) and bear markets
+# (selling breakdowns in downtrend) by only taking trades in direction of 1d EMA34.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,22 +33,12 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate prior day's Camarilla levels (using 1d data)
-    # Camarilla: based on prior day's high, low, close
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    prior_high = df_1d['high'].shift(1).values  # prior day's high
-    prior_low = df_1d['low'].shift(1).values    # prior day's low
-    prior_close = df_1d['close'].shift(1).values # prior day's close
-    
-    # Calculate Camarilla levels (R3/S3 are the most significant breakout levels)
-    R3 = prior_close + (prior_high - prior_low) * 1.1 / 4
-    S3 = prior_close - (prior_high - prior_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (wait for prior day to complete)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Calculate Donchian(20) channels (using 4h data)
+    # Upper band = 20-period high, Lower band = 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 2.0x 20-period average (20*4h = ~3.3 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,25 +47,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for EMA34 and Camarilla)
-    start_idx = max(34, 30)  # 34 bars for EMA34, 30 bars to ensure prior day data available
+    # Start after warmup (need enough data for EMA34 and Donchian)
+    start_idx = max(34, 20)  # 34 bars for EMA34, 20 bars for Donchian
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above R3 with volume spike AND price > 1d EMA34 (bullish trend)
-            if (close[i] > R3_aligned[i] and 
+            # Long entry: price breaks above Donchian upper with volume spike AND price > 1d EMA34 (bullish trend)
+            if (close[i] > donchian_upper[i] and 
                 volume_spike[i] and 
                 close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 with volume spike AND price < 1d EMA34 (bearish trend)
-            elif (close[i] < S3_aligned[i] and 
+            # Short entry: price breaks below Donchian lower with volume spike AND price < 1d EMA34 (bearish trend)
+            elif (close[i] < donchian_lower[i] and 
                   volume_spike[i] and 
                   close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
@@ -85,16 +74,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price crosses below R3 (failed breakout) OR price below 1d EMA34 (trend change)
-            if close[i] < R3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: price crosses below Donchian lower (failed breakout) OR price below 1d EMA34 (trend change)
+            if close[i] < donchian_lower[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price crosses above S3 (failed breakdown) OR price above 1d EMA34 (trend change)
-            if close[i] > S3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: price crosses above Donchian upper (failed breakdown) OR price above 1d EMA34 (trend change)
+            if close[i] > donchian_upper[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
