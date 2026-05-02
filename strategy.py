@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with 1w EMA50 trend filter and volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
 # Uses 1d timeframe for signal generation with Donchian(20) breakouts
 # 1w EMA50 provides multi-timeframe trend filter to avoid counter-trend trades
 # Volume confirmation (1.5x 20-period average) ensures institutional participation
