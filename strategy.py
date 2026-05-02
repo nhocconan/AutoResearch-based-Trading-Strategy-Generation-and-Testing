@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Targets 12-37 trades/year (50-150 total over 4 years) on 6h timeframe
-# Ichimoku Cloud (Senkou Span A/B) acts as dynamic support/resistance; breakouts above/below cloud with 1d EMA50 alignment and volume spike (>2.0x 20 EMA) capture institutional participation
-# Works in bull markets (cloud breakouts with trend + volume) and bear markets (cloud breakdowns with trend + volume)
-# Uses discrete position sizing (0.25) to balance return potential with drawdown control and minimize fee churn
-# Designed to avoid overtrading by requiring confluence of price structure (cloud break), trend (1d EMA50), and volume
+# Hypothesis: 12h Williams Alligator + Elder Ray + 1d EMA34 trend filter
+# Targets 12-37 trades/year (50-150 total over 4 years) on 12h timeframe
+# Williams Alligator identifies trend direction via smoothed medians (Jaw/Teeth/Lips)
+# Elder Ray measures bull/bear power relative to EMA13 for momentum confirmation
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
+# Works in bull markets (Alligator bullish + Elder Ray positive) and bear markets (Alligator bearish + Elder Ray negative)
+# Discrete position sizing (0.25) balances return potential with drawdown control
+# Designed to avoid overtrading by requiring confluence of trend, momentum, and higher timeframe alignment
 
-name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_Trend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_ElderRay_1dEMA34_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,51 +24,45 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku Cloud components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2.0
+    # Williams Alligator: SMMA of median price (HLC/3) with different periods
+    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    median_price = (high + low + close) / 3.0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2.0
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((high_52 + low_52) / 2.0)
+    # Align Alligator components to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # The actual cloud boundaries for current price are the values shifted BACK 26 periods
-    # (because Senkou Span A/B are plotted 26 periods ahead)
-    senkou_span_a_lagged = np.roll(senkou_span_a, 26)
-    senkou_span_b_lagged = np.roll(senkou_span_b, 26)
-    # Set first 26 values to NaN due to roll
-    senkou_span_a_lagged[:26] = np.nan
-    senkou_span_b_lagged[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_lagged, senkou_span_b_lagged)
-    cloud_bottom = np.minimum(senkou_span_a_lagged, senkou_span_b_lagged)
-    
-    # Volume confirmation
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmation = volume > (2.0 * vol_ema_20)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,44 +71,42 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(volume_confirmation[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA50
-        bullish_bias = close[i] > ema_50_1d_aligned[i]
-        bearish_bias = close[i] < ema_50_1d_aligned[i]
+        # Determine Alligator trend: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        alligator_bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        alligator_bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Determine 1d trend bias
+        daily_bullish = close[i] > ema_34_1d_aligned[i]
+        daily_bearish = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if bullish_bias:
-                # Long: Price breaks above cloud top with volume confirmation
-                if close[i] > cloud_top[i-1] and volume_confirmation[i]:
-                    signals[i] = 0.25
-                    position = 1
-                else:
-                    signals[i] = 0.0
-            elif bearish_bias:
-                # Short: Price breaks below cloud bottom with volume confirmation
-                if close[i] < cloud_bottom[i-1] and volume_confirmation[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            if alligator_bullish and daily_bullish and bull_power[i] > 0:
+                # Long: Alligator bullish, daily trend bullish, and positive bull power
+                signals[i] = 0.25
+                position = 1
+            elif alligator_bearish and daily_bearish and bear_power[i] > 0:
+                # Short: Alligator bearish, daily trend bearish, and positive bear power
+                signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0  # Avoid chop around 1d EMA50
+                signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price closes below cloud bottom or trend reverses
-            if close[i] < cloud_bottom[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Alligator turns bearish or daily trend turns bearish
+            if not alligator_bullish or not daily_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price closes above cloud top or trend reverses
-            if close[i] > cloud_top[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Alligator turns bullish or daily trend turns bullish
+            if not alligator_bearish or not daily_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
