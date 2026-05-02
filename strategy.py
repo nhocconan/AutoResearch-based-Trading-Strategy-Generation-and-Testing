@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Camarilla pivot levels provide precise support/resistance derived from prior day's range
-# R3/S3 represent strong breakout levels; breaks above R3 or below S3 indicate momentum shifts
-# 1d EMA50 filters for higher-timeframe trend alignment to avoid counter-trend trades
-# Volume spike (>2.0 x 30-period EMA) confirms breakout validity and reduces false signals
-# Discrete position sizing (0.25) balances opportunity with fee drag control
-# Target: 75-200 total trades over 4 years (19-50/year) for optimal risk-adjusted returns
-# Works in both bull and bear markets by trading breakouts in the direction of the higher timeframe trend
+# Hypothesis: 6h Donchian(20) breakout with 1d ADX(14)>25 trend filter and volume confirmation (>1.5x 20-period EMA)
+# Donchian breakouts capture momentum shifts; 1d ADX ensures we only trade in strong trending regimes (works in bull/bear)
+# Volume confirmation reduces false breakouts; discrete sizing (0.25) controls fee drag
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_1dADX_Trend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,34 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (volume spike > 2.0 x 30-period EMA)
-    vol_ema_30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    volume_confirmation = volume > (2.0 * vol_ema_30)
+    # Volume confirmation: >1.5x 20-period EMA
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > (1.5 * vol_ema_20)
     
-    # 1d data for Camarilla pivot calculation
+    # Donchian channels (20-period) on 6h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:  # need enough for ADX calculation
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1 / 2
-    # S3 = PP - (H - L) * 1.1 / 2
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate ADX(14) on 1d
+    plus_dm = pd.Series(df_1d['high']).diff()
+    minus_dm = pd.Series(df_1d['low']).diff().mul(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
     
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_r3 = pp + (prev_high - prev_low) * 1.1 / 2.0
-    camarilla_s3 = pp - (prev_high - prev_low) * 1.1 / 2.0
+    tr1 = pd.Series(df_1d['high']) - pd.Series(df_1d['low'])
+    tr2 = abs(pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift(1))
+    tr3 = abs(pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    strong_trend = adx_values > 25
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d ADX to 6h timeframe (wait for completed 1d bar)
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,38 +64,34 @@ def generate_signals(prices):
     start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_confirmation[i]) or np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Long: Close breaks above Camarilla R3 with volume confirmation and uptrend
-            if close[i] > camarilla_r3_aligned[i] and volume_confirmation[i] and uptrend:
+            # Long: Close breaks above Donchian upper band with volume confirmation and strong trend
+            if close[i] > highest_high[i] and volume_confirmation[i] and strong_trend_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Camarilla S3 with volume confirmation and downtrend
-            elif close[i] < camarilla_s3_aligned[i] and volume_confirmation[i] and downtrend:
+            # Short: Close breaks below Donchian lower band with volume confirmation and strong trend
+            elif close[i] < lowest_low[i] and volume_confirmation[i] and strong_trend_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close drops below Camarilla S3 (reversal to downside) OR trend changes to downtrend
-            if close[i] < camarilla_s3_aligned[i] or not uptrend:
+            # Exit: Close drops below Donchian lower band (reversal to downside)
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close rises above Camarilla R3 (reversal to upside) OR trend changes to uptrend
-            if close[i] > camarilla_r3_aligned[i] or not downtrend:
+            # Exit: Close rises above Donchian upper band (reversal to upside)
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
