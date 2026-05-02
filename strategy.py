@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike (>2.0x average)
-# Uses 12h primary timeframe to reduce trade frequency and fee drag. Camarilla levels from daily timeframe
-# provide institutional support/resistance. Trend filter ensures alignment with daily momentum.
-# Discrete sizing 0.25 minimizes fee churn. Target: 50-150 trades over 4 years (12-37/year).
-# Works in both bull and bear markets by following daily trend while using volume confirmation
-# to avoid false breakouts.
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x average), and chop regime filter (CHOP < 61.8)
+# H3/L3 levels are more sensitive than R3/S3, increasing trade frequency while maintaining edge.
+# Trend filter ensures alignment with daily momentum. Chop filter avoids ranging markets.
+# Discrete sizing 0.25 to minimize fee churn. Target: 75-200 trades over 4 years.
+# Primary timeframe: 4h, HTF: 1d for Camarilla levels and EMA34.
 
-name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +37,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 12h timeframe (they update daily)
+    # Align Camarilla levels to 4h timeframe (they update daily)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -51,6 +50,24 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
+    # Choppiness Index regime filter (avoid ranging markets)
+    # CHOP > 61.8 = ranging (avoid), CHOP < 38.2 = trending (favor)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * np.sqrt(atr_period))) / np.log10(atr_period)
+    chop_regime = chop < 61.8  # True when trending (CHOP < 61.8), False when ranging
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,21 +76,24 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above H3 AND price > 1d EMA34 AND volume spike
+            # Long: Price breaks above H3 AND price > 1d EMA34 AND volume spike AND trending regime
             if (close[i] > camarilla_h3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
+                volume_spike[i] and 
+                chop_regime[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below L3 AND price < 1d EMA34 AND volume spike
+            # Short: Price breaks below L3 AND price < 1d EMA34 AND volume spike AND trending regime
             elif (close[i] < camarilla_l3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
+                  volume_spike[i] and 
+                  chop_regime[i]):
                 signals[i] = -0.25
                 position = -1
             else:
