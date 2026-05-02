@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Targets 12-37 trades per year (50-150 total over 4 years) on 12h timeframe
-# Donchian channels provide robust price channel structure for breakouts
-# 1w EMA50 ensures alignment with weekly trend (avoid counter-trend trades in bear markets)
+# Hypothesis: 4h Williams %R extreme with 1d ADX regime filter and volume spike
+# Targets 20-50 trades per year (80-200 total over 4 years) to minimize fee drag
+# Williams %R identifies overbought/oversold conditions (above -20 = overbought, below -80 = oversold)
+# 1d ADX > 25 ensures we trade only in trending markets (avoid chop)
 # Volume spike (2.0x 20-period average) confirms institutional participation
 # Uses discrete position sizing 0.25 to balance exposure and risk
-# Works in both bull and bear: trend filter prevents counter-trend trades, volume confirms validity
+# Works in both bull and bear: ADX filter ensures we only trade strong trends, Williams %R catches pullbacks in trend
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_WilliamsR_Extreme_1dADX_Regime_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,27 +25,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for Donchian calculation and EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 weeks for Donchian(20)
+    # Load 1d data ONCE before loop for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # Calculate 1w Donchian(20) channels
-    high_1w = pd.Series(df_1w['high'].values)
-    low_1w = pd.Series(df_1w['low'].values)
-    donchian_high = high_1w.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_1w.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Calculate 12h volume spike (2.0x 20-period average)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(values[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    tr_14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_14 != 0, (dm_plus_14 / tr_14) * 100, 0)
+    di_minus = np.where(tr_14 != 0, (dm_minus_14 / tr_14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Load 1d data ONCE before loop for Williams %R calculation
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(close_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(close_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high_1d - lowest_low_1d) != 0,
+                          (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100, -50)
+    
+    # Align Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 4h volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -53,25 +96,25 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for indicators)
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian high AND price > 1w EMA50 AND volume spike
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long: Williams %R < -80 (oversold) AND ADX > 25 (trending) AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                adx_aligned[i] > 25 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND price < 1w EMA50 AND volume spike
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short: Williams %R > -20 (overbought) AND ADX > 25 (trending) AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  adx_aligned[i] > 25 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -79,18 +122,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Donchian low OR price < 1w EMA50
-            if (close[i] < donchian_low_aligned[i] or 
-                close[i] < ema_50_1w_aligned[i]):
+            # Exit: Williams %R > -20 (overbought) OR ADX < 20 (weak trend)
+            if (williams_r_aligned[i] > -20 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Donchian high OR price > 1w EMA50
-            if (close[i] > donchian_high_aligned[i] or 
-                close[i] > ema_50_1w_aligned[i]):
+            # Exit: Williams %R < -80 (oversold) OR ADX < 20 (weak trend)
+            if (williams_r_aligned[i] < -80 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
