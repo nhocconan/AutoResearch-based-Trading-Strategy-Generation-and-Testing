@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses 4h timeframe for signal direction (EMA50 trend) and 1d Chop regime filter
-# 1h only for entry timing precision - breaks above/below Camarilla R3/S3 levels
-# Volume confirmation (1.5x 20-period average) ensures institutional participation
-# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
-# Session filter (08-20 UTC) reduces noise trades
-# Discrete position sizing (0.20) minimizes fee churn
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
-# Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
-# Designed for low trade frequency to minimize fee drag (critical for 1h timeframe)
+# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Uses 6h timeframe for signal generation with Camarilla(R3/S3) breakouts from prior 1d
+# 1d EMA34 provides trend filter to avoid counter-trend trades
+# Volume confirmation (1.8x 20-period average) ensures institutional participation
+# Discrete position sizing (0.25) minimizes fee churn
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
+# Works in bull markets via trend-aligned breakouts, in bear via avoidance of false signals
+# Based on proven Camarilla pivot strategy but adapted to 6h with proper MTF alignment
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeS_Session_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,55 +30,41 @@ def generate_signals(prices):
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 4h data ONCE before loop for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Load 1d data ONCE before loop for Chop regime filter
+    # Load 1d data ONCE before loop for pivot calculation and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Chopiness Index (14) - trending when < 38.2, ranging when > 61.8
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d OHLC for Camarilla pivots (use previous day's values)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Camarilla pivot levels based on previous day's range
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    # R4 = close + (high - low) * 1.1/2
+    # S4 = close - (high - low) * 1.1/2
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + range_1d * 1.1 / 4
+    camarilla_s3 = close_1d - range_1d * 1.1 / 4
+    camarilla_r4 = close_1d + range_1d * 1.1 / 2
+    camarilla_s4 = close_1d - range_1d * 1.1 / 2
     
-    # ATR14
-    atr1 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Chop = 100 * log15(sum(ATR14)/ (max(high)-min(low)) over 14 periods)
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log15(atr1 * 14 / (max_high - min_low))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate Camarilla levels (based on previous day's OHLC)
-    # Need to resample to daily OHLC from 1h data
-    # Since we can't resample, we'll use 1d data for Camarilla calculation
-    # Camarilla R3/S3 = close +- 1.1 * (high - low) / 2
-    camarilla_r3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
-    camarilla_s3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
-    
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 6h timeframe (use previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume confirmation (1.5x 20-period average)
+    # Volume confirmation (1.8x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,25 +79,19 @@ def generate_signals(prices):
             continue
             
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_confirm[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Regime filter: only trade when Chop < 61.8 (not strongly ranging)
-        if chop_aligned[i] > 61.8:
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 + price > 4h EMA50 + volume confirm
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume confirm
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 + price < 4h EMA50 + volume confirm
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume confirm
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -124,7 +102,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Exit: Price breaks above Camarilla R3 or reverse signal
@@ -132,6 +110,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
