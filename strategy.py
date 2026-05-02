@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and chop regime filter
 # Uses 4h timeframe for signal generation with Camarilla pivot levels from 1d
 # 1d EMA34 provides multi-timeframe trend filter to avoid counter-trend trades
 # Volume confirmation (2.0x 20-period average) ensures institutional participation
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r4 = close_1d + 1.1 * camarilla_range
     s4 = close_1d - 1.1 * camarilla_range
     
-    # AlCamarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
