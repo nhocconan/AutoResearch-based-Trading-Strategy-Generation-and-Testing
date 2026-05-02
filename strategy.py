@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
-# Williams Fractals on 6h timeframe provide structural support/resistance levels that work in both bull and bear markets
+# Hypothesis: 12h Williams Fractal breakout with 1d EMA34 trend filter and volume confirmation
+# Williams Fractals on 12h timeframe provide structural support/resistance levels that work in both bull and bear markets
 # 1d EMA34 ensures trades only with intermediate-term trend, reducing false breakouts in choppy markets
 # Volume confirmation at 1.5x average filters low-participation moves
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Discrete sizing 0.25 to minimize fee churn
 
-name = "6h_WilliamsFractal_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Fractals on 6h timeframe (requires 5-bar window: n-2, n-1, n, n+1, n+2)
+    # Calculate Williams Fractals on 12h data (requires 5-bar window: n-2, n-1, n, n+1, n+2)
     # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
     # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
     # We calculate on completed candles only, so we shift by 2 to avoid look-ahead
