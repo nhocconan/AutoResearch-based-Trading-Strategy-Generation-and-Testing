@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Donchian breakout with 12h EMA50 trend filter and volume confirmation
 # Uses 4h timeframe for signal generation with Donchian(20) breakouts
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (1.8x 20-period average) ensures institutional participation
+# 12h EMA50 provides multi-timeframe trend filter to avoid counter-trend trades
+# Volume confirmation (1.5x 20-period average) ensures institutional participation
 # Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
 # Discrete position sizing (0.25) minimizes fee churn
 # Target: 100-180 total trades over 4 years = 25-45/year for 4h timeframe
 # Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
 # Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
 
-name = "4h_Donchian20_1dEMA34_VolumeS_ChopFilter_v1"
+name = "4h_Donchian20_12hEMA50_VolumeS_ChopFilter_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,15 +31,20 @@ def generate_signals(prices):
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 1d data ONCE before loop for EMA trend filter and Chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Load 1d data ONCE before loop for Chop regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
     # Calculate 1d Chopiness Index (14) - trending when < 38.2, ranging when > 61.8
     high_1d = df_1d['high'].values
@@ -65,9 +70,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation (1.8x 20-period average)
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,7 +87,7 @@ def generate_signals(prices):
             continue
             
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop_aligned[i]) or 
             np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
@@ -94,12 +99,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Donchian upper band + price > 1d EMA34 + volume confirm
-            if close[i] > highest_high[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above Donchian upper band + price > 12h EMA50 + volume confirm
+            if close[i] > highest_high[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower band + price < 1d EMA34 + volume confirm
-            elif close[i] < lowest_low[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below Donchian lower band + price < 12h EMA50 + volume confirm
+            elif close[i] < lowest_low[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
