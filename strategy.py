@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume spike
-# Targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-# Donchian(20) provides clear breakout structure with proven effectiveness on SOL/ETH
+# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend + volume spike
+# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Donchian(20) provides clear breakout structure with proven effectiveness on BTC/ETH
 # 1d EMA34 determines long-term trend bias: long when price > EMA34, short when price < EMA34
 # Volume spike (2x 20-period average) confirms institutional participation
 # Works in bull markets via breakouts with trend alignment and bear markets via fade of false breakouts
 # Discrete position sizing: 0.25 (25% of capital) balances exposure and risk
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian(20) channels (prior completed 4h bar's range)
+    # Calculate 12h Donchian(20) channels (prior completed 12h bar's range)
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -37,7 +37,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 4h volume spike (2x 20-period average)
+    # Calculate 12h volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
