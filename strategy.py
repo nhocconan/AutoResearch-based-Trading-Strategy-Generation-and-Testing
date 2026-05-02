@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike
-# Uses 4h timeframe for signal generation with Camarilla pivot level breakouts
-# 12h EMA(50) determines primary trend direction - multi-timeframe alignment
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses daily timeframe for signal generation with Donchian channel breakouts
+# 1w EMA(50) determines primary trend direction - multi-timeframe alignment
 # Volume spike (2.0x 20-period average) ensures strong institutional participation
 # Discrete position sizing (0.25) minimizes fee drag while maintaining profitability
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Camarilla levels provide mathematically derived support/resistance based on prior day
-# Works in both bull and bear markets by only taking trades aligned with 12h trend
-# Prioritizes BTC/ETH over SOL by requiring volume confirmation and trend alignment
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe
+# Donchian channels provide clear structure-based breakouts
+# Works in both bull and bear markets by only taking trades aligned with 1w trend
+# Prioritizes BTC/ETH by requiring volume confirmation and trend alignment
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +26,22 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values  # datetime64[ms]
     
-    # Load 12h HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load 1w HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 12h EMA(50) for trend determination
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA(50) for trend determination
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from prior 12h bar
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
-    #            S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use R3/S3 for breakouts
-    prior_close = np.roll(close_12h, 1)
-    prior_high = np.roll(high_12h, 1)
-    prior_low = np.roll(low_12h, 1)
-    prior_close[0] = np.nan  # First value has no prior
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    
-    camarilla_range = prior_high - prior_low
-    camarilla_r3 = prior_close + 1.1 * camarilla_range
-    camarilla_s3 = prior_close - 1.1 * camarilla_range
-    
-    # Align Camarilla levels to 4h timeframe (they update only when new 12h bar forms)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    # Calculate Donchian channels from prior 20 days (using 1d data)
+    # Upper band = highest high of prior 20 periods
+    # Lower band = lowest low of prior 20 periods
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -69,34 +55,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_ma[i]) or 
+            np.isnan(low_ma[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close > Camarilla R3 + volume spike + close > 12h EMA50 (bullish trend)
-            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
+            # Long: Close > Donchian upper band + volume spike + close > 1w EMA50 (bullish trend)
+            if close[i] > high_ma[i] and volume_spike[i] and close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Camarilla S3 + volume spike + close < 12h EMA50 (bearish trend)
-            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
+            # Short: Close < Donchian lower band + volume spike + close < 1w EMA50 (bearish trend)
+            elif close[i] < low_ma[i] and volume_spike[i] and close[i] < ema_50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close < Camarilla S3 or close < 12h EMA50 (trend reversal)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit: Close < Donchian lower band or close < 1w EMA50 (trend reversal)
+            if close[i] < low_ma[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close > Camarilla R3 or close > 12h EMA50 (trend reversal)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit: Close > Donchian upper band or close > 1w EMA50 (trend reversal)
+            if close[i] > high_ma[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
