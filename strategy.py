@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
-# Donchian breakout captures momentum in trending markets
-# 1d EMA34 ensures we only trade in the direction of the daily trend
-# Volume spike (2.0x 20-period avg) confirms the breakout has conviction
-# Discrete position sizing (0.30) balances profit potential with drawdown control
-# Targets 20-50 trades/year (80-200 total over 4 years) for 4h timeframe
-# Works in bull markets via buying breakouts in uptrends and in bear markets via selling breakdowns in downtrends
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike (2.0x 20-period avg)
+# Donchian breakout captures momentum in trending markets, works in both bull and bear via directional filter
+# 1d EMA34 ensures we only trade in higher timeframe trend direction to avoid whipsaws
+# Volume spike confirms conviction behind breakout
+# Discrete position sizing (0.25) minimizes fee churn
+# Targets 20-50 trades/year (75-200 total over 4 years) for 4h timeframe
 
 name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
@@ -34,7 +33,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Donchian(20) channels
+    # Calculate Donchian(20) channels on 4h data
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -59,12 +58,12 @@ def generate_signals(prices):
             # Long: price breaks above Donchian upper + 1d close > EMA34 (uptrend) + volume spike
             if (close[i] > highest_high[i] and 
                 close[i] > ema_1d_aligned[i] and volume_spike[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian lower + 1d close < EMA34 (downtrend) + volume spike
             elif (close[i] < lowest_low[i] and 
                   close[i] < ema_1d_aligned[i] and volume_spike[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -75,7 +74,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Exit: price breaks above Donchian upper or 1d trend breaks
@@ -83,6 +82,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
