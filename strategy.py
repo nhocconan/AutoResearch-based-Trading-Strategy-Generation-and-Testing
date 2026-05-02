@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
+# Hypothesis: 6h Donchian(20) breakout + 1d trend filter (EMA34) + volume confirmation
 # Donchian breakout captures strong momentum moves in both bull and bear markets
 # 1d EMA34 ensures we only trade in the direction of the higher timeframe trend
 # Volume confirmation filters out false breakouts
-# ATR-based stoploss manages risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
 # Discrete sizing 0.25 balances profit potential and fee drag
 
-name = "12h_Donchian20_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "6h_Donchian20_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
