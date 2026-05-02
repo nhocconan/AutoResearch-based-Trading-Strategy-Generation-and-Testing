@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h KAMA trend + 1d Williams %R regime filter + volume spike confirmation
-# KAMA adapts to market noise - fast in trends, slow in ranges (good for 2025 bear market)
-# Williams %R on 1d: > -20 = overbought (fade), < -80 = oversold (fade) in ranging markets
-# In trending markets (ADX > 25), trade with Williams %R extremes as momentum signals
-# Volume confirmation (2.0x 20-period average) ensures institutional participation
-# Discrete position sizing 0.25 balances risk and minimizes fee churn
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1w trend filter + volume confirmation
+# Camarilla pivot levels provide precise intraday support/resistance from prior 1d session
+# Breakout of R3 (resistance 3) or S3 (support 3) with volume confirms institutional participation
+# 1w EMA50 trend filter ensures we trade with the weekly momentum
+# Discrete position sizing 0.25 minimizes fee churn while maintaining adequate exposure
 # Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# Works in both bull and bear markets by adapting to regime via 1d ADX
+# Works in both bull and bear markets by adapting to weekly trend direction
 
-name = "6h_KAMA_1dWilliamsR_Regime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,162 +25,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Williams %R and ADX regime
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low + 1e-10)
+    # Calculate Camarilla pivot levels from prior 1d OHLC
+    # Camarilla levels: 
+    # R4 = close + ((high - low) * 1.5/2)
+    # R3 = close + ((high - low) * 1.25/2)
+    # R2 = close + ((high - low) * 1.1/2)
+    # R1 = close + ((high - low) * 0.5/2)
+    # PP = (high + low + close) / 3
+    # S1 = close - ((high - low) * 0.5/2)
+    # S2 = close - ((high - low) * 1.1/2)
+    # S3 = close - ((high - low) * 1.25/2)
+    # S4 = close - ((high - low) * 1.5/2)
     
-    # Calculate 1d ADX for regime filter (trending vs ranging)
-    # True Range
-    tr1 = np.abs(df_1d['high'].values - df_1d['low'].values)
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # We need prior day's OHLC, so shift by 1
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
     
-    # Directional Movement
-    dm_plus = np.where((df_1d['high'].values - np.roll(df_1d['high'].values, 1)) > 
-                       (np.roll(df_1d['low'].values, 1) - df_1d['low'].values),
-                       np.maximum(df_1d['high'].values - np.roll(df_1d['high'].values, 1), 0), 0)
-    dm_minus = np.where((np.roll(df_1d['low'].values, 1) - df_1d['low'].values) > 
-                        (df_1d['high'].values - np.roll(df_1d['high'].values, 1)),
-                        np.maximum(np.roll(df_1d['low'].values, 1) - df_1d['low'].values, 0), 0)
-    dm_plus[0] = dm_minus[0] = 0
+    # First day has no prior day
+    prev_high[0] = prev_low[0] = prev_close[0] = 0
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels
+    hl_range = prev_high - prev_low
+    r3 = prev_close + (hl_range * 1.25 / 2)
+    s3 = prev_close - (hl_range * 1.25 / 2)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Align 1d Camarilla levels to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align 1d indicators to 6h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 6h KAMA (Adaptive Moving Average)
-    # Efficiency Ratio: |change| / volatility
-    change = np.abs(np.diff(close, k=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    # Pad arrays to match length
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
+    # Align 1w EMA50 to 12h
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Smoothing Constants: fastest SC=2/(2+1)=0.666, slowest SC=2/(30+1)=0.0645
-    sc = (er * (0.666 - 0.0645) + 0.0645) ** 2
-    sc = np.nan_to_num(sc, nan=0.0645)  # default to slowest when ER is NaN
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed with first close
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate 6h volume confirmation (2.0x 20-period average)
+    # Calculate 12h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 50  # max(20 for volume, 34 for KAMA/Williams/ADX) + buffer
+    # Start after warmup (need enough for pivots, EMA and volume MA)
+    start_idx = 50  # max(20 for volume, 50 for EMA) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(kama[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Determine regime from 1d ADX
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        # Determine trend from 1w EMA50
+        uptrend = close[i] > ema50_1w_aligned[i]
+        downtrend = close[i] < ema50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if trending:
-                # In trending market: trade with momentum
-                # Long: Price > KAMA AND Williams %R crossing above -80 from below (momentum up)
-                if (close[i] > kama[i] and 
-                    williams_r_aligned[i] > -80 and 
-                    i > start_idx and williams_r_aligned[i-1] <= -80 and
+            if uptrend:
+                # In uptrend: long breakout of R3 with volume
+                if (close[i] > r3_aligned[i] and 
+                    i > start_idx and close[i-1] <= r3_aligned[i-1] and
                     volume_confirm[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: Price < KAMA AND Williams %R crossing below -20 from above (momentum down)
-                elif (close[i] < kama[i] and 
-                      williams_r_aligned[i] < -20 and 
-                      i > start_idx and williams_r_aligned[i-1] >= -20 and
-                      volume_confirm[i]):
+                else:
+                    signals[i] = 0.0
+            elif downtrend:
+                # In downtrend: short breakdown of S3 with volume
+                if (close[i] < s3_aligned[i] and 
+                    i > start_idx and close[i-1] >= s3_aligned[i-1] and
+                    volume_confirm[i]):
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
-            else:  # ranging or transition regime
-                # In ranging market: fade extremes
-                # Long: Williams %R < -80 (oversold) AND price > KAMA (bullish bias)
-                if (williams_r_aligned[i] < -80 and 
-                    close[i] > kama[i] and 
-                    i > start_idx and williams_r_aligned[i-1] >= -80 and
-                    volume_confirm[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Williams %R > -20 (overbought) AND price < KAMA (bearish bias)
-                elif (williams_r_aligned[i] > -20 and 
-                      close[i] < kama[i] and 
-                      i > start_idx and williams_r_aligned[i-1] <= -20 and
-                      volume_confirm[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions
-            exit_signal = False
-            if trending:
-                # Exit trending long when momentum fades
-                if close[i] <= kama[i] or williams_r_aligned[i] >= -20:
-                    exit_signal = True
-            else:
-                # Exit ranging long when overbought or momentum weakens
-                if williams_r_aligned[i] > -20 or close[i] <= kama[i]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit conditions: price breaks below R3 (failed breakout) or reverse signal
+            if close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_signal = False
-            if trending:
-                # Exit trending short when momentum fades
-                if close[i] >= kama[i] or williams_r_aligned[i] <= -80:
-                    exit_signal = True
-            else:
-                # Exit ranging short when oversold or momentum weakens
-                if williams_r_aligned[i] < -80 or close[i] >= kama[i]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit conditions: price breaks above S3 (failed breakdown) or reverse signal
+            if close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
