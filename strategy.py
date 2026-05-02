@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Elder Ray measures bull/bear power (close - EMA13) to detect strength
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend vs ranging markets
-# In trending markets (Alligator aligned): trade Elder Ray direction
-# In ranging markets (Alligator intertwined): fade extreme Elder Ray readings
-# Volume confirmation (1.5x 20-period average) filters low-participation moves
-# Designed for 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses tight entry conditions targeting 75-200 total trades over 4 years (19-50/year)
+# Camarilla levels provide institutional support/resistance, EMA34 filters trend, volume confirms participation
+# Works in bull via breakouts with trend, in bear via mean reversion at extreme levels
 
-name = "6h_ElderRay_Alligator_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,100 +32,56 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Elder Ray components (13-period EMA)
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = close - ema_13  # Bull Power = Close - EMA13
-    bear_power = ema_13 - close  # Bear Power = EMA13 - Close
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    camarilla_high = close_1d + (high_1d - low_1d) * 1.1 / 4  # R3 level
+    camarilla_low = close_1d - (high_1d - low_1d) * 1.1 / 4   # S3 level
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    # Calculate Williams Alligator (13,8,5 SMAs with offsets)
-    # Jaw: 13-period SMA, offset 8 bars
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA, offset 5 bars
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA, offset 3 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Calculate volume confirmation (1.5x 20-period average)
+    # Calculate volume spike (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for all indicators)
+    # Start after warmup (need enough for EMA and volume MA)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Determine market state using Alligator
-        # Trending: Jaw > Teeth > Lips (uptrend) or Jaw < Teeth < Lips (downtrend)
-        # Ranging: Alligator lines intertwined (not clearly separated)
-        is_uptrend = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        is_downtrend = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        is_ranging = not (is_uptrend or is_downtrend)
-        
         if position == 0:  # Flat - look for new entries
-            if is_uptrend:
-                # In uptrend: go long on strong bull power
-                if bull_power[i] > 0 and volume_confirm[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif is_downtrend:
-                # In downtrend: go short on strong bear power
-                if bear_power[i] > 0 and volume_confirm[i]:
-                    signals[i] = -0.25
-                    position = -1
-            else:  # ranging market
-                # In range: fade extreme Elder Ray readings
-                if bull_power[i] > np.percentile(bull_power[max(0, i-50):i+1], 80) and volume_confirm[i]:
-                    # Extreme bull power in range -> short (mean reversion)
-                    signals[i] = -0.25
-                    position = -1
-                elif bear_power[i] > np.percentile(bear_power[max(0, i-50):i+1], 80) and volume_confirm[i]:
-                    # Extreme bear power in range -> long (mean reversion)
-                    signals[i] = 0.25
-                    position = 1
-            # Default: stay flat
-            if position == 0:
+            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume spike
+            if close[i] > camarilla_high_aligned[i] and close[i] > ema_34_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume spike
+            elif close[i] < camarilla_low_aligned[i] and close[i] < ema_34_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
+            else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit conditions
-            exit_signal = False
-            if is_uptrend:
-                # In uptrend: exit when bull power fades
-                if bull_power[i] <= 0:
-                    exit_signal = True
-            else:
-                # In ranging/downtrend: exit on any reversal signal
-                if bear_power[i] > bull_power[i]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: Price breaks below Camarilla S3 (reversal signal)
+            if close[i] < camarilla_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_signal = False
-            if is_downtrend:
-                # In downtrend: exit when bear power fades
-                if bear_power[i] <= 0:
-                    exit_signal = True
-            else:
-                # In ranging/uptrend: exit on any reversal signal
-                if bull_power[i] > bear_power[i]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: Price breaks above Camarilla R3 (reversal signal)
+            if close[i] > camarilla_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
