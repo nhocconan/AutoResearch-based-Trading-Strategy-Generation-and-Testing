@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and session filter (08-20 UTC)
-# Uses prior day's OHLC for Camarilla levels to avoid look-ahead, 4h EMA34 for trend alignment,
-# and session filter to reduce noise. Discrete position sizing (0.20) controls fee drag.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume confirmation
+# Uses prior day's OHLC for Camarilla levels (no look-ahead), 4h EMA34 for trend alignment,
+# and volume spike (>1.5x 20-period average) to filter false breakouts.
+# Session filter (08-20 UTC) reduces noise. Discrete position sizing (0.20) controls fee drag.
 # Target: 60-150 total trades over 4 years (15-37/year) by requiring confluence of
-# daily breakout level, 4h trend, and active session. Works in bull markets by capturing
-# breakouts with trend, works in bear by only taking trend-aligned breaks.
+# daily breakout level, 4h trend, volume confirmation, and active session.
 
-name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Trend_Session"
+name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Volume_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -22,6 +22,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     open_time = prices['open_time'].values
     
     # Precompute session hours (08-20 UTC)
@@ -58,6 +59,10 @@ def generate_signals(prices):
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
+    # Volume confirmation: 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -71,24 +76,24 @@ def generate_signals(prices):
             continue
             
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close breaks above R3 with bullish 4h trend
+            # Long: Close breaks above R3 with bullish 4h trend and volume spike
             if close[i] > r3_1d_aligned[i] and ema_34_4h_aligned[i] > close_4h[-1] if len(close_4h) > 0 else False:
                 # Re-check trend using aligned values for bar i
                 close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-                if close_4h_aligned[i] > ema_34_4h_aligned[i]:
+                if close_4h_aligned[i] > ema_34_4h_aligned[i] and volume_spike[i]:
                     signals[i] = 0.20
                     position = 1
                 else:
                     signals[i] = 0.0
-            # Short: Close breaks below S3 with bearish 4h trend
+            # Short: Close breaks below S3 with bearish 4h trend and volume spike
             elif close[i] < s3_1d_aligned[i]:
                 close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-                if close_4h_aligned[i] < ema_34_4h_aligned[i]:
+                if close_4h_aligned[i] < ema_34_4h_aligned[i] and volume_spike[i]:
                     signals[i] = -0.20
                     position = -1
                 else:
