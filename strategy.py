@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 4h timeframe for signal generation with Camarilla levels from 1d pivots
+# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 1d EMA34 trend filter and volume spike confirmation
+# Elder Ray measures bull/bear strength relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Uses 6h timeframe for signal generation with Elder Ray calculated from 6h data
 # 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
 # Volume confirmation (2.0x 20-period average) ensures institutional participation
 # Discrete position sizing (0.25) balances return and risk
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Works in bull markets via trend-aligned breakouts, in bear via trend filter avoiding false signals
-# Based on proven Camarilla pivot structure with volume confirmation edge
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
+# Works in bull markets via strong bull power + uptrend, in bear via strong bear power + downtrend
+# Elder Ray captures momentum exhaustion better than RSI/WilliamsR in ranging markets
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,9 +27,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for pivot calculations and EMA
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -36,24 +37,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Elder Ray components on 6h data
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Shift by 1 to use previous day's data for current day's levels
-    high_1d_prev = np.concatenate([[np.nan], high_1d[:-1]])
-    low_1d_prev = np.concatenate([[np.nan], low_1d[:-1]])
-    close_1d_prev = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = close_1d_prev + (high_1d_prev - low_1d_prev) * 1.1 / 4
-    camarilla_s3 = close_1d_prev - (high_1d_prev - low_1d_prev) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    bull_power = high - ema_13  # Measures bull strength
+    bear_power = low - ema_13   # Measures bear strength (negative values)
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -62,39 +52,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for indicators)
-    start_idx = 100
+    # Start after warmup (need enough for EMA13)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 + price > 1d EMA34 + volume confirm
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Strong bull power (>0) + price > 1d EMA34 + volume confirm
+            if bull_power[i] > 0 and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3 + price < 1d EMA34 + volume confirm
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Strong bear power (<0) + price < 1d EMA34 + volume confirm
+            elif bear_power[i] < 0 and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below Camarilla S3 or reverse signal
-            if close[i] < camarilla_s3_aligned[i]:
+            # Exit: Bull power turns negative (<0) or bear power becomes strong (< -1.0 * ATR proxy)
+            # Use 0 as simple exit for bull power turning negative
+            if bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above Camarilla R3 or reverse signal
-            if close[i] > camarilla_r3_aligned[i]:
+            # Exit: Bear power turns positive (>0) or bull power becomes strong (> 1.0 * ATR proxy)
+            # Use 0 as simple exit for bear power turning positive
+            if bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
