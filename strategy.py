@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
-# Donchian channels provide clear structural breakouts based on price action
-# 1d EMA50 filters for intermediate-term trend to avoid counter-trend entries
-# Volume spike (>1.8 * 20-period EMA) confirms institutional participation
-# Discrete sizing (0.30) balances return potential with drawdown control
-# Works in bull markets (breakout continuation) and bear markets (mean reversion via short)
-# Designed to generate sufficient trades while maintaining statistical significance
+# Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation
+# Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years)
+# Williams %R(14) identifies overbought/oversold conditions for mean reversion entries
+# 1d EMA34 provides intermediate-term trend filter to avoid counter-trend trades
+# Volume spike (>2.0 * 20-period EMA on 4h) confirms strong participation at reversal points
+# Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
+# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
+# Designed to avoid overtrading by requiring confluence of momentum extreme, trend alignment, and volume
 
-name = "4h_Donchian20_1dEMA50_Trend_Volume"
+name = "4h_WilliamsR_Reversal_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,70 +28,70 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) channels on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Williams %R(14) on 4h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Volume confirmation: volume > 1.8 * 20-period EMA (4h)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (4h)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ema_20)
+    volume_spike = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup: need sufficient data for Donchian and EMA
-    start_idx = 60
+    # Start after warmup: need sufficient data for all indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA50
-        bullish_bias = close[i] > ema_50_1d_aligned[i]
-        bearish_bias = close[i] < ema_50_1d_aligned[i]
+        # Determine trend bias from 1d EMA34
+        bullish_bias = close[i] > ema_34_1d_aligned[i]
+        bearish_bias = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if bullish_bias:
-                # Long: price breaks above Donchian high with volume spike
-                if close[i] > highest_high[i] and volume_spike[i]:
-                    signals[i] = 0.30
+                # Long: Williams %R oversold (< -80) with volume spike
+                if williams_r[i] < -80 and volume_spike[i]:
+                    signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.0
             elif bearish_bias:
-                # Short: price breaks below Donchian low with volume spike
-                if close[i] < lowest_low[i] and volume_spike[i]:
-                    signals[i] = -0.30
+                # Short: Williams %R overbought (> -20) with volume spike
+                if williams_r[i] > -20 and volume_spike[i]:
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid chop around 1d EMA50
+                signals[i] = 0.0  # Avoid chop around 1d EMA34
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian low or price below 1d EMA50
-            if close[i] < lowest_low[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Williams %R returns above -50 or price below 1d EMA34
+            if williams_r[i] > -50 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or price above 1d EMA50
-            if close[i] > highest_high[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Williams %R returns below -50 or price above 1d EMA34
+            if williams_r[i] < -50 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
