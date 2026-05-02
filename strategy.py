@@ -3,86 +3,90 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + 1w EMA34 trend filter + volume confirmation
-# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) to identify trend direction and strength
-# Weekly EMA34 ensures alignment with higher timeframe bias for both bull and bear markets
-# Volume confirmation (1.5x 20-period average) filters for institutional participation
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels from 1d timeframe for structure: R3/S3 as fade levels, R4/S4 as breakout continuation
+# 12h EMA50 ensures alignment with intermediate trend to avoid counter-trend trades
+# Volume confirmation (2.0x 20-period average) filters for institutional participation
 # Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 30-80 total trades over 4 years (7-20/year) for 1d timeframe
-# Alligator provides clear trend signals while weekly filter prevents counter-trend trading
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Camarilla levels provide mathematical support/resistance that works in both ranging and trending markets
 
-name = "1d_WilliamsAlligator_1wEMA34_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_12hEMA50_Trend_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: Jaw(13), Teeth(8), Lips(5) - all SMAs of median price
-    median_price = (high + low) / 2
-    median_series = pd.Series(median_price)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Typical Price = (H + L + C) / 3
+    typical_price = (high + low + close) / 3.0
+    # Previous period's typical price
+    prev_typical = pd.Series(typical_price).shift(1).values
+    # Previous period's range
+    prev_range = pd.Series(high - low).shift(1).values
     
-    jaw = median_series.rolling(window=13, min_periods=13).mean().shift(1).values  # Jaw (13)
-    teeth = median_series.rolling(window=8, min_periods=8).mean().shift(1).values   # Teeth (8)
-    lips = median_series.rolling(window=5, min_periods=5).mean().shift(1).values    # Lips (5)
+    # Camarilla levels
+    R3 = prev_typical + (prev_range * 1.1 / 4.0)
+    S3 = prev_typical - (prev_range * 1.1 / 4.0)
+    R4 = prev_typical + (prev_range * 1.1 / 2.0)
+    S4 = prev_typical - (prev_range * 1.1 / 2.0)
     
-    # Weekly trend filter: price > weekly EMA34 for longs, < for shorts
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 12h EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume confirmation (1.5x 20-period average)
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(R4[i]) or np.isnan(S4[i]) or
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Alligator bullish: Lips > Teeth > Jaw (green alignment)
-            # Alligator bearish: Lips < Teeth < Jaw (red alignment)
-            if lips[i] > teeth[i] and teeth[i] > jaw[i]:  # Bullish alignment
-                if volume_spike[i] and close[i] > ema34_1w_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i]:  # Bearish alignment
-                if volume_spike[i] and close[i] < ema34_1w_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: Close above R4 + volume spike + price > 12h EMA50
+            if close[i] > R4[i] and volume_spike[i] and close[i] > ema50_12h_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short breakout: Close below S4 + volume spike + price < 12h EMA50
+            elif close[i] < S4[i] and volume_spike[i] and close[i] < ema50_12h_aligned[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Alligator turns bearish or price < weekly EMA34
-            if lips[i] < teeth[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: Close below R3 (mean reversion) or price < 12h EMA50 (trend change)
+            if close[i] < R3[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Alligator turns bullish or price > weekly EMA34
-            if lips[i] > teeth[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: Close above S3 (mean reversion) or price > 12h EMA50 (trend change)
+            if close[i] > S3[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
