@@ -9,8 +9,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Session filter (08-20 UTC) reduces noise. Discrete position sizing (0.20) controls fee drag.
 # Target: 60-150 total trades over 4 years (15-37/year) by requiring confluence of
 # daily breakout level, 4h trend, volume confirmation, and active session.
+# Added: ATR-based volatility filter to reduce whipsaw in low volatility regimes.
 
-name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Volume_Session"
+name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Volume_ATR_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -37,6 +38,15 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # Calculate ATR for volatility filter (14-period on 1h)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily Camarilla levels (using prior day's OHLC)
     df_1d = get_htf_data(prices, '1d')
@@ -76,16 +86,22 @@ def generate_signals(prices):
             continue
             
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_14[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Volatility filter: require ATR > 0.5% of price to avoid choppy markets
+        if atr_14[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
             # Long: Close breaks above R3 with bullish 4h trend and volume spike
-            if close[i] > r3_1d_aligned[i] and ema_34_4h_aligned[i] > close_4h[-1] if len(close_4h) > 0 else False:
-                # Re-check trend using aligned values for bar i
+            if close[i] > r3_1d_aligned[i]:
                 close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-                if close_4h_aligned[i] > ema_34_4h_aligned[i] and volume_spike[i]:
+                if (not np.isnan(close_4h_aligned[i]) and 
+                    close_4h_aligned[i] > ema_34_4h_aligned[i] and 
+                    volume_spike[i]):
                     signals[i] = 0.20
                     position = 1
                 else:
@@ -93,7 +109,9 @@ def generate_signals(prices):
             # Short: Close breaks below S3 with bearish 4h trend and volume spike
             elif close[i] < s3_1d_aligned[i]:
                 close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-                if close_4h_aligned[i] < ema_34_4h_aligned[i] and volume_spike[i]:
+                if (not np.isnan(close_4h_aligned[i]) and 
+                    close_4h_aligned[i] < ema_34_4h_aligned[i] and 
+                    volume_spike[i]):
                     signals[i] = -0.20
                     position = -1
                 else:
@@ -104,7 +122,8 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Exit: Close drops below S3 (reversal to mean) OR 4h trend turns bearish
             close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-            if close[i] < s3_1d_aligned[i] or close_4h_aligned[i] < ema_34_4h_aligned[i]:
+            if (not np.isnan(close_4h_aligned[i]) and 
+                (close[i] < s3_1d_aligned[i] or close_4h_aligned[i] < ema_34_4h_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,7 +132,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit: Close rises above R3 (reversal to mean) OR 4h trend turns bullish
             close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-            if close[i] > r3_1d_aligned[i] or close_4h_aligned[i] > ema_34_4h_aligned[i]:
+            if (not np.isnan(close_4h_aligned[i]) and 
+                (close[i] > r3_1d_aligned[i] or close_4h_aligned[i] > ema_34_4h_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
