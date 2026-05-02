@@ -4,9 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout captures institutional price action. 1d EMA34 ensures alignment with higher timeframe trend.
-# Volume confirmation filters false breakouts. Works in both bull and bear markets by following 1d trend.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian breakouts capture institutional accumulation/distribution zones.
+# 1d EMA34 ensures alignment with higher timeframe trend direction.
+# Volume spike confirms institutional participation in the breakout.
+# Works in both bull and bear markets by following 1d trend. Target: 75-200 trades over 4 years (19-50/year).
 
 name = "4h_Donchian20_Breakout_1dEMA34_Volume"
 timeframe = "4h"
@@ -31,21 +32,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Donchian channels: upper = max(high, lookback=20), lower = min(low, lookback=20)
+    high_ma = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align HTF indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, high_ma)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, low_ma)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 1.5x 20-period average on 4h
+    # Volume confirmation: 2.0x 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
