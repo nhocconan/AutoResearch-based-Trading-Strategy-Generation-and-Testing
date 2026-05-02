@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# Uses 6h primary timeframe for optimal trade frequency (target: 12-37/year)
-# 1d ATR regime filter distinguishes trending (ATR(7)/ATR(30) > 1.2) from ranging markets
-# In trending regime: trade Donchian breakouts in direction of 1d EMA50 trend
-# In ranging regime: fade Donchian touches at bands with mean reversion
-# Volume confirmation (>1.3 * 20-period EMA) ensures participation on signals
-# Designed for low trade frequency with 0.25 sizing to manage drawdown
-# Works in bull markets via trend-following breakouts and bear markets via mean reversion in ranges
+# Hypothesis: 12h Williams Fractal breakout with 1w EMA50 trend filter and volume confirmation
+# Uses 12h primary timeframe for low trade frequency (target: 12-37 trades/year)
+# 1w EMA50 ensures alignment with weekly trend to avoid counter-trend entries
+# Williams Fractals provide high-probability reversal points with natural look-ahead delay
+# Volume spike (>2.0 * 50-period EMA) confirms participation on breakouts
+# Designed for very low trade frequency with 0.25 sizing to manage drawdown
+# Works in bull markets via breakout continuation and bear markets via trend-following alignment
 
-name = "6h_Donchian20_1dATRRegime_Volume_v1"
-timeframe = "6h"
+name = "12h_Williams_Fractal_1wEMA50_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,128 +25,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ATR regime and EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(7) and ATR(30) for regime detection
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Williams Fractals on 1d (requires 2-bar confirmation after center)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # First period has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n+1] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n+1] < low[n+2]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    atr_7 = pd.Series(tr).ewm(span=7, adjust=False, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i-1] < high_1d[i] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i+1] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i-1] > low_1d[i] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i+1] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # ATR ratio for regime: >1.2 = trending, <1.2 = ranging
-    atr_ratio = atr_7 / (atr_30 + 1e-10)
+    # Align Williams Fractals to 12h timeframe with 2-bar extra delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 1d EMA50 for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Donchian channels (20-period) on 6h data
-    # Using rolling window with min_periods
-    df_prices = pd.DataFrame({'high': high, 'low': low, 'close': close})
-    donchian_high = df_prices['high'].rolling(window=20, min_periods=20).max().values
-    donchian_low = df_prices['low'].rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.3 * 20-period EMA (6h * ~5.3 = 20 periods)
+    # Volume confirmation: volume > 2.0 * 50-period EMA (12h * ~4.2 = 50 periods = ~21 days)
     vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ema_20)
+    vol_ema_50 = vol_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    volume_spike = volume > (2.0 * vol_ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup: need sufficient data for all indicators
-    start_idx = 100
+    start_idx = 200
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
-        atr_ratio_val = atr_ratio_aligned[i]
-        is_trending = atr_ratio_val > 1.2
-        is_ranging = atr_ratio_val <= 1.2
+        # Determine trend bias from 1w EMA50
+        bullish_bias = close[i] > ema_50_1w_aligned[i]
+        bearish_bias = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            if is_trending:
-                # Trending regime: trade Donchian breakouts in direction of 1d EMA50 trend
-                bullish_trend = close[i] > ema_50_1d_aligned[i]
-                bearish_trend = close[i] < ema_50_1d_aligned[i]
-                
-                if bullish_trend:
-                    # Long: price breaks above Donchian high with volume spike
-                    if close[i] > donchian_high[i] and volume_spike[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    else:
-                        signals[i] = 0.0
-                elif bearish_trend:
-                    # Short: price breaks below Donchian low with volume spike
-                    if close[i] < donchian_low[i] and volume_spike[i]:
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
-                else:
-                    signals[i] = 0.0  # Avoid chop around 1d EMA50
-            else:
-                # Ranging regime: fade Donchian touches at bands
-                # Long: price touches or pierces Donchian low with volume spike (mean reversion up)
-                if close[i] <= donchian_low[i] and volume_spike[i]:
+            if bullish_bias:
+                # Long: price breaks above bullish fractal with volume spike
+                if close[i] > bullish_fractal_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price touches or pierces Donchian high with volume spike (mean reversion down)
-                elif close[i] >= donchian_high[i] and volume_spike[i]:
+                else:
+                    signals[i] = 0.0
+            elif bearish_bias:
+                # Short: price breaks below bearish fractal with volume spike
+                if close[i] < bearish_fractal_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
+            else:
+                signals[i] = 0.0  # Avoid chop around 1w EMA50
         
         elif position == 1:  # Long position
-            if is_trending:
-                # In trending regime: exit on Donchian low break or trend reversal
-                if close[i] < donchian_low[i] or close[i] < ema_50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: price breaks below bearish fractal or price below 1w EMA50
+            if close[i] < bearish_fractal_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit on Donchian high touch (mean reversion target)
-                if close[i] >= donchian_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            if is_trending:
-                # In trending regime: exit on Donchian high break or trend reversal
-                if close[i] > donchian_high[i] or close[i] > ema_50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: price breaks above bullish fractal or price above 1w EMA50
+            if close[i] > bullish_fractal_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit on Donchian low touch (mean reversion target)
-                if close[i] <= donchian_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
