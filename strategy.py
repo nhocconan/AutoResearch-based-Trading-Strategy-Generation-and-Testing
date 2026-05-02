@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h timeframe for signal generation with Camarilla pivot breakouts from R3/S3 levels
-# 1d EMA(34) determines primary trend direction - avoids counter-trend trades in bear markets
-# Volume spike (1.8x 24-period average on 12h data) ensures strong participation
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trend filter
+# Uses 4h timeframe for signal generation with Donchian channel breakouts
+# Volume spike (2.0x 20-period average) ensures strong participation
+# ATR(14) trend filter: only long when price > SMA50 + 0.5*ATR, short when price < SMA50 - 0.5*ATR
 # Discrete position sizing (0.25) minimizes fee drag while maintaining profitability
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
-# Works in both bull and bear markets by only taking trades aligned with 1d trend
+# Target: 100-180 total trades over 4 years = 25-45/year for 4h timeframe
+# Works in both bull and bear markets by using volatility-adjusted trend filter
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_ATRTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,36 +25,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 1d EMA(34) for trend determination
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Volume confirmation (2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 2.0)
     
-    # Calculate Camarilla pivot levels from prior 1d bar
-    prior_close = np.roll(close_1d, 1)
-    prior_high = np.roll(high_1d, 1)
-    prior_low = np.roll(low_1d, 1)
-    prior_close[0] = np.nan
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
+    # ATR(14) for trend filter and volatility adjustment
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
+    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla calculations: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    rang = prior_high - prior_low
-    camarilla_r3 = prior_close + rang * 1.1 / 2
-    camarilla_s3 = prior_close - rang * 1.1 / 2
+    # SMA50 for trend direction
+    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation (1.8x 24-period average on 12h data)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Trend filter: price must be beyond 0.5*ATR from SMA50
+    long_filter = close > (sma50 + 0.5 * atr)
+    short_filter = close < (sma50 - 0.5 * atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,34 +55,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(long_filter[i]) or 
+            np.isnan(short_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close > R3 + volume spike + close > 1d EMA34 (bullish trend)
-            if close[i] > r3_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+            # Long: Break above Donchian high + volume spike + bullish trend filter
+            if close[i] > highest_high[i] and volume_spike[i] and long_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S3 + volume spike + close < 1d EMA34 (bearish trend)
-            elif close[i] < s3_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: Break below Donchian low + volume spike + bearish trend filter
+            elif close[i] < lowest_low[i] and volume_spike[i] and short_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close < S3 or close < 1d EMA34 (trend reversal)
-            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit: Close below Donchian low or bearish trend filter
+            if close[i] < lowest_low[i] or not long_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close > R3 or close > 1d EMA34 (trend reversal)
-            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit: Close above Donchian high or bullish trend filter
+            if close[i] > highest_high[i] or not short_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
