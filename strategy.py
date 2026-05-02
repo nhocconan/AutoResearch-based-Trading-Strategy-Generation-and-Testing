@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with weekly pivot filter and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with weekly pivot filter and volume confirmation
 # Uses daily Camarilla levels for entry/exit and weekly pivot for directional bias
 # Weekly pivot acts as regime filter: price above weekly PP = long bias, below = short bias
 # Volume spike (2.0x 24-bar MA) confirms institutional participation
-# Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 # Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes)
 
-name = "6h_Camarilla_R3S3_Breakout_1wPivot_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wPivot_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +47,7 @@ def generate_signals(prices):
     s3_1d = close_1d - range_1d * 1.1 / 4.0
     s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -66,7 +66,7 @@ def generate_signals(prices):
     weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Volume confirmation: 2.0x 24-period average (24*6h = 6 days)
+    # Volume confirmation: 2.0x 24-period average (24*12h = 12 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
