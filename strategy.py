@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivot levels from prior day identify key support/resistance; breakouts above R3 or below S3
-# with volume confirmation indicate strong momentum. 1d EMA34 ensures trades align with daily trend
-# to avoid false breakouts in choppy markets. Designed for 75-200 total trades over 4 years (19-50/year)
-# on 4h timeframe. Works in bull markets (buying breakouts in uptrend) and bear markets
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla pivot levels identify key intraday support/resistance; breakouts above R3 or below S3 with
+# volume confirmation indicate strong momentum. 1d EMA34 ensures trades align with daily trend
+# to avoid false breakouts in choppy markets. Designed for 50-150 total trades over 4 years (12-37/year)
+# on 12h timeframe. Works in bull markets (buying breakouts in uptrend) and bear markets
 # (selling breakdowns in downtrend) by only taking trades in direction of 1d EMA34.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,13 +45,13 @@ def generate_signals(prices):
     R4 = prior_close + (prior_high - prior_low) * 1.1 / 2
     S4 = prior_close - (prior_high - prior_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (wait for prior day to complete)
+    # Align Camarilla levels to 12h timeframe (wait for prior day to complete)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume confirmation: 2.0x 20-period average (20*4h = ~3.3 days)
+    # Volume confirmation: 2.0x 20-period average (20*12h = 10 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -59,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for EMA34 and Camarilla)
-    start_idx = max(34, 30)  # 30 bars to ensure prior day data available
+    start_idx = max(34, 30)  # 34 bars for EMA34, 30 bars to ensure prior day data available
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
