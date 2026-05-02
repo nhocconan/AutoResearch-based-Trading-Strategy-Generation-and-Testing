@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation (1.5x 20-period average)
-# Uses Donchian channels for price structure on 12h, 1d EMA34 for trend alignment to avoid counter-trend trades
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation (1.5x 20-period average)
+# Uses Donchian channels for price structure, 1d EMA34 for trend alignment to avoid counter-trend trades
 # Volume spike ensures participation and reduces false breakouts
 # Discrete position sizing 0.25 balances risk and minimizes fee churn
 # Targets 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 # Works in both bull and bear markets by only taking breakouts in direction of 1d trend
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,11 +34,11 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian(20) on 12h
+    # Calculate Donchian(20) on 4h
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 12h volume confirmation (1.5x 20-period average)
+    # Calculate 4h volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_confirm = volume > (vol_ma * 1.5)
     
