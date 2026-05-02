@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h session-based mean reversion with 4h trend filter and volume exhaustion
-# Strategy trades mean reversion in ranging markets (8-20 UTC session) using Bollinger Bands
-# 4h EMA50 defines trend direction - only take mean reversion trades in direction of 4h trend
-# Volume exhaustion (volume < 0.5 x 20-period EMA) confirms low momentum environment for reversion
-# Discrete position sizing (0.20) limits fee drag and drawdown
-# Target: 60-150 total trades over 4 years (15-38/year) to avoid fee drag
-# Works in bull/bear by following 4h trend - long in uptrends near BB lower, short in downtrends near BB upper
+# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries
+# 1d EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades
+# Volume spike (>1.5 x 20-period EMA) confirms reversal validity
+# Discrete position sizing (0.25) controls fee drag
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal risk-adjusted returns
+# Works in both bull and bear markets by following HTF trend direction and fading extremes
 
-name = "1h_Session_MeanReversion_BB_VolumeExhaust_4hEMA50_Trend"
-timeframe = "1h"
+name = "6h_WilliamsR_Reversal_1dEMA34_Trend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,75 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 8-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Bollinger Bands (20, 2.0) on 1h
-    close_s = pd.Series(close)
-    bb_middle = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
-    
-    # Volume exhaustion: volume < 0.5 x 20-period EMA (low momentum environment)
+    # Volume confirmation (volume spike > 1.5 x 20-period EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_exhaustion = volume < (0.5 * vol_ema_20)
+    volume_confirmation = volume > (1.5 * vol_ema_20)
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
+    # Start after warmup (need enough data for calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(volume_exhaustion[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 4h trend bias
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Determine trend bias from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        if position == 0:  # Flat - look for mean reversion entries
-            if in_session[i] and volume_exhaustion[i]:
-                # Long: price at/below BB lower in uptrend (buy dip in uptrend)
-                if close[i] <= bb_lower[i] and uptrend:
-                    signals[i] = 0.20
-                    position = 1
-                # Short: price at/above BB upper in downtrend (sell rally in downtrend)
-                elif close[i] >= bb_upper[i] and downtrend:
-                    signals[i] = -0.20
-                    position = -1
-                else:
-                    signals[i] = 0.0
+        if position == 0:  # Flat - look for new entries
+            # Long: Williams %R oversold (< -80) with volume confirmation and uptrend
+            if williams_r[i] < -80 and volume_confirmation[i] and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R overbought (> -20) with volume confirmation and downtrend
+            elif williams_r[i] > -20 and volume_confirmation[i] and downtrend:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price returns to BB middle (mean reversion complete) OR session ends
-            if close[i] >= bb_middle[i] or not in_session[i]:
+            # Exit: Williams %R rises above -50 (mean reversion complete) OR trend changes to downtrend
+            if williams_r[i] > -50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price returns to BB middle (mean reversion complete) OR session ends
-            if close[i] <= bb_middle[i] or not in_session[i]:
+            # Exit: Williams %R falls below -50 (mean reversion complete) OR trend changes to uptrend
+            if williams_r[i] < -50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
