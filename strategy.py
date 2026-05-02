@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume spike confirmation
-# Donchian breakout captures momentum; 1d EMA > price for longs, < price for shorts filters primary trend
-# Volume spike (2.0x 20-period average) ensures strong participation and reduces false breakouts
-# Uses discrete position sizing 0.25 to minimize fee churn
-# Targets 20-30 trades/year (80-120 total over 4 years) to stay within fee drag limits
-# Works in both bull and bear markets by requiring volume confirmation and primary trend alignment
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA(34) trend filter and volume spike (2.5x) confirmation
+# Uses discrete position sizing 0.25 to minimize fee churn. Targets 12-30 trades/year (50-120 total over 4 years)
+# Volume spike filter reduces false breakouts; 1d EMA ensures alignment with primary trend
+# Works in bull markets via breakout momentum and in bear markets via short-side symmetry
+# Uses 6h timeframe to balance trade frequency and signal quality
 
-name = "4h_Donchian20_1dEMA_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,23 +28,23 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA(34) for trend filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 6h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate volume spike (2.0x 20-period average)
+    # Calculate volume spike (2.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for Donchian, EMA and volume MA)
-    start_idx = 55  # max(20 for Donchian/volume, 50 for EMA) + buffer
+    start_idx = 55  # max(20 for Donchian/volume, 34 for EMA) + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
