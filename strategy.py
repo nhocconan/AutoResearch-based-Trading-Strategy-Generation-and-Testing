@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation
-# Uses 6h timeframe for signal generation with Donchian channel breakouts
-# 12h EMA(50) determines primary trend direction - multi-timeframe alignment
-# Volume spike (2.0x 20-period average) ensures strong institutional participation
+# Hypothesis: 4h Donchian(20) breakout with 1d HMA(21) trend filter and volume confirmation
+# Uses 4h timeframe for signal generation with Donchian channel breakouts
+# 1d HMA(21) determines primary trend direction - multi-timeframe alignment
+# Volume spike (1.8x 20-period average) ensures strong institutional participation
 # Discrete position sizing (0.25) minimizes fee drag while maintaining profitability
-# Target: 75-200 total trades over 4 years = 19-50/year for 6h timeframe
-# Donchian channels provide clear breakout levels based on recent price action
-# Works in both bull and bear markets by only taking trades aligned with 12h trend
-# Focus on BTC/ETH by requiring volume confirmation and trend alignment
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
+# Donchian channels provide adaptive support/resistance based on recent price action
+# Works in both bull and bear markets by only taking trades aligned with 1d HMA trend
+# Prioritizes BTC/ETH over SOL by requiring volume confirmation and trend alignment
 
-name = "6h_Donchian20_12hEMA50_Trend_Volume_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dHMA21_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,27 +26,48 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values  # datetime64[ms]
     
-    # Load 12h HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h EMA(50) for trend determination
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d HMA(21) for trend determination
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Calculate Donchian(20) levels on 6h data
-    # Upper band = highest high over last 20 periods
-    # Lower band = lowest low over last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
     
-    # Volume confirmation (2.0x 20-period average)
+    wma_half = np.array([np.nan] * len(close_1d))
+    wma_full = np.array([np.nan] * len(close_1d))
+    
+    for i in range(half_len, len(close_1d)):
+        wma_half[i] = wma(close_1d[i-half_len+1:i+1], half_len)
+    
+    for i in range(21, len(close_1d)):
+        wma_full[i] = wma(close_1d[i-21+1:i+1], 21)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma_21_1d = np.array([np.nan] * len(close_1d))
+    
+    for i in range(sqrt_len, len(raw_hma)):
+        if not np.isnan(raw_hma[i]):
+            hma_21_1d[i] = wma(raw_hma[i-sqrt_len+1:i+1], sqrt_len)
+    
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    
+    # Calculate Donchian(20) channels on 4h
+    donchian_period = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().shift(1).values
+    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().shift(1).values
+    
+    # Volume confirmation (1.8x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,34 +77,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(hma_21_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Close > Donchian Upper + volume spike + close > 12h EMA50 (bullish trend)
-            if close[i] > donchian_upper[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
+            # Long: Close > Upper Donchian + volume spike + close > 1d HMA21 (bullish trend)
+            if close[i] > upper_channel[i] and volume_spike[i] and close[i] > hma_21_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Donchian Lower + volume spike + close < 12h EMA50 (bearish trend)
-            elif close[i] < donchian_lower[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
+            # Short: Close < Lower Donchian + volume spike + close < 1d HMA21 (bearish trend)
+            elif close[i] < lower_channel[i] and volume_spike[i] and close[i] < hma_21_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close < Donchian Lower or close < 12h EMA50 (trend reversal)
-            if close[i] < donchian_lower[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit: Close < Lower Donchian or close < 1d HMA21 (trend reversal)
+            if close[i] < lower_channel[i] or close[i] < hma_21_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close > Donchian Upper or close > 12h EMA50 (trend reversal)
-            if close[i] > donchian_upper[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit: Close > Upper Donchian or close > 1d HMA21 (trend reversal)
+            if close[i] > upper_channel[i] or close[i] > hma_21_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
