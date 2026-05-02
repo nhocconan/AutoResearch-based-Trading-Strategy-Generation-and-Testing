@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume spike
-# Uses Donchian channel breakouts for momentum capture with weekly EMA trend filter
-# Volume spike confirmation reduces false breakouts
-# ATR-based trailing stop (3.0) lets winners run while cutting losses
-# Designed for 12h timeframe targeting 12-37 trades/year (50-150 total over 4 years)
-# Works in bull markets by buying breakouts above upper channel in uptrend
-# Works in bear markets by selling breakdowns below lower channel in downtrend
-# Weekly EMA50 filter ensures we only trade with the dominant trend
-# Volume spike (2.0x 20-period average) confirms breakout strength
+# Hypothesis: 4h Bollinger Band Squeeze Breakout with 1d Volume Regime Filter
+# Uses Bollinger Band width percentile to detect low volatility squeeze (regime filter)
+# Breakout occurs when price closes outside BB(20,2) with volume > 1.5x 20-period average
+# Works in bull markets by buying upside breakouts and in bear markets by selling downside breakouts
+# Volume regime filter ensures breakouts occur during institutional participation
+# ATR-based position sizing (0.25) manages risk through volatility adaptation
+# Targets 20-40 trades/year (80-160 total over 4 years) for 4h timeframe
 
-name = "12h_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_BollingerSqueezeBreakout_1dVolumeRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,88 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d average volume for regime filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_1d > (vol_ma_1d * 1.2)  # High volume regime
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align volume regime to 4h timeframe (wait for completed 1d bar)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
     
-    # Calculate ATR(14) for trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Calculate volume spike (2.0x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Calculate Bollinger Band width percentile (squeeze detection)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True).values
+    squeeze_condition = bb_width_percentile < 0.2  # Lowest 20% = squeeze
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0  # For long trailing stop
-    lowest_low_since_entry = 0.0    # For short trailing stop
     
-    # Start after warmup (need enough for Donchian, ATR, EMA, and volume MA)
+    # Start after warmup (need enough for BB and volume calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(squeeze_condition[i]) or np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Uptrend: price > weekly EMA50
-            # Downtrend: price < weekly EMA50
-            uptrend = close[i] > ema_50_1w_aligned[i]
-            downtrend = close[i] < ema_50_1w_aligned[i]
-            
-            # Long: Price breaks above upper Donchian + volume spike + uptrend
-            if close[i] > highest_high[i] and volume_spike[i] and uptrend:
+            # Long: Price closes above BB upper + BB squeeze + high volume regime
+            if close[i] > bb_upper[i] and squeeze_condition[i] and vol_regime_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-                highest_high_since_entry = high[i]
-            # Short: Price breaks below lower Donchian + volume spike + downtrend
-            elif close[i] < lowest_low[i] and volume_spike[i] and downtrend:
+            # Short: Price closes below BB lower + BB squeeze + high volume regime
+            elif close[i] < bb_lower[i] and squeeze_condition[i] and vol_regime_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
-                lowest_low_since_entry = low[i]
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_high_since_entry:
-                highest_high_since_entry = high[i]
-            
-            # ATR trailing stop: exit if price drops 3.0*ATR from highest high
-            trailing_stop = highest_high_since_entry - 3.0 * atr[i]
-            if close[i] < trailing_stop:
+            # Exit when price closes below BB middle (mean reversion)
+            if close[i] < bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_low_since_entry:
-                lowest_low_since_entry = low[i]
-            
-            # ATR trailing stop: exit if price rises 3.0*ATR from lowest low
-            trailing_stop = lowest_low_since_entry + 3.0 * atr[i]
-            if close[i] > trailing_stop:
+            # Exit when price closes above BB middle (mean reversion)
+            if close[i] > bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
