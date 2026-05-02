@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# Uses 4h timeframe for signal generation with Camarilla pivot breakouts from 1d timeframe
-# 12h EMA50 provides multi-timeframe trend filter to avoid counter-trend trades
-# Volume confirmation (2.0x 20-period average) ensures institutional participation
-# Chop regime filter from 1d timeframe avoids ranging markets (CHOP > 61.8 = range)
-# Discrete position sizing (0.25) minimizes fee churn
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Works in bull markets via trend-aligned breakouts, in bear via chop filter avoiding false signals
-# Designed for low trade frequency to minimize fee drag (critical for 4h timeframe)
+# Hypothesis: 1h Camarilla pivot breakout with 4h EMA50 trend filter and volume confirmation
+# Uses 4h timeframe for signal direction (trend filter) and 1h for entry timing precision
+# Camarilla R3/S3 levels provide institutional support/resistance for breakouts
+# 4h EMA50 ensures trades align with higher timeframe trend to avoid whipsaws
+# Volume confirmation (1.8x 20-period average) filters low-conviction moves
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours
+# Discrete position sizing (0.20) minimizes fee churn
+# Target: 80-120 total trades over 4 years = 20-30/year for 1h timeframe
+# Works in bull markets via trend-aligned breakouts, in bear via trend filter avoiding counter-trend traps
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeS_ChopFilter_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeS_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,6 +22,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -31,69 +32,45 @@ def generate_signals(prices):
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Load 1d data ONCE before loop for Camarilla pivots and Chop regime filter
+    # Calculate Camarilla pivots (based on previous day) on 1h timeframe
+    # Use daily high/low/close from 1d timeframe for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Chopiness Index (14) - trending when < 38.2, ranging when > 61.8
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate typical price for pivot
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    camarilla_range = (high_1d - low_1d) * 1.1
+    r3 = close_1d + camarilla_range / 4.0
+    s3 = close_1d - camarilla_range / 4.0
     
-    # ATR14
-    atr1 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align daily Camarilla levels to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Chop = 100 * log15(sum(ATR14)/ (max(high)-min(low)) over 14 periods)
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log15(atr1 * 14 / (max_high - min_low))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate 1d Camarilla pivot levels (R3, S3)
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_ = high_prev - low_prev
-    
-    # Camarilla levels
-    R3 = close_prev + range_ * 1.1 / 4
-    S3 = close_prev - range_ * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Calculate Donchian channels (20-period) on 4h timeframe for exit
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (2.0x 20-period average)
+    # Volume confirmation (1.8x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for indicators)
+    # Start after warmup (need enough for indicators and pivots)
     start_idx = 100
     
     for i in range(start_idx, n):
@@ -103,44 +80,37 @@ def generate_signals(prices):
             continue
             
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_confirm[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Regime filter: only trade when Chop < 61.8 (not strongly ranging)
-        if chop_aligned[i] > 61.8:
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above Camarilla R3 + price > 12h EMA50 + volume confirm
-            if close[i] > R3_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above Camarilla R3 + price > 4h EMA50 + volume confirm
+            if close[i] > r3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below Camarilla S3 + price < 12h EMA50 + volume confirm
-            elif close[i] < S3_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below Camarilla S3 + price < 4h EMA50 + volume confirm
+            elif close[i] < s3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price breaks below 4h Donchian lower band or reverse signal
-            if close[i] < lowest_low[i]:
+            # Exit: Price breaks below Camarilla S3 or reverse signal
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
-            # Exit: Price breaks above 4h Donchian upper band or reverse signal
-            if close[i] > highest_high[i]:
+            # Exit: Price breaks above Camarilla R3 or reverse signal
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
