@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike (>1.8x average)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike (>2.0x average)
 # Uses 1d HTF for EMA50 trend to capture long-term direction and reduce false breakouts.
-# Donchian(20) provides proven breakout levels with good historical performance.
-# Volume confirmation at 1.8x average ensures strong participation while limiting trades.
+# Donchian(20) from 4h provides proven breakout levels with good historical performance.
+# Volume confirmation at 2.0x average ensures strong participation while limiting trades.
 # Discrete sizing 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 # Works in bull/bear: trend filter ensures trades only with momentum, volume confirms conviction.
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_Breakout_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,11 +24,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) from primary timeframe
+    # Calculate Donchian channels (20-period) from 4h timeframe
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA50 for trend filter (long-term trend)
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -37,9 +37,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 1.8x 20-period average (restrictive threshold to limit trades)
+    # Volume confirmation: 2.0x 20-period average (restrictive threshold to limit trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
