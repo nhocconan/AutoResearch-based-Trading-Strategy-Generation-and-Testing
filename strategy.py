@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
-# Donchian breakout captures momentum bursts, 1d EMA34 ensures higher-timeframe trend alignment,
-# volume spike (2.0x 20-period average) confirms momentum and filters false signals.
-# Discrete sizing 0.25 targets ~50-150 trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull/bear via trend-following logic with strict alignment requirements.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation
+# Donchian breakout captures momentum in trending markets. 1d EMA34 ensures higher-timeframe
+# trend alignment to avoid counter-trend trades. Volume spike (2.0x 20-period average) confirms
+# momentum and filters false signals. Discrete sizing 0.25 targets ~75-200 trades over 4 years
+# (19-50/year) to minimize fee drag. Works in bull/bear via trend-following logic with strict
+# alignment requirements. Uses ATR-based stoploss to manage risk.
 
-name = "12h_Donchian20_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,11 +33,11 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) on 12h: upper/lower bands
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) channels on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation (2.0x 20-period average) on 12h
+    # Volume confirmation (2.0x 20-period average) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
