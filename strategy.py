@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R4/S4 breakout with 12h EMA50 trend filter and volume confirmation
-# Uses 6h primary timeframe targeting 12-37 trades/year (50-150 total over 4 years)
-# 12h EMA50 ensures alignment with intermediate trend to avoid counter-trend entries
-# Camarilla R4/S4 levels from 1d provide strong breakout/continuation levels
-# Volume spike (>2.0 * 20-period EMA on 6h) confirms strong participation
+# Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume confirmation
+# Uses 4h primary timeframe targeting 19-50 trades/year (75-200 total over 4 years)
+# Williams %R identifies overbought/oversold conditions for mean reversion entries
+# 1d EMA50 ensures alignment with daily trend to avoid counter-trend entries
+# Volume spike (>1.8 * 20-period EMA on 4h) confirms strong participation
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
-# Works in bull (continuation via R4/S4 breakout) and bear (mean reversion via R3/S3 fade) markets
+# Works in bull (continuation on pullbacks) and bear (bearish rallies) markets
 
-name = "6h_Camarilla_R4S4_12hEMA50_Trend_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_Reversal_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,49 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of completed 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1d_shifted = np.roll(close_1d, 1)  # Previous 1d bar's close
-    close_1d_shifted[0] = close_1d[0]  # First bar uses its own close
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla R3, S3, R4, S4 levels: based on previous 1d bar's range
-    # R3 = close + 1.1 * (high - low) / 4
-    # S3 = close - 1.1 * (high - low) / 4
-    # R4 = close + 1.1 * (high - low) / 2
-    # S4 = close - 1.1 * (high - low) / 2
-    camarilla_r3 = close_1d_shifted + 1.1 * (high_1d - low_1d) / 4
-    camarilla_s3 = close_1d_shifted - 1.1 * (high_1d - low_1d) / 4
-    camarilla_r4 = close_1d_shifted + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s4 = close_1d_shifted - 1.1 * (high_1d - low_1d) / 2
+    # Williams %R (14-period) on 4h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 12h EMA50 to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: volume > 2.0 * 20-period EMA (6h)
+    # Volume confirmation: volume > 1.8 * 20-period EMA (4h)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    volume_spike = volume > (1.8 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,45 +53,44 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ema_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 12h EMA50
-        bullish_bias = close[i] > ema_50_12h_aligned[i]
-        bearish_bias = close[i] < ema_50_12h_aligned[i]
+        # Determine trend bias from 1d EMA50
+        bullish_bias = close[i] > ema_50_1d_aligned[i]
+        bearish_bias = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             if bullish_bias:
-                # Long: price breaks above Camarilla R4 with volume spike (continuation)
-                if close[i] > camarilla_r4_aligned[i] and volume_spike[i]:
+                # Long: Williams %R oversold (< -80) with volume spike
+                if williams_r[i] < -80 and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
                 else:
                     signals[i] = 0.0
             elif bearish_bias:
-                # Short: price breaks below Camarilla S4 with volume spike (continuation)
-                if close[i] < camarilla_s4_aligned[i] and volume_spike[i]:
+                # Short: Williams %R overbought (> -20) with volume spike
+                if williams_r[i] > -20 and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0  # Avoid chop around 12h EMA50
+                signals[i] = 0.0  # Avoid chop around 1d EMA50
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Camarilla S3 or price below 12h EMA50
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit: Williams %R rises above -50 or price below 1d EMA50
+            if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Camarilla R3 or price above 12h EMA50
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit: Williams %R falls below -50 or price above 1d EMA50
+            if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
