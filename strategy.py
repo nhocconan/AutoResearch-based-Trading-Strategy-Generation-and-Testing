@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H4/L4 breakout with 1d EMA50 trend filter and volume spike (>2.5x average)
-# H4/L4 levels are stronger reversal points than H3/L3, reducing false breakouts.
-# 1d EMA50 provides smoother trend filter less prone to whipsaw than EMA34.
-# Volume spike threshold increased to 2.5x to reduce trade frequency and fee drag.
-# Discrete sizing 0.25 balances profit potential with drawdown control.
-# Primary timeframe: 4h, HTF: 1d for Camarilla levels and EMA50.
+# Hypothesis: 6h Williams %R Reversal with 1d EMA34 trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; EMA34 ensures alignment with daily trend
+# Volume confirmation (>2.0x average) filters false signals. Discrete sizing 0.25 minimizes fee churn.
+# Primary timeframe: 6h, HTF: 1d for EMA34.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Camarilla_H4_L4_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,55 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels H4 and L4 from 1d timeframe
+    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    denominator = highest_high - lowest_low
+    denominator_safe = np.where(denominator == 0, 1e-10, denominator)
+    williams_r = ((highest_high - close) / denominator_safe) * -100
+    
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:  # Need enough for EMA34
         return np.zeros(n)
     
-    # Prior day's high, low, close for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla H4 and L4 levels (stronger than H3/L3)
-    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # 1d EMA50 for trend filter (smoother than EMA34)
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 2.5x 20-period average (higher threshold to reduce trades)
+    # Volume confirmation: 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = 60
+    # Start after warmup (need enough data for Williams %R and volume MA)
+    start_idx = 35  # max(14, 20) + buffer
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long: Price breaks above H4 AND price > 1d EMA50 AND volume spike
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below L4 AND price < 1d EMA50 AND volume spike
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -80,16 +73,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Price drops below L4 OR price < 1d EMA50
-            if close[i] < camarilla_l4_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Williams %R > -20 (overbought) OR price < 1d EMA34
+            if williams_r[i] > -20 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Price rises above H4 OR price > 1d EMA50
-            if close[i] > camarilla_h4_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Williams %R < -80 (oversold) OR price > 1d EMA34
+            if williams_r[i] < -80 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
