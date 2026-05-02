@@ -6,9 +6,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Williams Fractal Breakout with 1d EMA50 trend filter and volume confirmation
 # Uses Williams Fractals to identify potential reversal points at swing highs/lows
 # 1d EMA50 ensures alignment with daily trend to reduce counter-trend signals
-# Volume confirmation at 1.8x average filters low-participation moves
+# Volume confirmation at 1.5x average filters low-participation moves
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Discrete sizing 0.28 balances profit potential and fee drag while allowing multiple entries per year
+# Discrete sizing 0.25 balances profit potential and fee drag
 # Works in both bull and bear markets by combining trend filter with fractal structure
 
 name = "4h_WilliamsFractal_Breakout_1dEMA50_Volume"
@@ -35,8 +35,8 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Williams Fractals (5-bar window: 2 left, 2 right)
-    # Bearish fractal: high[i] is highest among [i-2, i-1, i, i+1, i+2]
-    # Bullish fractal: low[i] is lowest among [i-2, i-1, i, i+1, i+2]
+    # Bearish fractal: high[i] is highest of [i-2, i-1, i, i+1, i+2]
+    # Bullish fractal: low[i] is lowest of [i-2, i-1, i, i+1, i+2]
     bearish_fractal = np.zeros(n, dtype=bool)
     bullish_fractal = np.zeros(n, dtype=bool)
     
@@ -48,15 +48,23 @@ def generate_signals(prices):
             low[i] <= low[i+1] and low[i] <= low[i+2]):
             bullish_fractal[i] = True
     
-    # Volume confirmation: 1.8x 20-period average
+    # Williams fractals need 2 extra 1d bars for confirmation (Rule 2b)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2
+    )
+    
+    # Volume confirmation: 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for all indicators)
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
@@ -65,35 +73,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bullish fractal AND price > 1d EMA50 (uptrend) AND volume spike
-            if (bullish_fractal[i] and 
+            # Long entry: Bullish fractal confirmed AND price > 1d EMA50 (uptrend) AND volume spike
+            if (bullish_fractal_aligned[i] == 1.0 and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.28
+                signals[i] = 0.25
                 position = 1
-            # Short entry: Bearish fractal AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (bearish_fractal[i] and 
+            # Short entry: Bearish fractal confirmed AND price < 1d EMA50 (downtrend) AND volume spike
+            elif (bearish_fractal_aligned[i] == 1.0 and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.28
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Bearish fractal formed OR price < 1d EMA50 (trend change)
-            if bearish_fractal[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: Bearish fractal confirmed (potential top) OR price < 1d EMA50 (trend change)
+            if bearish_fractal_aligned[i] == 1.0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Bullish fractal formed OR price > 1d EMA50 (trend change)
-            if bullish_fractal[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: Bullish fractal confirmed (potential bottom) OR price > 1d EMA50 (trend change)
+            if bullish_fractal_aligned[i] == 1.0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
