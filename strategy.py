@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and volume confirmation
-# Uses 4h primary timeframe with 1d HTF for trend alignment. Williams %R identifies overbought/oversold conditions.
-# Enters on %R extreme reversals (below -80 for long, above -20 for short) in direction of 1d EMA34 trend.
-# Volume spike confirms institutional participation. Designed for low trade frequency to minimize fee drag.
-# Works in both bull and bear markets by following 1d trend direction only.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 12h primary timeframe with 1d HTF for trend alignment to reduce whipsaw.
+# Camarilla R3/S3 from 1d timeframe act as strong support/resistance.
+# Breakouts in direction of 1d trend with volume spike capture institutional moves.
+# Designed for low trade frequency (12-37/year) to minimize fee drag in 12h timeframe.
+# Works in both bull and bear markets by following the 1d trend direction only.
 
-name = "4h_WilliamsR_Extreme_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +24,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Camarilla pivots (R3/S3) and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels (R3, S3) on 1d
+    # Based on previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    R3 = pivot + (range_hl * 1.1 / 4)  # R3 = pivot + 1.1*(H-L)/4
+    S3 = pivot - (range_hl * 1.1 / 4)  # S3 = pivot - 1.1*(H-L)/4
+    
     # Calculate EMA(34) on 1d for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels and EMA to 12h timeframe (wait for completed 1d bar)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R on 4h (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation (2.0x 20-period average) on 4h
+    # Volume confirmation (2.0x 20-period average) on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough for Williams %R and EMA calculations)
-    start_idx = 50  # max(34 for EMA, 20 for volume +1 for shift, 14 for Williams)
+    # Start after warmup (need enough for EMA and volume calculations)
+    start_idx = 55  # max(34 for EMA, 20 for volume +1 for shift)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R crosses above -80 (oversold reversal) + 1d uptrend + volume spike
-            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long entry: price breaks above R3 + 1d uptrend + volume spike
+            if close[i] > R3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R crosses below -20 (overbought reversal) + 1d downtrend + volume spike
-            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short entry: price breaks below S3 + 1d downtrend + volume spike
+            elif close[i] < S3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses above -20 (overbought) or trend reversal (close < EMA)
-            if williams_r[i] > -20 or close[i] < ema_34_1d_aligned[i]:
+            # Exit: price returns below EMA34 (trend reversal) or reaches S3 (mean reversion)
+            if close[i] < ema_34_1d_aligned[i] or close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -80 (oversold) or trend reversal (close > EMA)
-            if williams_r[i] < -80 or close[i] > ema_34_1d_aligned[i]:
+            # Exit: price returns above EMA34 (trend reversal) or reaches R3 (mean reversion)
+            if close[i] > ema_34_1d_aligned[i] or close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
