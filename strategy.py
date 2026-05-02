@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
-# Uses 1d primary timeframe for signal generation with Camarilla pivot breakouts
-# 1w EMA34 trend filter provides higher timeframe bias (price > EMA34 for longs, < for shorts)
-# Volume confirmation (2.0x 20-period average) filters for strong participation to reduce false breakouts
-# Discrete position sizing (0.25) balances profit potential with fee drag minimization
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Works in both bull and bear markets by only trading in direction of 1w trend
-# Camarilla pivots provide objective support/resistance levels, reducing subjectivity in entries/exits
+# Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation
+# Uses 12h primary timeframe for Donchian channel breakouts with strict filters
+# 1d ATR(14) filter ensures volatility regime is suitable (ATR > 20-period median)
+# Volume confirmation (1.5x 20-period average) ensures strong participation
+# Discrete position sizing (0.25) minimizes fee churn while maintaining profit potential
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Works in both bull and bear markets by filtering for sufficient volatility and volume
+# Donchian breakouts capture strong momentum moves while filters reduce false signals
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_Volume_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dATR_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +26,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1w EMA34
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate 1d ATR(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d Camarilla levels (based on previous 1d bar's OHLC)
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # where C = close, H = high, L = low of previous period
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Volume confirmation (2.0x 20-period average)
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,34 +59,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: ATR > 20-period median (avoid low volatility choppy periods)
+        atr_median = pd.Series(atr_1d_aligned[max(0, i-19):i+1]).median()
+        vol_filter = atr_1d_aligned[i] > atr_median if not np.isnan(atr_median) else False
+        
         if position == 0:  # Flat - look for new entries
-            # Long: Break above Camarilla R3 + volume spike + price > 1w EMA34
-            if close[i] > camarilla_r3[i] and volume_spike[i] and close[i] > ema34_1w_aligned[i]:
+            # Long: Break above Donchian upper + volume spike + volatility filter
+            if close[i] > highest_high[i] and volume_spike[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 + volume spike + price < 1w EMA34
-            elif close[i] < camarilla_s3[i] and volume_spike[i] and close[i] < ema34_1w_aligned[i]:
+            # Short: Break below Donchian lower + volume spike + volatility filter
+            elif close[i] < lowest_low[i] and volume_spike[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Close below Camarilla S3 or price < 1w EMA34
-            if close[i] < camarilla_s3[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: Close below Donchian lower
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Close above Camarilla R3 or price > 1w EMA34
-            if close[i] > camarilla_r3[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: Close above Donchian upper
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
