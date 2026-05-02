@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h primary timeframe for low trade frequency (target: 12-37 trades/year)
+# Hypothesis: 4h Camarilla R3S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 4h primary timeframe for optimal trade frequency (target: 19-50 trades/year)
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend entries
-# Camarilla R3/S3 levels provide strong intraday support/resistance based on prior 1d range
-# Volume spike (>2.0 * 20-period EMA) confirms strong institutional participation
-# Strategy designed to work in both bull and bear markets by following 1d trend
+# Camarilla R3S3 levels provide institutional support/resistance based on prior day's range
+# Volume spike (>2.0 * 20-period EMA) confirms strong participation
+# Novelty: Tight volume threshold (2.0x) reduces trades while maintaining edge in both bull/bear markets
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,23 +33,30 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe
+    # Align 1d EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior completed 1d bar
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Calculate Camarilla levels (R3, S3) from previous completed 1d bar
+    # Using 1d data shifted by 1 to avoid look-ahead
+    close_1d_series = pd.Series(close_1d)
+    high_1d_series = pd.Series(df_1d['high'].values)
+    low_1d_series = pd.Series(df_1d['low'].values)
     
-    camarilla_r3 = close_1d_arr + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d_arr - (high_1d - low_1d) * 1.1 / 4
+    # Previous day's Camarilla levels
+    prev_close = close_1d_series.shift(1).values
+    prev_high = high_1d_series.shift(1).values
+    prev_low = low_1d_series.shift(1).values
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Camarilla calculations
+    camarilla_range = prev_high - prev_low
+    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4
+    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume confirmation: volume > 2.0 * 20-period EMA (12h * 2 = ~24h lookback)
+    # Volume confirmation: volume > 2.0 * 20-period EMA (4h * 6 = ~24 periods)
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
