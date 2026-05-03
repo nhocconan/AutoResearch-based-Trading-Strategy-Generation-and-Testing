@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Breakouts in direction of daily trend with volume spike provide high-probability trades.
-# Uses 1d EMA34 for smoother trend filter to reduce whipsaw and trade frequency.
-# Designed for low trade frequency (19-50/year) on 4h timeframe to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts with higher timeframe trend.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Donchian channels identify key breakout levels; breakouts in direction of 1w trend
+# with volume spike provide high-probability continuation trades. Designed for low trade frequency
+# (7-25/year) on 1d timeframe to minimize fee drag. Works in both bull and bear markets by
+# trading breakouts in the direction of the higher timeframe trend.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,23 +28,23 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter and volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1w EMA34 for trend filter
+    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Align 1w indicators to 1d timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate Donchian channels (20-period) on 1d data
     lookback = 20
     upper_channel = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lower_channel = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
