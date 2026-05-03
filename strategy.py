@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla pivot levels provide intraday support/resistance. Breakout above R3 or below S3
-# with volume confirmation indicates strong momentum. 1d EMA34 filter ensures trades
-# align with higher timeframe trend. Designed for 12-30 trades/year on 6h to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts in the direction of the 1d trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla pivots identify key intraday support/resistance levels. Breakout above R3 or below S3
+# with 1d EMA34 trend alignment captures strong momentum moves. Volume spike confirms conviction.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year) minimizing fee drag.
+# Works in both bull and bear markets by trading breakouts in the direction of the higher timeframe trend.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,59 +37,67 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
-    # Camarilla levels: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use the previous completed 1d bar to avoid look-ahead
-    df_1d_shifted = df_1d.shift(1)
-    high_1d = df_1d_shifted['high'].values
-    low_1d = df_1d_shifted['low'].values
-    close_1d = df_1d_shifted['close'].values
-    
-    # Calculate Camarilla levels for 1d
-    rang = high_1d - low_1d
-    r3 = close_1d + 1.1 * rang
-    s3 = close_1d - 1.1 * rang
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: 20-period EMA
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after sufficient warmup for EMA34
+    for i in range(1, n):  # Start from 1 to calculate pivots from previous day
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate Camarilla levels from previous 1d bar
+        if i < 1:
+            continue
+            
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        # Camarilla pivot calculations
+        pivot = (prev_high + prev_low + prev_close) / 3
+        range_hl = prev_high - prev_low
+        
+        # Resistance levels
+        r3 = pivot + (range_hl * 1.1 / 2)
+        r4 = pivot + (range_hl * 1.1)
+        
+        # Support levels
+        s3 = pivot - (range_hl * 1.1 / 2)
+        s2 = pivot - (range_hl * 1.1)
+        
         # Volume confirmation: 20-period EMA
-        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        if i >= 20:
+            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
+        # Breakout conditions
+        breakout_long = close[i] > r3 and volume_spike
+        breakout_short = close[i] < s3 and volume_spike
+        
         if position == 0:
-            # Long: break above R3 with volume spike in 1d uptrend
-            if close[i] > r3_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Long: breakout above R3 in 1d uptrend with volume spike
+            if breakout_long and ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume spike in 1d downtrend
-            elif close[i] < s3_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Short: breakout below S3 in 1d downtrend with volume spike
+            elif breakout_short and ema_34_1d_aligned[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below R3 or loses 1d uptrend
-            if close[i] < r3_aligned[i] or ema_34_1d_aligned[i] < close[i]:
+            # Exit long: price falls below pivot or loses 1d uptrend
+            if close[i] < pivot or ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above S3 or loses 1d downtrend
-            if close[i] > s3_aligned[i] or ema_34_1d_aligned[i] > close[i]:
+            # Exit short: price rises above pivot or loses 1d downtrend
+            if close[i] > pivot or ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
