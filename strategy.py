@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
+# Hypothesis: 4h Donchian(20) breakout + 12h volume spike + choppiness regime filter
 # Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
 # choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
 # Designed to work in both bull and bear markets by adapting to regime.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Target: 19-50 trades/year (75-200 over 4 years).
 
-name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Donchian20_12hVolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,32 +28,32 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for volume spike and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for volume spike and choppiness
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 12h volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_12h['volume'].values > (2.0 * vol_ema_20)
     
-    # Calculate 1d choppiness index (CHOP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h choppiness index (CHOP)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR(14) - sum of TR over 14 periods
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
     # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
     # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
     range_14 = hh_14 - ll_14
@@ -61,11 +61,11 @@ def generate_signals(prices):
     # Handle division by zero and invalid values
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
-    # Align 1d indicators to 12h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 12h indicators to 4h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
