@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume spike confirmation, and ATR(14) stoploss.
-# Long when price breaks above Donchian(20) high + volume spike in bull trend (close > 1d EMA34).
-# Short when price breaks below Donchian(20) low + volume spike in bear trend (close < 1d EMA34).
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter, volume spike confirmation, and ATR(14) stoploss.
+# Long when price breaks above Donchian(20) high + volume spike in bull trend (close > 1w EMA50).
+# Short when price breaks below Donchian(20) low + volume spike in bear trend (close < 1w EMA50).
 # Uses discrete position sizing (0.25) to minimize fee churn and ATR-based exits for risk control.
-# Designed for 75-200 total trades over 4 years (19-50/year) with Sharpe > 1.0 on BTC/ETH/SOL.
+# Designed for 30-100 total trades over 4 years (7-25/year) with Sharpe > 0 on BTC/ETH/SOL.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,14 +23,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -43,7 +43,7 @@ def generate_signals(prices):
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume regime: current 4h volume > 2.0x 20-period MA
+    # Volume regime: current 1d volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -53,14 +53,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
