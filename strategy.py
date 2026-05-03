@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 12h timeframe for lower trade frequency (~12-37/year target) to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Uses 4h timeframe for balanced trade frequency, with 1d for trend direction and volume regime.
 # Camarilla levels from prior completed 1d bar provide institutional pivot points.
 # Breakouts with volume indicate institutional participation. Trend filter avoids counter-trend trades.
-# Discrete sizing 0.25 to manage drawdown. Target: 50-150 total trades over 4 years.
+# Discrete sizing 0.30 to manage drawdown. Target: 100-200 total trades over 4 years.
+# Added Bollinger Band width regime filter to avoid choppy markets and reduce false breakouts.
 
-name = "12h_Camarilla_R3_S3_1dEMA50_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dEMA50_VolumeSpike_Trend_BBWidth"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +42,7 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + (prior_high - prior_low) * 1.1 / 4
     camarilla_s3 = prior_close - (prior_high - prior_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -55,10 +56,19 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
     
-    # Align volume regime to 12h timeframe
+    # Align volume regime to 4h timeframe
     vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    # Calculate ATR(14) for 12h data (for stoploss)
+    # Calculate Bollinger Band width on 4h for regime filter (avoid chop)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * bb_std_dev)
+    lower_band = sma - (bb_std * bb_std_dev)
+    bb_width = (upper_band - lower_band) / sma  # Normalized width
+    
+    # Calculate ATR(14) for 4h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -77,23 +87,28 @@ def generate_signals(prices):
         ema_trend = ema_50_1d_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
+        bbw = bb_width[i]
         
         # Skip if any value is NaN
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
+        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val) or np.isnan(bbw):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
+        # Bollinger Band width regime filter: avoid extreme chop (width too low) or excessive volatility (width too high)
+        bbw_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values[i]
+        bbw_regime = (bbw > 0.5 * bbw_ma) & (bbw < 2.0 * bbw_ma)  # Reasonable volatility regime
+        
         # Entry conditions
-        # Long: break above R3 with volume spike, above 1d EMA50, and in high volume regime
-        long_entry = (close[i] > r3) and volume_spike and (close[i] > ema_trend) and vol_reg
-        # Short: break below S3 with volume spike, below 1d EMA50, and in high volume regime
-        short_entry = (close[i] < s3) and volume_spike and (close[i] < ema_trend) and vol_reg
+        # Long: break above R3 with volume spike, above 1d EMA50, in high volume regime, and reasonable BB width
+        long_entry = (close[i] > r3) and volume_spike and (close[i] > ema_trend) and vol_reg and bbw_regime
+        # Short: break below S3 with volume spike, below 1d EMA50, in high volume regime, and reasonable BB width
+        short_entry = (close[i] < s3) and volume_spike and (close[i] < ema_trend) and vol_reg and bbw_regime
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
@@ -109,11 +124,11 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -121,12 +136,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
