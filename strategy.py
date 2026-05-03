@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivot levels provide high-probability intraday support/resistance based on prior day's range.
-# Breakouts at R3/S3 levels in direction of daily trend with volume confirmation offer favorable risk-reward.
-# Designed for low trade frequency (target: 20-50 trades/year per symbol) to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts aligned with higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla pivot levels provide high-probability reversal/breakout zones; breakouts in direction of daily trend
+# with volume confirmation offer high-probability continuation. Designed for 12h timeframe to achieve 50-150 total trades
+# over 4 years (12-37/year) minimizing fee drag. Works in both bull and bear markets by trading breakouts aligned with HTF trend.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,9 +27,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla levels, trend filter and volume confirmation
+    # Get 1d data for trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -40,17 +39,20 @@ def generate_signals(prices):
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Calculate Camarilla levels for each day: based on prior day's OHLC
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # Align 1d indicators to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    
+    # Calculate Camarilla levels (R3, S3) from previous 1d bar
+    # R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # We use the previous completed 1d bar to avoid look-ahead
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Align 1d indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -68,11 +70,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike in uptrend (EMA34 > 0)
+            # Long: price breaks above R3 with volume spike in uptrend
             if close[i] > camarilla_r3_aligned[i] and close[i-1] <= camarilla_r3_aligned[i-1] and ema_34_aligned[i] > 0 and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike in downtrend (EMA34 > 0 acts as trend filter)
+            # Short: price breaks below S3 with volume spike in downtrend
             elif close[i] < camarilla_s3_aligned[i] and close[i-1] >= camarilla_s3_aligned[i-1] and ema_34_aligned[i] > 0 and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
