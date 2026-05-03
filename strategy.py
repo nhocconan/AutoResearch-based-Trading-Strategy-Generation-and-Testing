@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike confirmation
-# Camarilla pivot levels identify intraday support/resistance with high probability reversal/breakout zones.
-# R3 and S3 levels represent strong breakout points. 1d EMA34 ensures alignment with daily trend.
-# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via upward breakouts at R3 and in bear markets via downward breakdowns at S3.
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume spike confirmation
+# Donchian breakouts capture strong momentum moves. 12h EMA50 ensures alignment with higher timeframe trend.
+# Volume confirmation filters false breakouts. Designed for 75-200 total trades over 4 years (19-50/year).
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns with trend filter.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,37 +27,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla calculation and EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: based on previous day's range
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Donchian channels on 4h data
+    # Upper band: 20-period high
+    # Lower band: 20-period low
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
+    for i in range(19, n):
+        upper_band[i] = np.max(high[i-19:i+1])
+        lower_band[i] = np.min(low[i-19:i+1])
     
-    for i in range(len(df_1d)):
-        if i == 0:
-            continue  # Need previous day
-        rng = high_1d[i-1] - low_1d[i-1]
-        camarilla_r3[i] = close_1d[i-1] + rng * 1.1 / 4
-        camarilla_s3[i] = close_1d[i-1] - rng * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 4h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -67,9 +55,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start from 34 to have valid EMA34 and Camarilla values
+    for i in range(20, n):  # Start from 20 to have valid Donchian values
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -79,24 +67,24 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend alignment with volume spike
-            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Long: price breaks above upper band in uptrend alignment with volume spike
+            if close[i] > upper_band[i] and ema_50_12h_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in downtrend alignment with volume spike
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Short: price breaks below lower band in downtrend alignment with volume spike
+            elif close[i] < lower_band[i] and ema_50_12h_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or loses uptrend alignment
-            if close[i] < camarilla_s3_aligned[i] or ema_34_1d_aligned[i] >= close[i]:
+            # Exit long: price breaks below lower band or loses uptrend alignment
+            if close[i] < lower_band[i] or ema_50_12h_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 or loses downtrend alignment
-            if close[i] > camarilla_r3_aligned[i] or ema_34_1d_aligned[i] <= close[i]:
+            # Exit short: price breaks above upper band or loses downtrend alignment
+            if close[i] > upper_band[i] or ema_50_12h_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
