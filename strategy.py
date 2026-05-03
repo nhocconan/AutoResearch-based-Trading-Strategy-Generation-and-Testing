@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND Bear Power rising AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period MA
-# Short when Bear Power < 0 AND Bull Power falling AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Uses ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR)
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Elder Ray measures bull/bear power relative to EMA13, filtering by 1d ADX ensures we only trade
-# in strong trending markets (avoiding whipsaws in ranges), volume confirmation adds institutional participation.
-# Works in both bull and bear markets by trading with the 1d trend direction via ADX regime.
+# Hypothesis: 12h KAMA trend with 1d RSI filter and volume confirmation.
+# Long when KAMA turns upward in 12h, price > 1d EMA50, and volume > 1.5x 20-period MA.
+# Short when KAMA turns downward in 12h, price < 1d EMA50, and volume > 1.5x 20-period MA.
+# Uses ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
+# KAMA adapts to market noise, reducing whipsaws in ranging markets. 1d EMA50 ensures higher timeframe alignment.
+# Volume confirmation filters low-participation breakouts. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
 
-name = "6h_ElderRay_1dADX25_VolumeSpike_ATR"
-timeframe = "6h"
+name = "12h_KAMA_1dEMA50_VolumeSpike_ATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss (using primary timeframe)
+    # Calculate ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -37,51 +34,40 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA13 for Elder Ray (primary timeframe)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 12h KAMA (adaptive moving average)
+    change = np.abs(np.diff(close, periods=10))
+    volatility = np.sum(np.abs(np.diff(close, periods=1)), axis=0) if len(close) > 1 else 0
+    er = np.zeros_like(change)
+    for i in range(len(change)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    # Pad ER array to match close length
+    er = np.concatenate([np.full(10, np.nan), er])
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Seed value
+    for i in range(10, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Get 1d data for ADX calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1_1d[0] = 0
-    tr2_1d[0] = 0
-    tr3_1d[0] = 0
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM and TR
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,21 +88,19 @@ def generate_signals(prices):
             
         close_val = close[i]
         vol_spike = volume_spike[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
-        adx_val = adx_aligned[i]
-        
-        # Trend strength filter: ADX > 25 indicates strong trend
-        strong_trend = adx_val > 25
+        kama_up = kama[i] > kama[i-1]   # KAMA turning upward
+        kama_down = kama[i] < kama[i-1]  # KAMA turning downward
+        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power rising (less negative) AND strong trend AND volume spike
-            if bull > 0 and (i == 100 or bear > bear_power[i-1]) and strong_trend and vol_spike:
+            # Long: KAMA turning up AND 1d uptrend AND volume spike
+            if kama_up and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: Bear Power < 0 AND Bull Power falling (less positive) AND strong trend AND volume spike
-            elif bear < 0 and (i == 100 or bull < bull_power[i-1]) and strong_trend and vol_spike:
+            # Short: KAMA turning down AND 1d downtrend AND volume spike
+            elif kama_down and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
@@ -126,14 +110,11 @@ def generate_signals(prices):
             # Stoploss: price moves against position by 2.5*ATR
             if close_val < entry_price - 2.5 * atr[i]:
                 exit_signal = True
-            # Exit: Bull Power becomes negative
-            elif bull <= 0:
+            # Exit: KAMA turns downward
+            elif not kama_up:
                 exit_signal = True
-            # Exit: Bear Power starts falling (more negative) indicating weakening bulls
-            elif i > 100 and bear < bear_power[i-1]:
-                exit_signal = True
-            # Exit: Trend weakens (ADX < 20)
-            elif adx_val < 20:
+            # Exit: 1d trend changes to downtrend
+            elif not trend_up:
                 exit_signal = True
             
             if exit_signal:
@@ -147,14 +128,11 @@ def generate_signals(prices):
             # Stoploss: price moves against position by 2.5*ATR
             if close_val > entry_price + 2.5 * atr[i]:
                 exit_signal = True
-            # Exit: Bear Power becomes positive
-            elif bear >= 0:
+            # Exit: KAMA turns upward
+            elif not kama_down:
                 exit_signal = True
-            # Exit: Bull Power starts falling (more negative) indicating strengthening bears
-            elif i > 100 and bull < bull_power[i-1]:
-                exit_signal = True
-            # Exit: Trend weakens (ADX < 20)
-            elif adx_val < 20:
+            # Exit: 1d trend changes to uptrend
+            elif not trend_down:
                 exit_signal = True
             
             if exit_signal:
