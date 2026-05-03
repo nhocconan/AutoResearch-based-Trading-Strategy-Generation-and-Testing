@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike
-# Donchian channels provide objective trend-following breakouts with clear stoploss logic.
-# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades in bear markets.
-# Volume confirmation filters false breakouts. Designed for 75-200 total trades over 4 years.
-# Works in bull markets via upward breaks and in bear markets via downward breaks with trend filter.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
+# Donchian channels provide robust breakout levels that work in both bull and bear markets.
+# 1d EMA50 ensures alignment with the daily trend to avoid counter-trend trades.
+# Volume confirmation (2x 20-period EMA) filters false breakouts.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete position sizing.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_1dEMA50_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,7 +38,7 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Donchian channels (20-period) on 4h data
-    # Upper band = highest high of last 20 periods, Lower band = lowest low of last 20 periods
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
