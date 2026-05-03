@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume spike confirmation.
-# Long when Williams %R crosses above -80 (oversold recovery) in bull trend (close > 1d EMA34) with volume > 2x 20-period MA.
-# Short when Williams %R crosses below -20 (overbought rejection) in bear trend (close < 1d EMA34) with volume spike.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian upper channel in bull trend (close > 1d EMA50) with volume > 1.5x 20-period MA.
+# Short when price breaks below 20-period Donchian lower channel in bear trend (close < 1d EMA50) with volume spike.
 # Uses discrete position sizing (0.25) to minimize fee churn while maintaining sufficient exposure.
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades in both bull and bear markets.
+# 1d EMA50 provides higher timeframe trend filter to avoid counter-trend trades in both bull and bear markets.
 # Volume confirmation ensures moves have institutional participation, reducing false signals.
 # Target: 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH/SOL.
 
-name = "6h_WilliamsR_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +25,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 6h data (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Donchian channels on 12h data (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume regime: current 6h volume > 2.0x 20-period MA
+    # Volume regime: current 12h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
-        wr = williams_r[i]
+        ema_trend = ema_50_1d_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
         is_bull_trend = close_val > ema_trend
         is_bear_trend = close_val < ema_trend
         
-        # Williams %R conditions
-        wr_oversold = wr > -80  # Recovery from oversold
-        wr_overbought = wr < -20  # Rejection from overbought
+        # Donchian breakout conditions
+        breakout_up = close_val > upper_channel
+        breakout_down = close_val < lower_channel
         
         # Entry logic
         if position == 0:
-            if is_bull_trend and wr_oversold and vol_spike:
+            if is_bull_trend and breakout_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif is_bear_trend and wr_overbought and vol_spike:
+            elif is_bear_trend and breakout_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R overbought OR trend reversal
-            if wr < -20 or close_val < ema_trend:
+            # Long exit: price retests middle of channel OR trend reversal
+            middle_channel = (upper_channel + lower_channel) / 2
+            if close_val < middle_channel or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R oversold OR trend reversal
-            if wr > -80 or close_val > ema_trend:
+            # Short exit: price retests middle of channel OR trend reversal
+            middle_channel = (upper_channel + lower_channel) / 2
+            if close_val > middle_channel or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
