@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume spike confirmation.
-# Long when: price breaks above 1d Donchian upper band (20-period high) AND close > 1w EMA50 AND volume > 2.0x 24-bar average
-# Short when: price breaks below 1d Donchian lower band (20-period low) AND close < 1w EMA50 AND volume > 2.0x 24-bar average
-# Exit via ATR(24) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
-#                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses 1d Donchian for structure (proven edge from top performers), 1w EMA50 for HTF trend alignment, volume spike for confirmation
-# Discrete sizing 0.25 balances return and fee drag. Target: 30-100 total trades over 4 years = 7-25/year.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
+# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts, in bear via short signals.
+# Proven pattern from top performers: price channel + HTF trend + volume confirmation + ATR stop.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +22,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Donchian upper band: highest high of last 20 completed 4h bars
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band: lowest low of last 20 completed 4h bars
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 4h timeframe (no additional delay needed for price channels)
+    donchian_upper_4h = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    
+    # Calculate 1d EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Donchian upper band: highest high of last 20 completed 1d bars
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band: lowest low of last 20 completed 1d bars
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian bands to 1d timeframe (no additional delay needed for price channels)
-    donchian_upper_1d = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_1d = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # Calculate 1w EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
@@ -69,9 +66,9 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        dh_up = donchian_upper_1d[i]
-        dh_low = donchian_lower_1d[i]
-        ema_trend = ema_50_1w_aligned[i]
+        dh_up = donchian_upper_4h[i]
+        dh_low = donchian_lower_4h[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
