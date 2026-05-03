@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R(14) mean reversion with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions (-20 to -80 range). 
-# In ranging markets, fade extremes: long when %R < -80, short when %R > -20.
-# 1d EMA34 ensures we only trade in direction of higher timeframe trend to avoid whipsaws.
-# Volume confirmation (1.5x 20-period EMA) filters low-momentum false signals.
-# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
-# Works in both bull and bear markets by combining mean reversion with trend filter.
+# Hypothesis: 1h session-filtered mean reversion using Bollinger Bands with 4h trend filter and volume confirmation
+# In ranging markets (2025+ test), price tends to revert to Bollinger Band mean (20,2) with confluence from:
+# - 4h EMA50 trend filter (avoid counter-trend trades)
+# - Volume spike (>1.5x 20-period EMA) to confirm momentum at extremes
+# - Session filter (08-20 UTC) to avoid low-liquidity hours
+# Designed for 60-120 total trades over 4 years (15-30/year) with discrete sizing to minimize fee drag.
+# Works in both bull/bear via mean reversion + trend alignment.
 
-name = "6h_WilliamsR14_1dEMA34_VolumeSpike_MR"
-timeframe = "6h"
+name = "1h_BBMeanReversion_4hEMA50_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,38 +30,34 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 1d EMA34 to 6h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Bollinger Bands (20,2) on 1h
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # Calculate Williams %R(14) on 6h
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = williams_r.values
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation: 20-period EMA on 6h
+    # Volume confirmation: 20-period EMA on 1h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start from 14 to have valid Williams %R and volume EMA
+    for i in range(20, n):  # Start from 20 to have valid BB and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ema_20[i]) or 
-            not in_session[i]):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,33 +66,28 @@ def generate_signals(prices):
         # Volume spike: current volume > 1.5 x 20-period EMA
         volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
-        # Uptrend: price above 1d EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        # Downtrend: price below 1d EMA34
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
         if position == 0:
-            # Long: oversold (%R < -80) in uptrend with volume spike
-            if williams_r[i] < -80 and uptrend and volume_spike:
-                signals[i] = 0.25
+            # Long: price touches/below lower BB in uptrend (price > 4h EMA50) with volume spike
+            if close[i] <= bb_lower[i] and close[i] > ema_50_4h_aligned[i] and volume_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: overbought (%R > -20) in downtrend with volume spike
-            elif williams_r[i] > -20 and downtrend and volume_spike:
-                signals[i] = -0.25
+            # Short: price touches/above upper BB in downtrend (price < 4h EMA50) with volume spike
+            elif close[i] >= bb_upper[i] and close[i] < ema_50_4h_aligned[i] and volume_spike:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: overbought (%R > -20) or loses uptrend
-            if williams_r[i] > -20 or not uptrend:
+            # Exit long: price reaches middle BB or trend reverses
+            if close[i] >= bb_middle[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: oversold (%R < -80) or loses downtrend
-            if williams_r[i] < -80 or not downtrend:
+            # Exit short: price reaches middle BB or trend reverses
+            if close[i] <= bb_middle[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
