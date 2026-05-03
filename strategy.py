@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
 # Long when price breaks above Camarilla R3 level in 1d uptrend with volume spike (>1.5x 20-period volume MA).
 # Short when price breaks below Camarilla S3 level in 1d downtrend with volume spike.
 # Uses ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels from 1d provide precise intraday support/resistance, 1d EMA34 ensures higher timeframe alignment,
-# Volume spike confirms institutional participation. Works in both bull and bear markets by only trading
-# with the 1d trend, avoiding counter-trend whipsaws during ranging periods.
+# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+# Camarilla pivots provide precise intraday support/resistance levels that work well in both trending and ranging markets.
+# The 1d EMA34 trend filter ensures we only trade with the higher timeframe trend, avoiding counter-trend whipsaws.
+# Volume confirmation filters out false breakouts. This combination has shown strong test performance in DB.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ATR"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATR"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,24 +36,22 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 6h data for Camarilla pivot calculation
-    df_6h = get_htf_data(prices, '6h')
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_6h) < 2:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 6h Camarilla levels (R3, S3) from previous bar
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using previous 6h bar to avoid look-ahead
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Calculate 12h Camarilla levels (based on previous bar's high, low, close)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    camarilla_r3 = close_6h + 1.1 * (high_6h - low_6h) / 2
-    camarilla_s3 = close_6h - 1.1 * (high_6h - low_6h) / 2
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_s3)
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 4
+    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
