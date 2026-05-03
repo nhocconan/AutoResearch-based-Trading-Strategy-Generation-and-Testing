@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1w Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above weekly Camarilla R3 level with 1d EMA50 uptrend and volume > 1.8x 50-bar average
-# Short when price breaks below weekly Camarilla S3 level with 1d EMA50 downtrend and volume > 1.8x 50-bar average
+# Hypothesis: 12h strategy using 1d Williams %R extreme + 1d EMA50 trend filter + volume confirmation
+# Long when Williams %R < -80 (oversold) with 1d EMA50 uptrend and volume > 1.3x 20-bar average
+# Short when Williams %R > -20 (overbought) with 1d EMA50 downtrend and volume > 1.3x 20-bar average
 # Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses weekly Camarilla pivot levels for major structure, 1d EMA50 for trend filter, volume spike for confirmation
-# Discrete sizing 0.25 balances return and fee drag. Target: 100-200 total trades over 4 years = 25-50/year.
+# Uses Williams %R from daily timeframe for mean reversion edge, 1d EMA50 for trend filter
+# Discrete sizing 0.25 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "4h_Camarilla_R3S3_1wEMA50_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_1dEMA50_Volume_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,26 +25,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla pivot levels (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate daily Williams %R (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Prior week's OHLC for Camarilla calculation
-    ph = df_1w['high'].shift(1).values  # prior week high
-    pl = df_1w['low'].shift(1).values   # prior week low
-    pc = df_1w['close'].shift(1).values # prior week close
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Replace division by zero with -50 (neutral)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (completed 1w bar only)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Align Williams %R to 12h timeframe (completed 1d bar only)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -55,9 +51,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation (1.8x 50-period average)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Volume confirmation (1.3x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,24 +62,24 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start after warmup (need enough for EMA50 and ATR calculations)
-    start_idx = 100  # EMA50 needs 50 bars, plus buffer for alignment and ATR
+    start_idx = 60  # EMA50 needs 50 bars, plus buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above weekly Camarilla R3 with 1d EMA50 uptrend and volume spike
-            if close[i] > camarilla_r3_aligned[i] and ema_50_aligned[i] > ema_50_aligned[i-1] and volume_spike[i]:
+            # Long entry: Williams %R < -80 (oversold) with 1d EMA50 uptrend and volume spike
+            if williams_r_aligned[i] < -80 and ema_50_aligned[i] > ema_50_aligned[i-1] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below weekly Camarilla S3 with 1d EMA50 downtrend and volume spike
-            elif close[i] < camarilla_s3_aligned[i] and ema_50_aligned[i] < ema_50_aligned[i-1] and volume_spike[i]:
+            # Short entry: Williams %R > -20 (overbought) with 1d EMA50 downtrend and volume spike
+            elif williams_r_aligned[i] > -20 and ema_50_aligned[i] < ema_50_aligned[i-1] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
