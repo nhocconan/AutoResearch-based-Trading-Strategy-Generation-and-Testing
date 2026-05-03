@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation.
 # Long when Williams %R < -80 (oversold) in bull trend (close > 1d EMA34) with volume > 2x 20-period MA.
 # Short when Williams %R > -20 (overbought) in bear trend (close < 1d EMA34) with volume spike.
-# Uses discrete position sizing (0.30) to minimize fee churn while maintaining sufficient exposure.
-# Williams %R captures short-term momentum extremes that often reverse in ranging/choppy markets.
+# Uses discrete position sizing (0.25) to minimize fee churn while maintaining sufficient exposure.
+# Williams %R captures short-term extremes that often reverse in ranging markets.
 # 1d EMA34 provides intermediate-term trend filter to avoid counter-trend trades.
-# Volume confirmation ensures institutional participation, reducing false signals.
-# Target: 100-200 total trades over 4 years (25-50/year) with Sharpe > 0 on BTC/ETH/SOL.
+# Volume confirmation ensures reversals have institutional participation, reducing false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH/SOL.
 
-name = "4h_WilliamsR_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_WilliamsR_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,14 +36,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 14-period Williams %R on 1d data
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    close_1d = df_1d['close'].values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Calculate Williams %R (14-period) from 1d data
+    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - df_1d['close'].values) / (highest_high_14 - lowest_low_14)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume regime: current 4h volume > 2.0x 20-period MA
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -69,30 +68,30 @@ def generate_signals(prices):
         is_bear_trend = close_val < ema_trend
         
         # Williams %R conditions
-        oversold = wr_value < -80
-        overbought = wr_value > -20
+        is_oversold = wr_value < -80
+        is_overbought = wr_value > -20
         
         # Entry logic
         if position == 0:
-            if is_bull_trend and oversold and vol_spike:
-                signals[i] = 0.30
+            if is_bull_trend and is_oversold and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            elif is_bear_trend and overbought and vol_spike:
-                signals[i] = -0.30
+            elif is_bear_trend and is_overbought and vol_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R > -50 (momentum weakening) OR trend reversal
+            # Long exit: Williams %R > -50 (reversal from oversold) OR trend reversal
             if wr_value > -50 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R < -50 (momentum weakening) OR trend reversal
+            # Short exit: Williams %R < -50 (reversal from overbought) OR trend reversal
             if wr_value < -50 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
