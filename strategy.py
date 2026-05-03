@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d EMA34 for trend direction (long only when price > EMA34, short only when price < EMA34).
-# Entry: price breaks above Camarilla R3 level with volume > 2.0x 20-period MA for longs,
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Uses 12h EMA50 for trend direction (long only when price > EMA50, short only when price < EMA50).
+# Entry: price breaks above Camarilla R3 level with volume > 1.8x 20-period MA for longs,
 #        or breaks below Camarilla S3 level with volume spike for shorts.
-# Exit: ATR(14) trailing stop (2.0x ATR) or reversal of 1d EMA34 trend.
-# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# 12h timeframe reduces trade frequency vs lower TFs, minimizing fee drag.
-# Camarilla levels from 1d provide robust daily support/resistance; 1d EMA34 filters counter-trend trades;
+# Exit: ATR(14) trailing stop (2.0x ATR) or reversal of 12h EMA50 trend.
+# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Camarilla levels from 1d provide robust daily support/resistance; 12h EMA50 filters counter-trend trades;
 # volume confirmation reduces false breakouts. Works in bull via trend-following breakouts
 # and in bear via short breakdowns with trend alignment.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Volume_ATR"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hEMA50_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,15 +27,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_1d) < 2 or len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -51,13 +53,13 @@ def generate_signals(prices):
     #            S3 = close - 1.25*(high-low), S4 = close - 1.5*(high-low)
     camarilla_r3_1d = df_1d['close'] + 1.25 * (df_1d['high'] - df_1d['low'])
     camarilla_s3_1d = df_1d['close'] - 1.25 * (df_1d['high'] - df_1d['low'])
-    # Align to 12h timeframe (wait for 1d bar to close)
+    # Align to 4h timeframe (wait for 1d bar to close)
     camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d.values)
     camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d.values)
     
-    # Volume regime: current 12h volume > 2.0x 20-period MA
+    # Volume regime: current 4h volume > 1.8x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3[i]) or 
             np.isnan(camarilla_s3[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,7 +77,7 @@ def generate_signals(prices):
             continue
             
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         r3_level = camarilla_r3[i]
         s3_level = camarilla_s3[i]
         vol_spike = volume_spike[i]
