@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 75-200 total trades over 4 years (19-50/year). Camarilla pivots provide structure in ranging markets,
-# breakouts capture trends. Works in bull via long breakouts, in bear via short signals.
-# Proven pattern from top performers: Camarilla pivot + HTF trend + volume confirmation + ATR stop.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
+# Uses ATR(24) trailing stop for risk management. Discrete sizing 0.20 to balance return and fee drag.
+# Target: 60-150 total trades over 4 years (15-37/year). Uses 4h/1d for signal direction, 1h only for entry timing.
+# Session filter (08-20 UTC) reduces noise trades. Works in bull via long breakouts, in bear via short signals.
 
-name = "4h_Camarilla_R3_S3_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_4hEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,6 +21,11 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
+    
+    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Calculate prior completed bar's high/low for Camarilla calculation
     prior_high = np.roll(high, 1)
@@ -41,25 +45,27 @@ def generate_signals(prices):
     prior_close_1d = np.roll(df_1d['close'].values, 1)
     prior_close_1d[0] = np.nan
     
-    # Calculate Camarilla levels: R3, S3, R4, S4
-    # R3 = close + 1.1*(high-low)/2
-    # S3 = close - 1.1*(high-low)/2
+    # Calculate Camarilla levels: R1, S1, R3, S3
     camarilla_range = prior_high_1d - prior_low_1d
+    camarilla_r1 = prior_close_1d + 1.1 * camarilla_range / 4
+    camarilla_s1 = prior_close_1d - 1.1 * camarilla_range / 4
     camarilla_r3 = prior_close_1d + 1.1 * camarilla_range / 2
     camarilla_s3 = prior_close_1d - 1.1 * camarilla_range / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 4h EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
@@ -78,22 +84,38 @@ def generate_signals(prices):
     lowest_low_since_entry = 0
     
     for i in range(100, n):  # Start after sufficient warmup
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         # Get current values
+        camarilla_r1_val = camarilla_r1_aligned[i]
+        camarilla_s1_val = camarilla_s1_aligned[i]
         camarilla_r3_val = camarilla_r3_aligned[i]
         camarilla_s3_val = camarilla_s3_aligned[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(camarilla_r3_val) or np.isnan(camarilla_s3_val) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(camarilla_r1_val) or np.isnan(camarilla_s1_val) or np.isnan(camarilla_r3_val) or np.isnan(camarilla_s3_val) or np.isnan(ema_trend) or np.isnan(atr_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
             
         # Entry conditions
-        # Long: break above Camarilla R3 with volume spike and above 12h EMA50
-        long_entry = (close[i] > camarilla_r3_val) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Camarilla S3 with volume spike and below 12h EMA50
-        short_entry = (close[i] < camarilla_s3_val) and (close[i] < ema_trend) and vol_spike
+        # Long: break above Camarilla R1 with volume spike and above 4h EMA50
+        long_entry = (close[i] > camarilla_r1_val) and (close[i] > ema_trend) and vol_spike
+        # Short: break below Camarilla S1 with volume spike and below 4h EMA50
+        short_entry = (close[i] < camarilla_s1_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
@@ -109,24 +131,26 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 lowest_low_since_entry = low[i]
+            else:
+                signals[i] = 0.0
         elif position == 1:
             if long_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
