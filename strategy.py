@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume confirmation
-# Williams %R measures overbought/oversold levels: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# In bull markets: buy when %R crosses above -80 from below (oversold bounce) + price above 1d EMA34 + volume spike
-# In bear markets: sell when %R crosses below -20 from above (overbought rejection) + price below 1d EMA34 + volume spike
-# Volume spike (>2.0x 20-period EMA) confirms institutional participation
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag while capturing mean reversion in trends
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla pivot levels provide high-probability reversal/continuation points
+# Breakout above R3 or below S3 with volume confirmation indicates strong institutional participation
+# 1d EMA34 filter ensures alignment with daily trend for higher win rate
+# Volume spike (>2.0x 20-period EMA) filters weak breakouts
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag while capturing strong moves
 
-name = "4h_WilliamsR_1dEMA34_VolumeSpike"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,12 +34,25 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels from previous day (using 1d data)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low)
+    #          S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    # We use the previous day's OHLC to calculate today's levels
+    if len(df_1d) >= 2:
+        prev_high = df_1d['high'].iloc[-2]  # Previous day high
+        prev_low = df_1d['low'].iloc[-2]    # Previous day low
+        prev_close = df_1d['close'].iloc[-2] # Previous day close
+        
+        # Calculate Camarilla levels for current day
+        diff = prev_high - prev_low
+        camarilla_r3 = prev_close + 1.125 * diff
+        camarilla_s3 = prev_close - 1.125 * diff
+    else:
+        camarilla_r3 = camarilla_s3 = 0
+    
+    # Broadcast Camarilla levels to all 4h bars (same for entire day)
+    camarilla_r3_4h = np.full(n, camarilla_r3)
+    camarilla_s3_4h = np.full(n, camarilla_s3)
     
     # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
@@ -50,8 +63,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +72,32 @@ def generate_signals(prices):
         # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Williams %R signals with 1d trend filter
-        # Long: %R crosses above -80 from below (oversold bounce) + price above 1d EMA34 + volume spike
-        # Short: %R crosses below -20 from above (overbought rejection) + price below 1d EMA34 + volume spike
         if position == 0:
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
-                close[i] > ema_34_1d_aligned[i] and volume_spike):
-                signals[i] = 0.25
+            # Long: Price breaks above Camarilla R3 + above 1d EMA34 + volume spike
+            if (close[i] > camarilla_r3_4h[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike):
+                signals[i] = 0.30
                 position = 1
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
-                  close[i] < ema_34_1d_aligned[i] and volume_spike):
-                signals[i] = -0.25
+            # Short: Price breaks below Camarilla S3 + below 1d EMA34 + volume spike
+            elif (close[i] < camarilla_s3_4h[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: %R crosses above -20 (overbought) OR price below 1d EMA34
-            if williams_r[i] >= -20 or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Price closes below Camarilla R3 OR below 1d EMA34
+            if close[i] < camarilla_r3_4h[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: %R crosses below -80 (oversold) OR price above 1d EMA34
-            if williams_r[i] <= -80 or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Price closes above Camarilla S3 OR above 1d EMA34
+            if close[i] > camarilla_s3_4h[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
