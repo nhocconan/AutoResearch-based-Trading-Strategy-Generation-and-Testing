@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d EMA(34) trend filter and volume confirmation
-# Williams Alligator (JAW/TEETH/LIPS) identifies trending vs ranging markets
-# Entry: Alligator lines aligned (JAW > TEETH > LIPS for long, reverse for short) + price outside lips
+# Hypothesis: 12h Williams Alligator with 1d EMA(34) trend filter and volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend presence via convergence/divergence
+# In bear markets, Alligator lines converge (sleeping) - wait for divergence (awakening) with volume
 # 1d EMA(34) ensures alignment with higher timeframe trend to avoid counter-trend trades
-# Volume spike (>2.0x 20-period EMA) filters low-probability breakouts
-# Works in bull/bear markets by following 1d trend direction for entries
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# Volume spike (>1.8x 20-period EMA) confirms institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_WilliamsAlligator_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,23 +34,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator: SMAs of median price with specific periods
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2
+    # Williams Alligator calculation (using 12h data as primary timeframe)
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA = smoothed moving average (similar to EMA but different smoothing)
+    close_series = pd.Series(close)
+    jaw = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth = close_series.ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips = close_series.ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # JAW: 13-period SMMA, shifted 8 bars ahead
-    # TEETH: 8-period SMMA, shifted 5 bars ahead  
-    # LIPS: 5-period SMMA, shifted 3 bars ahead
-    # Using SMA as approximation for SMMA (simple moving average)
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
-    
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
-    
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -60,38 +51,43 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(jaw_vals[i]) or np.isnan(teeth_vals[i]) or np.isnan(lips_vals[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.8 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
         # Williams Alligator signals with 1d trend filter
-        # Long: JAW > TEETH > LIPS (bullish alignment) AND price > LIPS AND above 1d EMA34
-        # Short: JAW < TEETH < LIPS (bearish alignment) AND price < LIPS AND below 1d EMA34
+        # Alligator sleeping: Jaw, Teeth, Lips intertwined (convergence)
+        # Alligator awake: Lines diverging with clear separation
+        jaw_above_teeth = jaw[i] > teeth[i]
+        teeth_above_lips = teeth[i] > lips[i]
+        jaw_below_teeth = jaw[i] < teeth[i]
+        teeth_below_lips = teeth[i] < lips[i]
+        
+        # Long: Alligator awake (jaw > teeth > lips) + price above 1d EMA34 + volume spike
+        # Short: Alligator awake (jaw < teeth < lips) + price below 1d EMA34 + volume spike
         if position == 0:
-            if jaw_vals[i] > teeth_vals[i] and teeth_vals[i] > lips_vals[i] and close[i] > lips_vals[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
+            if jaw_above_teeth and teeth_above_lips and close[i] > ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif jaw_vals[i] < teeth_vals[i] and teeth_vals[i] < lips_vals[i] and close[i] < lips_vals[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
+            elif jaw_below_teeth and teeth_below_lips and close[i] < ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator lines reverse alignment OR price crosses below LIPS OR below 1d EMA34
-            if (jaw_vals[i] <= teeth_vals[i] or teeth_vals[i] <= lips_vals[i] or 
-                close[i] <= lips_vals[i] or close[i] <= ema_34_1d_aligned[i]):
+            # Exit long: Alligator starts sleeping (lines converge) OR price below 1d EMA34
+            if not (jaw_above_teeth and teeth_above_lips) or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator lines reverse alignment OR price crosses above LIPS OR above 1d EMA34
-            if (jaw_vals[i] >= teeth_vals[i] or teeth_vals[i] >= lips_vals[i] or 
-                close[i] >= lips_vals[i] or close[i] >= ema_34_1d_aligned[i]):
+            # Exit short: Alligator starts sleeping (lines converge) OR price above 1d EMA34
+            if not (jaw_below_teeth and teeth_below_lips) or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
