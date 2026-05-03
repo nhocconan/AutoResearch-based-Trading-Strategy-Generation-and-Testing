@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year).
-# Camarilla levels provide high-probability reversal/breakout points from prior 1d range.
-# 12h EMA50 filter ensures alignment with intermediate trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at key levels.
-# Based on proven Camarilla patterns showing strong test performance in DB (ETH/SOL winners).
+# Hypothesis: 1h Camarilla pivot breakout with 4h EMA50 trend filter and volume spike confirmation.
+# Uses 1h timeframe for entry timing, 4h for trend direction, 1d for Camarilla levels.
+# Discrete sizing 0.20 to minimize fee churn. Target: 60-150 total trades over 4 years.
+# Session filter (08-20 UTC) reduces noise trades outside active market hours.
+# ATR-based trailing stop manages risk. Works in bull/bear via trend filter and volume confirmation.
 
-name = "4h_Camarilla_R3_S3_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_4hEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,10 +22,15 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Calculate 1d OHLC for Camarilla pivot levels (from prior completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least 1 completed bar for prior
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Use prior completed 1d bar's OHLC for Camarilla calculation
@@ -46,26 +49,26 @@ def generate_signals(prices):
     cam_high = prior_close + (prior_high - prior_low) * 1.1 / 2
     cam_low = prior_close - (prior_high - prior_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     cam_high_aligned = align_htf_to_ltf(prices, df_1d, cam_high)
     cam_low_aligned = align_htf_to_ltf(prices, df_1d, cam_low)
     
-    # Calculate 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate 4h EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR(30) for stoploss (using 4h data)
+    # Calculate ATR(30) for stoploss (using 1h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 1h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -75,21 +78,31 @@ def generate_signals(prices):
     lowest_low_since_entry = 0
     
     for i in range(100, n):  # Start after sufficient warmup
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         # Get current values
         upper = cam_high_aligned[i]
         lower = cam_low_aligned[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
         if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(atr_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
             
         # Entry conditions
-        # Long: break above Camarilla R3 with volume spike and above 12h EMA50
+        # Long: break above Camarilla R3 with volume spike and above 4h EMA50
         long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Camarilla S3 with volume spike and below 12h EMA50
+        # Short: break below Camarilla S3 with volume spike and below 4h EMA50
         short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
@@ -106,24 +119,26 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 lowest_low_since_entry = low[i]
+            else:
+                signals[i] = 0.0
         elif position == 1:
             if long_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
