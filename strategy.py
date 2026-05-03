@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width Regime + RSI(2) Extreme Reversion
-# Uses Bollinger Band Width percentile to detect regime: 
-# - High BBW (>80th percentile) = expansion/trending -> avoid entries
-# - Low BBW (<20th percentile) = contraction/squeeze -> mean reversion ripe
-# In squeeze regime: RSI(2) < 10 = long, RSI(2) > 90 = short
-# Volume confirmation: current volume > 1.5x 20-period EMA to filter false signals
-# Works in both bull/bear markets as squeeze/mean reversion is regime-independent
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume confirmation
+# Williams %R measures overbought/oversold levels: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# In bull markets: buy when %R crosses above -80 from below (oversold bounce) + price above 1d EMA34 + volume spike
+# In bear markets: sell when %R crosses below -20 from above (overbought rejection) + price below 1d EMA34 + volume spike
+# Volume spike (>2.0x 20-period EMA) confirms institutional participation
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag while capturing mean reversion in trends
 
-name = "6h_BBW_Regime_RSI2_Extreme"
-timeframe = "6h"
+name = "4h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,35 +19,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2) on 6h
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + (2 * dev)
-    lower_band = basis - (2 * dev)
-    bb_width = (upper_band - lower_band) / basis  # Normalized width
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate BBW percentile rank (50-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate RSI(2) on 6h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_2 = 100 - (100 / (1 + rs))
+    # Calculate Williams %R(14) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -58,38 +50,38 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(rsi_2[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Regime: Low BBW (<20th percentile) = squeeze/mean reversion ripe
-        low_bbw_regime = bb_width_percentile[i] < 20
-        
-        # Mean reversion signals in squeeze regime
+        # Williams %R signals with 1d trend filter
+        # Long: %R crosses above -80 from below (oversold bounce) + price above 1d EMA34 + volume spike
+        # Short: %R crosses below -20 from above (overbought rejection) + price below 1d EMA34 + volume spike
         if position == 0:
-            if low_bbw_regime and volume_spike:
-                if rsi_2[i] < 10:  # Extreme oversold
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_2[i] > 90:  # Extreme overbought
-                    signals[i] = -0.25
-                    position = -1
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
+                close[i] > ema_34_1d_aligned[i] and volume_spike):
+                signals[i] = 0.25
+                position = 1
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
+                  close[i] < ema_34_1d_aligned[i] and volume_spike):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: RSI(2) > 50 (mean reversion complete) OR BBW expansion (>80)
-            if rsi_2[i] > 50 or bb_width_percentile[i] > 80:
+            # Exit long: %R crosses above -20 (overbought) OR price below 1d EMA34
+            if williams_r[i] >= -20 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI(2) < 50 (mean reversion complete) OR BBW expansion (>80)
-            if rsi_2[i] < 50 or bb_width_percentile[i] > 80:
+            # Exit short: %R crosses below -80 (oversold) OR price above 1d EMA34
+            if williams_r[i] <= -80 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
