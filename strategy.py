@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Uses 1d HTF for structure (Camarilla levels from previous day, EMA trend) to avoid look-ahead.
-# Volume spike confirms institutional interest at key levels.
-# Designed for low trade frequency (target: 12-37/year) on 12h timeframe to minimize fee drag.
-# Works in bull/bear markets by trading with the daily trend via EMA34 filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla R3/S3 levels from daily price action provide high-probability breakout zones.
+# 1d EMA34 filter ensures alignment with the daily trend to avoid counter-trend trades.
+# Volume spike confirms institutional participation at these key levels.
+# Designed for low trade frequency (target: 19-50/year) to minimize fee drag on 4h timeframe.
+# Works in both bull and bear markets by trading with the higher timeframe trend.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,11 +35,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Avoid look-ahead by using previous day's data
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # We calculate for the PREVIOUS day to avoid look-ahead
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
+    # Avoid look-ahead by using previous day's data
     diff = prev_high - prev_low
     r3 = prev_close + (diff * 1.1 / 4)
     s3 = prev_close - (diff * 1.1 / 4)
@@ -52,7 +55,7 @@ def generate_signals(prices):
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
