@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume spike confirmation.
-# Uses 6h primary timeframe to reduce trade frequency vs lower TFs, targeting 12-37 trades/year.
-# Donchian channels from 6h provide price structure, 12h EMA50 filters trend direction,
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume spike confirmation.
+# Uses 4h primary timeframe to balance trade frequency and responsiveness, targeting 19-50 trades/year.
+# Camarilla levels from 1d provide institutional structure, 1d EMA34 filters trend direction,
 # and volume spike confirms momentum. Designed for BTC/ETH to work in both bull and bear markets
 # by taking breakouts in the direction of the higher timeframe trend.
 
-name = "6h_Donchian20_12hEMA50_VolumeSpike_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_1dEMA34_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +23,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivots and EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Donchian channels from 6h data (20-period)
-    # Upper channel = highest high over past 20 bars
-    # Lower channel = lowest low over past 20 bars
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_values = typical_price.values
     
-    # Calculate volume regime: current 6h volume > 1.8x 20-period MA (tight to reduce trades)
+    # Camarilla levels: R1 = PP + (H - L) * 1.1/12, S1 = PP - (H - L) * 1.1/12
+    # Using previous day's values (already completed bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
+    
+    # Pivot point
+    pp = (high_1d + low_1d + close_1d_vals) / 3
+    # Range
+    rng = high_1d - low_1d
+    # Camarilla levels
+    r1 = pp + (rng * 1.1 / 12)
+    s1 = pp - (rng * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA (strict to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Get current values
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        ema_trend = ema_50_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend):
+        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         # Entry conditions
-        # Long: break above upper Donchian with volume spike and above 12h EMA50
-        long_entry = (close[i] > upper) and vol_spike and (close[i] > ema_trend)
-        # Short: break below lower Donchian with volume spike and below 12h EMA50
-        short_entry = (close[i] < lower) and vol_spike and (close[i] < ema_trend)
+        # Long: break above R1 with volume spike and above 1d EMA34
+        long_entry = (close[i] > r1_val) and vol_spike and (close[i] > ema_trend)
+        # Short: break below S1 with volume spike and below 1d EMA34
+        short_entry = (close[i] < s1_val) and vol_spike and (close[i] < ema_trend)
         
         # Generate signals
         if position == 0:
@@ -77,14 +92,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on close below 12h EMA50 (trend change)
+            # Exit on close below EMA34 (trend change)
             if close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on close above 12h EMA50 (trend change)
+            # Exit on close above EMA34 (trend change)
             if close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
