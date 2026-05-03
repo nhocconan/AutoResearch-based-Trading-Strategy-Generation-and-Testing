@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
-# Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
-# Exit when price breaks below Donchian(10) low (for longs) or above Donchian(10) high (for shorts).
-# Uses 4h timeframe to target 75-200 trades over 4 years with strict entry conditions.
-# Donchian channels provide clear breakout levels, ADX filters for trending markets only, volume confirms breakout validity.
-# Works in both bull (upward breakouts) and bear (downward breakouts) markets by trading with the trend.
+# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
+# Williams Alligator: Jaw (EMA13, 8-period offset), Teeth (EMA8, 5-period offset), Lips (EMA5, 3-period offset).
+# Long when Lips > Teeth > Jaw (bullish alignment) AND price > close[1] AND 1w EMA50 > close AND volume > 1.5x 20-period MA.
+# Short when Lips < Teeth < Jaw (bearish alignment) AND price < close[1] AND 1w EMA50 < close AND volume > 1.5x 20-period MA.
+# Exit when alignment breaks (Lips crosses Teeth or Jaw) OR 1w EMA50 crosses price.
+# Uses 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with strict entry conditions.
+# Williams Alligator identifies trend phases, 1w EMA50 filters for higher timeframe trend, volume confirms participation.
+# Designed to work in both bull (strong bullish alignment) and bear (strong bearish alignment) markets.
 
-name = "4h_Donchian20_1dADX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,46 +31,27 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (trend strength filter)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels (20-period for entry, 10-period for exit)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Calculate Williams Alligator components on 1d
+    # Jaw: EMA13, 8-period offset
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
+    # Teeth: EMA8, 5-period offset
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
+    # Lips: EMA5, 3-period offset
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
     
-    # Calculate 4h volume 20-period MA for spike detection
+    # Calculate 1d volume 20-period MA for spike detection
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -77,39 +59,47 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or np.isnan(volume_ma_20[i]) or not in_session[i]):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume spike condition: current 4h volume > 1.5x 20-period volume MA
+        # Williams Alligator conditions
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        # 1w EMA50 trend filter
+        above_1w_ema = close[i] > ema_50_1w_aligned[i]
+        below_1w_ema = close[i] < ema_50_1w_aligned[i]
+        
+        # Volume spike condition: current 1d volume > 1.5x 20-period volume MA
         volume_spike = volume[i] > (volume_ma_20[i] * 1.5)
         
-        # 1d ADX conditions
-        adx_trending = adx_1d_aligned[i] > 25
-        adx_ranging = adx_1d_aligned[i] < 20
+        # Price momentum: current close vs previous close
+        price_up = close[i] > close[i-1]
+        price_down = close[i] < close[i-1]
         
         if position == 0:
-            # Long: price breaks above Donchian(20) high AND trending AND volume spike AND session
-            if close[i] > donchian_high_20[i] and adx_trending and volume_spike:
+            # Long: Bullish alignment AND above 1w EMA50 AND price up AND volume spike AND session
+            if bullish_alignment and above_1w_ema and price_up and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian(20) low AND trending AND volume spike AND session
-            elif close[i] < donchian_low_20[i] and adx_trending and volume_spike:
+            # Short: Bearish alignment AND below 1w EMA50 AND price down AND volume spike AND session
+            elif bearish_alignment and below_1w_ema and price_down and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian(10) low OR ADX becomes ranging
-            if close[i] < donchian_low_10[i] or adx_ranging:
+            # Exit long: Bearish alignment OR price crosses below 1w EMA50
+            if bearish_alignment or not above_1w_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian(10) high OR ADX becomes ranging
-            if close[i] > donchian_high_10[i] or adx_ranging:
+            # Exit short: Bullish alignment OR price crosses above 1w EMA50
+            if bullish_alignment or not below_1w_ema:
                 signals[i] = 0.0
                 position = 0
             else:
