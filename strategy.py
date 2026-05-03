@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA34 trend filter and volume confirmation
-# Williams Alligator identifies trendless markets when lines are intertwined (Jaw, Teeth, Lips).
-# Enter when price breaks above/below the Alligator 'mouth' (Lips) with 1w EMA34 trend alignment and volume spike.
-# Designed for 30-100 total trades over 4 years (7-25/year) on 1d timeframe to minimize fee drag.
-# Works in bull markets via breakout continuation and in bear markets via breakdown shorts with trend filter.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
+# Camarilla pivots identify key intraday support/resistance levels. Breakout at R3/S3 with
+# 1d ADX > 25 (trending market) and volume spike provides high-probability entries.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull markets via breakout continuation and in bear markets via breakdown shorts.
 
-name = "1d_WilliamsAlligator_1wEMA34_VolumeSpike"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dADX25_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,81 +28,113 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator on 1d data
-    # Jaw (Blue): 13-period SMMA shifted 8 bars ahead
-    # Teeth (Red): 8-period SMMA shifted 5 bars ahead
-    # Lips (Green): 5-period SMMA shifted 3 bars ahead
-    def smma(source, length):
-        """Smoothed Moving Average"""
-        if length < 1:
-            return np.full_like(source, np.nan, dtype=float)
-        result = np.full_like(source, np.nan, dtype=float)
-        # First value is simple SMA
-        result[length-1] = np.mean(source[:length])
-        # Subsequent values: SMMA = (PREV_SMMA * (LENGTH-1) + CLOSE) / LENGTH
-        for i in range(length, len(source)):
-            result[i] = (result[i-1] * (length-1) + source[i]) / length
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            else:
+                result[i] = np.nan
         return result
     
-    jaw = smma(high, 13)  # Using high for Jaw as per Williams
-    teeth = smma(high, 8)  # Using high for Teeth
-    lips = smma(high, 5)   # Using high for Lips
-    
-    # Shift as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set shifted values to NaN
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Start from 13 to have valid Alligator values
+    for i in range(30, n):  # Start from 30 to have valid ADX and Camarilla
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or not in_session[i]):
+        if (np.isnan(adx_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: 20-period EMA on 1d
+        # Calculate Camarilla levels for current 6h bar using previous bar's OHLC
+        if i == 0:
+            continue
+        prev_close = close[i-1]
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        range_val = prev_high - prev_low
+        
+        if range_val <= 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Camarilla levels
+        r3 = prev_close + range_val * 1.1 / 4
+        s3 = prev_close - range_val * 1.1 / 4
+        r4 = prev_close + range_val * 1.1 / 2
+        s4 = prev_close - range_val * 1.1 / 2
+        
+        # Volume confirmation: 20-period EMA on 6h
         if i >= 19:
             vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
         else:
             vol_ema_20 = volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
+        # Trend filter: 1d ADX > 25
+        strong_trend = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: price breaks above Lips in uptrend alignment with volume spike
-            if close[i] > lips[i] and lips[i] > teeth[i] and teeth[i] > jaw[i] and ema_34_1w_aligned[i] < close[i] and volume_spike:
+            # Long: break above R3 with strong trend and volume spike
+            if close[i] > r3 and strong_trend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Lips in downtrend alignment with volume spike
-            elif close[i] < lips[i] and lips[i] < teeth[i] and teeth[i] < jaw[i] and ema_34_1w_aligned[i] > close[i] and volume_spike:
+            # Short: break below S3 with strong trend and volume spike
+            elif close[i] < s3 and strong_trend and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Teeth or loses uptrend alignment
-            if close[i] < teeth[i] or lips[i] <= teeth[i] or ema_34_1w_aligned[i] >= close[i]:
+            # Exit long: break below R3 or loss of trend/volume
+            if close[i] < r3 or not strong_trend or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Teeth or loses downtrend alignment
-            if close[i] > teeth[i] or lips[i] >= teeth[i] or ema_34_1w_aligned[i] <= close[i]:
+            # Exit short: break above S3 or loss of trend/volume
+            if close[i] > s3 or not strong_trend or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
