@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakouts capture sustained moves; 1d EMA50 ensures alignment with higher timeframe trend.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Donchian breakouts capture sustained moves; 1d EMA ensures alignment with higher timeframe trend.
 # Volume confirmation (1.5x 20-period EMA) filters low-momentum false breakouts.
-# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
 # Works in both bull and bear markets by following the 1d trend direction.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +37,7 @@ def generate_signals(prices):
     donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
@@ -45,10 +45,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
+    # Align 1d EMA50 to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 20-period EMA on 12h volume
+    # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
