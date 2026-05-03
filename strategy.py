@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian channels identify key breakout levels; breakouts in direction of 1d trend
-# with volume spike provide high-probability continuation trades. Designed for low trade frequency
-# (12-37/year) on 12h timeframe to minimize fee drag. Works in both bull and bear markets by
-# trading breakouts in the direction of the higher timeframe trend.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide precise intraday support/resistance; breakouts in direction of
+# 1d trend with volume spike offer high-probability trades. Designed for low trade frequency
+# (19-50/year) on 4h timeframe to minimize fee drag. Works in both bull and bear markets by
+# trading breakouts aligned with higher timeframe trend.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,22 +40,27 @@ def generate_signals(prices):
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    lookback = 20
-    upper_channel = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower_channel = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Camarilla pivot levels (R3, S3) from prior 1d bar
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low)
+    #          S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r3 = df_1d['close'].values + 1.125 * (df_1d['high'].values - df_1d['low'].values)
+    camarilla_s3 = df_1d['close'].values - 1.125 * (df_1d['high'].values - df_1d['low'].values)
+    
+    # Align Camarilla levels to 4h timeframe (use prior completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):  # Start after sufficient warmup for indicators
+    for i in range(1, n):  # Start after 1 bar for prior close reference
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -63,24 +68,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper channel with volume spike in uptrend
-            if close[i] > upper_channel[i] and close[i-1] <= upper_channel[i-1] and ema_34_aligned[i] < close[i] and volume_spike_aligned[i]:
+            # Long: price breaks above R3 with volume spike in uptrend (price > EMA34)
+            if close[i] > camarilla_r3_aligned[i] and close[i-1] <= camarilla_r3_aligned[i] and ema_34_aligned[i] > close[i] and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower channel with volume spike in downtrend
-            elif close[i] < lower_channel[i] and close[i-1] >= lower_channel[i-1] and ema_34_aligned[i] > close[i] and volume_spike_aligned[i]:
+            # Short: price breaks below S3 with volume spike in downtrend (price < EMA34)
+            elif close[i] < camarilla_s3_aligned[i] and close[i-1] >= camarilla_s3_aligned[i] and ema_34_aligned[i] < close[i] and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters below upper channel
-            if close[i] < upper_channel[i]:
+            # Exit long: price re-enters below R3
+            if close[i] < camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters above lower channel
-            if close[i] > lower_channel[i]:
+            # Exit short: price re-enters above S3
+            if close[i] > camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
