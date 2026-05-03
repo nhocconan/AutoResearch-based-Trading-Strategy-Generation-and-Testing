@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-# Long: Close breaks above Donchian upper AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period MA
-# Short: Close breaks below Donchian lower AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period MA
-# Exit: Opposite Donchian breakout or ADX < 20 (range) or volume drops.
+# Hypothesis: 4h Williams %R(14) with 1d ADX trend filter and volume confirmation.
+# Long: %R crosses above -80 from below AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Short: %R crosses below -20 from above AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Exit: Opposite %R cross or ADX < 20 (range) or volume drops.
 # Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian provides clear structure; 1d ADX filters for trending markets only; volume confirmation
-# reduces false breakouts. Works in bull via long signals and bear via short signals when aligned with trend.
+# Williams %R identifies overbought/oversold conditions; 1d ADX filters for trending markets only;
+# volume confirmation reduces false signals. Works in bull via long signals from oversold
+# and bear via short signals from overbought when aligned with higher timeframe trend.
 
-name = "4h_Donchian20_1dADX25_Volume"
+name = "4h_WilliamsR14_1dADX25_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -67,9 +68,10 @@ def generate_signals(prices):
     # Align 1d ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Donchian channels (20-period) on 4h
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R (14-period) on 4h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     # Volume regime: current 4h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,7 +82,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,31 +93,37 @@ def generate_signals(prices):
         close_val = close[i]
         adx_val = adx_aligned[i]
         vol_spike = volume_spike[i]
+        wr = williams_r[i]
+        wr_prev = williams_r[i-1]
         
         # Determine trend regime
         is_trending = adx_val > 25
         is_ranging = adx_val < 20
         
+        # Williams %R cross signals
+        cross_above_80 = wr > -80 and wr_prev <= -80
+        cross_below_20 = wr < -20 and wr_prev >= -20
+        
         # Entry logic
         if position == 0:
-            # Long: Close breaks above Donchian upper AND trending AND volume spike
-            if close_val > donchian_upper[i] and is_trending and vol_spike:
+            # Long: %R crosses above -80 from below AND trending AND volume spike
+            if cross_above_80 and is_trending and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian lower AND trending AND volume spike
-            elif close_val < donchian_lower[i] and is_trending and vol_spike:
+            # Short: %R crosses below -20 from above AND trending AND volume spike
+            elif cross_below_20 and is_trending and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close breaks below Donchian lower OR trend weakens (ADX < 20) OR volume drops
-            if close_val < donchian_lower[i] or is_ranging or not vol_spike:
+            # Long exit: %R crosses below -20 from above OR trend weakens (ADX < 20) OR volume drops
+            if cross_below_20 or is_ranging or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close breaks above Donchian upper OR trend weakens (ADX < 20) OR volume drops
-            if close_val > donchian_upper[i] or is_ranging or not vol_spike:
+            # Short exit: %R crosses above -80 from below OR trend weakens (ADX < 20) OR volume drops
+            if cross_above_80 or is_ranging or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
