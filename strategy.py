@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above Camarilla R3 level in 1d uptrend with volume spike (>2.0x 20-period volume MA).
 # Short when price breaks below Camarilla S3 level in 1d downtrend with volume spike.
 # Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
+# Volume spike confirms institutional participation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
 # This strategy focuses on BTC/ETH as primary targets, with SOL as secondary, avoiding overtrading by using tight entry conditions.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +39,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to lower timeframe (1d -> 4h)
+    # Align Camarilla levels to lower timeframe (1d -> 12h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
