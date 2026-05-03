@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Camarilla pivot levels provide precise intraday support/resistance. Breakout above R3 or below S3
-# with volume confirmation indicates strong momentum. 1d EMA34 filters for higher timeframe trend
-# alignment to avoid counter-trend trades. This strategy aims for low-frequency, high-conviction
-# trades suitable for 12h timeframe (target: 12-37 trades/year).
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter.
+# Long when price breaks above upper Donchian channel with volume spike and 12h EMA50 uptrend.
+# Short when price breaks below lower Donchian channel with volume spike and 12h EMA50 downtrend.
+# Uses tight entry conditions to limit trades (target: 20-50/year) and ATR-based stoploss.
+# Works in both bull and bear markets by aligning with higher timeframe trend.
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_12hTrend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,88 +23,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 4h
+    lookback = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        upper_channel[i] = np.max(high[i - lookback + 1:i + 1])
+        lower_channel[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # True range for Camarilla calculation
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First bar
+    # Calculate ATR(14) for stoploss and volume MA
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.25*(high-low)
-    # S3 = close - 1.25*(high-low), S4 = close - 1.5*(high-low)
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.25 * camarilla_range
-    s3 = close_1d - 1.25 * camarilla_range
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3, additional_delay_bars=1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3, additional_delay_bars=1)
-    
-    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
+    # Volume regime: current volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(100, n):
-        # Get current values
-        close_val = close[i]
-        vol_spike = volume_spike[i]
-        ema_trend = ema_34_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        
         # Skip if any value is NaN
-        if np.isnan(close_val) or np.isnan(vol_spike) or np.isnan(ema_trend) or \
-           np.isnan(r3_val) or np.isnan(s3_val):
+        if np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine trend regime: bull if close > 1d EMA34, bear if close < 1d EMA34
-        is_bull_trend = close_val > ema_trend
-        is_bear_trend = close_val < ema_trend
+        close_val = close[i]
+        vol_spike = volume_spike[i]
+        ema_trend = ema_50_12h_aligned[i]
+        
+        # Regime: bull if close > 12h EMA50, bear if close < 12h EMA50
+        is_bull_regime = close_val > ema_trend
+        is_bear_regime = close_val < ema_trend
+        
+        # Breakout conditions
+        breakout_up = close_val > upper_channel[i]
+        breakout_down = close_val < lower_channel[i]
         
         # Generate signals
         if position == 0:
-            # Long entry: price breaks above R3 with volume spike in bull trend
-            if is_bull_trend and close_val > r3_val and vol_spike:
+            # Long entry: bullish breakout in bull regime with volume spike
+            if is_bull_regime and breakout_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 with volume spike in bear trend
-            elif is_bear_trend and close_val < s3_val and vol_spike:
+                entry_price = close_val
+            # Short entry: bearish breakout in bear regime with volume spike
+            elif is_bear_regime and breakout_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Long exit: price crosses below 1d EMA34 or loses momentum (close < R3)
-            if close_val < ema_trend or close_val < r3_val:
+            # Long position: trail stop or exit on breakdown
+            signals[i] = 0.25
+            # Stoploss: 2 * ATR below entry price
+            if close_val < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
+            # Exit on bearish breakout or regime change to bear
+            elif breakout_down or close_val < ema_trend:
+                signals[i] = 0.0
+                position = 0
         elif position == -1:
-            # Short exit: price crosses above 1d EMA34 or loses momentum (close > S3)
-            if close_val > ema_trend or close_val > s3_val:
+            # Short position: trail stop or exit on breakup
+            signals[i] = -0.25
+            # Stoploss: 2 * ATR above entry price
+            if close_val > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
+            # Exit on bullish breakout or regime change to bull
+            elif breakout_up or close_val > ema_trend:
+                signals[i] = 0.0
+                position = 0
     
     return signals
