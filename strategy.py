@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level AND 1d close > 1d EMA34 (uptrend) AND 1d volume > 1.5x 20-period volume MA.
-# Short when price breaks below Camarilla S3 level AND 1d close < 1d EMA34 (downtrend) AND 1d volume > 1.5x 20-period volume MA.
+# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level AND 1d close > 1d EMA34 (uptrend) AND 6h volume > 2.0x 20-period volume MA.
+# Short when price breaks below Camarilla S3 level AND 1d close < 1d EMA34 (downtrend) AND 6h volume > 2.0x 20-period volume MA.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size fixed at 0.25.
-# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with strict entry conditions.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
 # Camarilla levels provide objective intraday support/resistance, 1d EMA34 filters for trend alignment, volume confirms participation.
 # Works in both bull and bear markets by only trading breakouts in the direction of the 1d trend when volume confirms.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Session"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Session"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter and volume confirmation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -39,14 +39,8 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d volume 20-period MA for spike detection
-    volume_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
     # Calculate Camarilla levels from previous 1d bar (OHLC)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6
-    #          S2 = C - (H-L)*1.1/6, S1 = C - (H-L)*1.1/4, S3 = C - (H-L)*1.1/2
-    # We need previous day's OHLC, so we shift by 1
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/2
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
@@ -55,17 +49,20 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 6h volume 20-period MA for spike detection
+    volume_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma_6h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,13 +72,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current 1d volume > 1.5x 20-period volume MA
-        # We use the aligned 1d volume MA and compare with current 1d volume (approximated as the last value)
-        current_1d_volume = df_1d['volume'].iloc[-1] if len(df_1d) > 0 else 0  # This is not accurate for historical bars
-        # Instead, we use a proxy: since we don't have intraday 1d volume, we use volume ratio from 4h data
-        # Calculate 4h volume 20-period MA and check if current 4h volume is > 2.0x MA (as proxy for 1d spike)
-        volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume[i] > (volume_ma_4h[i] * 2.0)  # 4h volume spike as proxy
+        # Volume spike condition: current 6h volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_6h[i] * 2.0)
         
         # Camarilla breakout conditions
         breakout_up = high_val > camarilla_r3_aligned[i]  # Price breaks above R3
