@@ -64,11 +64,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above upper channel with volume spike in uptrend
-            if close[i] > upper_channel[i] and close[i-1] <= upper_channel[i-1] and ema_50_aligned[i] > 0 and volume_spike_aligned[i]:
+            if close[i] > upper_channel[i] and close[i-1] <= upper_channel[i-1] and ema_50_aligned[i] > close[i] and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below lower channel with volume spike in downtrend
-            elif close[i] < lower_channel[i] and close[i-1] >= lower_channel[i-1] and ema_50_aligned[i] > 0 and volume_spike_aligned[i]:
+            elif close[i] < lower_channel[i] and close[i-1] >= lower_channel[i-1] and ema_50_aligned[i] < close[i] and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
