@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted MACD with 1w Trend Filter and ATR Regime
-# Long when MACD line crosses above signal line with volume > 1.5x 24-bar average AND price > 1w EMA50 (uptrend) AND ATR(14) < ATR(50) (low volatility regime)
-# Short when MACD line crosses below signal line with volume > 1.5x 24-bar average AND price < 1w EMA50 (downtrend) AND ATR(14) < ATR(50) (low volatility regime)
-# Exit when MACD histogram crosses zero (mean reversion to momentum equilibrium)
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+# Long when Jaw < Teeth < Lips (bullish alignment) with volume > 1.8x 28-bar average and close > 1d EMA50 (uptrend)
+# Short when Jaw > Teeth > Lips (bearish alignment) with volume > 1.8x 28-bar average and close < 1d EMA50 (downtrend)
+# Exit when Alligator lines cross (alignment breaks) or volume drops below average
+# Williams Alligator identifies trend phases and works in both bull and bear markets by capturing strong directional moves.
 # Target: 50-150 total trades over 4 years = 12-37/year. Uses discrete sizing (0.25) to minimize fee churn.
-# Works in both bull and bear markets by combining momentum (MACD), trend (1w EMA50), and volatility regime (ATR ratio) filters.
 
-name = "6h_VolumeWeighted_MACD_1wEMA50_ATR_Regime_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_1dEMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,82 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) and ATR(50) for volatility regime filter
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
-    tr2 = np.maximum(tr1, np.abs(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # First bar TR
-    tr2[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr2).rolling(window=50, min_periods=50).mean().values
+    # Williams Alligator (13,8,5 smoothed with 8,5,3 periods)
+    # Jaw: 13-period SMMA smoothed by 8 periods
+    # Teeth: 8-period SMMA smoothed by 5 periods  
+    # Lips: 5-period SMMA smoothed by 3 periods
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
     
-    # Volume confirmation (1.5x 24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.5)
-    
-    # Calculate MACD (12,26,9)
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema_12 - ema_26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_histogram = macd_line - signal_line
+    # Volume confirmation (1.8x 28-period average)
+    vol_ma = pd.Series(volume).rolling(window=28, min_periods=28).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for all calculations)
-    start_idx = max(12, 26, 9, 50, 14, 50, 24) + 1  # MACD + 1w EMA50 + ATRs + volume MA + shift(1)
+    start_idx = max(13, 8, 5, 28) + 8  # SMMA periods + smoothing + volume MA + shift
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_12[i]) or np.isnan(ema_26[i]) or np.isnan(macd_line[i]) or 
-            np.isnan(signal_line[i]) or np.isnan(macd_histogram[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: low volatility (ATR14 < ATR50) for cleaner signals
-        low_vol_regime = atr_14[i] < atr_50[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Long entry: MACD bullish crossover with volume spike, uptrend, and low volatility
-            if (macd_line[i-1] <= signal_line[i-1] and  # Previous: MACD <= signal
-                macd_line[i] > signal_line[i] and       # Current: MACD > signal (bullish cross)
-                volume_spike[i] and 
-                close[i] > ema_50_1w_aligned[i] and
-                low_vol_regime):
+            # Long entry: Jaw < Teeth < Lips (bullish alignment) with volume spike and close > 1d EMA50 (uptrend)
+            if (jaw[i] < teeth[i] and teeth[i] < lips[i] and 
+                volume_spike[i] and close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: MACD bearish crossover with volume spike, downtrend, and low volatility
-            elif (macd_line[i-1] >= signal_line[i-1] and  # Previous: MACD >= signal
-                  macd_line[i] < signal_line[i] and       # Current: MACD < signal (bearish cross)
-                  volume_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
-                  low_vol_regime):
+            # Short entry: Jaw > Teeth > Lips (bearish alignment) with volume spike and close < 1d EMA50 (downtrend)
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  volume_spike[i] and close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: MACD histogram crosses below zero (momentum weakening)
-            if macd_histogram[i] < 0:
+            # Exit: Bullish alignment breaks (Jaw >= Teeth or Teeth >= Lips)
+            if jaw[i] >= teeth[i] or teeth[i] >= lips[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: MACD histogram crosses above zero (momentum weakening)
-            if macd_histogram[i] > 0:
+            # Exit: Bearish alignment breaks (Jaw <= Teeth or Teeth <= Lips)
+            if jaw[i] <= teeth[i] or teeth[i] <= lips[i]:
                 signals[i] = 0.0
                 position = 0
             else:
