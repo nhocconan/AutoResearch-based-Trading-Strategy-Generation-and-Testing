@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Donchian channels provide clear breakout levels with minimal lag.
+# Hypothesis: 4h Donchian(20) breakout + 1w EMA50 trend filter + volume spike
+# Donchian channels provide robust structure for breakouts in both bull and bear markets.
 # 1w EMA50 ensures alignment with weekly trend to avoid counter-trend trades.
-# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
+# Volume confirmation filters false breakouts. Designed for 75-200 total trades over 4 years (19-50/year).
 # Works in bull markets via upward breaks at upper channel and in bear markets via downward breaks at lower channel.
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,20 +37,14 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian(20) channels from 1d data (more stable than 12h for channel calculation)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate Donchian channels from previous 4h bar (20-period)
+    # Upper channel = max(high, 20), Lower channel = min(low, 20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Upper channel: 20-period high, Lower channel: 20-period low
-    upper_channel = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe (use previous day's levels to avoid look-ahead)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 4h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -61,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -72,23 +66,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above upper channel in uptrend alignment with volume spike
-            if close[i] > upper_aligned[i] and ema_50_1w_aligned[i] < close[i] and volume_spike:
+            if close[i] > upper_channel[i] and ema_50_1w_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below lower channel in downtrend alignment with volume spike
-            elif close[i] < lower_aligned[i] and ema_50_1w_aligned[i] > close[i] and volume_spike:
+            elif close[i] < lower_channel[i] and ema_50_1w_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price breaks below lower channel or loses uptrend alignment
-            if close[i] < lower_aligned[i] or ema_50_1w_aligned[i] >= close[i]:
+            if close[i] < lower_channel[i] or ema_50_1w_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price breaks above upper channel or loses downtrend alignment
-            if close[i] > upper_aligned[i] or ema_50_1w_aligned[i] <= close[i]:
+            if close[i] > upper_channel[i] or ema_50_1w_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
