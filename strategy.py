@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA(34) trend filter and volume confirmation
-# Camarilla pivot levels from 1d provide high-probability support/resistance levels
-# Breakout above R1 or below S1 with volume confirmation captures institutional moves
-# 1w EMA(34) ensures alignment with weekly trend to avoid counter-trend trades in bear markets
-# Volume spike (>2.0x 20-period EMA) filters low-probability breakouts
-# Works in bull/bear markets by following 1w trend direction for entries
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and maximize edge
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA(50) trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# In strong uptrends, Bull Power expands and stays positive; in downtrends, Bear Power expands and stays negative
+# We use 6h for entry timing, 12h EMA(50) for trend alignment, and volume spike for confirmation
+# Long: Bull Power > 0 AND Bear Power < 0 (bulls in control) AND price > 12h EMA50 AND volume spike
+# Short: Bear Power < 0 AND Bull Power > 0 (bears in control) AND price < 12h EMA50 AND volume spike
+# This avoids whipsaws by requiring both bull and bear power to confirm regime
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing trends
 
-name = "1d_Camarilla_R1S1_Breakout_1wEMA34_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,37 +26,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla pivot levels from 1d data (standard formula)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Elder Ray components on 6h: need EMA13 first
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    camarilla_range = (high_1d - low_1d)
-    r1 = close_1d + (1.1 * camarilla_range / 12)
-    s1 = close_1d - (1.1 * camarilla_range / 12)
-    
-    # Align Camarilla levels to 1d timeframe (already aligned as 1d->1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume confirmation: 20-period EMA on 1d volume
+    # Volume confirmation: 20-period EMA on 6h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -64,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +61,28 @@ def generate_signals(prices):
         # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Camarilla breakout signals with 1w trend filter
-        # Long: Break above R1 + price above 1w EMA34 + volume spike
-        # Short: Break below S1 + price below 1w EMA34 + volume spike
+        # Elder Ray signals with 12h trend filter
+        # Long: Bull Power > 0 (bulls in control) AND Bear Power < 0 (no bear pressure) 
+        #       AND price above 12h EMA50 AND volume spike
+        # Short: Bear Power < 0 (bears in control) AND Bull Power > 0 (no bull pressure)
+        #        AND price below 12h EMA50 AND volume spike
         if position == 0:
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_spike:
+            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_50_12h_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_spike:
+            elif bear_power[i] < 0 and bull_power[i] > 0 and close[i] < ema_50_12h_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S1 (reversion to mean) OR below 1w EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+            # Exit long: Bears take over (Bear Power > 0) OR price breaks below 12h EMA50
+            if bear_power[i] > 0 or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above R1 (reversion to mean) OR above 1w EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            # Exit short: Bulls take over (Bull Power < 0) OR price breaks above 12h EMA50
+            if bull_power[i] < 0 or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
