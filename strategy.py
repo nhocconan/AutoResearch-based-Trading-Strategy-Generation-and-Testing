@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot R3/S3 breakout with 1d EMA200 trend filter and volume confirmation.
-# In bull regime (price > 1d EMA200), go long on breakout above R3 with volume spike.
-# In bear regime (price < 1d EMA200), go short on breakdown below S3 with volume spike.
-# Uses Camarilla levels from prior completed 1d for structure, 1d EMA200 for regime filter,
-# and 12h volume spike for confirmation. Designed for 50-150 total trades over 4 years.
-# Focus on BTC/ETH as primary symbols.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# In bull trend (price > 1d EMA34), go long on breakout above R3 with volume spike.
+# In bear trend (price < 1d EMA34), go short on breakdown below S3 with volume spike.
+# Uses 1d Camarilla pivot levels (prior completed 1d) for structure, 1d EMA34 for trend filter,
+# and 4h volume spike for confirmation. Designed for 75-200 total trades over 4 years.
+# Focus on BTC/ETH as primary symbols with proven edge from Camarilla patterns.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA200_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,24 +29,26 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate prior 1d Camarilla levels (using high, low, close from previous 1d bar)
+    # Calculate prior 1d Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_high = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_low = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Camarilla pivot calculations
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 12h (wait for 1d bar to complete)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align Camarilla levels to 4h (wait for 1d bar to complete)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get 1d data for EMA200 trend filter
-    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Get 1d data for EMA34 trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -56,32 +58,32 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        ema_trend = ema_200_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend):
+        if np.isnan(r3_val) or np.isnan(s3_val) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1d EMA200, bear if close < 1d EMA200
-        is_bull_regime = close_val > ema_trend
-        is_bear_regime = close_val < ema_trend
+        # Determine trend: bull if close > 1d EMA34, bear if close < 1d EMA34
+        is_bull_trend = close_val > ema_trend
+        is_bear_trend = close_val < ema_trend
         
-        # Regime-based entry conditions
-        if is_bull_regime:
+        # Trend-based entry conditions
+        if is_bull_trend:
             # Long: breakout above R3 with volume spike
-            long_entry = (close_val > r3) and vol_spike
+            long_entry = (close_val > r3_val) and vol_spike
         else:
             long_entry = False
             
-        if is_bear_regime:
+        if is_bear_trend:
             # Short: breakdown below S3 with volume spike
-            short_entry = (close_val < s3) and vol_spike
+            short_entry = (close_val < s3_val) and vol_spike
         else:
             short_entry = False
         
@@ -94,15 +96,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on breakdown below S3 (failure of bullish breakout) or regime change to bear
-            if close_val < s3 or close_val < ema_trend:
+            # Exit on breakdown below S3 (failure of bullish breakout) or trend change to bear
+            if close_val < s3_val or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on breakout above R3 (failure of bearish breakdown) or regime change to bull
-            if close_val > r3 or close_val > ema_trend:
+            # Exit on breakout above R3 (failure of bearish breakdown) or trend change to bull
+            if close_val > r3_val or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
