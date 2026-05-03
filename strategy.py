@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and volume confirmation
-# In ranging markets (common in bear/bull transitions), RSI extremes revert to mean.
-# 4h EMA50 defines the trend: only take longs when price > EMA50 (uptrend bias) and shorts when price < EMA50 (downtrend bias).
-# Volume spike confirms conviction at RSI extremes. Session filter (08-20 UTC) reduces noise.
-# Designed for 15-30 trades/year on 1h to minimize fee drag while working in both bull and bear regimes.
+# Hypothesis: 6h Williams Fractal breakout with 1w EMA50 trend filter and volume confirmation
+# Williams Fractals identify key swing points where price reverses. A breakout above the most
+# recent bearish fractal (or below bullish fractal) with volume confirmation and aligned
+# weekly trend captures strong momentum moves. Weekly EMA50 filter ensures we trade with
+# the higher timeframe trend, reducing false breakouts in ranging markets. Designed for
+# 12-37 trades/year on 6h to minimize fee drag while maintaining edge in bull/bear markets.
 
-name = "1h_RSI14_4hEMA50_VolumeSpike_MR"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Breakout_1wEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,69 +29,92 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w, additional_delay_bars=0)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Williams Fractals on 1d (requires 2-bar confirmation after center)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
     
-    # Calculate 1h volume EMA(20) for spike detection
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Initialize fractal arrays
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    # Williams Fractal: bearish = high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
+    # bullish = low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align fractals to 6h timeframe with 2-bar confirmation delay
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(50, n):  # Start after sufficient warmup for EMA50
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition: current volume > 2.0 * 20-period EMA
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike condition: current volume > 2x 20-period EMA of volume
+        vol_lookback = min(20, i+1)
+        vol_slice = volume[max(0, i-19):i+1]
+        if len(vol_slice) > 0:
+            vol_ema_20 = pd.Series(vol_slice).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i]
+        volume_spike = volume[i] > (2.0 * vol_ema_20)
         
-        # RSI extreme conditions
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        # Most recent completed fractal values (using aligned arrays)
+        recent_bearish = bearish_fractal_aligned[i]
+        recent_bullish = bullish_fractal_aligned[i]
+        
+        # Breakout conditions
+        breakout_long = (not np.isnan(recent_bearish)) and (close[i] > recent_bearish) and volume_spike
+        breakout_short = (not np.isnan(recent_bullish)) and (close[i] < recent_bullish) and volume_spike
         
         if position == 0:
-            # Long: RSI oversold in 4h uptrend with volume spike
-            if rsi_oversold and close[i] > ema_50_4h_aligned[i] and volume_spike:
-                signals[i] = 0.20
+            # Long: break above bearish fractal in weekly uptrend with volume spike
+            if breakout_long and ema_50_1w_aligned[i] < close[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought in 4h downtrend with volume spike
-            elif rsi_overbought and close[i] < ema_50_4h_aligned[i] and volume_spike:
-                signals[i] = -0.20
+            # Short: break below bullish fractal in weekly downtrend with volume spike
+            elif breakout_short and ema_50_1w_aligned[i] > close[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or trend breaks
-            if rsi_values[i] >= 50 or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: price closes below weekly EMA50 or breaks below bullish fractal
+            if close[i] < ema_50_1w_aligned[i] or (not np.isnan(recent_bullish) and close[i] < recent_bullish):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or trend breaks
-            if rsi_values[i] <= 50 or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: price closes above weekly EMA50 or breaks above bearish fractal
+            if close[i] > ema_50_1w_aligned[i] or (not np.isnan(recent_bearish) and close[i] > recent_bearish):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
