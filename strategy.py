@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 (uptrend) AND 4h volume > 1.5x 20-period volume MA.
-# Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 (downtrend) AND 4h volume > 1.5x 20-period volume MA.
-# Exit when Williams %R returns to -50 level or trend reverses.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above 1d Donchian upper channel AND 1w close > 1w EMA34 (uptrend) AND 1d volume > 2.0x 20-period volume MA.
+# Short when price breaks below 1d Donchian lower channel AND 1w close < 1w EMA34 (downtrend) AND 1d volume > 2.0x 20-period volume MA.
+# Exit on retracement to 1d Donchian midpoint or trend reversal.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Williams %R captures extreme momentum reversals, effective in both bull and bear markets.
-# 1d EMA34 ensures alignment with higher-timeframe trend, reducing counter-trend trades.
-# Volume confirmation ensures breakout has participation, reducing false signals.
-# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with strict entry conditions.
+# Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with strict entry conditions.
+# Donchian channels provide robust price structure, 1w EMA34 filters for higher-timeframe trend alignment, volume confirms participation.
+# Works in both bull and bear markets by only trading breakouts in the direction of the 1w trend when volume confirms.
 
-name = "4h_WilliamsR_Extreme_1dEMA34_VolumeSpike_Session"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike_Session"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,69 +31,75 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend direction
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA34 for trend direction
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 4h Williams %R (14-period)
-    highest_high_4h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_4h - close) / (highest_high_4h - lowest_low_4h)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high_4h - lowest_low_4h) == 0, -50, williams_r)
+    # Calculate 1d Donchian channels (20-period)
+    # Use previous period's data to avoid look-ahead
+    high_shifted = pd.Series(high).shift(1).values
+    low_shifted = pd.Series(low).shift(1).values
     
-    # Calculate 4h volume 20-period MA for spike detection
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian channels using rolling window on shifted data
+    donchian_upper = pd.Series(high_shifted).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_shifted).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
+    
+    # Calculate 1d volume 20-period MA for spike detection
+    volume_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma_4h[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(volume_ma_1d[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        williams_r_val = williams_r[i]
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
         
-        # Volume spike condition: current 4h volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_4h[i] * 1.5)
+        # Volume spike condition: current 1d volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_1d[i] * 2.0)
         
-        # Williams %R extreme conditions
-        oversold = williams_r_val < -80  # Oversold condition for long
-        overbought = williams_r_val > -20  # Overbought condition for short
+        # Donchian breakout conditions
+        breakout_up = high_val > donchian_upper[i]  # Price breaks above upper channel
+        breakout_down = low_val < donchian_lower[i]  # Price breaks below lower channel
         
-        # 1d trend conditions
-        trend_up = close[i] > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_down = close[i] < ema_34_1d_aligned[i]  # 1d downtrend
+        # 1w trend conditions
+        trend_up = close_val > ema_34_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < ema_34_1w_aligned[i]  # 1w downtrend
         
         if position == 0:
-            # Long: Williams %R oversold AND 1d uptrend AND volume spike AND session
-            if oversold and trend_up and volume_spike:
+            # Long: Donchian breakout up AND 1w uptrend AND volume spike AND session
+            if breakout_up and trend_up and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought AND 1d downtrend AND volume spike AND session
-            elif overbought and trend_down and volume_spike:
+            # Short: Donchian breakout down AND 1w downtrend AND volume spike AND session
+            elif breakout_down and trend_down and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to -50 level OR trend changes
-            if williams_r_val > -50 or not trend_up:
+            # Exit long: price retouches Donchian midpoint OR trend changes
+            if close_val < donchian_mid[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to -50 level OR trend changes
-            if williams_r_val < -50 or not trend_down:
+            # Exit short: price retouches Donchian midpoint OR trend changes
+            if close_val > donchian_mid[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
