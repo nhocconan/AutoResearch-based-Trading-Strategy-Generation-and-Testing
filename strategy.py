@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses ATR-based trailing stop for risk management. Discrete sizing 0.30.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Donchian channels provide clear structure for breakouts in both trending and ranging markets.
-# 1d EMA50 filter ensures alignment with long-term trend.
-# Volume confirmation reduces false breakouts.
-# Designed to work in both bull and bear markets by requiring trend alignment and volume.
+# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation.
+# Uses Alligator's Jaw/Teeth/Lips for trend direction and entry signals.
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
+# Volume confirmation filters weak breakouts.
+# Designed for low trade frequency (12-37/year) to minimize fee drag on 6h timeframe.
+# Williams Alligator is effective in both trending and ranging markets via its convergence/divergence.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "6h_WilliamsAlligator_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian(20) levels from prior completed 1d bar
+    # Calculate 1d Williams Alligator (Jaw=13, Teeth=8, Lips=5) from prior completed 1d bar
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 1 completed bar for prior
         return np.zeros(n)
     
-    # Calculate prior completed 1d bar's high and low for Donchian
-    prior_high_1d = np.roll(df_1d['high'].values, 1)
-    prior_low_1d = np.roll(df_1d['low'].values, 1)
-    prior_high_1d[0] = np.nan
-    prior_low_1d[0] = np.nan
+    # Calculate prior completed 1d bar's median price for Alligator
+    prior_median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    prior_median_1d = np.roll(prior_median_1d, 1)  # Shift for prior bar
+    prior_median_1d[0] = np.nan
     
-    # Calculate Donchian levels for prior 1d bar (20-period)
-    high_series = pd.Series(prior_high_1d)
-    low_series = pd.Series(prior_low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams Alligator lines
+    median_series = pd.Series(prior_median_1d)
+    jaw = median_series.rolling(window=13, min_periods=13).mean().shift(8).values  # Jaw: 13-period, shifted 8
+    teeth = median_series.rolling(window=8, min_periods=8).mean().shift(5).values   # Teeth: 8-period, shifted 5
+    lips = median_series.rolling(window=5, min_periods=5).mean().shift(3).values    # Lips: 5-period, shifted 3
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(30) for stoploss (using 12h data)
+    # Calculate ATR(30) for stoploss (using 6h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 12h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 6h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -69,21 +68,28 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or np.isnan(ema_trend) or np.isnan(atr_val):
             continue
             
+        # Alligator conditions
+        # Lips above Teeth above Jaw = bullish alignment
+        bullish_align = lips_val > teeth_val and teeth_val > jaw_val
+        # Lips below Teeth below Jaw = bearish alignment
+        bearish_align = lips_val < teeth_val and teeth_val < jaw_val
+        
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1d EMA50
-        long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 1d EMA50
-        short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
+        # Long: bullish alignment + price above Lips + above 1d EMA34 + volume spike
+        long_entry = bullish_align and (close[i] > lips_val) and (close[i] > ema_trend) and vol_spike
+        # Short: bearish alignment + price below Lips + below 1d EMA34 + volume spike
+        short_entry = bearish_align and (close[i] < lips_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
@@ -99,11 +105,11 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -111,12 +117,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
