@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian upper channel AND 1w close > 1w EMA34 (uptrend) AND 1d volume > 1.5x 20-period volume MA.
-# Short when price breaks below 1d Donchian lower channel AND 1w close < 1w EMA34 (downtrend) AND 1d volume > 1.5x 20-period volume MA.
-# Exit on retracement to the opposite Donchian channel or trend reversal.
+# Hypothesis: 6h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above 6h Donchian upper band AND 1d ADX > 25 (strong trend) AND 6h volume > 2.0x 20-period volume MA.
+# Short when price breaks below 6h Donchian lower band AND 1d ADX > 25 AND 6h volume > 2.0x 20-period volume MA.
+# Exit on retracement to 6h Donchian middle band or ADX < 20 (weak trend).
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with strict entry conditions.
-# Donchian channels provide robust price structure, 1w EMA34 filters for higher-timeframe trend alignment, volume confirms participation.
-# Works in both bull and bear markets by only trading breakouts in the direction of the 1w trend when volume confirms.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Donchian channels provide clear breakout levels, 1d ADX filters for higher-timeframe trend strength, volume confirms participation.
+# Works in both bull and bear markets by only trading breakouts when the 1d trend is strong (ADX > 25) and volume confirms.
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_Session"
-timeframe = "1d"
+name = "6h_Donchian20_1dADX25_VolumeSpike_Session"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,32 +31,69 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend direction
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d ADX(14) for trend strength
+    # ADX calculation requires +DI, -DI, and DX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # Use rolling window on 1d data directly (no HTF conversion needed for Donchian)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
     
-    # Calculate 1d volume 20-period MA for spike detection
-    volume_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm[0] = 0.0
+    minus_dm[0] = 0.0
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan, dtype=float)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(values[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1]/period) + values[i]
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h Donchian channels (20-period)
+    donchian_period = 20
+    upper_band = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    middle_band = (upper_band + lower_band) / 2
+    
+    # Calculate 6h volume 20-period MA for spike detection
+    volume_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ma_1d[i]) or not in_session[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(middle_band[i]) or np.isnan(volume_ma_6h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,36 +103,36 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current 1d volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_1d[i] * 1.5)
+        # Volume spike condition: current 6h volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_6h[i] * 2.0)
         
         # Donchian breakout conditions
-        breakout_up = high_val > donchian_upper[i]   # Price breaks above upper channel
-        breakout_down = low_val < donchian_lower[i]  # Price breaks below lower channel
+        breakout_up = high_val > upper_band[i]  # Price breaks above upper band
+        breakout_down = low_val < lower_band[i]  # Price breaks below lower band
         
-        # 1w trend conditions
-        trend_up = close_val > ema_34_1w_aligned[i]   # 1w uptrend
-        trend_down = close_val < ema_34_1w_aligned[i]  # 1w downtrend
+        # 1d ADX trend strength conditions
+        strong_trend = adx_aligned[i] > 25.0   # Strong trend
+        weak_trend = adx_aligned[i] < 20.0     # Weak trend (exit condition)
         
         if position == 0:
-            # Long: Donchian breakout up AND 1w uptrend AND volume spike AND session
-            if breakout_up and trend_up and volume_spike:
+            # Long: Donchian breakout up AND strong trend AND volume spike AND session
+            if breakout_up and strong_trend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down AND 1w downtrend AND volume spike AND session
-            elif breakout_down and trend_down and volume_spike:
+            # Short: Donchian breakout down AND strong trend AND volume spike AND session
+            elif breakout_down and strong_trend and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retouches lower Donchian channel OR trend changes
-            if close_val < donchian_lower[i] or not trend_up:
+            # Exit long: price retouches middle band OR trend weakens
+            if close_val < middle_band[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retouches upper Donchian channel OR trend changes
-            if close_val > donchian_upper[i] or not trend_down:
+            # Exit short: price retouches middle band OR trend weakens
+            if close_val > middle_band[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
