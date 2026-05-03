@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Donchian breakout captures strong momentum moves. 1d EMA34 filter ensures alignment with higher timeframe trend.
-# Volume confirmation filters false breakouts. ATR trailing stop (2.0x) manages risk while allowing trends to develop.
-# Focus on BTC/ETH as primary targets. Works in both bull (breakouts with trend) and bear (filtered by EMA34).
+# Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian(20) provides clear price channel structure for breakouts.
+# 12h HMA21 ensures alignment with higher timeframe trend to avoid counter-trend trades.
+# Volume spike confirms institutional participation at breakout points.
+# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
+# Works in both bull and bear markets by following the 12h trend direction.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hHMA21_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +26,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily OHLC for Donchian channels (from prior completed 1d bar)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least 1 completed bar for prior
+    # Calculate Donchian(20) channels from 4h data
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    upper_channel = high_roll
+    lower_channel = low_roll
+    
+    # Calculate 12h HMA21 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Use prior completed 1d bar's OHLC for Donchian calculation
-    prior_high = np.roll(df_1d['high'].values, 1)
-    prior_low = np.roll(df_1d['low'].values, 1)
-    prior_close = np.roll(df_1d['close'].values, 1)
-    prior_open = np.roll(df_1d['open'].values, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
-    prior_open[0] = np.nan
+    close_12h = df_12h['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Calculate Donchian channels (20-period) for prior 1d bar
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    lookback = 20
-    upper_raw = np.full_like(prior_high, np.nan)
-    lower_raw = np.full_like(prior_low, np.nan)
+    def wma(values, window):
+        if len(values) < window:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights/weights.sum(), mode='same')
     
-    for i in range(lookback, len(prior_high)):
-        upper_raw[i] = np.max(prior_high[i-lookback:i])
-        lower_raw[i] = np.min(prior_low[i-lookback:i])
+    wma_half = wma(close_12h, half_len)
+    wma_full = wma(close_12h, 21)
+    hma_12h = 2 * wma_half - wma_full
+    hma_12h = wma(hma_12h, sqrt_len)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Align Donchian levels to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_raw)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_raw)
-    
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate ATR(30) for stoploss (using 12h data)
+    # Calculate ATR(30) for stoploss (using 4h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 1.5x 30-bar average (on 12h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,21 +72,21 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
+        upper = upper_channel[i]
+        lower = lower_channel[i]
+        hma_trend = hma_12h_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(upper) or np.isnan(lower) or np.isnan(hma_trend) or np.isnan(atr_val):
             continue
             
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1d EMA34
-        long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 1d EMA34
-        short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
+        # Long: break above Donchian upper with volume spike and above 12h HMA21
+        long_entry = (close[i] > upper) and (close[i] > hma_trend) and vol_spike
+        # Short: break below Donchian lower with volume spike and below 12h HMA21
+        short_entry = (close[i] < lower) and (close[i] < hma_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
