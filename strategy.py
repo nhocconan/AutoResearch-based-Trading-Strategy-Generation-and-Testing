@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Donchian breakouts capture momentum in trending markets. 1d EMA50 filters for higher-timeframe trend alignment.
-# Volume spike confirms institutional participation. Designed for low-frequency, high-conviction trades.
-# Works in both bull and bear markets by requiring trend alignment and volume confirmation.
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
+# In low volatility regimes (BB Width < 20th percentile), price is primed for breakout.
+# We enter long when price breaks above upper BB with volume spike and 1d EMA34 uptrend,
+# short when price breaks below lower BB with volume spike and 1d EMA34 downtrend.
+# This captures explosive moves after consolidation, works in both bull and bear markets.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_Trend"
-timeframe = "12h"
+name = "6h_BollingerSqueeze_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,19 +25,32 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Donchian(20) channels on 12h
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
+    bb_width = ((upper_bb - lower_bb) / sma_20) * 100  # as percentage
     
-    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
+    # Calculate BB Width percentile rank (20-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
+    ).values
+    # Handle NaN values in percentile calculation
+    bb_width_percentile = np.where(np.isnan(bb_width_percentile), 50, bb_width_percentile)
+    
+    # Volume spike: current volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -44,44 +58,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Get current values
-        donchian_high = highest_high_20[i]
-        donchian_low = lowest_low_20[i]
-        ema_trend = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
-        
         # Skip if any value is NaN
-        if np.isnan(donchian_high) or np.isnan(donchian_low) or np.isnan(ema_trend):
+        if np.isnan(close[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or \
+           np.isnan(ema_34_aligned[i]) or np.isnan(bb_width_percentile[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Entry conditions: Donchian breakout + trend alignment + volume spike
-        long_entry = (close[i] > donchian_high) and (close[i] > ema_trend) and vol_spike
-        short_entry = (close[i] < donchian_low) and (close[i] < ema_trend) and vol_spike
+        # Squeeze condition: BB Width below 20th percentile (low volatility)
+        squeeze_active = bb_width_percentile[i] < 20
         
-        # Exit conditions: close crosses back below/above Donchian midpoint
-        midpoint = (donchian_high + donchian_low) / 2.0
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Breakout conditions
+        long_breakout = close[i] > upper_bb[i]
+        short_breakout = close[i] < lower_bb[i]
+        
+        # Trend filter from 1d EMA34
+        ema_trend = ema_34_aligned[i]
+        uptrend = close[i] > ema_trend
+        downtrend = close[i] < ema_trend
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            # Enter long: squeeze breakout up + uptrend + volume spike
+            if squeeze_active and long_breakout and uptrend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            # Enter short: squeeze breakout down + downtrend + volume spike
+            elif squeeze_active and short_breakout and downtrend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            if long_exit:
+            # Exit long: price re-enters Bollinger Bands or trend changes
+            if close[i] < sma_20[i] or close[i] < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            if short_exit:
+            # Exit short: price re-enters Bollinger Bands or trend changes
+            if close[i] > sma_20[i] or close[i] > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
