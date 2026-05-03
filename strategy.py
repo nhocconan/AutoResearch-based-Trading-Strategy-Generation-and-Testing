@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume confirmation and ADX trend filter.
-# Long: Close breaks above Camarilla R3 AND 1d volume > 1.5x 20-period MA AND 1d ADX > 25
-# Short: Close breaks below Camarilla S3 AND 1d volume > 1.5x 20-period MA AND 1d ADX > 25
-# Exit: Opposite Camarilla breakout or ADX < 20 (range) or volume drops below threshold.
-# Uses discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Camarilla levels provide high-probability reversal/breakout points; 1d volume confirms institutional interest;
-# 1d ADX ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long: Close breaks above Donchian upper AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period MA
+# Short: Close breaks below Donchian lower AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period MA
+# Exit: Opposite Donchian breakout or price crosses 1d EMA50 or volume drops.
+# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian provides clear structure; 1d EMA50 filters for trend direction only; volume confirmation
+# reduces false breakouts. Works in bull via long signals and bear via short signals when aligned with trend.
 
-name = "4h_Camarilla_R3S3_1dVolume_ADX"
+name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,108 +25,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and ADX filters
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
+    # Calculate 1d EMA(50)
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range
-    tr1 = df_1d_high - df_1d_low
-    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
-    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Directional Movement
-    dm_plus = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low), 
-                       np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0)
-    dm_minus = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)), 
-                        np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Donchian channels (20-period) on 4h
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (atr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (atr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 1d volume confirmation: current 1d volume > 1.5x 20-period MA
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (1.5 * vol_ma_20_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
-    
-    # Calculate Camarilla levels for 4h using previous day's OHLC
-    # We need to align daily OHLC to 4h bars
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous day's data
-    camarilla_r3 = df_1d_close + (df_1d_high - df_1d_low) * 1.1 / 4
-    camarilla_s3 = df_1d_close - (df_1d_high - df_1d_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Volume regime: current 4h volume > 1.5x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        adx_val = adx_aligned[i]
-        vol_spike = volume_spike_1d_aligned[i] > 0.5  # Convert back to boolean
-        
-        # Determine trend regime
-        is_trending = adx_val > 25
-        is_ranging = adx_val < 20
+        ema_val = ema_50_aligned[i]
+        vol_spike = volume_spike[i]
         
         # Entry logic
         if position == 0:
-            # Long: Close breaks above Camarilla R3 AND trending AND volume spike
-            if close_val > camarilla_r3_aligned[i] and is_trending and vol_spike:
+            # Long: Close breaks above Donchian upper AND price > 1d EMA50 (uptrend) AND volume spike
+            if close_val > donchian_upper[i] and close_val > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Camarilla S3 AND trending AND volume spike
-            elif close_val < camarilla_s3_aligned[i] and is_trending and vol_spike:
+            # Short: Close breaks below Donchian lower AND price < 1d EMA50 (downtrend) AND volume spike
+            elif close_val < donchian_lower[i] and close_val < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close breaks below Camarilla S3 OR trend weakens (ADX < 20) OR volume drops
-            if close_val < camarilla_s3_aligned[i] or is_ranging or not vol_spike:
+            # Long exit: Close breaks below Donchian lower OR price < 1d EMA50 (trend change) OR volume drops
+            if close_val < donchian_lower[i] or close_val < ema_val or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close breaks above Camarilla R3 OR trend weakens (ADX < 20) OR volume drops
-            if close_val > camarilla_r3_aligned[i] or is_ranging or not vol_spike:
+            # Short exit: Close breaks above Donchian upper OR price > 1d EMA50 (trend change) OR volume drops
+            if close_val > donchian_upper[i] or close_val > ema_val or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
