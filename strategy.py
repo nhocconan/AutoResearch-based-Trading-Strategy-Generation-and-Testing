@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d ADX regime filter and volume confirmation.
-# Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) with future shifts.
-# Long when Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
-# Short when Lips < Teeth < Jaw (bearish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
-# Exit when alignment breaks (Lips crosses Teeth or Teeth crosses Jaw) OR ADX < 20 (regime change to ranging).
-# Uses 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with strict entry conditions.
-# Williams Alligator identifies trending markets via SMA alignment, ADX filters for strong trends only,
-# volume confirms participation. Designed to work in both bull (bullish alignment) and bear (bearish alignment) markets.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX regime filter and volume confirmation.
+# Long when price breaks above R3 AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
+# Short when price breaks below S3 AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
+# Exit when price returns to Camarilla H4/L4 levels OR ADX < 20 (ranging).
+# Uses 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Camarilla levels provide intraday support/resistance, ADX filters for trending markets only, volume confirms participation.
+# Designed to work in both bull (breakouts with volume) and bear (breakdowns with volume) markets.
 
-name = "4h_WilliamsAlligator_1dADX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dADX_VolumeSpike_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,15 +30,32 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX
+    # Get 1d data for Camarilla pivot calculation and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX (trend strength filter)
+    # Calculate 1d OHLC for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
+    # But we use R3 and S3 for breakouts, H4 and L4 for exits
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + 1.125 * range_1d
+    s3_1d = close_1d - 1.125 * range_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
+    
+    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Calculate 1d ADX (trend strength filter)
     # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -61,21 +77,10 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 4h Williams Alligator SMAs (Jaw=13, Teeth=8, Lips=5)
-    # Jaw: 13-period SMMA shifted 8 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    jaw = np.concatenate([np.full(8, np.nan), jaw[:-8]])  # shift 8 forward
-    # Teeth: 8-period SMMA shifted 5 bars forward
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    teeth = np.concatenate([np.full(5, np.nan), teeth[:-5]])  # shift 5 forward
-    # Lips: 5-period SMMA shifted 3 bars forward
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    lips = np.concatenate([np.full(3, np.nan), lips[:-3]])  # shift 3 forward
-    
-    # Calculate 4h volume 20-period MA for spike detection
+    # Calculate 12h volume 20-period MA for spike detection
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -83,18 +88,16 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma_20[i]) or not in_session[i]):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma_20[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Williams Alligator conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
-        # Volume spike condition: current 4h volume > 1.5x 20-period volume MA
+        # Volume spike condition: current 12h volume > 1.5x 20-period volume MA
         volume_spike = volume[i] > (volume_ma_20[i] * 1.5)
         
         # 1d ADX conditions
@@ -102,24 +105,24 @@ def generate_signals(prices):
         adx_ranging = adx_1d_aligned[i] < 20
         
         if position == 0:
-            # Long: Bullish alignment AND trending AND volume spike AND session
-            if bullish_alignment and adx_trending and volume_spike:
+            # Long: price breaks above R3 AND trending AND volume spike AND session
+            if close[i] > r3_1d_aligned[i] and adx_trending and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment AND trending AND volume spike AND session
-            elif bearish_alignment and adx_trending and volume_spike:
+            # Short: price breaks below S3 AND trending AND volume spike AND session
+            elif close[i] < s3_1d_aligned[i] and adx_trending and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bullish alignment breaks OR ADX becomes ranging
-            if not bullish_alignment or adx_ranging:
+            # Exit long: price returns below H4 OR ADX becomes ranging
+            if close[i] < h4_1d_aligned[i] or adx_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bearish alignment breaks OR ADX becomes ranging
-            if not bearish_alignment or adx_ranging:
+            # Exit short: price returns above L4 OR ADX becomes ranging
+            if close[i] > l4_1d_aligned[i] or adx_ranging:
                 signals[i] = 0.0
                 position = 0
             else:
