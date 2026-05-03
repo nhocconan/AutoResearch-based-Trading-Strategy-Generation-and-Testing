@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Donchian channels provide robust structure for breakouts. Trading breakouts above
-# the 20-period upper band or below the lower band with 1d EMA50 trend filter and
-# volume spike captures strong moves while minimizing whipsaws. Designed for 12-37
-# trades/year on 12h to avoid fee drag and work in both bull and bear markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout points. Trading breakouts
+# of R3 (resistance 3) or S3 (support 3) with 1d EMA50 trend filter and volume spike
+# captures strong moves in both bull and bear markets. Designed for 20-50 trades/year on 4h
+# to minimize fee drag while maintaining edge.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,24 +28,6 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for Donchian channels (using same timeframe for structure)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Upper band: highest high over 20 periods
-    upper_band = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over 20 periods
-    lower_band = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian bands to 12h timeframe (use previous completed band)
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
-    
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
@@ -55,7 +37,20 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 12h data for volume confirmation
+    # Get 1d data for Camarilla pivot points (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_range = (high_1d - low_1d) * 1.1
+    r3 = close_1d + camarilla_range / 4
+    s3 = close_1d - camarilla_range / 4
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Get 4h data for volume confirmation
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
     
@@ -64,36 +59,36 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions: price breaks Donchian bands with volume spike
-        breakout_long = close[i] > upper_band_aligned[i] and volume_spike[i]
-        breakout_short = close[i] < lower_band_aligned[i] and volume_spike[i]
+        # Breakout conditions: price breaks R3 or S3 with volume spike
+        breakout_long = close[i] > r3_aligned[i] and volume_spike[i]
+        breakout_short = close[i] < s3_aligned[i] and volume_spike[i]
         
         if position == 0:
-            # Long: break above upper band in 1d uptrend with volume spike
+            # Long: break above R3 in 1d uptrend with volume spike
             if breakout_long and ema_50_1d_aligned[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band in 1d downtrend with volume spike
+            # Short: break below S3 in 1d downtrend with volume spike
             elif breakout_short and ema_50_1d_aligned[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below upper band or loses 1d uptrend
-            if close[i] < upper_band_aligned[i] or ema_50_1d_aligned[i] < close[i]:
+            # Exit long: price crosses below R3 or loses 1d uptrend
+            if close[i] < r3_aligned[i] or ema_50_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above lower band or loses 1d downtrend
-            if close[i] > lower_band_aligned[i] or ema_50_1d_aligned[i] > close[i]:
+            # Exit short: price crosses above S3 or loses 1d downtrend
+            if close[i] > s3_aligned[i] or ema_50_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
