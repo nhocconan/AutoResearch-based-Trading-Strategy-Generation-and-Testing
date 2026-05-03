@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Donchian breakouts capture strong momentum moves; 1w EMA50 ensures we trade with higher timeframe trend to avoid whipsaws
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Donchian breakouts capture strong momentum moves; 1w EMA50 ensures we trade with weekly trend
 # Volume spike (>2.0x 20-period EMA) confirms breakout authenticity
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
-# Works in both bull and bear markets by filtering breakouts with 1w trend
+# Works in both bull and bear markets by aligning with higher timeframe trend
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# This follows proven patterns from DB: Donchian + volume + trend filter on higher timeframes
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,12 +34,12 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels on 12h data
+    # Calculate Donchian(20) channels on 1d data
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume confirmation: 20-period EMA on 12h volume
+    # Volume confirmation: 20-period EMA on 1d volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -70,17 +71,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below midpoint of Donchian channel
+            # Exit long: price crosses below midpoint of Donchian channel OR below 1w EMA50
             midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midpoint:
+            if close[i] < midpoint or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above midpoint of Donchian channel
+            # Exit short: price crosses above midpoint of Donchian channel OR above 1w EMA50
             midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midpoint:
+            if close[i] > midpoint or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
