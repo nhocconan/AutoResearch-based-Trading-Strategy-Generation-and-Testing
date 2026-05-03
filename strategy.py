@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume confirmation
-# Long when Williams %R crosses above -80 (oversold reversal), price > 1d EMA50, volume > 2x 20-bar average
-# Short when Williams %R crosses below -20 (overbought reversal), price < 1d EMA50, volume > 2x 20-bar average
-# Williams %R identifies reversal points in ranging markets, EMA50 filters for trend alignment, volume confirms momentum
-# Designed for low trade frequency (~20-40/year on 4h) to minimize fee drag while capturing mean reversion in trends
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Ichimoku cloud (Senkou Span A/B), 1d close > 1d EMA50, volume > 2.0x 20-bar average
+# Short when price breaks below Ichimoku cloud, 1d close < 1d EMA50, volume > 2.0x 20-bar average
+# Ichimoku provides dynamic support/resistance, 1d EMA50 filters trend direction, volume confirms momentum
+# Designed for low trade frequency (~12-30/year on 6h) to minimize fee drag
+# Works in bull (cloud acts as support in uptrend) and bear (cloud acts as resistance in downtrend)
 
-name = "4h_WilliamsR_Volume_1dEMA50_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,12 +32,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 4h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Volume confirmation (2x 20-period average on 4h)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2.0
+    
+    # The cloud is between Senkou Span A and Senkou Span B
+    # Upper cloud boundary = max(Senkou Span A, Senkou Span B)
+    # Lower cloud boundary = min(Senkou Span A, Senkou Span B)
+    upper_cloud = np.maximum(senkou_span_a, senkou_span_b)
+    lower_cloud = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -44,23 +65,23 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for all calculations)
-    start_idx = max(50, 14, 20) + 1  # EMA50(1d) + Williams %R(14) + volume MA(20) + shift(1)
+    start_idx = max(50, 52, 20) + 1  # EMA50(1d) + Ichimoku(52) + volume MA(20) + shift(1)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(upper_cloud[i]) or 
+            np.isnan(lower_cloud[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R crosses above -80 (oversold reversal), price > 1d EMA50, volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+            # Long entry: price breaks above upper cloud, 1d close > 1d EMA50, volume spike
+            if (close[i] > upper_cloud[i] and 
                 close[i] > ema_50_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R crosses below -20 (overbought reversal), price < 1d EMA50, volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+            # Short entry: price breaks below lower cloud, 1d close < 1d EMA50, volume spike
+            elif (close[i] < lower_cloud[i] and 
                   close[i] < ema_50_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -68,16 +89,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R crosses above -20 (overbought) or price < 1d EMA50 (trend failure)
-            if (williams_r[i] > -20 and williams_r[i-1] <= -20) or close[i] < ema_50_aligned[i]:
+            # Exit: price falls below lower cloud or 1d close < 1d EMA50 (trend failure)
+            if (close[i] < lower_cloud[i] or 
+                close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -80 (oversold) or price > 1d EMA50 (trend failure)
-            if (williams_r[i] < -80 and williams_r[i-1] >= -80) or close[i] > ema_50_aligned[i]:
+            # Exit: price rises above upper cloud or 1d close > 1d EMA50 (trend failure)
+            if (close[i] > upper_cloud[i] or 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
