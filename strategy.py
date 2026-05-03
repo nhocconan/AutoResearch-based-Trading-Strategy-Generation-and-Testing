@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation.
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending) AND 6h volume > 1.3x 20-period volume MA.
-# Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX > 25 (trending) AND 6h volume > 1.3x 20-period volume MA.
-# Exit when Elder Ray divergence occurs OR 1d ADX < 20 (range) OR volume drops.
+# Hypothesis: 12h Camarilla H4L4 breakout with 1d volume spike and 1w EMA200 trend filter.
+# Long when price breaks above H4 level with 12h volume > 2.0x 20-period volume MA AND 1w close > 1w EMA200.
+# Short when price breaks below L4 level with 12h volume > 2.0x 20-period volume MA AND 1w close < 1w EMA200.
+# Exit when price returns to Pivot level or trend reverses.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
-# Elder Ray measures bull/bear power via EMA13, 1d ADX filters for trending regimes only, volume confirms participation.
-# Works in both bull and bear markets by only trading strong trends when volume confirms and Elder Ray shows clear dominance.
+# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Camarilla pivot levels provide precise intraday support/resistance, 1w EMA200 filters for higher-timeframe trend alignment,
+# volume spike confirms institutional participation. Works in both bull and bear markets by only trading breakouts
+# in the direction of the 1w trend when volume confirms.
 
-name = "6h_ElderRay_1dADX_VolumeSpike_Session"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_Breakout_1wEMA200_VolumeSpike_Session"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,101 +32,84 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength
-    # ADX: Average Directional Index - measures trend strength (not direction)
-    # +DI: Positive Directional Indicator
-    # -DI: Negative Directional Indicator
-    # DX = |(+DI - -DI)| / (+DI + -DI) * 100
-    # ADX = smoothed DX
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # Calculate 1w EMA200 for trend direction
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # +DM and -DM
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = close + 1.1*(high-low)/2
+    # L4 = close - 1.1*(high-low)/2
+    # Pivot = (high + low + close)/3
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = atr.values  # already smoothed
+    camarilla_range = prev_high - prev_low
+    h4 = prev_close + 1.1 * camarilla_range / 2.0
+    l4 = prev_close - 1.1 * camarilla_range / 2.0
+    pivot = (prev_high + prev_low + prev_close) / 3.0
     
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # Align Camarilla levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Elder Ray on 6h timeframe
-    # Elder Ray: Bull Power = High - EMA13(Close)
-    #            Bear Power = Low - EMA13(Close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Calculate 6h volume 20-period MA for spike detection
-    volume_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume 20-period MA for spike detection
+    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma_6h[i]) or not in_session[i]):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ma_12h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume spike condition: current 6h volume > 1.3x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_6h[i] * 1.3)
+        close_val = close[i]
         
-        # Elder Ray conditions
-        bull_power_pos = bull_power[i] > 0    # Bulls in control
-        bear_power_neg = bear_power[i] < 0    # Bears weak
-        bear_power_pos = bear_power[i] > 0    # Bears in control
-        bull_power_neg = bull_power[i] < 0    # Bulls weak
+        # Volume spike condition: current 12h volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_12h[i] * 2.0)
         
-        # 1d ADX trend condition
-        trending = adx_1d_aligned[i] > 25     # Strong trend
-        ranging = adx_1d_aligned[i] < 20      # Range/market weak
+        # Trend conditions
+        trend_up = close_val > ema_200_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < ema_200_1w_aligned[i]  # 1w downtrend
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND trending AND volume spike AND session
-            if bull_power_pos and bear_power_neg and trending and volume_spike:
+            # Long: Price breaks above H4 level with volume spike AND 1w uptrend AND session
+            if close_val > h4_aligned[i] and volume_spike and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 AND Bull Power < 0 AND trending AND volume spike AND session
-            elif bear_power_pos and bull_power_neg and trending and volume_spike:
+            # Short: Price breaks below L4 level with volume spike AND 1w downtrend AND session
+            elif close_val < l4_aligned[i] and volume_spike and trend_down:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Elder Ray divergence OR ranging OR volume drops
-            if not (bull_power_pos and bear_power_neg) or ranging or not volume_spike:
+            # Exit long: Price returns to Pivot level OR trend reverses
+            if close_val <= pivot_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Elder Ray divergence OR ranging OR volume drops
-            if not (bear_power_pos and bull_power_neg) or ranging or not volume_spike:
+            # Exit short: Price returns to Pivot level OR trend reverses
+            if close_val >= pivot_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
