@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume confirmation.
-# Long when Alligator jaws < teeth < lips (bullish alignment) AND 1d close > 1d EMA50 AND 12h volume > 1.5x 20-period volume MA.
-# Short when Alligator jaws > teeth > lips (bearish alignment) AND 1d close < 1d EMA50 AND 12h volume > 1.5x 20-period volume MA.
-# Exit when Alligator alignment reverses or trend changes.
-# Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
-# Williams Alligator identifies trend phases via smoothed medians, 1d EMA50 filters for higher-timeframe alignment, volume confirms participation.
-# Works in both bull and bear markets by only trading in the direction of the 1d trend when volume confirms and Alligator is aligned.
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike + choppiness regime filter.
+# Long when price breaks above R3 with 1d uptrend, volume spike, and choppy market (CHOP > 61.8).
+# Short when price breaks below S3 with 1d downtrend, volume spike, and choppy market.
+# Exit when price reverts to R2/S2 or trend changes.
+# Uses 4h timeframe targeting 20-50 trades/year (80-200 total over 4 years).
+# Camarilla pivot levels provide institutional support/resistance, EMA34 filters higher-timeframe trend,
+# volume spike confirms institutional participation, chop filter avoids whipsaws in strong trends.
 
-name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike_Session"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,51 +26,72 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Session filter: 08-20 UTC (pre-compute to avoid datetime64 issues)
+    # Pre-compute session filter: 08-20 UTC
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
+    # Get 1d data for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Alligator: Jaw (13-period smoothed median of typical price, 8-bar shift)
-    #          Teeth (8-period smoothed median of typical price, 5-bar shift)
-    #          Lips (5-period smoothed median of typical price, 3-bar shift)
-    typical_price = (high + low + close) / 3.0
+    # Calculate 1d Camarilla pivot levels (R3, R2, S2, S3)
+    # Based on previous day's OHLC
+    df_1d_prev = df_1d.shift(1)
+    high_prev = df_1d_prev['high'].values
+    low_prev = df_1d_prev['low'].values
+    close_prev = df_1d_prev['close'].values
     
-    # Calculate medians using rolling window
-    def rolling_median(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).median().values
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_prev = high_prev - low_prev
     
-    median_tp = rolling_median(typical_price, 13)  # Jaw base
-    jaw = np.roll(median_tp, 8)  # 8-bar shift
-    jaw[:8] = np.nan
+    # Camarilla levels
+    R3 = pivot + (range_prev * 1.1 / 4)
+    R2 = pivot + (range_prev * 1.1 / 2)
+    S2 = pivot - (range_prev * 1.1 / 2)
+    S3 = pivot - (range_prev * 1.1 / 4)
     
-    median_tp_teeth = rolling_median(typical_price, 8)  # Teeth base
-    teeth = np.roll(median_tp_teeth, 5)  # 5-bar shift
-    teeth[:5] = np.nan
+    # Align 1d Camarilla levels to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    median_tp_lips = rolling_median(typical_price, 5)  # Lips base
-    lips = np.roll(median_tp_lips, 3)  # 3-bar shift
-    lips[:3] = np.nan
+    # Calculate 4h choppiness index (CHOP) for regime filter
+    def true_range(high, low, prev_close):
+        tr1 = high - low
+        tr2 = np.abs(high - prev_close)
+        tr3 = np.abs(low - prev_close)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 12h volume 20-period MA for spike detection
-    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    prev_close = np.roll(close, 1)
+    prev_close[0] = np.nan
+    tr = true_range(high, low, prev_close)
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    chop_denom = highest_high_14 - lowest_low_14
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop = 100 * np.log10(atr_14 * np.sqrt(14) / chop_denom) / np.log10(14)
+    
+    # Calculate 4h volume 20-period MA for spike detection
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(volume_ma_12h[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(R2_aligned[i]) or 
+            np.isnan(S2_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_ma_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,36 +99,35 @@ def generate_signals(prices):
             
         close_val = close[i]
         
-        # Volume spike condition: current 12h volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_12h[i] * 1.5)
+        # Volume spike condition: current 4h volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_20[i] * 2.0)
         
-        # Alligator alignment conditions
-        bullish_alignment = jaw[i] < teeth[i] and teeth[i] < lips[i]   # Jaws < Teeth < Lips
-        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]   # Jaws > Teeth > Lips
+        # Choppiness regime filter: CHOP > 61.8 indicates ranging/choppy market (good for mean reversion)
+        choppy_market = chop[i] > 61.8
         
         # 1d trend conditions
-        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
+        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: Bullish Alligator alignment AND 1d uptrend AND volume spike AND session
-            if bullish_alignment and trend_up and volume_spike:
+            # Long: Price breaks above R3 AND 1d uptrend AND volume spike AND choppy market AND session
+            if close_val > R3_aligned[i] and trend_up and volume_spike and choppy_market:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Alligator alignment AND 1d downtrend AND volume spike AND session
-            elif bearish_alignment and trend_down and volume_spike:
+            # Short: Price breaks below S3 AND 1d downtrend AND volume spike AND choppy market AND session
+            elif close_val < S3_aligned[i] and trend_down and volume_spike and choppy_market:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment turns bearish OR trend changes
-            if not bullish_alignment or not trend_up:
+            # Exit long: Price reverts to R2 OR trend changes to downtrend
+            if close_val < R2_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment turns bullish OR trend changes
-            if not bearish_alignment or not trend_down:
+            # Exit short: Price reverts to S2 OR trend changes to uptrend
+            if close_val > S2_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
