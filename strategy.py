@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation.
-# Long when price breaks above Donchian upper band in 1d uptrend (price > EMA34).
-# Short when price breaks below Donchian lower band in 1d downtrend (price < EMA34).
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w trend filter (HMA21) and volume confirmation.
+# Long when price breaks above Camarilla R3 in 1w uptrend (price > HMA21).
+# Short when price breaks below Camarilla S3 in 1w downtrend (price < HMA21).
 # Volume must be > 1.5x 20-period MA to confirm breakout strength.
-# Uses discrete sizing 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
-# BTC/ETH focus: 1d EMA34 filter avoids whipsaws in ranging markets and captures major trends.
+# Uses discrete sizing 0.25 to minimize fee churn. Target: 30-100 total trades over 4 years.
 
-name = "4h_Donchian20_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wHMA21_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,21 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 34:
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w HMA21
+    close_1w = df_1w['close'].values
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    wma_half = pd.Series(close_1w).rolling(window=half_len, min_periods=half_len).mean().values
+    wma_full = pd.Series(close_1w).rolling(window=21, min_periods=21).mean().values
+    wma_sqrt = pd.Series(2 * wma_half - wma_full).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+    hma_21_1w = wma_sqrt
+    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    
+    # Camarilla levels on 1d (based on previous day's range)
+    # R3 = close + 1.1*(high - low)/2
+    # S3 = close - 1.1*(high - low)/2
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # avoid NaN on first bar
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
     # Volume confirmation: current volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,40 +60,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(21, n):  # start after warmup for Camarilla calculation
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(hma_21_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        trend_up = close_val > hma_21_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < hma_21_1w_aligned[i]  # 1w downtrend
         vol_spike = volume_spike[i]
         
         # Entry logic
         if position == 0:
-            # Long: price breaks above Donchian upper band AND 1d uptrend AND volume spike
-            if close_val > highest_high[i] and trend_up and vol_spike:
+            # Long: price breaks above Camarilla R3 AND 1w uptrend AND volume spike
+            if close_val > camarilla_r3[i] and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band AND 1d downtrend AND volume spike
-            elif close_val < lowest_low[i] and trend_down and vol_spike:
+            # Short: price breaks below Camarilla S3 AND 1w downtrend AND volume spike
+            elif close_val < camarilla_s3[i] and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower band OR 1d trend turns down
-            if close_val < lowest_low[i] or not trend_up:
+            # Long exit: price breaks below Camarilla S3 OR 1w trend turns down
+            if close_val < camarilla_s3[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian upper band OR 1d trend turns up
-            if close_val > highest_high[i] or not trend_down:
+            # Short exit: price breaks above Camarilla R3 OR 1w trend turns up
+            if close_val > camarilla_r3[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
