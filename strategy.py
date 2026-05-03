@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 levels for breakout entries with volume confirmation and 1w EMA34 trend filter.
-# Long when: price breaks above 1d Camarilla R3 with volume > 2.0x 20-bar average AND close > 1w EMA34 (bullish trend)
-# Short when: price breaks below 1d Camarilla S3 with volume > 2.0x 20-bar average AND close < 1w EMA34 (bearish trend)
+# Hypothesis: 12h strategy using 1d Camarilla pivot R3/S3 levels for breakout entries with volume confirmation and 1d EMA34 trend filter.
+# Long when: price breaks above 1d Camarilla R3 with volume > 2.0x 20-bar average AND close > 1d EMA34 (bullish trend)
+# Short when: price breaks below 1d Camarilla S3 with volume > 2.0x 20-bar average AND close < 1d EMA34 (bearish trend)
 # Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses 1w EMA34 for robust trend filtering (avoids whipsaw in chop), 1d Camarilla R3/S3 for precise breakout levels, volume for confirmation
-# Discrete sizing 0.25 balances return and fee drag. Target: 75-200 total trades over 4 years = 19-50/year.
+# Uses 1d EMA34 for robust trend filtering (avoids whipsaw in chop), 1d Camarilla R3/S3 for precise breakout levels, volume for confirmation
+# Discrete sizing 0.25 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "4h_Camarilla_R3S3_1wEMA34_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_Volume_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -43,20 +43,15 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 4)
     s3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align 1d Camarilla levels to 4h timeframe (completed 1d bar only)
+    # Align 1d Camarilla levels to 12h timeframe (completed 1d bar only)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # 4h ATR(14) for stoploss
+    # 12h ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -79,20 +74,20 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above 1d Camarilla R3 with volume spike AND bullish trend (close > 1w EMA34)
-            if close[i] > r3_1d_aligned[i] and volume_spike[i] and close[i] > ema_34_1w_aligned[i]:
+            # Long entry: price breaks above 1d Camarilla R3 with volume spike AND bullish trend (close > 1d EMA34)
+            if close[i] > r3_1d_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below 1d Camarilla S3 with volume spike AND bearish trend (close < 1w EMA34)
-            elif close[i] < s3_1d_aligned[i] and volume_spike[i] and close[i] < ema_34_1w_aligned[i]:
+            # Short entry: price breaks below 1d Camarilla S3 with volume spike AND bearish trend (close < 1d EMA34)
+            elif close[i] < s3_1d_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
