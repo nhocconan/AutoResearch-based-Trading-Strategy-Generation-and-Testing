@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA(34) trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA: Bull Power = High - EMA, Bear Power = Low - EMA
-# Long when Bull Power > 0 and rising, price above 1d EMA34, volume > 1.5x 20-period EMA
-# Short when Bear Power < 0 and falling, price below 1d EMA34, volume > 1.5x 20-period EMA
-# Works in bull/bear markets by aligning with 1d trend while capturing momentum shifts
+# Hypothesis: 12h Williams Alligator with 1d EMA(34) trend filter and volume confirmation
+# Williams Alligator identifies trend presence via smoothed medians (Jaw/Teeth/Lips)
+# When all three lines are aligned (bullish: Lips > Teeth > Jaw, bearish: reverse), trend is strong
+# 1d EMA(34) ensures alignment with daily trend to avoid counter-trend trades
+# Volume spike (>2.0x 20-period EMA) filters low-probability entries
+# Works in bull/bear markets by following 1d trend direction for entries
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "6h_ElderRay_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA trend filter and Williams Alligator
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -34,15 +35,32 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h EMA(13) for Elder Ray (standard period)
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams Alligator from 1d data
+    # Alligator uses SMMA (Smoothed Moving Average) with specific periods
+    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(source, np.nan, dtype=np.float64)
+        if len(source) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT_PRICE) / period
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA
-    bear_power = low - ema_13   # Bear Power = Low - EMA
+    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    jaw = smma(median_price_1d, 13)  # Jaw: SMMA(13, 8)
+    teeth = smma(median_price_1d, 8)  # Teeth: SMMA(8, 5)
+    lips = smma(median_price_1d, 5)   # Lips: SMMA(5, 3)
     
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Align Alligator lines to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw, additional_delay_bars=0)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth, additional_delay_bars=0)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips, additional_delay_bars=0)
+    
+    # Volume confirmation: 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -51,40 +69,42 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA (balanced to avoid overtrading)
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume spike: current volume > 2.0 x 20-period EMA
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Elder Ray signals with 1d trend filter
-        # Long: Rising Bull Power (>0) + price above 1d EMA34 + volume spike
-        # Short: Falling Bear Power (<0) + price below 1d EMA34 + volume spike
+        # Williams Alligator signals with 1d trend filter
+        # Bullish alignment: Lips > Teeth > Jaw
+        # Bearish alignment: Lips < Teeth < Jaw
+        bullish_aligned = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_aligned = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
         if position == 0:
-            if i > 50:  # Need previous bar for momentum
-                bull_rising = bull_power[i] > bull_power[i-1]
-                bear_falling = bear_power[i] < bear_power[i-1]
-                
-                if bull_power[i] > 0 and bull_rising and close[i] > ema_34_1d_aligned[i] and volume_spike:
-                    signals[i] = 0.25
-                    position = 1
-                elif bear_power[i] < 0 and bear_falling and close[i] < ema_34_1d_aligned[i] and volume_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: Bullish alignment + price above 1d EMA34 + volume spike
+            if bullish_aligned and close[i] > ema_34_1d_aligned[i] and volume_spike:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: Bearish alignment + price below 1d EMA34 + volume spike
+            elif bearish_aligned and close[i] < ema_34_1d_aligned[i] and volume_spike:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: Bull Power turns negative OR price breaks below 1d EMA34
-            if bull_power[i] <= 0 or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Bearish alignment OR price below 1d EMA34
+            if bearish_aligned or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power turns positive OR price breaks above 1d EMA34
-            if bear_power[i] >= 0 or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Bullish alignment OR price above 1d EMA34
+            if bullish_aligned or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
