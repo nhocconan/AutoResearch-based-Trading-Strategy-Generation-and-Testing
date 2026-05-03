@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Camarilla pivot levels provide high-probability intraday reversal/breakout points
 # 1d EMA34 ensures we only trade in the direction of the higher timeframe trend
-# Volume confirmation requires 2.0x average volume to ensure strong participation (tightened from 1.8x to reduce trades)
-# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag on 12h timeframe
+# Volume confirmation requires 1.8x average volume to ensure strong participation
+# Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag on 4h timeframe
 # Works in both bull and bear markets by following the 1d trend direction and using mean-reversion breakouts
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 12h bar
+    # Calculate Camarilla levels from previous 4h bar
     # R3 = close + 1.1*(high - low)/2
     # S3 = close - 1.1*(high - low)/2
     # Using previous bar's OHLC to avoid look-ahead
@@ -48,7 +48,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
     camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Volume confirmation: 20-period EMA on 12h volume
+    # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -64,8 +64,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tightened to reduce overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.8 x 20-period EMA (balanced to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
         # Camarilla R3/S3 breakout signals with 1d trend filter
         # Long: price breaks above R3 + volume spike + price above 1d EMA34
