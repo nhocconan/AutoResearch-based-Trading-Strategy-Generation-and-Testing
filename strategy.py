@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout + 4h EMA50 trend filter + volume confirmation
-# Camarilla pivots provide intraday support/resistance levels that work in ranging and trending markets.
-# 4h EMA > 50 ensures medium-term trend alignment to reduce whipsaws.
-# Volume confirmation (1.8x 20-period EMA) filters low-momentum breakouts.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
-# Discrete sizing (0.20) minimizes fee churn. Target: 60-120 total trades over 4 years.
+# Hypothesis: 6h Williams %R extreme + 1d EMA34 trend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions; extremes (< -80 or > -20) signal potential reversals.
+# 1d EMA34 ensures alignment with the daily trend to avoid counter-trend trades in choppy markets.
+# Volume confirmation (1.5x 20-period EMA) validates the reversal attempt.
+# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
+# Works in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,69 +29,65 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla levels from previous 1h bar
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    close_series = pd.Series(close)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    camarilla_r3 = (close_series.shift(1) + (high_series.shift(1) - low_series.shift(1)) * 1.1 / 2).values
-    camarilla_s3 = (close_series.shift(1) - (high_series.shift(1) - low_series.shift(1)) * 1.1 / 2).values
+    # Align 1d EMA34 to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period EMA
+    # Calculate Williams %R(14) on 6h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume confirmation: 20-period EMA on 6h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have valid Camarilla levels
+    for i in range(14, n):  # Start from 14 to have valid Williams %R and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.8 x 20-period EMA
-        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
-        
-        # Uptrend: close > EMA50, Downtrend: close < EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Volume spike: current volume > 1.5 x 20-period EMA
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend with volume spike
-            if close[i] > camarilla_r3[i] and uptrend and volume_spike:
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold) + price above 1d EMA34 (uptrend) + volume spike
+            if williams_r[i] < -80 and close[i] > ema_34_aligned[i] and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in downtrend with volume spike
-            elif close[i] < camarilla_s3[i] and downtrend and volume_spike:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) + price below 1d EMA34 (downtrend) + volume spike
+            elif williams_r[i] > -20 and close[i] < ema_34_aligned[i] and volume_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or loses uptrend
-            if close[i] < camarilla_s3[i] or not uptrend:
+            # Exit long: Williams %R > -50 (momentum fading) or price below 1d EMA34 (trend break)
+            if williams_r[i] > -50 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 or loses downtrend
-            if close[i] > camarilla_r3[i] or not downtrend:
+            # Exit short: Williams %R < -50 (momentum fading) or price above 1d EMA34 (trend break)
+            if williams_r[i] < -50 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
