@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX25 trend filter + volume confirmation (2x 20 EMA)
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX25 trend filter + volume confirmation
 # Donchian channels provide robust breakout structure in both bull and bear markets.
 # 1d ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
-# Volume confirmation filters false breakouts.
-# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.25) to minimize fee drag.
-# Works in bull markets via breakouts and in bear markets via strong trend + breakdowns.
+# Volume confirmation (2.0x 20-period EMA) filters false breakouts.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
 
 name = "4h_Donchian20_1dADX25_VolumeSpike"
 timeframe = "4h"
