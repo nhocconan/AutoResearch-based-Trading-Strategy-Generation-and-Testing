@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter, volume confirmation, and ATR stoploss.
-# Long when price breaks above 20-period Donchian high in 1d uptrend with volume spike (>1.8x 20-period volume MA).
-# Short when price breaks below 20-period Donchian low in 1d downtrend with volume spike.
-# Uses ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
-# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year).
-# Donchian channels provide robust trend-following structure, 1d EMA50 ensures higher timeframe alignment,
-# Volume spike confirms institutional participation. Works in both bull and bear markets by only trading
-# with the 1d trend, avoiding counter-trend whipsaws during ranging periods.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above R3 in 1d uptrend with volume spike (>1.8x 20-period volume MA).
+# Short when price breaks below S3 in 1d downtrend with volume spike.
+# Exit when price retests the pivot point (PP) or 1d trend reverses.
+# Camarilla levels from 1d provide statistically significant support/resistance.
+# Breakouts at R3/S3 with volume confirmation indicate institutional participation.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by only trading with the 1d trend.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATR_v2"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +26,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss (using primary timeframe)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 6h data for price action
+    df_6h = get_htf_data(prices, '6h')
     
-    # Get 4h data for Donchian channel calculation (primary timeframe matches)
-    df_4h = get_htf_data(prices, '4h')
-    
-    if len(df_4h) < 20:
+    if len(df_6h) < 10:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = pp + range_1d * 1.1 / 4.0  # R3 = PP + 1.1 * Range / 4
+    s3 = pp - range_1d * 1.1 / 4.0  # S3 = PP - 1.1 * Range / 4
+    r4 = pp + range_1d * 1.1 / 2.0  # R4 = PP + 1.1 * Range / 2
+    s4 = pp - range_1d * 1.1 / 2.0  # S4 = PP - 1.1 * Range / 2
+    
+    # Align Camarilla levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,12 +71,12 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0  # Track entry price for ATR-based stoploss
+    entry_price = 0.0  # Track entry price for reference
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,33 +84,36 @@ def generate_signals(prices):
             
         close_val = close[i]
         vol_spike = volume_spike[i]
-        upper_channel = donchian_high_aligned[i]
-        lower_channel = donchian_low_aligned[i]
-        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
+        pp_val = pp_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        r4_val = r4_aligned[i]
+        s4_val = s4_aligned[i]
+        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: price breaks above Donchian upper channel AND 1d uptrend AND volume spike
-            if close_val > upper_channel and trend_up and vol_spike:
+            # Long: price breaks above R3 AND 1d uptrend AND volume spike
+            if close_val > r3_val and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: price breaks below Donchian lower channel AND 1d downtrend AND volume spike
-            elif close_val < lower_channel and trend_down and vol_spike:
+            # Short: price breaks below S3 AND 1d downtrend AND volume spike
+            elif close_val < s3_val and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Stoploss: price moves against position by 2.5*ATR
-            if close_val < entry_price - 2.5 * atr[i]:
-                exit_signal = True
-            # Exit: price breaks below Donchian lower channel
-            elif close_val < lower_channel:
+            # Exit: price retests pivot point (mean reversion)
+            if abs(close_val - pp_val) < 0.001 * pp_val:  # Within 0.1% of PP
                 exit_signal = True
             # Exit: 1d trend changes to downtrend
             elif not trend_up:
+                exit_signal = True
+            # Exit: price breaks above R4 (extended move, take profit)
+            elif close_val > r4_val:
                 exit_signal = True
             
             if exit_signal:
@@ -117,14 +124,14 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Stoploss: price moves against position by 2.5*ATR
-            if close_val > entry_price + 2.5 * atr[i]:
-                exit_signal = True
-            # Exit: price breaks above Donchian upper channel
-            elif close_val > upper_channel:
+            # Exit: price retests pivot point (mean reversion)
+            if abs(close_val - pp_val) < 0.001 * pp_val:  # Within 0.1% of PP
                 exit_signal = True
             # Exit: 1d trend changes to uptrend
             elif not trend_down:
+                exit_signal = True
+            # Exit: price breaks below S4 (extended move, take profit)
+            elif close_val < s4_val:
                 exit_signal = True
             
             if exit_signal:
