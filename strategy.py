@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
-# Uses 1h timeframe for entry timing, 4h for HTF direction and pivot calculation.
-# Breakouts above R1 (long) or below S1 (short) with volume confirmation and trend alignment.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Session filter (08-20 UTC) reduces noise trades. Discrete sizing 0.20.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Uses 12h timeframe for lower trade frequency (target: 12-37/year), 1d for HTF direction and Donchian calculation.
+# Breakouts above 12h Donchian upper(20) (long) or below lower(20) (short) with volume confirmation and trend alignment.
+# ATR-based trailing stop for risk management. Discrete sizing 0.25 to balance return and drawdown.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing Donchian edge.
 
-name = "1h_Camarilla_R1_S1_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,47 +22,43 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute hour for session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 4h data for Camarilla calculation and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1d data for Donchian calculation, trend filter, and volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Use prior completed 4h bar's OHLC for Camarilla calculation
-    prior_close = np.roll(df_4h['close'].values, 1)
-    prior_high = np.roll(df_4h['high'].values, 1)
-    prior_low = np.roll(df_4h['low'].values, 1)
-    prior_close[0] = np.nan
+    # Use prior completed 1d bar's OHLC for Donchian calculation
+    prior_high = np.roll(df_1d['high'].values, 1)
+    prior_low = np.roll(df_1d['low'].values, 1)
     prior_high[0] = np.nan
     prior_low[0] = np.nan
     
-    # Calculate Camarilla levels for prior 4h bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = prior_close + (prior_high - prior_low) * 1.1 / 12
-    camarilla_s1 = prior_close - (prior_high - prior_low) * 1.1 / 12
+    # Calculate 1d Donchian channels (20-period) for prior 1d bar
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_series = pd.Series(prior_high)
+    low_series = pd.Series(prior_low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate 4h EMA50 trend filter
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 4h volume regime (high volume when current volume > 1.5x 20-period MA)
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    vol_regime = vol_4h > (1.5 * vol_ma_4h)  # High volume regime
+    # Calculate 1d volume regime (high volume when current volume > 1.5x 20-period MA)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
     
-    # Align volume regime to 1h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_4h, vol_regime)
+    # Align volume regime to 12h timeframe
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    # Calculate ATR(14) for 1h data (for stoploss)
+    # Calculate ATR(14) for 12h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -75,40 +71,29 @@ def generate_signals(prices):
     lowest_low_since_entry = 0
     
     for i in range(100, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        # Skip if outside session
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Get current values
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
         ema_trend = ema_50_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(r1) or np.isnan(s1) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
+        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 1h volume > 1.5x 20-period MA
+        # Volume confirmation: current 12h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: break above R1 with volume spike, above 4h EMA50, and in high volume regime
-        long_entry = (close[i] > r1) and volume_spike and (close[i] > ema_trend) and vol_reg
-        # Short: break below S1 with volume spike, below 4h EMA50, and in high volume regime
-        short_entry = (close[i] < s1) and volume_spike and (close[i] < ema_trend) and vol_reg
+        # Long: break above upper Donchian with volume spike, above 1d EMA50, and in high volume regime
+        long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend) and vol_reg
+        # Short: break below lower Donchian with volume spike, below 1d EMA50, and in high volume regime
+        short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend) and vol_reg
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
@@ -124,11 +109,11 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -136,12 +121,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
