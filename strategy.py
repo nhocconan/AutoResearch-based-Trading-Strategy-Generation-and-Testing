@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via alignment of smoothed medians.
-# In bull market: Lips > Teeth > Jaw (all rising) = uptrend
-# In bear market: Lips < Teeth < Jaw (all falling) = downtrend
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Volume confirmation filters false signals. Designed for 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via long entries on bullish Alligator alignment and in bear markets via short entries on bearish alignment.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide intraday support/resistance that work well on 12h timeframe
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
+# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via upward breaks at R3/R4 and in bear markets via downward breaks at S3/S4
 
-name = "6h_WilliamsAlligator_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,30 +37,36 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator: Smoothed medians (using close as proxy for median price)
-    # Jaw: 13-period SMMA of median price, shifted 8 bars
-    # Teeth: 8-period SMMA of median price, shifted 5 bars
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
-    median_price = (high + low + close) / 3.0
+    # Calculate Camarilla levels from previous 1d bar
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # Where C = (H+L+CLOSE)/3 of previous day
+    typical_price = (high + low + close) / 3.0
+    typical_price_series = pd.Series(typical_price)
+    prev_close = typical_price_series.shift(1).values
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
     
-    # Jaw (13, 8)
-    jaw = pd.Series(median_price).ewm(alpha=1/13, adjust=False).mean().shift(8).values
-    # Teeth (8, 5)
-    teeth = pd.Series(median_price).ewm(alpha=1/8, adjust=False).mean().shift(5).values
-    # Lips (5, 3)
-    lips = pd.Series(median_price).ewm(alpha=1/5, adjust=False).mean().shift(3).values
+    camarilla_pivot = prev_close
+    camarilla_range = prev_high - prev_low
     
-    # Volume confirmation: 20-period EMA on 6h
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    camarilla_r3 = camarilla_pivot + (camarilla_range * 1.1 / 4)
+    camarilla_s3 = camarilla_pivot - (camarilla_range * 1.1 / 4)
+    camarilla_r4 = camarilla_pivot + (camarilla_range * 1.1 / 2)
+    camarilla_s4 = camarilla_pivot - (camarilla_range * 1.1 / 2)
+    
+    # Volume confirmation: 20-period EMA on 12h
+    vol_ema_20 = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20[:] = vol_ema_20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Start from 13 to have valid Alligator values
+    for i in range(1, n):  # Start from 1 to have valid previous day data
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,30 +74,25 @@ def generate_signals(prices):
         
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Bullish alignment: Lips > Teeth > Jaw (all rising)
-        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        # Bearish alignment: Lips < Teeth < Jaw (all falling)
-        bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
         if position == 0:
-            # Long: bullish Alligator alignment with daily uptrend and volume spike
-            if bullish_alignment and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Long: price breaks above camarilla R3 in uptrend alignment with volume spike
+            if close[i] > camarilla_r3[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment with daily downtrend and volume spike
-            elif bearish_alignment and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Short: price breaks below camarilla S3 in downtrend alignment with volume spike
+            elif close[i] < camarilla_s3[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: loss of bullish alignment or daily trend reversal
-            if not bullish_alignment or ema_34_1d_aligned[i] >= close[i]:
+            # Exit long: price breaks below camarilla S3 or loses uptrend alignment
+            if close[i] < camarilla_s3[i] or ema_34_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: loss of bearish alignment or daily trend reversal
-            if not bearish_alignment or ema_34_1d_aligned[i] <= close[i]:
+            # Exit short: price breaks above camarilla R3 or loses downtrend alignment
+            if close[i] > camarilla_r3[i] or ema_34_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
