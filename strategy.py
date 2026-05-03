@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
 # Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts, in bear via short signals.
 # Proven pattern from top performers: price channel + HTF trend + volume confirmation + ATR stop.
+# Focus on 6h timeframe to reduce trade frequency vs lower timeframes while maintaining sufficient sample size.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,22 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate 6h Camarilla levels from prior 6h bar (using close of previous completed 6h bar)
+    # We need to get 6h OHLC data, but since we're on 6h timeframe, we can use the current bar's data
+    # Camarilla levels are calculated based on previous day's range, but for intraday we use previous bar
+    # For 6h timeframe, we'll use the prior completed 6h bar's high/low/close
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate typical price for prior bar
+    typical_price = (high + low + close) / 3
+    # Shift by 1 to get prior bar's values
+    prior_typical = np.roll(typical_price, 1)
+    prior_typical[0] = np.nan  # First value has no prior
     
-    # Donchian upper band: highest high of last 20 completed 4h bars
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band: lowest low of last 20 completed 4h bars
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    prior_high = np.roll(high, 1)
+    prior_high[0] = np.nan
+    prior_low = np.roll(low, 1)
+    prior_low[0] = np.nan
+    prior_close = np.roll(close, 1)
+    prior_close[0] = np.nan
     
-    # Align Donchian bands to 4h timeframe (no additional delay needed for price channels)
-    donchian_upper_4h = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_4h = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    # Camarilla levels calculation (based on prior bar's range)
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.1 * (High - Low)
+    # S3 = Close - 1.1 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    # We'll use R3/S3 for fade/breakout logic
+    
+    # Calculate using prior completed bar to avoid look-ahead
+    prior_range = prior_high - prior_low
+    camarilla_r3 = prior_close + 1.1 * prior_range
+    camarilla_s3 = prior_close - 1.1 * prior_range
     
     # Calculate 1d EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -66,19 +80,21 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        dh_up = donchian_upper_4h[i]
-        dh_low = donchian_lower_4h[i]
+        camarilla_r3_val = camarilla_r3[i]
+        camarilla_s3_val = camarilla_s3[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(dh_up) or np.isnan(dh_low) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(camarilla_r3_val) or np.isnan(camarilla_s3_val) or np.isnan(ema_trend) or np.isnan(atr_val):
             continue
             
         # Entry conditions
-        long_entry = (close[i] > dh_up) and (close[i] > ema_trend) and vol_spike
-        short_entry = (close[i] < dh_low) and (close[i] < ema_trend) and vol_spike
+        # Long: break above R3 with volume spike and above 1d EMA34
+        long_entry = (close[i] > camarilla_r3_val) and (close[i] > ema_trend) and vol_spike
+        # Short: break below S3 with volume spike and below 1d EMA34
+        short_entry = (close[i] < camarilla_s3_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
