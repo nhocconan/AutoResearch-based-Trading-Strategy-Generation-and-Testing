@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume confirmation
-# Donchian breakouts capture strong momentum moves. 12h EMA50 ensures alignment with higher timeframe trend.
-# Volume confirmation filters false breakouts. Designed for 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via upward breakouts and in bear markets via downward breakdowns with trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Designed to capture strong momentum moves in both bull and bear markets.
+# Uses 0.25 position size to limit drawdown and reduce fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid overtrading.
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +23,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Session filter: 08-20 UTC (pre-compute to avoid datetime64 issues)
+    # Pre-compute session filter to avoid datetime64 issues
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -36,26 +36,17 @@ def generate_signals(prices):
     ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian channels on 4h data
-    # Upper band: 20-period high
-    # Lower band: 20-period low
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    
-    for i in range(19, n):
-        upper_band[i] = np.max(high[i-19:i+1])
-        lower_band[i] = np.min(low[i-19:i+1])
+    # Calculate Donchian channels on 4h data using vectorized operations
+    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period EMA on 4h
-    vol_ema_20 = np.full(n, np.nan)
-    vol_series = pd.Series(volume)
-    vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20[:] = vol_ema_20_values
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid Donchian values
+    for i in range(20, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
