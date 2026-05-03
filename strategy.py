@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with 1d RSI filter and volume confirmation.
-# Long when KAMA turns upward in 12h, price > 1d EMA50, and volume > 1.5x 20-period MA.
-# Short when KAMA turns downward in 12h, price < 1d EMA50, and volume > 1.5x 20-period MA.
-# Uses ATR-based stoploss (signal→0 when price moves against position by 2.5*ATR).
-# KAMA adapts to market noise, reducing whipsaws in ranging markets. 1d EMA50 ensures higher timeframe alignment.
-# Volume confirmation filters low-participation breakouts. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level in 1d uptrend with volume spike (>1.5x 20-period volume MA).
+# Short when price breaks below Camarilla S3 level in 1d downtrend with volume spike.
+# Uses ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
+# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year).
+# Camarilla pivots provide precise intraday support/resistance levels, 1d EMA34 ensures higher timeframe alignment,
+# Volume spike confirms institutional participation. Works in both bull and bear markets by only trading
+# with the 1d trend, avoiding counter-trend whipsaws during ranging periods.
 
-name = "12h_KAMA_1dEMA50_VolumeSpike_ATR"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stoploss
+    # Calculate ATR for stoploss (using primary timeframe)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -34,40 +36,36 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h KAMA (adaptive moving average)
-    change = np.abs(np.diff(close, periods=10))
-    volatility = np.sum(np.abs(np.diff(close, periods=1)), axis=0) if len(close) > 1 else 0
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Pad ER array to match close length
-    er = np.concatenate([np.full(10, np.nan), er])
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Seed value
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Get 4h data for Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 4h Camarilla levels (based on previous bar's OHLC)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    prev_high = np.roll(df_4h['high'].values, 1)
+    prev_low = np.roll(df_4h['low'].values, 1)
+    prev_close = np.roll(df_4h['close'].values, 1)
+    prev_high[0] = prev_high[1] if len(prev_high) > 1 else prev_high[0]
+    prev_low[0] = prev_low[1] if len(prev_low) > 1 else prev_low[0]
+    prev_close[0] = prev_close[1] if len(prev_close) > 1 else prev_close[0]
+    
+    camarilla_high = prev_close + 1.1 * (prev_high - prev_low)  # R3
+    camarilla_low = prev_close - 1.1 * (prev_high - prev_low)   # S3
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_4h, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_4h, camarilla_low)
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,30 +86,30 @@ def generate_signals(prices):
             
         close_val = close[i]
         vol_spike = volume_spike[i]
-        kama_up = kama[i] > kama[i-1]   # KAMA turning upward
-        kama_down = kama[i] < kama[i-1]  # KAMA turning downward
-        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
+        upper_level = camarilla_high_aligned[i]
+        lower_level = camarilla_low_aligned[i]
+        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: KAMA turning up AND 1d uptrend AND volume spike
-            if kama_up and trend_up and vol_spike:
+            # Long: price breaks above Camarilla R3 AND 1d uptrend AND volume spike
+            if close_val > upper_level and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: KAMA turning down AND 1d downtrend AND volume spike
-            elif kama_down and trend_down and vol_spike:
+            # Short: price breaks below Camarilla S3 AND 1d downtrend AND volume spike
+            elif close_val < lower_level and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Stoploss: price moves against position by 2.5*ATR
-            if close_val < entry_price - 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if close_val < entry_price - 2.0 * atr[i]:
                 exit_signal = True
-            # Exit: KAMA turns downward
-            elif not kama_up:
+            # Exit: price breaks below Camarilla S3
+            elif close_val < lower_level:
                 exit_signal = True
             # Exit: 1d trend changes to downtrend
             elif not trend_up:
@@ -125,11 +123,11 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Stoploss: price moves against position by 2.5*ATR
-            if close_val > entry_price + 2.5 * atr[i]:
+            # Stoploss: price moves against position by 2.0*ATR
+            if close_val > entry_price + 2.0 * atr[i]:
                 exit_signal = True
-            # Exit: KAMA turns upward
-            elif not kama_down:
+            # Exit: price breaks above Camarilla R3
+            elif close_val > upper_level:
                 exit_signal = True
             # Exit: 1d trend changes to uptrend
             elif not trend_down:
