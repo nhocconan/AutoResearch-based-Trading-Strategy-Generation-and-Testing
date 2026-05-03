@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme Reversal with 1d Elder Ray (Bull/Bear Power) regime filter
-# Williams %R identifies overbought/oversold conditions; Elder Ray confirms trend strength via
-# bull/bear power relative to 13-period EMA. In bear markets, short extreme %R when bear power
-# dominates; in bull markets, long extreme %R when bull power dominates. Volume spike adds
-# confirmation. Designed for low trade frequency (12-37/year) on 6h timeframe.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian channel breakouts capture strong momentum moves. Using 1d EMA50 as trend filter ensures
+# trades are taken in the direction of the daily trend. Volume confirmation adds reliability.
+# Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag.
+# Works in both bull and bear markets by trading breakouts in the direction of the higher timeframe trend.
 
-name = "6h_WilliamsR_Extreme_1dElderRay_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +28,35 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Elder Ray and Williams %R
+    # Get 1d data for EMA50 trend filter and volume spike
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema_13 = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema_13
-    bear_power = df_1d['low'].values - ema_13
-    
-    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    
-    # 1d volume spike (volume > 2.0 * 20-period EMA of volume)
+    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1d indicators to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    
+    # Calculate Donchian(20) channels from price data
+    # Upper band = 20-period high, Lower band = 20-period low
+    lookback = 20
+    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with bull power > 0 and volume spike
-            if williams_r_aligned[i] < -80 and bull_power_aligned[i] > 0 and volume_spike_aligned[i]:
+            # Long: price breaks above upper Donchian band with volume spike in uptrend
+            if close[i] > upper_band[i] and close[i-1] <= upper_band[i-1] and close[i] > ema_50_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with bear power < 0 and volume spike
-            elif williams_r_aligned[i] > -20 and bear_power_aligned[i] < 0 and volume_spike_aligned[i]:
+            # Short: price breaks below lower Donchian band with volume spike in downtrend
+            elif close[i] < lower_band[i] and close[i-1] >= lower_band[i-1] and close[i] < ema_50_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns above -50 or bull power turns negative
-            if williams_r_aligned[i] > -50 or bull_power_aligned[i] <= 0:
+            # Exit long: price re-enters below upper band or trend reverses
+            if close[i] < upper_band[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns below -50 or bear power turns positive
-            if williams_r_aligned[i] < -50 or bear_power_aligned[i] >= 0:
+            # Exit short: price re-enters above lower band or trend reverses
+            if close[i] > lower_band[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
