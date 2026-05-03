@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion works.
-# Trend filter ensures we only take mean reversion trades in the direction of higher timeframe trend.
-# Volume confirmation ensures institutional participation. Discrete sizing 0.25 manages drawdown.
-# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Uses 4h timeframe for balanced trade frequency, with 1d for trend direction and volume regime.
+# Camarilla levels from prior completed 1d bar provide institutional pivot points.
+# Breakouts with volume indicate institutional participation. Trend filter avoids counter-trend trades.
+# Discrete sizing 0.30 to manage drawdown. Target: 100-200 total trades over 4 years.
 
-name = "6h_WilliamsR_MeanReversion_12hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_1dEMA50_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,30 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and volume regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for Camarilla calculation, trend filter, and volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Williams %R(14) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Use prior completed 1d bar's OHLC for Camarilla calculation
+    prior_close = np.roll(df_1d['close'].values, 1)
+    prior_high = np.roll(df_1d['high'].values, 1)
+    prior_low = np.roll(df_1d['low'].values, 1)
+    prior_close[0] = np.nan
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
     
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla levels for prior 1d bar
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = prior_close + (prior_high - prior_low) * 1.1 / 4
+    camarilla_s3 = prior_close - (prior_high - prior_low) * 1.1 / 4
     
-    # Calculate 12h volume regime (high volume when current volume > 1.5x 20-period MA)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_regime = vol_12h > (1.5 * vol_ma_12h)  # High volume regime
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align volume regime to 6h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_12h, vol_regime)
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) for 6h data (for stoploss)
+    # Calculate 1d volume regime (high volume when current volume > 1.5x 20-period MA)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
+    
+    # Align volume regime to 4h timeframe
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    
+    # Calculate ATR(14) for 4h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -60,27 +72,28 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get current values
-        wr = williams_r[i]
-        ema_trend = ema_50_12h_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
+        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 6h volume > 1.5x 20-period MA
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: Williams %R oversold (< -80) with volume spike, above 12h EMA50, and in high volume regime
-        long_entry = (wr < -80) and volume_spike and (close[i] > ema_trend) and vol_reg
-        # Short: Williams %R overbought (> -20) with volume spike, below 12h EMA50, and in high volume regime
-        short_entry = (wr > -20) and volume_spike and (close[i] < ema_trend) and vol_reg
+        # Long: break above R3 with volume spike, above 1d EMA50, and in high volume regime
+        long_entry = (close[i] > r3) and volume_spike and (close[i] > ema_trend) and vol_reg
+        # Short: break below S3 with volume spike, below 1d EMA50, and in high volume regime
+        short_entry = (close[i] < s3) and volume_spike and (close[i] < ema_trend) and vol_reg
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
@@ -96,11 +109,11 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -108,12 +121,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
