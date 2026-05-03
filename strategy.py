@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d trend filter (ADX > 25) and volume confirmation.
-# Donchian breakouts capture strong momentum moves. Filtered by 1d ADX > 25 to ensure
-# we only trade in strong trending markets (avoiding whipsaws in ranging markets).
-# Volume > 1.5x 20-period MA confirms breakout validity. Works in bull via long breakouts
-# and bear via short breakouts when aligned with 1d trend. Target: 75-200 total trades over 4 years.
+# Hypothesis: 12h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian upper band in trending market (ADX>25) with volume spike.
+# Short when price breaks below 20-period Donchian lower band in trending market (ADX>25) with volume spike.
+# Uses discrete position sizing 0.25 to manage drawdown and reduce fee churn.
+# Designed to work in both bull (catch breakouts) and bear (catch breakdowns) markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "4h_Donchian20_1dADX25_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -62,21 +63,22 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align 1d ADX to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Donchian channel (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume regime: current 4h volume > 1.5x 20-period MA
+    # Volume regime: current 12h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
         if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_20[i])):
@@ -92,30 +94,26 @@ def generate_signals(prices):
         # Determine trend regime
         is_trending = adx_val > 25
         
-        # Donchian breakout conditions
-        breakout_up = close_val > highest_high[i-1]  # Break above previous period's high
-        breakout_down = close_val < lowest_low[i-1]  # Break below previous period's low
-        
         # Entry logic
         if position == 0:
-            # Long: Bullish Donchian breakout AND trending AND volume spike
-            if breakout_up and is_trending and vol_spike:
+            # Long: Price breaks above Donchian upper band AND trending AND volume spike
+            if close_val > highest_high[i] and is_trending and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Donchian breakout AND trending AND volume spike
-            elif breakout_down and is_trending and vol_spike:
+            # Short: Price breaks below Donchian lower band AND trending AND volume spike
+            elif close_val < lowest_low[i] and is_trending and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bearish Donchian breakout OR trend weakens (ADX < 20) OR volume drops
-            if breakout_down or adx_val < 20 or not vol_spike:
+            # Long exit: Price breaks below Donchian lower band OR trend weakens (ADX < 20) OR volume drops
+            if close_val < lowest_low[i] or adx_val < 20 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bullish Donchian breakout OR trend weakens (ADX < 20) OR volume drops
-            if breakout_up or adx_val < 20 or not vol_spike:
+            # Short exit: Price breaks above Donchian upper band OR trend weakens (ADX < 20) OR volume drops
+            if close_val > highest_high[i] or adx_val < 20 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
