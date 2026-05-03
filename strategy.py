@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In ranging markets (CHOP > 50),
-# we fade extremes: long when %R < -80 and short when %R > -20. In trending markets
-# (CHOP < 50), we follow the 1d EMA34 trend. Volume spike confirms momentum. Designed
-# to work in both bull and bear markets by adapting to regime.
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+# Uses Camarilla R3/S3 levels from daily candles for structure, 1d EMA34 for trend filter,
+# and volume spike for confirmation. Designed to capture strong intraday moves while
+# avoiding choppy markets via trend alignment. Works in both bull and bear by
+# following the 1d EMA direction.
 
-name = "4h_WilliamsR_MeanReversion_1dTrend_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and CHOP regime
+    # Get 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -33,59 +33,42 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 1d CHOP regime: CHOP > 50 = ranging (mean revert), CHOP < 50 = trending (trend follow)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d_vals, 1)), np.abs(low_1d - np.roll(close_1d_vals, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first TR
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denom = highest_high_1d - lowest_low_1d
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
-    chop_1d = 100 * (np.log10(atr_1d * np.sqrt(14) / chop_denom) / np.log10(10))
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate Camarilla levels from previous 1d bar (R3, S3)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    close_1d_prev = df_1d['close'].shift(1).values  # previous day close
+    high_1d_prev = df_1d['high'].shift(1).values   # previous day high
+    low_1d_prev = df_1d['low'].shift(1).values     # previous day low
+    camarilla_range = (high_1d_prev - low_1d_prev)
+    camarilla_range = np.where(camarilla_range == 0, 1e-10, camarilla_range)
+    camarilla_R3 = close_1d_prev + 1.1 * camarilla_range / 2
+    camarilla_S3 = close_1d_prev - 1.1 * camarilla_range / 2
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
-    # Calculate Williams %R on 4h: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_4h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    wr_denom = highest_high_4h - lowest_low_4h
-    wr_denom = np.where(wr_denom == 0, 1e-10, wr_denom)  # avoid division by zero
-    williams_r = ((highest_high_4h - close) / wr_denom) * -100
-    
-    # Calculate volume regime: current 4h volume > 1.8x 20-period MA
+    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Get current values
-        wr_val = williams_r[i]
         ema_trend = ema_34_aligned[i]
-        chop_val = chop_1d_aligned[i]
+        camarilla_R3 = camarilla_R3_aligned[i]
+        camarilla_S3 = camarilla_S3_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr_val) or np.isnan(ema_trend) or np.isnan(chop_val):
+        if np.isnan(ema_trend) or np.isnan(camarilla_R3) or np.isnan(camarilla_S3):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Regime-based entry conditions
-        if chop_val > 50:  # Ranging market: mean reversion
-            # Long: oversold (%R < -80) with volume spike
-            long_entry = (wr_val < -80) and vol_spike
-            # Short: overbought (%R > -20) with volume spike
-            short_entry = (wr_val > -20) and vol_spike
-        else:  # Trending market: follow 1d EMA34 trend
-            # Long: above EMA34 with volume spike
-            long_entry = (close[i] > ema_trend) and vol_spike
-            # Short: below EMA34 with volume spike
-            short_entry = (close[i] < ema_trend) and vol_spike
+        # Entry conditions: breakout of Camarilla R3/S3 with volume spike and trend alignment
+        long_entry = (close[i] > camarilla_R3) and vol_spike and (close[i] > ema_trend)
+        short_entry = (close[i] < camarilla_S3) and vol_spike and (close[i] < ema_trend)
         
         # Generate signals
         if position == 0:
@@ -96,15 +79,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on close below EMA34 (trend change) or Wolfe wave completion
-            if close[i] < ema_trend:
+            # Exit on close below Camarilla S3 (mean reversion) or trend change
+            if close[i] < camarilla_S3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on close above EMA34 (trend change)
-            if close[i] > ema_trend:
+            # Exit on close above Camarilla R3 (mean reversion) or trend change
+            if close[i] > camarilla_R3:
                 signals[i] = 0.0
                 position = 0
             else:
