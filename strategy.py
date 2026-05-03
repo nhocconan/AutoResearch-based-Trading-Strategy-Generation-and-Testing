@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Donchian breakout captures momentum in direction of higher timeframe trend.
-# EMA34 on 1w ensures we only trade with the weekly trend (bullish for longs, bearish for shorts).
-# Volume spike confirms institutional participation. Designed for 7-25 trades/year on 1d to minimize fee drag.
-# Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA34 trend filter and volume confirmation
+# Camarilla pivots from 12h provide intraday support/resistance levels.
+# Breakout at R3/S3 with 12h trend alignment captures momentum in trending markets.
+# Volume spike filters for institutional participation. Designed for 12-30 trades/year on 6h.
+# Works in bull markets via R3 breakouts and in bear markets via S3 breakdowns.
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_12hEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,63 +28,85 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for Camarilla pivots and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Calculate Donchian(20) channels
+    # Calculate 12h Camarilla levels (R3, S3)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    camarilla_r3 = np.zeros(len(df_12h))
+    camarilla_s3 = np.zeros(len(df_12h))
+    
+    for i in range(len(df_12h)):
+        # Camarilla calculations using previous 12h bar
+        if i == 0:
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+        else:
+            # Previous 12h bar's range
+            prev_high = high_12h[i-1]
+            prev_low = low_12h[i-1]
+            prev_close = close_12h[i-1]
+            range_val = prev_high - prev_low
+            
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 4
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 4
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    
+    # Volume confirmation: 20-period EMA
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient warmup for Donchian
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    for i in range(20, n):  # Start after sufficient warmup
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1w_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels using data up to current bar
-        highest_high = np.max(high[i-19:i+1])  # 20-period high
-        lowest_low = np.min(low[i-19:i+1])     # 20-period low
+        # Volume spike condition
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
-        # Volume confirmation: 20-period EMA
-        if i >= 19:
-            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
-        else:
-            vol_ema_20 = volume[i]
-        volume_spike = volume[i] > (1.5 * vol_ema_20)
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high
-        breakout_down = close[i] < lowest_low
+        # Camarilla breakout conditions
+        breakout_up = close[i] > camarilla_r3_aligned[i]
+        breakout_down = close[i] < camarilla_s3_aligned[i]
         
         if position == 0:
-            # Long: bullish breakout in 1w uptrend with volume spike
-            if breakout_up and ema_34_1w_aligned[i] < close[i] and volume_spike:
+            # Long: bullish breakout above R3 in 12h uptrend with volume spike
+            if breakout_up and ema_34_12h_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakdown in 1w downtrend with volume spike
-            elif breakout_down and ema_34_1w_aligned[i] > close[i] and volume_spike:
+            # Short: bearish breakdown below S3 in 12h downtrend with volume spike
+            elif breakout_down and ema_34_12h_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or loses 1w uptrend
-            midpoint = (highest_high + lowest_low) / 2
-            if close[i] < midpoint or ema_34_1w_aligned[i] >= close[i]:
+            # Exit long: price returns to midpoint of R3-S3 or loses 12h uptrend
+            midpoint = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if close[i] < midpoint or ema_34_12h_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or loses 1w downtrend
-            midpoint = (highest_high + lowest_low) / 2
-            if close[i] > midpoint or ema_34_1w_aligned[i] <= close[i]:
+            # Exit short: price returns to midpoint of R3-S3 or loses 12h downtrend
+            midpoint = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if close[i] > midpoint or ema_34_12h_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
