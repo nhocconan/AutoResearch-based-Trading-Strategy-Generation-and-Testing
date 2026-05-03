@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme + 1d ADX Trend Filter + Volume Spike
-# Williams %R identifies overbought/oversold conditions. Extreme readings (<-90 or >-10) 
-# often precede reversals. 1d ADX > 25 ensures we only trade in strong trends to avoid 
-# whipsaws in ranging markets. Volume confirmation filters false signals. 
-# Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
-# Works in bull markets via buying extreme dips in uptrends and in bear markets via 
-# selling extreme rallies in downtrends.
+# Hypothesis: 12h Williams Fractal breakout + 1d EMA34 trend + volume confirmation
+# Williams Fractals identify swing highs/lows with confirmation delay.
+# Breakouts above recent bearish fractal (sell fractal) or below bullish fractal (buy fractal)
+# with 1d EMA34 trend alignment and volume spike capture sustained moves.
+# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Works in bull markets via upward breaks and in bear markets via downward breaks.
 
-name = "6h_WilliamsR_Extreme_1dADX_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,69 +29,43 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for EMA34 trend filter and Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend filter
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Williams Fractals on 1d data
+    # Bearish fractal (sell fractal): high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal (buy fractal): low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    n_1d = len(high_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and 
+            high_1d[i-1] > high_1d[i-3] and 
+            high_1d[i-1] > high_1d[i+1]):
+            bearish_fractal[i-1] = high_1d[i-1]  # Center at i-1
+        
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and 
+            low_1d[i-1] < low_1d[i-3] and 
+            low_1d[i-1] < low_1d[i+1]):
+            bullish_fractal[i-1] = low_1d[i-1]  # Center at i-1
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Align Williams Fractals to 12h timeframe with 2-bar additional delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    atr_1d = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 6h Williams %R (%R = (Highest High - Close) / (Highest High - Lowest Low) * -100)
-    lookback = 14
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          -100 * (highest_high - close) / (highest_high - lowest_low), 
-                          -50)  # Neutral when range is zero
-    
-    # Volume confirmation: 20-period EMA on 6h
+    # Volume confirmation: 20-period EMA on 12h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -101,37 +74,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback-1, n):  # Start from lookback-1 to have valid Williams %R
+    for i in range(20, n):  # Start from 20 to have valid volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ema_20[i]) or 
-            not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
-        strong_trend = adx_1d_aligned[i] > 25
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: Williams %R extremely oversold (<-90) in uptrend with volume spike
-            if williams_r[i] < -90 and strong_trend and volume_spike:
+            # Long: price breaks above bearish fractal (sell fractal) in uptrend with volume spike
+            if close[i] > bearish_fractal_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R extremely overbought (>-10) in downtrend with volume spike
-            elif williams_r[i] > -10 and strong_trend and volume_spike:
+            # Short: price breaks below bullish fractal (buy fractal) in downtrend with volume spike
+            elif close[i] < bullish_fractal_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (exit oversold) or trend weakens
-            if williams_r[i] > -50 or adx_1d_aligned[i] < 20:
+            # Exit long: price breaks below bullish fractal or loses uptrend alignment
+            if close[i] < bullish_fractal_aligned[i] or ema_34_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (exit overbought) or trend weakens
-            if williams_r[i] < -50 or adx_1d_aligned[i] < 20:
+            # Exit short: price breaks above bearish fractal or loses downtrend alignment
+            if close[i] > bearish_fractal_aligned[i] or ema_34_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
