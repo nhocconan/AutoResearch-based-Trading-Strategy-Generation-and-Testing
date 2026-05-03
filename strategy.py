@@ -6,8 +6,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
 # Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakout captures strong momentum moves. 1d EMA34 ensures alignment with daily trend.
-# Volume spike confirms institutional participation. ATR trailing stop (2.0x) manages risk.
+# Donchian breakout captures strong momentum moves, EMA34 ensures alignment with daily trend.
+# Volume spike confirms institutional participation at breakout.
+# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
 # Focus on BTC/ETH as primary targets.
 
 name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
@@ -24,10 +25,6 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) from 4h data (using prior completed bar)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
     # Calculate 1d EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 1 completed bar for prior
@@ -36,6 +33,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate ATR(30) for stoploss (using 4h data)
     tr1 = high[1:] - low[1:]
@@ -55,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        upper = highest_20[i]
-        lower = lowest_20[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
