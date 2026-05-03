@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Williams Alligator breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
 # Target: 50-150 total trades over 4 years (12-37/year).
-# Donchian channels provide clear breakout levels from recent price range.
-# 1d EMA34 filter ensures alignment with daily trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at breakout points.
-# This combination has shown promise in DB for ETH/USD and avoids overtrading on 6h.
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via smoothed medians.
+# Breakout occurs when price closes outside Alligator's mouth with alignment to weekly trend.
+# Volume confirmation ensures institutional participation. Effective in both bull/bear regimes.
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,26 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels from 6h data (lookback 20 bars)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator (using 12h data)
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 1d EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1w EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(30) for stoploss (using 6h data)
+    # Calculate ATR(30) for stoploss (using 12h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 6h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 12h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -53,23 +54,28 @@ def generate_signals(prices):
     highest_high_since_entry = 0
     lowest_low_since_entry = 0
     
-    for i in range(100, n):  # Start after sufficient warmup
+    for i in range(50, n):  # Start after sufficient warmup
         # Get current values
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        ema_trend = ema_34_1d_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or np.isnan(ema_trend) or np.isnan(atr_val):
             continue
             
+        # Alligator mouth: outer bounds (jaw and lips)
+        alligator_high = max(jaw_val, lips_val)
+        alligator_low = min(jaw_val, lips_val)
+        
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1d EMA34
-        long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 1d EMA34
-        short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
+        # Long: break above Alligator's mouth with volume spike and above 1w EMA50
+        long_entry = (close[i] > alligator_high) and (close[i] > ema_trend) and vol_spike
+        # Short: break below Alligator's mouth with volume spike and below 1w EMA50
+        short_entry = (close[i] < alligator_low) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
