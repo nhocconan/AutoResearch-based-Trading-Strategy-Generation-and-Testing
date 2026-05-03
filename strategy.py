@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + 1w EMA50 trend filter + volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trendless markets when lines intertwine.
-# Trades only when Alligator is "awake" (jaw > teeth > lips for long, reverse for short) aligned with 1w EMA50.
-# Volume confirmation (1.5x 20-period EMA) filters low-participation breakouts.
-# Designed for 30-100 total trades over 4 years (7-25/year) with discrete sizing to minimize fee drag.
-# Works in both bull and bear markets by trading with the 1w trend only when Alligator confirms momentum.
+# Hypothesis: 12h Bollinger Band mean reversion with 1d ADX regime filter
+# In range-bound markets (ADX < 25), price tends to revert to the mean from Bollinger Bands.
+# Strong trends (ADX >= 25) are avoided to prevent counter-trend trading.
+# Volume confirmation (1.5x 20-period EMA) increases signal reliability.
+# Designed for low trade frequency (12-37/year) with discrete sizing to minimize fee drag.
+# Works in both bull and bear markets by adapting to regime via ADX filter.
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeConfirmation"
-timeframe = "1d"
+name = "12h_BBMeanReversion_1dADX25_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,73 +29,130 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for ADX25 regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator on 1d (Jaw=13, Teeth=8, Lips=5, all shifted)
-    # Using typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Jaw (13-period SMMA, shifted 8 bars)
-    jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMMA, shifted 5 bars)
-    teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMMA, shifted 3 bars)
-    lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Align Alligator lines (already on 1d, no additional alignment needed for same timeframe)
-    # But we need to ensure we're not using future data - the shifts above handle this
+    # Smoothed TR, DM+ , DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr_smoothed = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smoothed / tr_smoothed
+    di_minus = 100 * dm_minus_smoothed / tr_smoothed
+    
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    
+    def wilders_smoothing_dx(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        valid_data = data[~np.isnan(data)]
+        if len(valid_data) < period:
+            return result
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    adx_14 = wilders_smoothing_dx(dx, 14)
+    adx_regime = adx_14  # Using ADX(14), will filter with threshold 25
+    
+    # Align 1d ADX to 12h timeframe
+    adx_regime_aligned = align_htf_to_ltf(prices, df_1d, adx_regime)
+    
+    # Bollinger Bands (20, 2) on 12h
+    close_series = pd.Series(close)
+    ma_20 = close_series.rolling(window=20, min_periods=20).mean()
+    std_20 = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = (ma_20 + 2 * std_20).values
+    bb_lower = (ma_20 - 2 * std_20).values
+    bb_middle = ma_20.values
+    
+    # Volume confirmation: 20-period EMA on 12h
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Start from 13 to have valid Alligator lines
+    for i in range(20, n):  # Start from 20 to have valid BB and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or not in_session[i]):
+        if (np.isnan(adx_regime_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Range-bound market: ADX < 25 (avoid strong trends)
+        ranging_market = adx_regime_aligned[i] < 25
+        
         # Volume confirmation: current volume > 1.5 x 20-period EMA
-        vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().iloc[i]
-        volume_spike = volume[i] > (1.5 * vol_ema_20)
-        
-        # Alligator awake: jaw > teeth > lips for long, reverse for short
-        alligator_long = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        alligator_short = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        
-        # 1w trend filter: price above/below EMA50
-        uptrend_1w = close[i] > ema_50_1w_aligned[i]
-        downtrend_1w = close[i] < ema_50_1w_aligned[i]
+        volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
         
         if position == 0:
-            # Long: Alligator awake long + 1w uptrend + volume spike
-            if alligator_long and uptrend_1w and volume_spike:
+            # Long: price touches lower BB in ranging market with volume confirmation
+            if low[i] <= bb_lower[i] and ranging_market and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator awake short + 1w downtrend + volume spike
-            elif alligator_short and downtrend_1w and volume_spike:
+            # Short: price touches upper BB in ranging market with volume confirmation
+            elif high[i] >= bb_upper[i] and ranging_market and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator loses long alignment or 1w trend turns down
-            if not (alligator_long and uptrend_1w):
+            # Exit long: price reaches middle BB or exits ranging market
+            if close[i] >= bb_middle[i] or not ranging_market:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator loses short alignment or 1w trend turns up
-            if not (alligator_short and downtrend_1w):
+            # Exit short: price reaches middle BB or exits ranging market
+            if close[i] <= bb_middle[i] or not ranging_market:
                 signals[i] = 0.0
                 position = 0
             else:
