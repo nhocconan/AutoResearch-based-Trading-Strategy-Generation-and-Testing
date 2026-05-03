@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
 # Camarilla pivot levels provide high-probability reversal/breakout points. Trading breakouts
-# of R3 (resistance 3) or S3 (support 3) with 1d EMA50 trend filter and volume spike
-# captures strong moves in both bull and bear markets. Designed for 12-37 trades/year on 6h
-# to minimize fee drag while maintaining edge. Uses HTF alignment correctly.
+# of R3 (resistance 3) or S3 (support 3) with 1d EMA34 trend filter and volume spike
+# captures strong moves in both bull and bear markets. Designed for 12-37 trades/year on 12h
+# to minimize fee drag while maintaining edge. Uses 1d HTF for trend to avoid overtrading.
 
-name = "6h_Camarilla_R3S3_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,15 +30,14 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Get 1d data for Camarilla pivot points (using previous day's OHLC)
-    # Note: We use the same df_1d for both trend and pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -47,20 +46,20 @@ def generate_signals(prices):
     r3 = close_1d + camarilla_range / 4
     s3 = close_1d - camarilla_range / 4
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get 6h data for volume confirmation
+    # Get 12h data for volume confirmation
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient warmup for indicators
+    for i in range(34, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -73,23 +72,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above R3 in 1d uptrend with volume spike
-            if breakout_long and ema_50_1d_aligned[i] > close[i]:
+            if breakout_long and ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: break below S3 in 1d downtrend with volume spike
-            elif breakout_short and ema_50_1d_aligned[i] < close[i]:
+            elif breakout_short and ema_34_1d_aligned[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price crosses below R3 or loses 1d uptrend
-            if close[i] < r3_aligned[i] or ema_50_1d_aligned[i] < close[i]:
+            if close[i] < r3_aligned[i] or ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price crosses above S3 or loses 1d downtrend
-            if close[i] > s3_aligned[i] or ema_50_1d_aligned[i] > close[i]:
+            if close[i] > s3_aligned[i] or ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
