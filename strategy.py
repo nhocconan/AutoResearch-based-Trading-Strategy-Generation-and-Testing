@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian breakouts capture momentum bursts; 1w EMA50 ensures alignment with weekly trend.
-# Volume spike confirms institutional participation. Designed for low trade frequency (7-25/year)
-# to minimize fee drag on 1d timeframe. Works in both bull and bear markets by trading
-# with the higher timeframe trend and using ATR-based stoploss via position=0 on reversal.
+# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Donchian breakouts capture momentum bursts; 12h EMA50 ensures alignment with intermediate trend.
+# Volume spike confirms institutional participation. Designed for low trade frequency (12-37/year)
+# to minimize fee drag on 6h timeframe. Works in both bull and bear markets by trading
+# with the higher timeframe trend and using ATR-based stoploss.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_12hEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,23 +28,24 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA and volume
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Get 12h data for EMA and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA50 for trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 12h volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_12h['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1w indicators to 1d timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
+    # Align 12h indicators to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
     
-    # Calculate 1d Donchian channels (20-period) using vectorized operations
+    # Calculate 6h Donchian channels (20-period) using vectorized operations
+    # Use pandas rolling for efficiency, then convert to numpy
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -53,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(80, n):  # Start after sufficient warmup for indicators
+    for i in range(60, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
@@ -63,7 +64,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine weekly trend direction
+        # Determine 12h trend direction
         is_uptrend = close[i] > ema_50_aligned[i]
         is_downtrend = close[i] < ema_50_aligned[i]
         
