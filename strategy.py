@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivot levels provide intraday support/resistance that work well on 12h timeframe
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
-# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via upward breaks at R3/R4 and in bear markets via downward breaks at S3/S4
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide strong intraday support/resistance that work in both bull and bear markets.
+# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
+# Volume confirmation filters false breakouts. Designed for 75-200 total trades over 4 years (19-50/year).
+# Works in bull markets via upward breaks at R3/R4 and in bear markets via downward breaks at S3/S4.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,24 +37,30 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
-    # Where C = (H+L+CLOSE)/3 of previous day
-    typical_price = (high + low + close) / 3.0
-    typical_price_series = pd.Series(typical_price)
-    prev_close = typical_price_series.shift(1).values
-    prev_high = pd.Series(high).shift(1).values
-    prev_low = pd.Series(low).shift(1).values
+    # Get previous day's OHLC for Camarilla calculation
+    # We need to resample to get daily OHLC from the 4h data (but using actual Binance boundaries)
+    # Since we're on 4h timeframe, we can get daily data directly
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 2:
+        return np.zeros(n)
     
-    camarilla_pivot = prev_close
-    camarilla_range = prev_high - prev_low
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla R3 = close + (high - low) * 1.1/4
+    # Camarilla S3 = close - (high - low) * 1.1/4
+    # Camarilla R4 = close + (high - low) * 1.1/2
+    # Camarilla S4 = close - (high - low) * 1.1/2
     
-    camarilla_r3 = camarilla_pivot + (camarilla_range * 1.1 / 4)
-    camarilla_s3 = camarilla_pivot - (camarilla_range * 1.1 / 4)
-    camarilla_r4 = camarilla_pivot + (camarilla_range * 1.1 / 2)
-    camarilla_s4 = camarilla_pivot - (camarilla_range * 1.1 / 2)
+    prev_close = df_1d_ohlc['close'].shift(1).values
+    prev_high = df_1d_ohlc['high'].shift(1).values
+    prev_low = df_1d_ohlc['low'].shift(1).values
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Align the Camarilla levels to 4h timeframe
+    camarilla_r3 = align_htf_to_ltf(prices, df_1d_ohlc, prev_close + (prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = align_htf_to_ltf(prices, df_1d_ohlc, prev_close - (prev_high - prev_low) * 1.1 / 4)
+    camarilla_r4 = align_htf_to_ltf(prices, df_1d_ohlc, prev_close + (prev_high - prev_low) * 1.1 / 2)
+    camarilla_s4 = align_htf_to_ltf(prices, df_1d_ohlc, prev_close - (prev_high - prev_low) * 1.1 / 2)
+    
+    # Volume confirmation: 20-period EMA on 4h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -63,10 +69,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have valid previous day data
+    for i in range(20, n):  # Start from 20 to have valid volume EMA
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
+            np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
