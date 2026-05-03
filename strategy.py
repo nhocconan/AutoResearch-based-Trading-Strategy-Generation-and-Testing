@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-day Donchian high in weekly uptrend with volume spike (>2.0x 20-period volume MA).
-# Short when price breaks below 20-day Donchian low in weekly downtrend with volume spike.
-# Uses 1w EMA50 for higher timeframe trend alignment to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Designed for 1d timeframe to achieve 30-100 total trades over 4 years.
+# Hypothesis: 6h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high in 1d uptrend (ADX>25) with volume spike (>2.0x 20-period volume MA).
+# Short when price breaks below 20-period Donchian low in 1d downtrend (ADX>25) with volume spike.
+# Uses 1d ADX for higher timeframe trend strength to avoid whipsaw in ranging markets.
+# Volume spike confirms institutional participation. Designed for 6h timeframe to achieve 50-150 total trades over 4 years.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_1dADX25_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Donchian calculation and ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian levels from prior 1w bar (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate Donchian channels from prior 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) high and low
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to lower timeframe (1w -> 1d)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Align Donchian levels to lower timeframe (1d -> 6h)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ADX(14) for trend strength filter
+    # ADX calculation: +DM, -DM, TR, then smoothed
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(np.abs(high_1d[1:] - high_1d[:-1]), np.abs(low_1d[1:] - low_1d[:-1]))
+    )
+    # Prepend first values to maintain array length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period_adx = 14
+    plus_di_14 = 100 * wilders_smoothing(plus_dm, period_adx) / wilders_smoothing(tr, period_adx)
+    minus_di_14 = 100 * wilders_smoothing(minus_dm, period_adx) / wilders_smoothing(tr, period_adx)
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = wilders_smoothing(dx, period_adx)
+    
+    # Align ADX to lower timeframe (1d -> 6h)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +83,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +92,27 @@ def generate_signals(prices):
             
         close_val = close[i]
         vol_spike = volume_spike[i]
-        trend_up = close_val > ema_50_1w_aligned[i]   # 1w uptrend
-        trend_down = close_val < ema_50_1w_aligned[i]  # 1w downtrend
+        trend_strong = adx_aligned[i] > 25  # Strong trend filter
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND 1w uptrend AND volume spike
-            if close_val > donchian_upper_aligned[i] and trend_up and vol_spike:
+            # Long: price breaks above Donchian high AND strong trend AND volume spike
+            if close_val > donchian_high_aligned[i] and trend_strong and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: price breaks below Donchian lower AND 1w downtrend AND volume spike
-            elif close_val < donchian_lower_aligned[i] and trend_down and vol_spike:
+            # Short: price breaks below Donchian low AND strong trend AND volume spike
+            elif close_val < donchian_low_aligned[i] and trend_strong and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Exit: price breaks below Donchian lower (opposite level)
-            if close_val < donchian_lower_aligned[i]:
+            # Exit: price breaks below Donchian low (opposite level)
+            if close_val < donchian_low_aligned[i]:
                 exit_signal = True
-            # Exit: 1w trend changes to downtrend
-            elif not trend_up:
+            # Exit: trend weakens (ADX < 20)
+            elif adx_aligned[i] < 20:
                 exit_signal = True
             
             if exit_signal:
@@ -97,11 +123,11 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Exit: price breaks above Donchian upper (opposite level)
-            if close_val > donchian_upper_aligned[i]:
+            # Exit: price breaks above Donchian high (opposite level)
+            if close_val > donchian_high_aligned[i]:
                 exit_signal = True
-            # Exit: 1w trend changes to uptrend
-            elif not trend_down:
+            # Exit: trend weakens (ADX < 20)
+            elif adx_aligned[i] < 20:
                 exit_signal = True
             
             if exit_signal:
