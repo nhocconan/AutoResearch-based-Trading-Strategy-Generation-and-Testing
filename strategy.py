@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
-# Camarilla pivots identify key intraday support/resistance levels; breaks of R3/S3 with
-# volume spike and alignment to 4h trend provide high-probability continuation trades.
-# Uses 4h/1d for signal direction, 1h only for entry timing to minimize trades (target: 15-37/year).
-# Session filter (08-20 UTC) reduces noise. Works in bull/bear by trading breakouts in
-# direction of higher timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian channels identify key breakout levels; breakouts in direction of daily trend
+# with volume spike provide high-probability continuation trades. Designed for low trade frequency
+# (12-37/year) on 12h timeframe to minimize fee drag. Works in both bull and bear markets by
+# trading breakouts in the direction of the higher timeframe trend.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,48 +28,34 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for trend filter and volume confirmation (HTF for direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50 for trend filter
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 4h volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_4h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_4h['volume'].values > (2.0 * vol_ema_20)
-    
-    # Align 4h indicators to 1h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_4h, volume_spike)
-    
-    # Calculate daily data for Camarilla pivot points (using prior day's OHLC)
+    # Get 1d data for trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Prior day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/4
-    camarilla_range = (prev_high - prev_low) * 1.1 / 4
-    r3 = prev_close + camarilla_range * 3
-    s3 = prev_close - camarilla_range * 3
+    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align Camarilla levels to 1h timeframe (using prior day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align 1d indicators to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    
+    # Calculate Donchian channels (20-period) on 12h data
+    lookback = 20
+    upper_channel = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower_channel = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start after first bar to have prior close
+    for i in range(lookback, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -78,27 +63,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike in uptrend (4h EMA50 rising)
-            if close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and ema_50_aligned[i] > ema_50_aligned[i-1] and volume_spike_aligned[i]:
-                signals[i] = 0.20
+            # Long: price breaks above upper channel with volume spike in uptrend
+            if close[i] > upper_channel[i] and close[i-1] <= upper_channel[i-1] and ema_50_aligned[i] > 0 and volume_spike_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike in downtrend (4h EMA50 falling)
-            elif close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and ema_50_aligned[i] < ema_50_aligned[i-1] and volume_spike_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below lower channel with volume spike in downtrend
+            elif close[i] < lower_channel[i] and close[i-1] >= lower_channel[i-1] and ema_50_aligned[i] < 0 and volume_spike_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters below R3
-            if close[i] < r3_aligned[i]:
+            # Exit long: price re-enters below upper channel
+            if close[i] < upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters above S3
-            if close[i] > s3_aligned[i]:
+            # Exit short: price re-enters above lower channel
+            if close[i] > lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
