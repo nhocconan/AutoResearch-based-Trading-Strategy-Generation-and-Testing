@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R4/S4 breakout with 1w pivot filter and volume confirmation
-# Long when price breaks above Camarilla R4 with volume > 1.8x 20-bar average AND weekly close > weekly pivot
-# Short when price breaks below Camarilla S4 with volume > 1.8x 20-bar average AND weekly close < weekly pivot
+# Hypothesis: 6h Elder Ray + 1d EMA34 trend filter + volume confirmation
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low (using 1d EMA13 as reference)
+# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA34 AND volume > 1.5x 24-bar average
+# Short when Bull Power < 0 AND Bear Power > 0 AND price < 1d EMA34 AND volume > 1.5x 24-bar average
 # Exit via ATR trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR, short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Using 1d timeframe as specified, targeting 30-100 trades over 4 years (7-25/year)
-# Discrete sizing 0.25 to minimize fee drag, ATR stop with wider multiplier for 1d volatility
+# Elder Ray measures bull/bear strength relative to EMA13, 1d EMA34 filters higher-timeframe trend, volume confirms conviction.
+# Target: 50-150 total trades over 4 years = 12-37/year. Uses discrete sizing (0.25) to minimize fee drag.
 
-name = "1d_Camarilla_R4S4_1wPivot_Volume_ATRStop_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dEMA34_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,41 +25,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels (same timeframe, but needed for calculations)
+    # Load 1d data ONCE before loop for EMA13 and EMA34
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels (R4, S4)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA13 and EMA34
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r4 = pivot + range_1d * 1.1 / 2
-    s4 = pivot - range_1d * 1.1 / 2
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Load 1w data ONCE before loop for weekly pivot direction filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w pivot (weekly) and weekly close for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    
-    # Calculate ATR(20) for stoploss (wider for 1d volatility)
+    # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation (1.8x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.8)
+    # Volume confirmation (1.5x 24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,27 +53,32 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start after warmup (need enough for all calculations)
-    start_idx = max(20, 20) + 1  # volume MA(20) + ATR(20) + shift(1)
+    start_idx = max(24, 34) + 1  # volume MA(24) + EMA34(1d) + shift(1)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(weekly_close_aligned[i]) or 
+        if (np.isnan(ema_13_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
             np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
+        # Calculate Elder Ray components
+        bull_power = high[i] - ema_13_aligned[i]
+        bear_power = ema_13_aligned[i] - low[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R4 with volume spike AND weekly close > weekly pivot
-            if (close[i] > r4_aligned[i] and 
-                volume_spike[i] and weekly_close_aligned[i] > pivot_1w_aligned[i]):
+            # Long entry: Bull Power > 0 AND Bear Power > 0 (both positive indicates bullish strength)
+            # Actually: Bull Power > 0 means high > EMA13 (bullish), Bear Power > 0 means EMA13 > low (bullish)
+            # So we want BOTH > 0 for strong bullish
+            if (bull_power > 0 and bear_power > 0 and 
+                close[i] > ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below Camarilla S4 with volume spike AND weekly close < weekly pivot
-            elif (close[i] < s4_aligned[i] and 
-                  volume_spike[i] and weekly_close_aligned[i] < pivot_1w_aligned[i]):
+            # Short entry: Bull Power < 0 AND Bear Power < 0 (both negative indicates bearish strength)
+            elif (bull_power < 0 and bear_power < 0 and 
+                  close[i] < ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
