@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend + volume spike
-# Donchian breakout captures momentum; 1d EMA50 ensures alignment with daily trend;
-# volume spike confirms conviction. Designed for 12-37 trades/year on 12h timeframe
-# to minimize fee drag. Works in bull/bear by only trading in direction of higher timeframe trend.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakout captures momentum in direction of higher timeframe trend.
+# EMA50 on 1d ensures we only trade with the daily trend (bullish for longs, bearish for shorts).
+# Volume spike confirms institutional participation. Designed for 20-40 trades/year on 4h to minimize fee drag.
+# Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,12 +50,14 @@ def generate_signals(prices):
             continue
         
         # Calculate Donchian channels using data up to current bar
-        lookback = min(20, i+1)
-        highest_high = np.max(high[i-lookback+1:i+1])
-        lowest_low = np.min(low[i-lookback+1:i+1])
+        highest_high = np.max(high[i-19:i+1])  # 20-period high
+        lowest_low = np.min(low[i-19:i+1])     # 20-period low
         
         # Volume confirmation: 20-period EMA
-        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        if i >= 19:
+            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
         # Donchian breakout conditions
@@ -62,24 +65,26 @@ def generate_signals(prices):
         breakout_down = close[i] < lowest_low
         
         if position == 0:
-            # Long: Donchian breakout up + 1d uptrend + volume spike
+            # Long: bullish breakout in 1d uptrend with volume spike
             if breakout_up and ema_50_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + 1d downtrend + volume spike
+            # Short: bearish breakdown in 1d downtrend with volume spike
             elif breakout_down and ema_50_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakout down or loses 1d uptrend
-            if breakout_down or ema_50_1d_aligned[i] >= close[i]:
+            # Exit long: price returns to midpoint or loses 1d uptrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] < midpoint or ema_50_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout up or loses 1d downtrend
-            if breakout_up or ema_50_1d_aligned[i] <= close[i]:
+            # Exit short: price returns to midpoint or loses 1d downtrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] > midpoint or ema_50_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
