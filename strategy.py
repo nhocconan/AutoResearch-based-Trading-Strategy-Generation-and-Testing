@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian channels provide robust price structure that works in both bull and bear markets
-# 1d EMA50 offers strong trend filter that adapts to changing market regimes
-# Volume confirmation ensures institutional participation and reduces false breakouts
+# Donchian channels provide robust structure for breakout trading
+# 1d EMA50 ensures we only trade in the direction of the higher timeframe trend
+# Volume confirmation requires 2.0x average volume to ensure institutional participation
 # Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
-# Focus on BTC/ETH by requiring alignment with 1d trend and volume spike confirmation
+# Works in both bull and bear markets by following the 1d trend direction
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -58,12 +58,12 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (moderate threshold)
+        # Volume spike: current volume > 2.0 x 20-period EMA (balanced to avoid overtrading)
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         # Donchian breakout signals with 1d trend filter
-        # Long: price breaks above upper Donchian + volume spike + price above 1d EMA50
-        # Short: price breaks below lower Donchian + volume spike + price below 1d EMA50
+        # Long: price breaks above Donchian upper + volume spike + price above 1d EMA50
+        # Short: price breaks below Donchian lower + volume spike + price below 1d EMA50
         if position == 0:
             if (close[i] > donchian_upper[i] and volume_spike and 
                 close[i] > ema_50_1d_aligned[i]):
@@ -74,14 +74,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian (reversal) OR price below 1d EMA50
+            # Exit long: price breaks below Donchian lower (reversal) OR price below 1d EMA50
             if close[i] < donchian_lower[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian (reversal) OR price above 1d EMA50
+            # Exit short: price breaks above Donchian upper (reversal) OR price above 1d EMA50
             if close[i] > donchian_upper[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
