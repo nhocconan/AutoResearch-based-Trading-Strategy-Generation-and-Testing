@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses Camarilla pivot levels from daily data for institutional structure, EMA34 for trend filter,
 # and volume spike for momentum confirmation. Designed to work in both bull and bear markets
-# by taking breakouts in the direction of the higher timeframe trend. Target: 12-37 trades/year
+# by taking breakouts in the direction of the higher timeframe trend. Target: 20-50 trades/year
 # to minimize fee drag while capturing high-probability institutional level breaks.
-# Timeframe: 12h, HTF: 1d
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,6 +35,11 @@ def generate_signals(prices):
     
     # Calculate Camarilla pivot levels from previous 1d bar
     # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_values = typical_price.values
+    
+    # Camarilla levels: R3 = PP + (H - L) * 1.1/4, S3 = PP - (H - L) * 1.1/4
+    # Using previous day's values (already completed bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
@@ -48,11 +52,11 @@ def generate_signals(prices):
     r3 = pp + (rng * 1.1 / 4)
     s3 = pp - (rng * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate volume regime: current 12h volume > 2.0x 20-period MA (strict to reduce trades)
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA (strict to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
