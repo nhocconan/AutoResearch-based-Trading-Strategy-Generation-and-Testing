@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Regime Filter. Uses Bull Power (high-EMA13) and Bear Power (low-EMA13)
-# with ADX regime detection to avoid whipsaws. Long when Bull Power > 0 and ADX > 25 (trending up),
-# Short when Bear Power < 0 and ADX > 25 (trending down). Flat when ADX < 20 (range) or opposing power.
-# Designed for low trade frequency (12-37/year) with discrete sizing 0.25 to survive 2022 crash.
-# Works in bull/bear via regime filter: only takes strong trend signals, avoids chop.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Uses 4h timeframe for balance of trade frequency and signal quality (target: 19-50/year).
+# Breakouts above Donchian(20) high (long) or below Donchian(20) low (short) with volume confirmation and 1d EMA50 trend alignment.
+# ATR-based trailing stop for risk management. Discrete sizing 0.25 to balance return and drawdown.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while capturing Donchian edge.
+# Works in bull markets via trend-following breakouts and in bear markets via short breakdowns with trend filter.
 
-name = "6h_ElderRay_ADX_Regime_0.25"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,62 +24,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Donchian(20) channels for 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ADX(14) for regime filter
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    plus_di = 100 * (pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr_14)
-    minus_di = 100 * (pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr_14)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA (strict to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0
+    lowest_low_since_entry = 0
     
     for i in range(100, n):
+        # Get current values
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        ema_trend = ema_50_aligned[i]
+        vol_spike = volume_spike[i]
+        
         # Skip if any value is NaN
-        if np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx[i]):
+        if np.isnan(donchian_high) or np.isnan(donchian_low) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
+            
+        # Entry conditions
+        # Long: break above Donchian high with volume spike and above 1d EMA50
+        long_entry = (close[i] > donchian_high) and vol_spike and (close[i] > ema_trend)
+        # Short: break below Donchian low with volume spike and below 1d EMA50
+        short_entry = (close[i] < donchian_low) and vol_spike and (close[i] < ema_trend)
         
-        # Regime and entry conditions
-        adx_val = adx[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        # Exit conditions (ATR-based trailing stop)
+        # Calculate ATR(14) for 4h data
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_val = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values[i]
         
-        # Long: Bull Power > 0 AND ADX > 25 (strong uptrend)
-        long_entry = (bull > 0) and (adx_val > 25)
-        # Short: Bear Power < 0 AND ADX > 25 (strong downtrend)
-        short_entry = (bear < 0) and (adx_val > 25)
-        # Exit: ADX < 20 (range) OR opposing power (bull<0 for long, bear>0 for short)
-        long_exit = (adx_val < 20) or (bull < 0)
-        short_exit = (adx_val < 20) or (bear > 0)
+        long_exit = False
+        short_exit = False
+        
+        if position == 1:  # Long position
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            long_exit = close[i] < (highest_high_since_entry - 2.5 * atr_val)
+        elif position == -1:  # Short position
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            short_exit = close[i] > (lowest_low_since_entry + 2.5 * atr_val)
         
         # Generate signals
         if position == 0:
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                highest_high_since_entry = high[i]
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = low[i]
         elif position == 1:
             if long_exit:
                 signals[i] = 0.0
