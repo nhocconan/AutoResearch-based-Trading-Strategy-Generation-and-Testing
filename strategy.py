@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long: Close breaks above R3 AND price > 1d EMA34 (uptrend) AND volume > 1.8x 24-period MA
-# Short: Close breaks below S3 AND price < 1d EMA34 (downtrend) AND volume > 1.8x 24-period MA
-# Exit: Opposite Camarilla breakout or EMA34 trend reversal.
-# Discrete sizing 0.25. Target: 60-140 total trades over 4 years (15-35/year).
-# Camarilla levels provide precise intraday support/resistance; 1d EMA34 filters higher timeframe trend;
-# volume confirmation ensures breakout validity. Works in bull via longs with trend alignment
-# and in bear via shorts with trend alignment. 12h timeframe minimizes fee drag.
+# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long: Close breaks above R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-period MA
+# Short: Close breaks below S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-period MA
+# Exit: Opposite pivot breakout or EMA34 trend reversal.
+# Discrete sizing 0.25. Target: 80-180 total trades over 4 years (20-45/year).
+# Camarilla pivots provide strong intraday support/resistance; 1d EMA34 filters higher timeframe trend;
+# volume confirmation reduces false signals. Works in bull via long signals with trend alignment
+# and in bear via short signals with trend alignment.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,6 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -36,24 +37,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels for 12h (using prior 12h bar's OHLC)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use the prior completed 12h bar to avoid look-ahead
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_close = np.roll(close, 1)
-    prior_high[0] = np.nan  # First bar has no prior
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
+    # Calculate Camarilla pivot levels for 4h (using previous bar's H/L/C)
+    # Camarilla: R4 = Close + ((High - Low) * 1.5000), R3 = Close + ((High - Low) * 1.2500)
+    #          S3 = Close - ((High - Low) * 1.2500), S4 = Close - ((High - Low) * 1.5000)
+    # We use previous bar's high/low/close to calculate current bar's levels
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    prev_close = np.concatenate([[np.nan], close[:-1]])
     
-    rang = prior_high - prior_low
-    r3 = prior_close + 1.1 * rang
-    s3 = prior_close - 1.1 * rang
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + (camarilla_range * 1.2500)
+    s3 = prev_close - (camarilla_range * 1.2500)
     
-    # Volume regime: current 12h volume > 1.8x 24-period MA
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma_24)
+    # Volume regime: current 4h volume > 2.0x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,7 +59,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(vol_ma_24[i])):
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
