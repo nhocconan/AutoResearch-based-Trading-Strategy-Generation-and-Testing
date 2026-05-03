@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-# Donchian breakouts capture sustained momentum with clear structure.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume spike
+# Donchian channels provide robust price structure for breakouts.
 # 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades.
 # Volume confirmation (2x 20-period EMA) filters false breakouts.
-# Designed for 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-# Works in bull markets via upward breaks at upper band and bear markets via downward breaks at lower band.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing.
+# Works in bull markets via upward breaks and bear markets via downward breaks.
 
-name = "12h_Donchian20_1dEMA50_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,11 +38,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 4h data
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 4h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -51,9 +51,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid indicators
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_rolling[i]) or np.isnan(low_rolling[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -64,23 +64,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above upper Donchian in uptrend alignment with volume spike
-            if close[i] > highest_high[i] and ema_50_1d_aligned[i] < close[i] and volume_spike:
+            if close[i] > high_rolling[i] and ema_50_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below lower Donchian in downtrend alignment with volume spike
-            elif close[i] < lowest_low[i] and ema_50_1d_aligned[i] > close[i] and volume_spike:
+            elif close[i] < low_rolling[i] and ema_50_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price breaks below lower Donchian or loses uptrend alignment
-            if close[i] < lowest_low[i] or ema_50_1d_aligned[i] >= close[i]:
+            if close[i] < low_rolling[i] or ema_50_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price breaks above upper Donchian or loses downtrend alignment
-            if close[i] > highest_high[i] or ema_50_1d_aligned[i] <= close[i]:
+            if close[i] > high_rolling[i] or ema_50_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
