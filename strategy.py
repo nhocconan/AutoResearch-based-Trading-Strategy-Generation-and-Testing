@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX + Williams Alligator combination with volume confirmation.
-# Uses ADX(14) > 25 for trend strength, Alligator (Jaw/Teeth/Lips) for direction,
-# and volume spike for confirmation. Works in both bull and bear markets by
-# only taking trades when a strong trend is present, avoiding choppy regimes.
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume spike confirmation.
+# Williams %R identifies overbought/oversold conditions. In bull regime (price > 1d EMA50),
+# we go long when Williams %R < -80 (oversold) with volume spike. In bear regime (price < 1d EMA50),
+# we go short when Williams %R > -20 (overbought) with volume spike. This adapts to both bull and bear markets
+# by using the higher timeframe trend for regime filtering and Williams %R for precise mean reversion entry.
 
-name = "6h_ADX_Alligator_VolumeSpike"
-timeframe = "6h"
+name = "4h_WilliamsR_MeanReversion_1dTrend_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,70 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX components (primary timeframe)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Calculate 14-period Williams %R (primary timeframe)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Williams Alligator (primary timeframe)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Volume regime: current volume > 2.0x 20-period MA
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Get current values
+        wr_val = williams_r[i]
+        ema_trend = ema_50_aligned[i]
+        vol_spike = volume_spike[i]
+        close_val = close[i]
+        
         # Skip if any value is NaN
-        if np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(wr_val) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Alligator conditions: Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
-        is_uptrend = jaw[i] > teeth[i] > lips[i]
-        is_downtrend = jaw[i] < teeth[i] < lips[i]
+        # Determine regime: bull if close > 1d EMA50, bear if close < 1d EMA50
+        is_bull_regime = close_val > ema_trend
+        is_bear_regime = close_val < ema_trend
         
-        # ADX trend strength filter
-        strong_trend = adx[i] > 25
+        # Regime-based entry conditions
+        if is_bull_regime:
+            # Long: Williams %R < -80 (oversold) with volume spike
+            long_entry = (wr_val < -80) and vol_spike
+        else:
+            long_entry = False
+            
+        if is_bear_regime:
+            # Short: Williams %R > -20 (overbought) with volume spike
+            short_entry = (wr_val > -20) and vol_spike
+        else:
+            short_entry = False
         
         # Generate signals
         if position == 0:
-            if strong_trend and is_uptrend and volume_spike[i]:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            elif strong_trend and is_downtrend and volume_spike[i]:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on loss of uptrend structure or weak trend
-            if not is_uptrend or adx[i] < 20:
+            # Exit on Williams %R >= -20 (overbought) or regime change to bear
+            if wr_val >= -20 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on loss of downtrend structure or weak trend
-            if not is_downtrend or adx[i] < 20:
+            # Exit on Williams %R <= -80 (oversold) or regime change to bull
+            if wr_val <= -80 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
