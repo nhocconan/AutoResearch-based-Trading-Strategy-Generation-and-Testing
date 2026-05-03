@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Hypothesis: 6h Camarilla R4/S4 breakout with 12h EMA50 trend filter and volume spike confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year).
-# Donchian breakouts capture strong momentum moves with proven efficacy on SOLUSDT.
-# 1w EMA50 filter ensures alignment with weekly trend to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years (12-37/year).
+# Camarilla R4/S4 levels represent extreme breakout points with strong follow-through.
+# 12h EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
 # Volume spike confirms institutional participation at key levels.
 # ATR trailing stop (2.0x) manages risk while allowing trends to develop.
-# Focus on BTC/ETH as primary targets; SOL is secondary.
+# Focus on BTC/ETH as primary targets.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_12hEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,30 +26,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w OHLC for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:  # Need at least 1 completed bar
+    # Calculate 12h OHLC for Camarilla pivot levels (from prior completed 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:  # Need at least 1 completed bar for prior
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Use prior completed 12h bar's OHLC for Camarilla calculation
+    prior_high = np.roll(df_12h['high'].values, 1)
+    prior_low = np.roll(df_12h['low'].values, 1)
+    prior_close = np.roll(df_12h['close'].values, 1)
+    prior_open = np.roll(df_12h['open'].values, 1)
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
+    prior_close[0] = np.nan
+    prior_open[0] = np.nan
     
-    # Calculate ATR(30) for stoploss (using 1d data)
+    # Calculate Camarilla levels for prior 12h bar
+    # R4 = Close + (High - Low) * 1.1666
+    # S4 = Close - (High - Low) * 1.1666
+    cam_high = prior_close + (prior_high - prior_low) * 1.1666
+    cam_low = prior_close - (prior_high - prior_low) * 1.1666
+    
+    # Align Camarilla levels to 6h timeframe
+    cam_high_aligned = align_htf_to_ltf(prices, df_12h, cam_high)
+    cam_low_aligned = align_htf_to_ltf(prices, df_12h, cam_low)
+    
+    # Calculate 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate ATR(30) for stoploss (using 6h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 1d data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 6h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Calculate Donchian channels (20-period) on 1d data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,9 +74,9 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        ema_trend = ema_50_1w_aligned[i]
+        upper = cam_high_aligned[i]
+        lower = cam_low_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
@@ -69,9 +85,9 @@ def generate_signals(prices):
             continue
             
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1w EMA50
+        # Long: break above Camarilla R4 with volume spike and above 12h EMA50
         long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 1w EMA50
+        # Short: break below Camarilla S4 with volume spike and below 12h EMA50
         short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
