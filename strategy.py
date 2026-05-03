@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts, in bear via short signals.
+# Target: 30-100 total trades over 4 years (7-25/year). Works in bull via breakouts, in bear via short signals.
 # Proven pattern from top performers: price channel + HTF trend + volume confirmation + ATR stop.
-# Focus on 4h timeframe to reduce trade frequency vs lower timeframes while maintaining sufficient sample size.
+# Focus on 1d timeframe to reduce trade frequency while maintaining sufficient sample size.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period) from prior completed 4h bar
+    # Calculate 1d Donchian channels (20-period) from prior completed 1d bar
     # We need to use the prior completed bar's high/low to avoid look-ahead
     prior_high = np.roll(high, 1)
     prior_high[0] = np.nan
@@ -37,14 +37,14 @@ def generate_signals(prices):
     donchian_high = prior_high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = prior_low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
@@ -66,7 +66,7 @@ def generate_signals(prices):
         # Get current values
         donchian_high_val = donchian_high[i]
         donchian_low_val = donchian_low[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
@@ -75,9 +75,9 @@ def generate_signals(prices):
             continue
             
         # Entry conditions
-        # Long: break above Donchian high with volume spike and above 1d EMA50
+        # Long: break above Donchian high with volume spike and above 1w EMA50
         long_entry = (close[i] > donchian_high_val) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian low with volume spike and below 1d EMA50
+        # Short: break below Donchian low with volume spike and below 1w EMA50
         short_entry = (close[i] < donchian_low_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
