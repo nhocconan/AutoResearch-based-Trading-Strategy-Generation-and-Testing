@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
 # In bull regime (price > 1d EMA50), we go long on upper Donchian breakout with volume spike.
 # In bear regime (price < 1d EMA50), we go short on lower Donchian breakout with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee drag. Targets 12-37 trades/year.
+# Uses ATR-based stoploss via signal=0 when price moves against position by 2.5*ATR.
+# Designed for fewer trades (~30-50/year) to minimize fee drag while capturing strong trends.
 
-name = "12h_Donchian20_1dTrend_VolumeSpike_Regime"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,28 +33,37 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 12h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
+    # Calculate ATR (14-period) for stoploss
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0  # Track entry price for stoploss
     
     for i in range(100, n):
         # Get current values
-        hh = highest_high[i]
-        ll = lowest_low[i]
+        highest_val = highest_20[i]
+        lowest_val = lowest_20[i]
         ema_trend = ema_50_aligned[i]
         vol_spike = volume_spike[i]
         close_val = close[i]
+        atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(hh) or np.isnan(ll) or np.isnan(ema_trend):
+        if np.isnan(highest_val) or np.isnan(lowest_val) or np.isnan(ema_trend) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,16 +73,20 @@ def generate_signals(prices):
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Regime-based entry conditions
+        # Breakout conditions
+        upper_breakout = close_val > highest_val
+        lower_breakout = close_val < lowest_val
+        
+        # Regime-based entry conditions with volume confirmation
         if is_bull_regime:
-            # Long: price breaks above upper Donchian with volume spike
-            long_entry = (close_val > hh) and vol_spike
+            # Long: Upper Donchian breakout with volume spike
+            long_entry = upper_breakout and vol_spike
         else:
             long_entry = False
             
         if is_bear_regime:
-            # Short: price breaks below lower Donchian with volume spike
-            short_entry = (close_val < ll) and vol_spike
+            # Short: Lower Donchian breakout with volume spike
+            short_entry = lower_breakout and vol_spike
         else:
             short_entry = False
         
@@ -81,19 +95,23 @@ def generate_signals(prices):
             if long_entry:
                 signals[i] = 0.25
                 position = 1
+                entry_price = close_val
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Exit on close below lower Donchian or regime change to bear
-            if close_val < ll or close_val < ema_trend:
+            # Long position: trail stop or exit on breakdown
+            stop_price = entry_price - 2.5 * atr_val
+            if close_val < stop_price or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on close above upper Donchian or regime change to bull
-            if close_val > hh or close_val > ema_trend:
+            # Short position: trail stop or exit on breakout
+            stop_price = entry_price + 2.5 * atr_val
+            if close_val > stop_price or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
