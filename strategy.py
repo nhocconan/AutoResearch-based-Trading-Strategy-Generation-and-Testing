@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Donchian breakouts capture strong momentum moves. 1w EMA50 ensures alignment with higher timeframe trend.
-# Volume confirmation filters false breakouts. Designed for 30-100 total trades over 4 years (7-25/year).
-# Works in bull markets via upward breakouts and in bear markets via downward breakdowns with trend filter.
-# Primary timeframe: 1d, HTF: 1w
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivots from daily timeframe provide institutional support/resistance levels.
+# Breakout at R3/S3 with 1d EMA34 trend alignment captures institutional flow continuation.
+# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via upward R3 breakouts and bear markets via downward S3 breakdowns.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,26 +28,42 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivots and EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels on 1d data
-    # Upper band: 20-period high
-    # Lower band: 20-period low
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
+    # Calculate previous day's Camarilla levels (R3, S3, R4, S4)
+    # Camarilla levels based on previous day's OHLC
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r4 = np.full(n, np.nan)
+    camarilla_s4 = np.full(n, np.nan)
     
-    for i in range(19, n):
-        upper_band[i] = np.max(high[i-19:i+1])
-        lower_band[i] = np.min(low[i-19:i+1])
+    for i in range(1, len(df_1d)):
+        # Previous day's OHLC
+        prev_high = df_1d['high'].iloc[i-1]
+        prev_low = df_1d['low'].iloc[i-1]
+        prev_close = df_1d['close'].iloc[i-1]
+        
+        # Camarilla calculations
+        range_ = prev_high - prev_low
+        camarilla_r3[i] = prev_close + range_ * 1.1 / 4
+        camarilla_s3[i] = prev_close - range_ * 1.1 / 4
+        camarilla_r4[i] = prev_close + range_ * 1.1 / 2
+        camarilla_s4[i] = prev_close - range_ * 1.1 / 2
     
-    # Volume confirmation: 20-period EMA on 1d
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Volume confirmation: 20-period EMA on 6h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -56,9 +72,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid Donchian values
+    for i in range(20, n):  # Start from 20 to have valid volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -68,24 +84,24 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price breaks above upper band in uptrend alignment with volume spike
-            if close[i] > upper_band[i] and ema_50_1w_aligned[i] < close[i] and volume_spike:
+            # Long: price breaks above R3 with uptrend alignment and volume spike
+            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band in downtrend alignment with volume spike
-            elif close[i] < lower_band[i] and ema_50_1w_aligned[i] > close[i] and volume_spike:
+            # Short: price breaks below S3 with downtrend alignment and volume spike
+            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower band or loses uptrend alignment
-            if close[i] < lower_band[i] or ema_50_1w_aligned[i] >= close[i]:
+            # Exit long: price breaks below S3 or loses uptrend alignment
+            if close[i] < camarilla_s3_aligned[i] or ema_34_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper band or loses downtrend alignment
-            if close[i] > upper_band[i] or ema_50_1w_aligned[i] <= close[i]:
+            # Exit short: price breaks above R3 or loses downtrend alignment
+            if close[i] > camarilla_r3_aligned[i] or ema_34_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
