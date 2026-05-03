@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 12h primary timeframe to target 50-150 trades over 4 years (12-37/year) minimizing fee drag.
-# Camarilla levels from 1d provide institutional support/resistance for breakouts.
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Designed for BTC/ETH with discrete sizing.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses daily EMA34 for stronger trend alignment to reduce false breakouts.
+# Volume spike confirms institutional participation. Designed for 15-35 trades/year on 4h.
+# Works in bull markets via breakout continuation and in bear markets via breakdown shorts.
+# Camarilla levels from prior 1d bar avoid look-ahead.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and Camarilla pivot levels
+    # Get 1d data for EMA34 trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -60,7 +60,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: 20-period EMA on 12h
+        # Volume confirmation: 20-period EMA on 4h
         if i >= 19:
             vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
         else:
