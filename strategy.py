@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla levels provide precise intraday support/resistance that work across regimes.
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Volume spike (2x EMA20) confirms breakout strength.
-# Designed for 50-150 total trades over 4 years (12-37/year) on BTC/ETH/SOL.
-# Works in bull markets via upward breaks at R3/R4 and in bear markets via downward breaks at S3/S4.
+# Hypothesis: 1d Donchian(20) breakout + 1w HMA21 trend filter + volume confirmation
+# Donchian channels provide robust structure for breakouts in both bull and bear markets.
+# 1w HMA21 ensures alignment with weekly trend to avoid counter-trend trades.
+# Volume confirmation filters false breakouts. Designed for 30-100 total trades over 4 years (7-25/year).
+# Works in bull markets via upward breaks at upper channel and in bear markets via downward breaks at lower channel.
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_1wHMA21_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,38 +29,36 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for HMA21 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w HMA21 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    half_n = int(21 / 2)
+    sqrt_n = int(np.sqrt(21))
+    wma_half = close_1w.rolling(window=half_n, min_periods=half_n).mean()
+    wma_full = close_1w.rolling(window=21, min_periods=21).mean()
+    hma_21_1w = (2 * wma_half - wma_full).rolling(window=sqrt_n, min_periods=sqrt_n).mean().values
+    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
-    # Calculate 1d Camarilla levels (R3, S3) from previous day
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Donchian channels from previous 1d bar (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: 20-period EMA on 12h
-    vol_ema_20 = np.full(n, np.nan)
+    # Volume confirmation: 20-period EMA on 1d
     vol_series = pd.Series(volume)
-    vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20[:] = vol_ema_20_values
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have valid aligned HTF data
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(hma_21_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -70,24 +68,24 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 in uptrend alignment with volume spike
-            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Long: price breaks above upper Donchian in uptrend alignment with volume spike
+            if close[i] > donchian_upper[i] and hma_21_1w_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 in downtrend alignment with volume spike
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Short: price breaks below lower Donchian in downtrend alignment with volume spike
+            elif close[i] < donchian_lower[i] and hma_21_1w_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Camarilla S3 or loses uptrend alignment
-            if close[i] < camarilla_s3_aligned[i] or ema_34_1d_aligned[i] >= close[i]:
+            # Exit long: price breaks below lower Donchian or loses uptrend alignment
+            if close[i] < donchian_lower[i] or hma_21_1w_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Camarilla R3 or loses downtrend alignment
-            if close[i] > camarilla_r3_aligned[i] or ema_34_1d_aligned[i] <= close[i]:
+            # Exit short: price breaks above upper Donchian or loses downtrend alignment
+            if close[i] > donchian_upper[i] or hma_21_1w_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
