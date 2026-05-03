@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA200 trend filter and volume spike confirmation.
-# Williams %R measures overbought/oversold levels. In bull regime (price > 1d EMA200),
-# we go long when Williams %R crosses above -80 from below with volume spike.
-# In bear regime (price < 1d EMA200), we go short when Williams %R crosses below -20 from above with volume spike.
-# This captures mean reversion within the trend, works in both bull and bear markets.
-# Target: 20-40 trades/year on 4h (80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation.
+# Donchian breakout provides clear structure-based entries. 1d EMA50 filters for higher timeframe trend.
+# Volume spike confirms institutional participation. Works in both bull and bear markets by only taking
+# breakouts in the direction of the 1d trend. Target: 20-50 trades/year to minimize fee drag.
 
-name = "4h_WilliamsR_1dTrend_VolumeSpike"
+name = "4h_Donchian20_1dTrend_VolumeSpike_Regime"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,76 +24,70 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 trend filter
+    # Calculate 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Williams %R (14-period) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian channels (20-period) on primary timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume regime: current 4h volume > 1.8x 20-period MA
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Get current values
-        wr = williams_r[i]
-        ema_trend = ema_200_aligned[i]
-        vol_spike = volume_spike[i]
+        high_val = high[i]
+        low_val = low[i]
         close_val = close[i]
+        donchian_high = highest_20[i]
+        donchian_low = lowest_20[i]
+        ema_trend = ema_50_aligned[i]
+        vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr) or np.isnan(ema_trend):
+        if np.isnan(donchian_high) or np.isnan(donchian_low) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1d EMA200, bear if close < 1d EMA200
+        # Determine regime: bull if close > 1d EMA50, bear if close < 1d EMA50
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Williams %R levels
-        oversold = -80
-        overbought = -20
+        # Breakout conditions
+        bull_breakout = high_val > donchian_high
+        bear_breakout = low_val < donchian_low
         
         # Generate signals
         if position == 0:
-            # Look for crossovers with volume spike
-            if i > 100:
-                wr_prev = williams_r[i-1]
-                # Bullish crossover: WR crosses above -80 from below
-                bull_cross = (wr_prev < oversold and wr >= oversold) and vol_spike
-                # Bearish crossover: WR crosses below -20 from above
-                bear_cross = (wr_prev > overbought and wr <= overbought) and vol_spike
-                
-                if is_bull_regime and bull_cross:
-                    signals[i] = 0.25
-                    position = 1
-                elif is_bear_regime and bear_cross:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: bullish breakout in bull regime with volume spike
+            if is_bull_regime and bull_breakout and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short: bearish breakout in bear regime with volume spike
+            elif is_bear_regime and bear_breakout and vol_spike:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: WR reaches overbought (-20) or regime change to bear
-            if wr >= overbought or close_val < ema_trend:
+            # Exit on bearish breakout or regime change to bear
+            if bear_breakout or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: WR reaches oversold (-80) or regime change to bull
-            if wr <= oversold or close_val > ema_trend:
+            # Exit on bullish breakout or regime change to bull
+            if bull_breakout or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
