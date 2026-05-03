@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike
-# Camarilla pivot levels from 1d provide high-probability support/resistance.
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via upward breaks at R3/R4 and in bear markets via downward breaks at S3/S4.
+# Hypothesis: 1h Donchian breakout with 4h trend filter and volume spike
+# Uses 4h Donchian channels for signal direction (structure) and 1h for precise entry timing
+# Volume confirmation filters false breakouts. Session filter (08-20 UTC) reduces noise.
+# Designed for 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
+# Works in bull markets via upward breaks and bear markets via downward breaks.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "1h_Donchian20_4hTrend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,30 +28,30 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for Donchian channels and trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Upper channel: highest high over last 20 periods
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low over last 20 periods
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    R3 = prev_close + 1.1 * (prev_high - prev_low)
-    S3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Align Donchian levels to 1h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 1h
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -60,10 +60,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid volume EMA
+    for i in range(20, n):  # Start from 20 to have valid indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,27 +72,27 @@ def generate_signals(prices):
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend alignment with volume spike
-            if close[i] > R3_aligned[i] and ema_34_1d_aligned[i] < close[i] and volume_spike:
-                signals[i] = 0.25
+            # Long: price breaks above upper Donchian in uptrend with volume spike
+            if close[i] > upper_20_aligned[i] and ema_50_4h_aligned[i] < close[i] and volume_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 in downtrend alignment with volume spike
-            elif close[i] < S3_aligned[i] and ema_34_1d_aligned[i] > close[i] and volume_spike:
-                signals[i] = -0.25
+            # Short: price breaks below lower Donchian in downtrend with volume spike
+            elif close[i] < lower_20_aligned[i] and ema_50_4h_aligned[i] > close[i] and volume_spike:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or loses uptrend alignment
-            if close[i] < S3_aligned[i] or ema_34_1d_aligned[i] >= close[i]:
+            # Exit long: price breaks below lower Donchian or loses uptrend
+            if close[i] < lower_20_aligned[i] or ema_50_4h_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above R3 or loses downtrend alignment
-            if close[i] > R3_aligned[i] or ema_34_1d_aligned[i] <= close[i]:
+            # Exit short: price breaks above upper Donchian or loses downtrend
+            if close[i] > upper_20_aligned[i] or ema_50_4h_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
