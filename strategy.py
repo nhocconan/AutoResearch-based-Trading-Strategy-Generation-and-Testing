@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla Pivot Breakout with 4h EMA50 trend filter and volume confirmation
-# Uses 4h EMA50 for trend direction and 1h Camarilla R3/S3 levels for precise entries.
-# Volume spike confirms breakout conviction. Designed for 15-30 trades/year on 1h to minimize fee drag.
-# Works in both bull and bear markets by trading breakouts in the direction of the 4h trend.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# Donchian breakouts capture momentum in trending markets. Weekly pivot (from 1w) provides structural bias:
+# - Price above weekly pivot (PP) = bullish bias, look for long breakouts
+# - Price below weekly pivot = bearish bias, look for short breakouts
+# Volume spike confirms conviction. Designed for 12-30 trades/year on 6h to minimize fee drag.
+# Works in both bull and bear markets by aligning breakout direction with higher timeframe structure.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,83 +29,72 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    # We use the prior completed week's values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h Camarilla levels (using previous day's OHLC)
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    
+    # Calculate Donchian channels (20-period)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous bar for pivot calc
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or not in_session[i]):
+        if (np.isnan(pp_1w_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Camarilla levels using previous day's OHLC
-        # Need to get previous day's high, low, close
-        prev_day_idx = i - 1
-        while prev_day_idx >= 0 and pd.Timestamp(open_time[prev_day_idx]).date() == pd.Timestamp(open_time[i]).date():
-            prev_day_idx -= 1
-        
-        if prev_day_idx < 0:
-            # Not enough data for previous day, skip
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Get previous day's OHLC
-        phigh = np.max(high[max(0, prev_day_idx):i])
-        plow = np.min(low[max(0, prev_day_idx):i])
-        pclose = close[i-1]  # Previous bar's close as proxy for previous day's close
-        
-        # Calculate Camarilla levels
-        rang = phigh - plow
-        if rang <= 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        camarilla_r3 = pclose + rang * 1.1 / 4
-        camarilla_s3 = pclose - rang * 1.1 / 4
+        # Calculate Donchian channels using data up to current bar
+        highest_high = np.max(high[i-19:i+1])  # 20-period high
+        lowest_low = np.min(low[i-19:i+1])     # 20-period low
         
         # Volume confirmation: 20-period EMA
-        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        if i >= 19:
+            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
-        # Breakout conditions
+        # Donchian breakout conditions
+        breakout_long = close[i] > highest_high
+        breakout_short = close[i] < lowest_low
+        
         if position == 0:
-            # Long: price breaks above Camarilla R3 in 4h uptrend with volume spike
-            if close[i] > camarilla_r3 and ema_50_4h_aligned[i] > close[i] and volume_spike:
-                signals[i] = 0.20
+            # Long: Donchian breakout above weekly pivot with volume spike
+            if breakout_long and close[i] > pp_1w_aligned[i] and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 in 4h downtrend with volume spike
-            elif close[i] < camarilla_s3 and ema_50_4h_aligned[i] < close[i] and volume_spike:
-                signals[i] = -0.20
+            # Short: Donchian breakdown below weekly pivot with volume spike
+            elif breakout_short and close[i] < pp_1w_aligned[i] and volume_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns below Camarilla R3 or loses 4h uptrend
-            if close[i] < camarilla_r3 or ema_50_4h_aligned[i] < close[i]:
+            # Exit long: Donchian break below midpoint or loses weekly pivot support
+            midpoint = (highest_high + lowest_low) / 2.0
+            if close[i] < midpoint or close[i] < pp_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns above Camarilla S3 or loses 4h downtrend
-            if close[i] > camarilla_s3 or ema_50_4h_aligned[i] > close[i]:
+            # Exit short: Donchian break above midpoint or loses weekly pivot resistance
+            midpoint = (highest_high + lowest_low) / 2.0
+            if close[i] > midpoint or close[i] > pp_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
