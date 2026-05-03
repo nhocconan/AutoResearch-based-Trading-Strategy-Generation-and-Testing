@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# In bull regime (price > 1d EMA34), go long on break above R3 with volume spike.
-# In bear regime (price < 1d EMA34), go short on break below S3 with volume spike.
-# Uses Camarilla pivot levels from 1d for structure, volume confirmation for conviction,
-# and 1d EMA34 for regime filter. Designed for low trade frequency (12-37/year) to minimize fee drag.
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter (EMA50) and volume spike confirmation.
+# In bull regime (price > 4h EMA50), go long on break above Camarilla R3 with volume spike.
+# In bear regime (price < 4h EMA50), go short on break below Camarilla S3 with volume spike.
+# Uses 4h/1d for signal direction, 1h only for entry timing. Target: 15-37 trades/year.
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +22,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for trend filter and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 4h EMA50 trend filter
+    close_4h = df_4h['close'].values
+    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # Calculate Camarilla levels from prior 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r3 = pivot + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = pivot - (high_1d - low_1d) * 1.1 / 4.0
+    # Calculate Camarilla levels from previous 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Align Camarilla levels to 12h timeframe (wait for prior 1d bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Camarilla levels: based on previous day's range
+    R3 = close_4h + (high_4h - low_4h) * 1.1 / 4
+    S3 = close_4h - (high_4h - low_4h) * 1.1 / 4
     
-    # Volume regime: current 12h volume > 2.0x 20-period MA
+    # Align Camarilla levels to 1h timeframe (wait for 4h bar to close)
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
+    
+    # Calculate volume regime: current 1h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Get current values
-        close_val = close[i]
-        vol_spike = volume_spike[i]
-        ema_trend = ema_34_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        
-        # Skip if any value is NaN
-        if np.isnan(close_val) or np.isnan(vol_spike) or np.isnan(ema_trend) or \
-           np.isnan(r3_val) or np.isnan(s3_val):
+        # Skip if outside session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1d EMA34, bear if close < 1d EMA34
+        # Get current values
+        close_val = close[i]
+        ema_trend = ema_50_aligned[i]
+        r3_level = R3_aligned[i]
+        s3_level = S3_aligned[i]
+        vol_spike = volume_spike[i]
+        
+        # Skip if any value is NaN
+        if np.isnan(close_val) or np.isnan(ema_trend) or np.isnan(r3_level) or np.isnan(s3_level):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Determine regime: bull if close > 4h EMA50, bear if close < 4h EMA50
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Regime-based entry conditions
-        if is_bull_regime:
-            # Long: break above R3 with volume spike
-            long_entry = (close_val > r3_val) and vol_spike
-        else:
-            long_entry = False
-            
-        if is_bear_regime:
-            # Short: break below S3 with volume spike
-            short_entry = (close_val < s3_val) and vol_spike
-        else:
-            short_entry = False
-        
         # Generate signals
         if position == 0:
-            if long_entry:
-                signals[i] = 0.25
+            if is_bull_regime and close_val > r3_level and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            elif short_entry:
-                signals[i] = -0.25
+            elif is_bear_regime and close_val < s3_level and vol_spike:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit on close below EMA34 (regime change) or close below pivot (structure break)
-            if close_val < ema_trend or close_val < pivot[i]:
+            # Exit on close below 4h EMA50 (trend change) or loss of momentum
+            if close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit on close above EMA34 (regime change) or close above pivot (structure break)
-            if close_val > ema_trend or close_val > pivot[i]:
+            # Exit on close above 4h EMA50 (trend change) or loss of momentum
+            if close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
