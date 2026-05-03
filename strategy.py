@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX regime filter and volume spike confirmation.
-# Long when: Williams %R(14) crosses above -80 (oversold bounce) AND 1d ADX > 25 (trending market) AND volume > 2.0x 24-bar average
-# Short when: Williams %R(14) crosses below -20 (overbought rejection) AND 1d ADX > 25 (trending market) AND volume > 2.0x 24-bar average
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when: price breaks above 4h Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 24-bar average
+# Short when: price breaks below 4h Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 24-bar average
 # Exit via ATR(24) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses Williams %R for mean reversion entries in trending markets, ADX to filter chop, volume for confirmation.
-# Discrete sizing 0.25 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
+# Uses 4h Camarilla for structure (proven edge), 1d EMA34 for trend alignment, volume spike for confirmation
+# Discrete sizing 0.28 balances return and fee drag. Target: 75-200 total trades over 4 years = 19-50/year.
 
-name = "6h_WilliamsR_ADX_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,65 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R(14) on 6h timeframe
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Camarilla pivots (based on previous 4h bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Calculate 1d ADX(14) for trend filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate Camarilla levels for each 4h bar (using previous bar's OHLC)
+    camarilla_r3 = np.zeros(len(close_4h))
+    camarilla_s3 = np.zeros(len(close_4h))
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
+    
+    for i in range(1, len(close_4h)):
+        # Camarilla formulas based on previous 4h bar
+        high_prev = high_4h[i-1]
+        low_prev = low_4h[i-1]
+        close_prev = close_4h[i-1]
+        range_prev = high_prev - low_prev
+        
+        camarilla_r3[i] = close_prev + range_prev * 1.1 / 4  # R3 level
+        camarilla_s3[i] = close_prev - range_prev * 1.1 / 4  # S3 level
+    
+    # Align 4h Camarilla levels to 4h timeframe (completed 4h bar only)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    # Handle first element
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1d = wilders_smoothing(tr_1d, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, 14)
-    
-    # Align 1d ADX to 6h timeframe (completed 1d bar only)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 6h ATR(24) for stoploss
+    # 4h ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -100,28 +80,27 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup (need enough for Williams %R, ADX, ATR calculations)
-    start_idx = max(14, 24) + 14 + 5  # Williams %R(14) + ATR(24) + ADX warmup + buffer
+    # Start after warmup (need enough for ATR, Camarilla, EMA calculations)
+    start_idx = 24 + 34 + 5  # ATR(24) + EMA34 warmup + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R crosses above -80 (from below) with volume spike AND trending market (ADX > 25)
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                volume_spike[i] and adx_1d_aligned[i] > 25):
-                signals[i] = 0.25
+            # Long entry: price breaks above 4h Camarilla R3 with volume spike AND bullish trend (close > 1d EMA34)
+            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.28
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: Williams %R crosses below -20 (from above) with volume spike AND trending market (ADX > 25)
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  volume_spike[i] and adx_1d_aligned[i] > 25):
-                signals[i] = -0.25
+            # Short entry: price breaks below 4h Camarilla S3 with volume spike AND bearish trend (close < 1d EMA34)
+            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.28
                 position = -1
                 entry_bar = i
                 lowest_since_entry = low[i]
@@ -136,7 +115,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         
         elif position == -1:  # Short position
             # Update lowest low since entry
@@ -146,6 +125,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
