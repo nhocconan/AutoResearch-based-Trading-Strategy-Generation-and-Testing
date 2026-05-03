@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13. In strong trends, we fade extreme readings
-# in the direction of the 1d EMA34 trend. Volume spike confirms conviction. Designed for 12-30 trades/year
-# on 6h to minimize fee drag. Works in both bull and bear markets by fading extremes with higher timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Donchian breakouts capture strong momentum moves. 1w EMA34 ensures we only trade in the direction of the weekly trend.
+# Volume confirmation adds conviction. Designed for 12-37 trades/year on 12h to minimize fee drag.
+# Works in both bull and bear markets by aligning with the higher timeframe trend.
 
-name = "6h_ElderRay_Extreme_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,79 +27,58 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate EMA13 for Elder Ray (using 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Bull Power and Bear Power
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Start after sufficient warmup for EMA13
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            not in_session[i]):
+        if (np.isnan(ema_34_1w_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate Donchian(20) using data up to current bar
+        lookback = min(20, i+1)
+        highest_high = np.max(high[i-lookback+1:i+1])
+        lowest_low = np.min(low[i-lookback+1:i+1])
+        
         # Volume confirmation: 20-period EMA
-        if i >= 19:
-            vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
-        else:
-            vol_ema_20 = volume[i]
+        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
-        # Extreme Elder Ray conditions (using 1.5 * std as threshold)
-        if i >= 30:  # Need sufficient data for std calculation
-            bp_std = np.std(bull_power[max(0, i-29):i+1])
-            br_std = np.std(bear_power[max(0, i-29):i+1])
-            
-            # Avoid division by zero
-            if bp_std == 0:
-                bp_std = 0.001 * close[i]
-            if br_std == 0:
-                br_std = 0.001 * close[i]
-                
-            bull_extreme = bull_power[i] > (1.5 * bp_std)  # Extreme bull power
-            bear_extreme = bear_power[i] < (-1.5 * br_std)  # Extreme bear power
-        else:
-            bull_extreme = False
-            bear_extreme = False
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high
+        breakout_down = close[i] < lowest_low
         
         if position == 0:
-            # Long: extreme bear power (oversold) in 1d uptrend with volume spike
-            if bear_extreme and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Long: Donchian breakout up in 1w uptrend with volume spike
+            if breakout_up and ema_34_1w_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: extreme bull power (overbought) in 1d downtrend with volume spike
-            elif bull_extreme and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Short: Donchian breakout down in 1w downtrend with volume spike
+            elif breakout_down and ema_34_1w_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bear power normalizes or loses 1d uptrend
-            if bear_power[i] < (0.5 * br_std) or ema_34_1d_aligned[i] < close[i]:
+            # Exit long: Donchian breakout down or loses 1w uptrend
+            if breakout_down or ema_34_1w_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bull power normalizes or loses 1d downtrend
-            if bull_power[i] > (-0.5 * bp_std) or ema_34_1d_aligned[i] > close[i]:
+            # Exit short: Donchian breakout up or loses 1w downtrend
+            if breakout_up or ema_34_1w_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
