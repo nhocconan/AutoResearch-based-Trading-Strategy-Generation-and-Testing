@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extreme levels combined with 6h volume confirmation and 1d EMA50 trend filter.
-# Long when 1d Williams %R < -80 (oversold) AND price breaks above 6h VWAP with volume spike (>1.8x 20-period volume MA) in 1d uptrend.
-# Short when 1d Williams %R > -20 (overbought) AND price breaks below 6h VWAP with volume spike in 1d downtrend.
-# Williams %R identifies exhaustion points; VWAP break confirms institutional participation; volume spike validates move.
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years with discrete position sizing.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 in 1d uptrend with volume spike (>1.5x 20-period volume MA).
+# Short when price breaks below Camarilla S3 in 1d downtrend with volume spike.
+# Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume spike confirms institutional participation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
+# Camarilla pivot levels provide precise support/resistance based on prior day's range, effective in both trending and ranging markets.
 
-name = "6h_WilliamsR_Extreme_VWAP_Breakout_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,52 +25,45 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Get 1d data for Williams %R and trend filter
+    # Get 1d data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate Camarilla pivot levels on 1d timeframe (based on previous day's range)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
+    # Camarilla levels: based on previous day's high, low, close
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
+    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
     
-    # Williams %R extreme levels
-    williams_r_oversold = williams_r < -80
-    williams_r_overbought = williams_r > -20
+    # Align Camarilla levels to lower timeframe (1d -> 12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align Williams %R signals to lower timeframe (1d -> 6h)
-    williams_r_oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_r_oversold.astype(float))
-    williams_r_overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_r_overbought.astype(float))
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 6h VWAP (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3
-    tp_volume = typical_price * volume
-    vwap = np.cumsum(tp_volume) / np.cumsum(volume)
-    vwap = np.where(np.cumsum(volume) == 0, typical_price, vwap)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.8)  # Volume at least 1.8x average
+    volume_spike = volume > (volume_ma * 1.5)  # Volume at least 1.5x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r_oversold_aligned[i]) or np.isnan(williams_r_overbought_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vwap[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,29 +72,25 @@ def generate_signals(prices):
         close_val = close[i]
         open_val = open_prices[i]
         vol_spike = volume_spike[i]
-        vwap_val = vwap[i]
-        oversold_signal = bool(williams_r_oversold_aligned[i])
-        overbought_signal = bool(williams_r_overbought_aligned[i])
-        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
+        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: Williams %R oversold AND price breaks above VWAP AND volume spike AND 1d uptrend
-            if oversold_signal and close_val > vwap_val and open_val <= vwap_val and vol_spike and trend_up:
+            # Long: price breaks above Camarilla R3 AND 1d uptrend AND volume spike
+            if close_val > r3_level and open_val <= r3_level and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought AND price breaks below VWAP AND volume spike AND 1d downtrend
-            elif overbought_signal and close_val < vwap_val and open_val >= vwap_val and vol_spike and trend_down:
+            # Short: price breaks below Camarilla S3 AND 1d downtrend AND volume spike
+            elif close_val < s3_level and open_val >= s3_level and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Exit: price closes below VWAP (mean reversion)
-            if close_val < vwap_val:
-                exit_signal = True
-            # Exit: Williams %R becomes overbought (exhaustion)
-            elif overbought_signal:
+            # Exit: price closes below Camarilla S3 (reversal signal)
+            if close_val < s3_level:
                 exit_signal = True
             # Exit: 1d trend changes to downtrend
             elif not trend_up:
@@ -114,11 +104,8 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Exit: price closes above VWAP (mean reversion)
-            if close_val > vwap_val:
-                exit_signal = True
-            # Exit: Williams %R becomes oversold (exhaustion)
-            elif oversold_signal:
+            # Exit: price closes above Camarilla R3 (reversal signal)
+            if close_val > r3_level:
                 exit_signal = True
             # Exit: 1d trend changes to uptrend
             elif not trend_down:
