@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla R3/S3 levels provide high-probability reversal/breakout zones from 1d price action.
-# 1d EMA34 filter ensures we only trade in the direction of the daily trend.
-# Volume spike confirms institutional participation at these key levels.
-# Designed to work in both bull and bear markets by aligning with the higher timeframe trend.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike
+# Camarilla R3/S3 levels from 1d provide high-probability breakout zones.
+# 1d EMA50 ensures trades align with the daily trend (works in bull/bear markets).
+# Volume spike confirms institutional participation at key levels.
+# Target: 19-50 trades/year (75-200 over 4 years) to avoid fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,42 +34,40 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla levels: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # We calculate for the PREVIOUS day to avoid look-ahead
+    # Avoid look-ahead by using previous day's data
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Avoid look-ahead by using previous day's data
     diff = prev_high - prev_low
     r3 = prev_close + (diff * 1.1 / 4)
     s3 = prev_close - (diff * 1.1 / 4)
     r4 = prev_close + (diff * 1.1 / 2)
     s4 = prev_close - (diff * 1.1 / 2)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -78,8 +75,8 @@ def generate_signals(prices):
             continue
         
         # Determine daily trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
         
         if position == 0:
             # Long: Price breaks above R3 in uptrend with volume spike
