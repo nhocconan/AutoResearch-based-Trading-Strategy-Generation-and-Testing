@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme + 1d Elder Ray (Bull/Bear Power) + Volume Confirmation
-# Williams %R identifies overbought/oversold conditions; Elder Ray confirms trend strength via
-# bull/bear power relative to 13-period EMA. Volume spike ensures institutional participation.
-# Designed for low trade frequency (12-37/year) to minimize fee drag on 6h timeframe.
-# Works in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability reversal/breakout zones; 1d ADX>25 ensures 
+# we only trade in trending markets to avoid whipsaws. Volume spike confirms participation.
+# Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag.
+# Works in both bull and bear markets by aligning with daily trend and using volatility-based stops.
 
-name = "6h_WilliamsR_Extreme_1dElderRay_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dADX25_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,72 +28,85 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Elder Ray and volume
+    # Get 1d data for ADX and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 13-period EMA for Elder Ray
-    ema_13 = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d ADX (14-period) for trend strength filter
+    # ADX = 100 * smoothed moving average of |+DI - -DI| / (+DI + -DI)
+    # Simplified: use Welles Wilder's ATR-based DX calculation
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = pd.Series(df_1d['low']).diff().abs()
+    tr3 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'])).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema_13
-    bear_power = df_1d['low'].values - ema_13
+    plus_dm = pd.Series(df_1d['high']).diff()
+    minus_dm = pd.Series(df_1d['low']).diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align 1d indicators to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate 12h Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6
+    #          S2 = C - (H-L)*1.1/6, S1 = C - (H-L)*1.1/4, S3 = C - (H-L)*1.1/2
+    # We use R3/S3 as breakout levels
+    df_1d_shifted = df_1d.shift(1)  # Use previous day's OHLC
+    camarilla_r3 = df_1d_shifted['close'] + (df_1d_shifted['high'] - df_1d_shifted['low']) * 1.1 / 4
+    camarilla_s3 = df_1d_shifted['close'] - (df_1d_shifted['high'] - df_1d_shifted['low']) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_shifted, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_shifted, camarilla_s3.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient warmup for indicators
+    for i in range(30, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R extremes: < -80 oversold, > -20 overbought
-        is_oversold = williams_r[i] < -80
-        is_overbought = williams_r[i] > -20
-        
-        # Elder Ray: Bull Power > 0 indicates bullish bias, Bear Power < 0 indicates bearish bias
-        is_bullish = bull_power_aligned[i] > 0
-        is_bearish = bear_power_aligned[i] < 0
+        # Determine trend strength: ADX > 25 indicates trending market
+        is_trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: Williams %R oversold + Elder Ray bullish + volume spike
-            if is_oversold and is_bullish and volume_spike_aligned[i]:
+            # Long: Price breaks above Camarilla R3 in trending market with volume spike
+            if high[i] > camarilla_r3_aligned[i] and is_trending and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought + Elder Ray bearish + volume spike
-            elif is_overbought and is_bearish and volume_spike_aligned[i]:
+            # Short: Price breaks below Camarilla S3 in trending market with volume spike
+            elif low[i] < camarilla_s3_aligned[i] and is_trending and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (momentum fading) or Bear Power turns negative
-            if williams_r[i] > -50 or bear_power_aligned[i] < 0:
+            # Exit long: Price breaks below Camarilla S3 (reversal to downside)
+            if low[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (momentum fading) or Bull Power turns positive
-            if williams_r[i] < -50 or bull_power_aligned[i] > 0:
+            # Exit short: Price breaks above Camarilla R3 (reversal to upside)
+            if high[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
