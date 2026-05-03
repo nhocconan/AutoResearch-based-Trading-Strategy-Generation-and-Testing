@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Donchian channels capture volatility-based breakouts. Trend filter ensures trades align with
-# higher timeframe momentum. Volume spike confirms conviction. Designed for 20-50 trades/year
-# on 4h to minimize fee drag while maintaining edge in bull/bear markets via trend alignment.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Donchian channels identify volatility-based support/resistance. Breakouts above upper
+# channel in uptrend (price > EMA50) or below lower channel in downtrend capture strong
+# moves with controlled trade frequency. Volume spike confirms conviction. Designed for
+# 7-25 trades/year on 1d to minimize fee drag while maintaining edge in bull/bear markets.
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,25 +28,21 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate volume EMA20 for spike detection (on primary timeframe)
-    volume_series = pd.Series(volume)
-    vol_ema_20 = volume_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient warmup
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_12h_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,32 +53,32 @@ def generate_signals(prices):
         highest_high = np.max(high[i-lookback+1:i+1])
         lowest_low = np.min(low[i-lookback+1:i+1])
         
-        # Volume confirmation: current volume > 2.0 * 20-period EMA
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: 20-period volume EMA
+        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        volume_spike = volume[i] > (2.0 * vol_ema_20)
         
-        # Breakout conditions
         breakout_long = close[i] > highest_high and volume_spike
         breakout_short = close[i] < lowest_low and volume_spike
         
         if position == 0:
-            # Long: break above upper channel in 12h uptrend with volume spike
-            if breakout_long and ema_50_12h_aligned[i] > close[i]:
+            # Long: break above upper channel in 1w uptrend with volume spike
+            if breakout_long and ema_50_1w_aligned[i] < close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel in 12h downtrend with volume spike
-            elif breakout_short and ema_50_12h_aligned[i] < close[i]:
+            # Short: break below lower channel in 1w downtrend with volume spike
+            elif breakout_short and ema_50_1w_aligned[i] > close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below upper channel or loses 12h uptrend
-            if close[i] < highest_high or ema_50_12h_aligned[i] < close[i]:
+            # Exit long: price crosses below upper channel or loses 1w uptrend
+            if close[i] < highest_high or ema_50_1w_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above lower channel or loses 12h downtrend
-            if close[i] > lowest_low or ema_50_12h_aligned[i] > close[i]:
+            # Exit short: price crosses above lower channel or loses 1w downtrend
+            if close[i] > lowest_low or ema_50_1w_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
