@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year). Camarilla pivots provide structure in ranging markets,
+# Target: 75-200 total trades over 4 years (19-50/year). Camarilla pivots provide structure in ranging markets,
 # breakouts capture trends. Works in bull via long breakouts, in bear via short signals.
 # Proven pattern from top performers: Camarilla pivot + HTF trend + volume confirmation + ATR stop.
 
-name = "12h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,6 +22,12 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Calculate prior completed bar's high/low for Camarilla calculation
+    prior_high = np.roll(high, 1)
+    prior_high[0] = np.nan
+    prior_low = np.roll(low, 1)
+    prior_low[0] = np.nan
     
     # Calculate 1d Camarilla levels from prior completed 1d bar
     df_1d = get_htf_data(prices, '1d')
@@ -35,12 +41,14 @@ def generate_signals(prices):
     prior_close_1d = np.roll(df_1d['close'].values, 1)
     prior_close_1d[0] = np.nan
     
-    # Calculate Camarilla levels: R3, S3
+    # Calculate Camarilla levels: R3, S3, R4, S4
+    # R3 = close + 1.1*(high-low)/2
+    # S3 = close - 1.1*(high-low)/2
     camarilla_range = prior_high_1d - prior_low_1d
     camarilla_r3 = prior_close_1d + 1.1 * camarilla_range / 2
     camarilla_s3 = prior_close_1d - 1.1 * camarilla_range / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
