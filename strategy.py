@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-# Long when Bull Power > 0 (close > 13-period EMA) in uptrend (close > 1d EMA50) with volume > 1.5x 20-period MA.
-# Short when Bear Power < 0 (close < 13-period EMA) in downtrend (close < 1d EMA50) with volume spike.
-# Elder Ray measures trend strength relative to EMA, providing early reversal signals.
-# Works in both bull and bear markets: 1d EMA50 ensures we trade with higher timeframe trend,
-# while Elder Ray captures momentum shifts. Discrete sizing (0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Camarilla H4 level in bull trend (close > 1d EMA50) with volume > 2.0x 20-period MA.
+# Short when price breaks below Camarilla L4 level in bear trend (close < 1d EMA50) with volume spike.
+# Uses discrete position sizing (0.25) to minimize fee churn. 1d EMA50 provides strong trend filter.
+# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets: trend filter ensures we only trade in direction of 1d momentum,
+# while Camarilla levels provide precise entry/exit points based on intraday price structure.
 
-name = "6h_ElderRay_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA50 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
@@ -35,24 +35,34 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 13-period EMA for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Get 1d data for Camarilla levels (based on previous 1d bar's range)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Elder Ray components
-    bull_power = close - ema_13  # Bull Power = Close - EMA13
-    bear_power = ema_13 - close  # Bear Power = EMA13 - Close
+    # Calculate Camarilla levels for each 1d bar
+    prev_1d_high = df_1d['high'].values
+    prev_1d_low = df_1d['low'].values
+    prev_1d_close = df_1d['close'].values
     
-    # Volume regime: current 6h volume > 1.5x 20-period MA
+    # Calculate Camarilla H4 and L4 levels for each 1d bar
+    camarilla_h4 = prev_1d_close + (prev_1d_high - prev_1d_low) * 1.1 / 2
+    camarilla_l4 = prev_1d_close - (prev_1d_high - prev_1d_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe (no additional delay needed as these are based on completed 1d bar)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,36 +70,36 @@ def generate_signals(prices):
             
         close_val = close[i]
         ema_trend = ema_50_1d_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
+        h4_level = camarilla_h4_aligned[i]
+        l4_level = camarilla_l4_aligned[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
-        is_uptrend = close_val > ema_trend
-        is_downtrend = close_val < ema_trend
+        is_bull_trend = close_val > ema_trend
+        is_bear_trend = close_val < ema_trend
         
-        # Elder Ray conditions
-        bull_strong = bp > 0  # Close above EMA13
-        bear_strong = br > 0  # Close below EMA13
+        # Camarilla breakout conditions
+        breakout_h4 = close_val > h4_level
+        breakout_l4 = close_val < l4_level
         
         # Entry logic
         if position == 0:
-            if is_uptrend and bull_strong and vol_spike:
+            if is_bull_trend and breakout_h4 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            elif is_downtrend and bear_strong and vol_spike:
+            elif is_bear_trend and breakout_l4 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bear power turns positive OR trend reversal
-            if bear_strong > 0 or close_val < ema_trend:
+            # Long exit: price breaks below L4 level OR trend reversal
+            if close_val < l4_level or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bull power turns positive OR trend reversal
-            if bull_strong > 0 or close_val > ema_trend:
+            # Short exit: price breaks above H4 level OR trend reversal
+            if close_val > h4_level or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
