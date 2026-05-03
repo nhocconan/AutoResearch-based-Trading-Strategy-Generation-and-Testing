@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
 # Donchian channels identify volatility-based support/resistance. Breakouts above upper
-# channel in 1w uptrend (price > EMA50) or below lower channel in 1w downtrend capture
-# strong moves with controlled trade frequency. Volume spike confirms conviction. Designed
-# for 12-25 trades/year on 12h to minimize fee drag while maintaining edge in bull/bear markets.
-# Using 1w trend filter (vs 1d) for more robust trend identification in both bull and bear regimes.
+# channel in uptrend (price > EMA50) or below lower channel in downtrend capture strong
+# moves with controlled trade frequency. Volume spike confirms conviction. Designed for
+# 7-25 trades/year on 1d to minimize fee drag while maintaining edge in bull/bear markets.
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,6 +37,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
+    # Calculate 1d Donchian channels (20-period)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -54,12 +54,9 @@ def generate_signals(prices):
         highest_high = np.max(high[i-lookback+1:i+1])
         lowest_low = np.min(low[i-lookback+1:i+1])
         
-        # Volume confirmation: 20-period EMA
-        if i >= 19:
-            vol_ema = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
-        else:
-            vol_ema = volume[i]
-        volume_spike = volume[i] > (2.0 * vol_ema)
+        # Breakout conditions: price breaks Donchian channel with volume spike
+        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        volume_spike = volume[i] > (2.0 * vol_ema_20)
         
         breakout_long = close[i] > highest_high and volume_spike
         breakout_short = close[i] < lowest_low and volume_spike
