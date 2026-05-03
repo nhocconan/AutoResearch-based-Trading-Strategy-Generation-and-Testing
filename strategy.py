@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low (using 13-period EMA on 6h).
-# Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) in uptrend (close > 12h EMA50) with volume > 1.5x 20-period MA.
-# Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) in downtrend (close < 12h EMA50) with volume spike.
-# Uses 6h primary timeframe with 12h HTF for trend filter. Discrete sizing 0.25.
-# Elder Ray measures market power; 12h EMA50 filters counter-trend whipsaw.
-# Target: 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH/SOL.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper channel AND close > 1d EMA34 AND volume > 1.5x 20-period MA.
+# Short when price breaks below Donchian lower channel AND close < 1d EMA34 AND volume > 1.5x 20-period MA.
+# Uses discrete sizing 0.25 with ATR-based stoploss (signal→0 when price moves against position by 2.0*ATR).
+# Target: 75-200 total trades over 4 years (19-50/year) with Sharpe > 0 on BTC/ETH/SOL.
 
-name = "6h_ElderRay_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,71 +23,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h EMA13 for Elder Ray (using close prices)
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = ema_13 - low   # Bear Power = EMA13 - Low
-    
-    # Volume regime: current 6h volume > 1.5x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # Calculate ATR(14) for stoploss
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(lookback, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        ema_trend = ema_50_12h_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
-        vol_spike = volume_spike[i]
+        ema_trend = ema_34_1d_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        atr_val = atr[i]
         
-        # Determine trend regime
-        is_uptrend = close_val > ema_trend
-        is_downtrend = close_val < ema_trend
+        # Volume regime: current 4h volume > 1.5x 20-period MA
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+            volume_spike = volume[i] > (1.5 * vol_ma_20)
+        else:
+            volume_spike = False
         
-        # Elder Ray conditions for momentum
-        is_bullish_momentum = bp > 0 and br < 0  # Bull Power positive, Bear Power negative
-        is_bearish_momentum = br > 0 and bp < 0   # Bear Power positive, Bull Power negative
+        # Stoploss logic
+        if position == 1 and close_val < entry_price - 2.0 * atr_val:
+            signals[i] = 0.0
+            position = 0
+            continue
+        elif position == -1 and close_val > entry_price + 2.0 * atr_val:
+            signals[i] = 0.0
+            position = 0
+            continue
         
         # Entry logic
         if position == 0:
-            if is_uptrend and is_bullish_momentum and vol_spike:
+            if close_val > upper_channel and close_val > ema_trend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif is_downtrend and is_bearish_momentum and vol_spike:
+                entry_price = close_val
+            elif close_val < lower_channel and close_val < ema_trend and volume_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Long exit: momentum turns bearish OR trend reversal
-            if not is_bullish_momentum or not is_uptrend:
+            # Long exit: price breaks below lower channel OR trend reversal
+            if close_val < lower_channel or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: momentum turns bullish OR trend reversal
-            if not is_bearish_momentum or not is_downtrend:
+            # Short exit: price breaks above upper channel OR trend reversal
+            if close_val > upper_channel or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
