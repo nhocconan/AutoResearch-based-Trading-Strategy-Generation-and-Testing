@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
 # Donchian breakouts capture strong momentum moves, filtered by weekly trend to avoid counter-trend trades.
 # Volume confirmation ensures institutional participation. ATR trailing stop (2.0x) manages risk.
-# Weekly trend filter provides stronger regime bias than daily, reducing whipsaws in sideways markets.
 # Focus on BTC/ETH as primary targets with SOL as secondary.
+# Timeframe: 1d, HTF: 1w
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     donch_upper = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 4h timeframe
+    # Align Donchian channels to 1d timeframe
     donch_upper_aligned = align_htf_to_ltf(prices, df_1w, donch_upper)
     donch_lower_aligned = align_htf_to_ltf(prices, df_1w, donch_lower)
     
@@ -50,14 +50,14 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(30) for stoploss (using 4h data)
+    # Calculate ATR(30) for stoploss (using 1d data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 1d data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
