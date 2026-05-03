@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R(14) extreme + 1d trend filter + volume confirmation
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) 
-# signal potential reversals. Combined with 1d ADX > 25 for trend alignment and volume 
-# spike (>2.0x 20-period EMA) for confirmation. Designed for 50-150 total trades over 4 years 
-# (12-37/year) with discrete sizing to minimize fee drag. Works in both bull and bear markets 
-# by only taking trades in direction of higher timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout + 1d ATR-based volatility regime filter + volume confirmation
+# Donchian breakouts capture strong momentum moves in both bull and bear markets.
+# 1d ATR(14) / SMA(50) ratio identifies low-volatility regimes where breakouts are more reliable.
+# Volume confirmation (1.5x 20-period EMA) filters false breakouts.
+# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
 
-name = "6h_WilliamsR14_1dADX25_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dATRRegime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,12 +28,12 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX25 trend filter
+    # Get 1d data for ATR-based regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for trend filter
+    # Calculate 1d ATR(14) and SMA(50) for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,15 +45,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing)
+    # ATR(14) using Wilder's smoothing
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -69,87 +60,68 @@ def generate_signals(prices):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    tr_smoothed = wilders_smoothing(tr, 14)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
+    atr_14 = wilders_smoothing(tr, 14)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smoothed / tr_smoothed
-    di_minus = 100 * dm_minus_smoothed / tr_smoothed
+    # SMA(50) of close
+    close_series = pd.Series(close_1d)
+    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
     
-    # DX and ADX
-    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    # ATR ratio: ATR(14) / SMA(50) - identifies low volatility regimes
+    atr_ratio = np.where(sma_50 != 0, atr_14 / sma_50, np.nan)
     
-    def wilders_smoothing_dx(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average
-        valid_data = data[~np.isnan(data)]
-        if len(valid_data) < period:
-            return result
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]) or np.isnan(data[i]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Low volatility regime: ATR ratio < 0.02 (adjustable threshold)
+    low_vol_regime = atr_ratio < 0.02
     
-    adx_14 = wilders_smoothing_dx(dx, 14)
-    adx_25 = adx_14  # Using ADX(14) as proxy, will filter with threshold 25
+    # Align 1d low volatility regime to 12h timeframe
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
-    # Align 1d ADX to 6h timeframe
-    adx_25_aligned = align_htf_to_ltf(prices, df_1d, adx_25)
+    # Calculate Donchian channels from previous 12h bar (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate Williams %R(14) on 6h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
-    
-    # Volume confirmation: 20-period EMA on 6h
+    # Volume confirmation: 20-period EMA on 12h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start from 14 to have valid Williams %R and volume EMA
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_25_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(low_vol_regime_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.5 x 20-period EMA
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
-        # Strong trend: ADX > 25
-        strong_trend = adx_25_aligned[i] > 25
+        # Low volatility regime condition
+        in_low_vol = low_vol_regime_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) in strong uptrend with volume spike
-            if williams_r[i] < -80 and strong_trend and volume_spike:
+            # Long: price breaks above upper Donchian in low vol regime with volume spike
+            if close[i] > donchian_upper[i] and in_low_vol and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) in strong downtrend with volume spike
-            elif williams_r[i] > -20 and strong_trend and volume_spike:
+            # Short: price breaks below lower Donchian in low vol regime with volume spike
+            elif close[i] < donchian_lower[i] and in_low_vol and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns above -50 or loses strong trend
-            if williams_r[i] > -50 or not strong_trend:
+            # Exit long: price breaks below lower Donchian or leaves low vol regime
+            if close[i] < donchian_lower[i] or not in_low_vol:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns below -50 or loses strong trend
-            if williams_r[i] < -50 or not strong_trend:
+            # Exit short: price breaks above upper Donchian or leaves low vol regime
+            if close[i] > donchian_upper[i] or not in_low_vol:
                 signals[i] = 0.0
                 position = 0
             else:
