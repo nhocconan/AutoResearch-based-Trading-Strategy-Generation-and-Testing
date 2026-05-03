@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# In bull regime (price > 1d EMA34), go long on breakout above upper band with volume spike.
-# In bear regime (price < 1d EMA34), go short on breakdown below lower band with volume spike.
-# Uses Donchian channels from prior completed 1d for structure, 1d EMA34 for regime filter,
-# and 6h volume spike for confirmation. Designed for 50-150 total trades over 4 years.
-# Focus on BTC/ETH as primary symbols.
+# Hypothesis: 6h Donchian(20) breakout with 1d ATR-based volatility filter and volume confirmation.
+# Uses 1d ATR to normalize Donchian breakouts, reducing false signals in low volatility regimes.
+# Volume spike (2x 20-period MA) confirms breakout strength. Designed for 50-150 total trades over 4 years.
+# Works in both bull and bear markets by using ATR-adjusted channels and volume confirmation.
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike"
+name = "6h_Donchian20_ATR_VolumeSpike"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,24 +22,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels (prior completed 1d bar)
+    # Get 1d data for ATR calculation and Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 21:  # Need 20 for Donchian + 14 for ATR
         return np.zeros(n)
     
-    # Calculate prior 1d Donchian channels (20-period)
+    # Calculate 1d ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate prior 1d Donchian channels (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 6h (wait for 1d bar to complete)
+    # Align 1d indicators to 6h
     dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Get 1d data for EMA34 trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Calculate volume regime: current 6h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,32 +60,23 @@ def generate_signals(prices):
         close_val = close[i]
         dh = dh_aligned[i]
         dl = dl_aligned[i]
-        ema_trend = ema_34_aligned[i]
+        atr_val = atr_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(dh) or np.isnan(dl) or np.isnan(ema_trend):
+        if np.isnan(dh) or np.isnan(dl) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1d EMA34, bear if close < 1d EMA34
-        is_bull_regime = close_val > ema_trend
-        is_bear_regime = close_val < ema_trend
+        # ATR-normalized Donchian channels (add/subtract 0.5*ATR for buffer)
+        upper_channel = dh + 0.5 * atr_val
+        lower_channel = dl - 0.5 * atr_val
         
-        # Regime-based entry conditions
-        if is_bull_regime:
-            # Long: breakout above upper Donchian band with volume spike
-            long_entry = (close_val > dh) and vol_spike
-        else:
-            long_entry = False
-            
-        if is_bear_regime:
-            # Short: breakdown below lower Donchian band with volume spike
-            short_entry = (close_val < dl) and vol_spike
-        else:
-            short_entry = False
+        # Entry conditions: breakout with volume spike
+        long_entry = (close_val > upper_channel) and vol_spike
+        short_entry = (close_val < lower_channel) and vol_spike
         
         # Generate signals
         if position == 0:
@@ -91,15 +87,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on breakdown below lower band (failure of bullish breakout) or regime change to bear
-            if close_val < dl or close_val < ema_trend:
+            # Exit on breakdown below lower channel
+            if close_val < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on breakout above upper band (failure of bearish breakdown) or regime change to bull
-            if close_val > dh or close_val > ema_trend:
+            # Exit on breakout above upper channel
+            if close_val > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
