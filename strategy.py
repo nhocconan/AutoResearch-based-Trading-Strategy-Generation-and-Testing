@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-# Uses 1h primary timeframe targeting 15-37 trades/year (60-150 total over 4 years).
-# Camarilla levels from 4h provide intraday structure, 4h EMA50 filters trend direction,
-# and volume spike confirms momentum. Session filter (08-20 UTC) reduces noise trades.
-# Designed for BTC/ETH to work in both bull and bear markets by taking breakouts
-# in the direction of the higher timeframe trend.
+# Hypothesis: 6h strategy using 1-week Ichimoku cloud filter with 1-day TK cross for entry timing and volume confirmation.
+# Uses Ichimoku from weekly timeframe for major trend/cloud filter (bullish when price > cloud, bearish when price < cloud),
+# 1-day Tenkan/Kijun cross for entry signals, and 6h volume spike for confirmation.
+# Designed to work in both bull and bear markets by only taking trades in direction of weekly Ichimoku trend.
+# Targets 12-35 trades/year by requiring confluence of weekly trend, daily momentum, and volume spike.
 
-name = "1h_Camarilla_R1S1_4hEMA50_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Ichimoku_1wCloud_1dTKCross_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,100 +22,122 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 4h data for Camarilla pivots and EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for TK cross
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 trend filter
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Get 1w data for Ichimoku cloud
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
+        return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 4h bar
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    typical_price_values = typical_price.values
+    # Calculate 1d Tenkan-sen (9-period) and Kijun-sen (26-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Camarilla levels: R1 = PP + (H - L) * 1.1/12, S1 = PP - (H - L) * 1.1/12
-    # Using previous 4h bar's values (already completed bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_vals = df_4h['close'].values
+    # Tenkan-sen: (9-period high + 9-period low) / 2
+    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_1d_vals = tenkan_1d.values
     
-    # Pivot point
-    pp = (high_4h + low_4h + close_4h_vals) / 3
-    # Range
-    rng = high_4h - low_4h
-    # Camarilla levels
-    r1 = pp + (rng * 1.1 / 12)
-    s1 = pp - (rng * 1.1 / 12)
+    # Kijun-sen: (26-period high + 26-period low) / 2
+    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    kijun_1d_vals = kijun_1d.values
     
-    # Align Camarilla levels to 1h timeframe (wait for 4h bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Calculate 1w Ichimoku components
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate volume regime: current 1h volume > 2.0x 20-period MA (strict to reduce trades)
+    # Tenkan-sen (9-period) for 1w
+    tenkan_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_1w_vals = tenkan_1w.values
+    
+    # Kijun-sen (26-period) for 1w
+    kijun_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    kijun_1w_vals = kijun_1w.values
+    
+    # Senkou Span A: (Tenkan + Kijun) / 2 plotted 26 periods ahead
+    senkou_a_1w = ((tenkan_1w_vals + kijun_1w_vals) / 2)
+    
+    # Senkou Span B: (52-period high + 52-period low) / 2 plotted 26 periods ahead
+    senkou_b_1w = (pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                   pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2
+    senkou_b_1w_vals = senkou_b_1w.values
+    
+    # Align 1d TK cross values to 6h
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d_vals)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d_vals)
+    
+    # Align 1w Ichimoku cloud to 6h (Senkou Span A and B)
+    # Cloud is plotted 26 periods ahead, so we need to align with additional_delay_bars=26
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w, additional_delay_bars=26)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w_vals, additional_delay_bars=26)
+    
+    # Calculate 6h volume spike: current volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if outside session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Get current values
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_50_aligned[i]
+        tenkan_1d_val = tenkan_1d_aligned[i]
+        kijun_1d_val = kijun_1d_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema_trend):
+        if (np.isnan(tenkan_1d_val) or np.isnan(kijun_1d_val) or 
+            np.isnan(senkou_a_val) or np.isnan(senkou_b_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Entry conditions
-        # Long: break above R1 with volume spike and above 4h EMA50
-        long_entry = (close[i] > r1_val) and vol_spike and (close[i] > ema_trend)
-        # Short: break below S1 with volume spike and below 4h EMA50
-        short_entry = (close[i] < s1_val) and vol_spike and (close[i] < ema_trend)
+        # Determine Ichimoku cloud trend from 1w
+        # Bullish cloud: Senkou A > Senkou B
+        # Bearish cloud: Senkou A < Senkou B
+        bullish_cloud = senkou_a_val > senkou_b_val
+        bearish_cloud = senkou_a_val < senkou_b_val
+        
+        # TK cross signals from 1d
+        tk_bullish_cross = tenkan_1d_val > kijun_1d_val
+        tk_bearish_cross = tenkan_1d_val < kijun_1d_val
+        
+        # Entry conditions with volume confirmation
+        # Long: bullish cloud + TK bullish cross + volume spike
+        long_entry = bullish_cloud and tk_bullish_cross and vol_spike
+        # Short: bearish cloud + TK bearish cross + volume spike
+        short_entry = bearish_cloud and tk_bearish_cross and vol_spike
         
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_entry:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on close below 4h EMA50 (trend change)
-            if close[i] < ema_trend:
+            # Exit on TK bearish cross (momentum change)
+            if tk_bearish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit on close above 4h EMA50 (trend change)
-            if close[i] > ema_trend:
+            # Exit on TK bullish cross (momentum change)
+            if tk_bullish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
