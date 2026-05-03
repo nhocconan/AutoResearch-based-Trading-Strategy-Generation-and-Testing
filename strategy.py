@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivots identify key support/resistance levels. Breakouts at R3/S3 with 1d EMA34 trend
-# alignment and volume spike capture institutional participation. Designed for 12-30 trades/year on 6h
-# to minimize fee drag while maintaining edge in both bull and bear markets via trend-following breakouts.
+# Hypothesis: 4h TRIX momentum with 1d volume spike and choppiness regime filter
+# TRIX (15-period) identifies momentum shifts. Long when TRIX crosses above zero in 1d uptrend with volume spike and choppy market (CHOP > 61.8).
+# Short when TRIX crosses below zero in 1d downtrend with volume spike and choppy market.
+# Volume spike confirms conviction. Chop filter avoids whipsaws in strong trends.
+# Designed for 20-40 trades/year on 4h to minimize fee drag. Works in both bull and bear markets by capturing momentum in ranging conditions.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,74 +28,54 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for trend and chop filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # Calculate 1d Choppiness Index (14-period)
+    atr_1d = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        tr = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                 abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                 abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
+        atr_1d[i] = tr if i == 1 else (atr_1d[i-1] * 13 + tr) / 14
+    atr_1d[0] = atr_1d[1] if len(df_1d) > 1 else 0
     
-    # We need previous day's data to calculate today's Camarilla levels
-    # For each 6h bar, we use the most recent completed 1d bar's OHLC
-    for i in range(n):
-        if i == 0:
-            camarilla_r3[i] = np.nan
-            camarilla_s3[i] = np.nan
-            continue
-            
-        # Find the index of the most recent completed 1d bar
-        # Since we're on 6h timeframe, we need to map to 1d bars
-        # We'll use the previous day's close for simplicity (conservative)
-        if i >= 4:  # At least 4 six-hour bars = 1 day
-            # Use OHLC from 4 bars ago (yesterday's close, high, low, open)
-            idx_lookback = i - 4
-            if idx_lookback >= 0 and idx_lookback < n:
-                # We need the actual 1d OHLC, so we'll use the HTF data
-                # Find corresponding 1d bar index
-                # Simpler approach: use rolling window on 1d data
-                pass
+    sum_tr_14 = np.zeros(len(df_1d))
+    for i in range(14, len(df_1d)):
+        sum_tr = 0
+        for j in range(i-13, i+1):
+            tr = max(df_1d['high'].iloc[j] - df_1d['low'].iloc[j],
+                     abs(df_1d['high'].iloc[j] - df_1d['close'].iloc[j-1] if j > 0 else df_1d['open'].iloc[j]),
+                     abs(df_1d['low'].iloc[j] - df_1d['close'].iloc[j-1] if j > 0 else df_1d['open'].iloc[j]))
+            sum_tr += tr
+        sum_tr_14[i] = sum_tr
     
-    # Instead, calculate Camarilla levels directly from 1d data and align
-    # Camarilla formula: based on previous day's (high, low, close)
-    if len(df_1d) >= 2:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # Calculate Camarilla levels for each 1d bar (based on previous day)
-        camarilla_r3_1d = np.full(len(df_1d), np.nan)
-        camarilla_s3_1d = np.full(len(df_1d), np.nan)
-        
-        for j in range(1, len(df_1d)):
-            # Previous day's OHLC
-            phigh = high_1d[j-1]
-            plow = low_1d[j-1]
-            pclose = close_1d[j-1]
-            
-            # Camarilla levels
-            camarilla_r3_1d[j] = pclose + (phigh - plow) * 1.1 / 4
-            camarilla_s3_1d[j] = pclose - (phigh - plow) * 1.1 / 4
-        
-        # Align to 6h timeframe
-        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d, additional_delay_bars=1)
-        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d, additional_delay_bars=1)
-    else:
-        camarilla_r3_aligned = np.full(n, np.nan)
-        camarilla_s3_aligned = np.full(n, np.nan)
+    chop_1d = np.full(len(df_1d), 50.0)
+    for i in range(14, len(df_1d)):
+        if sum_tr_14[i] > 0 and atr_1d[i] > 0:
+            chop_1d[i] = 100 * np.log10(sum_tr_14[i] / (atr_1d[i] * 14)) / np.log10(14)
+    
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate TRIX (15-period) on 4h close
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.zeros(n)
+    trix[14:] = (ema3[15:] - ema3[14:-1]) / ema3[14:-1] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(4, n):  # Start after sufficient warmup
+    for i in range(15, n):  # Start after sufficient warmup for TRIX
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(trix[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -104,35 +85,32 @@ def generate_signals(prices):
         vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
-        # Breakout conditions
-        breakout_long = close[i] > camarilla_r3_aligned[i]
-        breakout_short = close[i] < camarilla_s3_aligned[i]
+        # Choppiness regime: choppy market (CHOP > 61.8)
+        choppy_market = chop_1d_aligned[i] > 61.8
         
-        # Trend filter: 1d EMA34 direction
-        # For long: price above EMA34 (uptrend)
-        # For short: price below EMA34 (downtrend)
-        trend_long = close[i] > ema_34_1d_aligned[i]
-        trend_short = close[i] < ema_34_1d_aligned[i]
+        # TRIX signals
+        trix_cross_above = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_below = trix[i] < 0 and trix[i-1] >= 0
         
         if position == 0:
-            # Long: breakout above R3 with uptrend and volume spike
-            if breakout_long and trend_long and volume_spike:
+            # Long: TRIX crosses above zero in 1d uptrend with volume spike and choppy market
+            if trix_cross_above and ema_34_1d_aligned[i] > close[i] and volume_spike and choppy_market:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 with downtrend and volume spike
-            elif breakout_short and trend_short and volume_spike:
+            # Short: TRIX crosses below zero in 1d downtrend with volume spike and choppy market
+            elif trix_cross_below and ema_34_1d_aligned[i] < close[i] and volume_spike and choppy_market:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakout fails or trend changes
-            if close[i] < camarilla_r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: TRIX crosses below zero or loses 1d uptrend
+            if trix_cross_below or ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout fails or trend changes
-            if close[i] > camarilla_s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: TRIX crosses above zero or loses 1d downtrend
+            if trix_cross_above or ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
