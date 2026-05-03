@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.30.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Target: 50-150 total trades over 4 years (12-37/year).
 # Camarilla R3/S3 levels provide strong breakout signals with proven efficacy in DB.
 # 1d EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
 # Volume spike confirms institutional participation at key levels.
 # ATR trailing stop (3.0x) manages risk while allowing trends to develop.
 
-name = "4h_Camarilla_R3_S3_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,7 +46,7 @@ def generate_signals(prices):
     cam_high = prior_close + (prior_high - prior_low) * 1.05
     cam_low = prior_close - (prior_high - prior_low) * 1.05
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     cam_high_aligned = align_htf_to_ltf(prices, df_1d, cam_high)
     cam_low_aligned = align_htf_to_ltf(prices, df_1d, cam_low)
     
@@ -55,14 +55,14 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(30) for stoploss (using 4h data)
+    # Calculate ATR(30) for stoploss (using 12h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 12h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
