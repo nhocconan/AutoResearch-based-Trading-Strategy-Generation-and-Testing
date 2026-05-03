@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
-# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
-# choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
-# Designed to work in both bull and bear markets by adapting to regime.
+# Hypothesis: 12h Williams %R extreme + 1d volume spike + choppiness regime filter
+# Williams %R identifies overbought/oversold conditions; volume spike confirms institutional participation;
+# choppiness regime ensures we trade mean reversions in ranging markets (CHOP > 61.8) and avoid false signals in strong trends.
+# Designed to work in both bull and bear markets by capturing exhaustion moves.
 # Target: 12-37 trades/year (50-150 over 4 years).
 
-name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
+name = "12h_WilliamsR_Extreme_1dVolumeSpike_ChopRegime"
 timeframe = "12h"
 leverage = 1.0
 
@@ -65,48 +65,48 @@ def generate_signals(prices):
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50.0, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            not in_session[i]):
+        if (np.isnan(highest_high_14[i]) or np.isnan(lowest_low_14[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: CHOP < 38.2 = trending (breakout), CHOP > 61.8 = ranging (mean revert)
-        is_trending = chop_aligned[i] < 38.2
+        # Regime filter: only trade mean reversions in ranging markets (CHOP > 61.8)
         is_ranging = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: Donchian breakout above upper band + volume spike + (trending OR ranging)
-            if high[i] > highest_high[i] and volume_spike_aligned[i]:
+            # Long: Williams %R oversold (< -80) + volume spike + ranging market
+            if williams_r[i] < -80.0 and volume_spike_aligned[i] and is_ranging:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band + volume spike + (trending OR ranging)
-            elif low[i] < lowest_low[i] and volume_spike_aligned[i]:
+            # Short: Williams %R overbought (> -20) + volume spike + ranging market
+            elif williams_r[i] > -20.0 and volume_spike_aligned[i] and is_ranging:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakdown below middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if low[i] < middle or (low[i] < lowest_low[i] and volume_spike_aligned[i]):
+            # Exit long: Williams %R returns above -50 (mean reversion) or reverse signal
+            if williams_r[i] > -50.0 or (williams_r[i] > -20.0 and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout above middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if high[i] > middle or (high[i] > highest_high[i] and volume_spike_aligned[i]):
+            # Exit short: Williams %R returns below -50 (mean reversion) or reverse signal
+            if williams_r[i] < -50.0 or (williams_r[i] < -80.0 and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
