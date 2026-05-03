@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-# Long: Close breaks above Donchian upper AND 1w ADX > 25 (trending) AND volume > 1.5x 20-period MA
-# Short: Close breaks below Donchian lower AND 1w ADX > 25 (trending) AND volume > 1.5x 20-period MA
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Long: Close breaks above Donchian upper AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period MA
+# Short: Close breaks below Donchian lower AND 1d ADX > 25 (trending) AND volume > 1.5x 20-period MA
 # Exit: Opposite Donchian breakout or ADX < 20 (range) or volume drops.
-# Discrete sizing 0.25. Target: 30-100 total trades over 4 years (7-25/year).
-# Donchian provides clear structure; 1w ADX filters for trending markets only; volume confirmation
+# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Donchian provides clear structure; 1d ADX filters for trending markets only; volume confirmation
 # reduces false breakouts. Works in bull via long signals and bear via short signals when aligned with trend.
 
-name = "1d_Donchian20_1wADX25_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_1dADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,29 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w ADX (14-period)
-    df_1w_high = df_1w['high'].values
-    df_1w_low = df_1w['low'].values
-    df_1w_close = df_1w['close'].values
+    # Calculate 1d ADX (14-period)
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
     # True Range
-    tr1 = df_1w_high - df_1w_low
-    tr2 = np.abs(df_1w_high - np.roll(df_1w_close, 1))
-    tr3 = np.abs(df_1w_low - np.roll(df_1w_close, 1))
+    tr1 = df_1d_high - df_1d_low
+    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((df_1w_high - np.roll(df_1w_high, 1)) > (np.roll(df_1w_low, 1) - df_1w_low), 
-                       np.maximum(df_1w_high - np.roll(df_1w_high, 1), 0), 0)
-    dm_minus = np.where((np.roll(df_1w_low, 1) - df_1w_low) > (df_1w_high - np.roll(df_1w_high, 1)), 
-                        np.maximum(np.roll(df_1w_low, 1) - df_1w_low, 0), 0)
+    dm_plus = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low), 
+                       np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)), 
+                        np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -64,14 +64,14 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align 1w ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Donchian channels (20-period) on 1d
+    # Donchian channels (20-period) on 12h
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume regime: current 1d volume > 1.5x 20-period MA
+    # Volume regime: current 12h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
