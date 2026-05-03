@@ -8,8 +8,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # 1d ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
 # Volume confirmation (2.0x 20-period EMA) filters false breakouts.
 # Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
+# Uses 4h timeframe as primary, 1d for HTF trend filter.
 
-name = "4h_Donchian20_1dADX25_VolumeSpike"
+name = "4h_Donchian20_1dADX25_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -134,11 +135,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above upper Donchian in strong uptrend with volume spike
             if close[i] > donchian_upper[i] and strong_trend and volume_spike:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below lower Donchian in strong downtrend with volume spike
             elif close[i] < donchian_lower[i] and strong_trend and volume_spike:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price breaks below lower Donchian or loses strong trend
@@ -146,13 +147,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price breaks above upper Donchian or loses strong trend
             if close[i] > donchian_upper[i] or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
