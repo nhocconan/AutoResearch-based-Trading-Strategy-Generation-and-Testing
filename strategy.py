@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13 to identify trend strength.
-# Combined with 1d EMA34 for higher timeframe trend alignment and volume spike for confirmation.
-# Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee drag on 6h timeframe.
-# Works in bull markets via buying dips in uptrends and in bear markets via selling rallies in downtrends.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakout captures momentum in direction of higher timeframe trend.
+# EMA50 on 1d ensures we only trade with the daily trend (bullish for longs, bearish for shorts).
+# Volume spike confirms institutional participation. Designed for 12-37 trades/year on 12h to minimize fee drag.
+# Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
 
-name = "6h_ElderRay_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,63 +30,60 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate EMA13 for Elder Ray (using 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
-    
-    # Volume confirmation: 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ema_20)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after sufficient warmup for 1d EMA34
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            not in_session[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate Donchian channels using data up to current bar
+        highest_high = np.max(high[i-19:i+1])  # 20-period high
+        lowest_low = np.min(low[i-19:i+1])     # 20-period low
+        
+        # Volume confirmation: 20-period EMA
+        if i >= 19:
+            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i]
+        volume_spike = volume[i] > (1.5 * vol_ema_20)
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high
+        breakout_down = close[i] < lowest_low
+        
         if position == 0:
             # Long: bullish breakout in 1d uptrend with volume spike
-            if (bull_power[i] > 0 and 
-                ema_34_1d_aligned[i] < close[i] and 
-                volume_spike[i]):
+            if breakout_up and ema_50_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout in 1d downtrend with volume spike
-            elif (bear_power[i] < 0 and 
-                  ema_34_1d_aligned[i] > close[i] and 
-                  volume_spike[i]):
+            # Short: bearish breakdown in 1d downtrend with volume spike
+            elif breakout_down and ema_50_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bear power turns negative or loses 1d uptrend
-            if (bear_power[i] < 0 or 
-                ema_34_1d_aligned[i] >= close[i]):
+            # Exit long: price returns to midpoint or loses 1d uptrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] < midpoint or ema_50_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bull power turns positive or loses 1d downtrend
-            if (bull_power[i] > 0 or 
-                ema_34_1d_aligned[i] <= close[i]):
+            # Exit short: price returns to midpoint or loses 1d downtrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] > midpoint or ema_50_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
