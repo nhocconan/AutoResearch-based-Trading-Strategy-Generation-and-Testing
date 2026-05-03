@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Camarilla pivot levels identify institutional support/resistance. Breakout of R3/S3
-# with volume confirmation captures strong institutional moves. Daily EMA34 filter ensures
-# alignment with higher timeframe trend to avoid counter-trend trades. ATR trailing stop
-# (2.0x) manages risk. Focus on BTC/ETH as primary targets.
+# Camarilla pivot levels identify key intraday support/resistance from prior 1d range.
+# Breakout above R3 or below S3 with volume spike and aligned 1d trend captures strong momentum.
+# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
+# Focus on BTC/ETH as primary targets with SOL as secondary.
 
-name = "12h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d OHLC for Camarilla pivot levels (from prior completed 1d bar)
+    # Calculate 1d OHLC for Camarilla levels (from prior completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 1 completed bar for prior
         return np.zeros(n)
@@ -37,16 +37,13 @@ def generate_signals(prices):
     prior_low[0] = np.nan
     prior_close[0] = np.nan
     
-    # Calculate Camarilla pivot levels for prior 1d bar
-    # Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1 / 2
-    # S3 = Pivot - (H - L) * 1.1 / 2
-    prior_pivot = (prior_high + prior_low + prior_close) / 3.0
-    prior_range = prior_high - prior_low
-    camarilla_r3 = prior_pivot + (prior_range * 1.1 / 2.0)
-    camarilla_s3 = prior_pivot - (prior_range * 1.1 / 2.0)
+    # Calculate Camarilla levels for prior 1d bar
+    # R3 = prior_close + 1.1 * (prior_high - prior_low)
+    # S3 = prior_close - 1.1 * (prior_high - prior_low)
+    camarilla_r3 = prior_close + 1.1 * (prior_high - prior_low)
+    camarilla_s3 = prior_close - 1.1 * (prior_high - prior_low)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -55,14 +52,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(30) for stoploss (using 12h data)
+    # Calculate ATR(30) for stoploss (using 4h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 12h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
