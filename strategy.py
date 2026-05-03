@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume spike + choppiness regime filter.
-# Long when price breaks above R3 with 1d uptrend, volume spike, and choppy market (CHOP > 61.8).
-# Short when price breaks below S3 with 1d downtrend, volume spike, and choppy market.
-# Exit when price reverts to R2/S2 or trend changes.
-# Uses 4h timeframe targeting 20-50 trades/year (80-200 total over 4 years).
-# Camarilla pivot levels provide institutional support/resistance, EMA34 filters higher-timeframe trend,
-# volume spike confirms institutional participation, chop filter avoids whipsaws in strong trends.
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation.
+# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending) AND 6h volume > 1.3x 20-period volume MA.
+# Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX > 25 (trending) AND 6h volume > 1.3x 20-period volume MA.
+# Exit when Elder Ray divergence occurs OR 1d ADX < 20 (range) OR volume drops.
+# Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Elder Ray measures bull/bear power via EMA13, 1d ADX filters for trending regimes only, volume confirms participation.
+# Works in both bull and bear markets by only trading strong trends when volume confirms and Elder Ray shows clear dominance.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "6h_ElderRay_1dADX_VolumeSpike_Session"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,108 +27,105 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time']
     
-    # Pre-compute session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (pre-compute to avoid datetime64 issues)
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for HTF indicators
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ADX for trend strength
+    # ADX: Average Directional Index - measures trend strength (not direction)
+    # +DI: Positive Directional Indicator
+    # -DI: Negative Directional Indicator
+    # DX = |(+DI - -DI)| / (+DI + -DI) * 100
+    # ADX = smoothed DX
     
-    # Calculate 1d Camarilla pivot levels (R3, R2, S2, S3)
-    # Based on previous day's OHLC
-    df_1d_prev = df_1d.shift(1)
-    high_prev = df_1d_prev['high'].values
-    low_prev = df_1d_prev['low'].values
-    close_prev = df_1d_prev['close'].values
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # +DM and -DM
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Camarilla levels
-    R3 = pivot + (range_prev * 1.1 / 4)
-    R2 = pivot + (range_prev * 1.1 / 2)
-    S2 = pivot - (range_prev * 1.1 / 2)
-    S3 = pivot - (range_prev * 1.1 / 4)
+    # Smoothed +DM, -DM, TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = atr.values  # already smoothed
     
-    # Align 1d Camarilla levels to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    # Calculate 4h choppiness index (CHOP) for regime filter
-    def true_range(high, low, prev_close):
-        tr1 = high - low
-        tr2 = np.abs(high - prev_close)
-        tr3 = np.abs(low - prev_close)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    prev_close = np.roll(close, 1)
-    prev_close[0] = np.nan
-    tr = true_range(high, low, prev_close)
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate Elder Ray on 6h timeframe
+    # Elder Ray: Bull Power = High - EMA13(Close)
+    #            Bear Power = Low - EMA13(Close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Avoid division by zero
-    chop_denom = highest_high_14 - lowest_low_14
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
-    chop = 100 * np.log10(atr_14 * np.sqrt(14) / chop_denom) / np.log10(14)
-    
-    # Calculate 4h volume 20-period MA for spike detection
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume 20-period MA for spike detection
+    volume_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(R2_aligned[i]) or 
-            np.isnan(S2_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_ma_20[i]) or not in_session[i]):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma_6h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        close_val = close[i]
+        # Volume spike condition: current 6h volume > 1.3x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_6h[i] * 1.3)
         
-        # Volume spike condition: current 4h volume > 2.0x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_20[i] * 2.0)
+        # Elder Ray conditions
+        bull_power_pos = bull_power[i] > 0    # Bulls in control
+        bear_power_neg = bear_power[i] < 0    # Bears weak
+        bear_power_pos = bear_power[i] > 0    # Bears in control
+        bull_power_neg = bull_power[i] < 0    # Bulls weak
         
-        # Choppiness regime filter: CHOP > 61.8 indicates ranging/choppy market (good for mean reversion)
-        choppy_market = chop[i] > 61.8
-        
-        # 1d trend conditions
-        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        # 1d ADX trend condition
+        trending = adx_1d_aligned[i] > 25     # Strong trend
+        ranging = adx_1d_aligned[i] < 20      # Range/market weak
         
         if position == 0:
-            # Long: Price breaks above R3 AND 1d uptrend AND volume spike AND choppy market AND session
-            if close_val > R3_aligned[i] and trend_up and volume_spike and choppy_market:
+            # Long: Bull Power > 0 AND Bear Power < 0 AND trending AND volume spike AND session
+            if bull_power_pos and bear_power_neg and trending and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 AND 1d downtrend AND volume spike AND choppy market AND session
-            elif close_val < S3_aligned[i] and trend_down and volume_spike and choppy_market:
+            # Short: Bear Power > 0 AND Bull Power < 0 AND trending AND volume spike AND session
+            elif bear_power_pos and bull_power_neg and trending and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price reverts to R2 OR trend changes to downtrend
-            if close_val < R2_aligned[i] or not trend_up:
+            # Exit long: Elder Ray divergence OR ranging OR volume drops
+            if not (bull_power_pos and bear_power_neg) or ranging or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price reverts to S2 OR trend changes to uptrend
-            if close_val > S2_aligned[i] or not trend_down:
+            # Exit short: Elder Ray divergence OR ranging OR volume drops
+            if not (bear_power_pos and bull_power_neg) or ranging or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
