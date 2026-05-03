@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w volume spike + choppiness regime filter
-# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
-# choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
-# Designed to work in both bull and bear markets by adapting to regime.
-# Target: 7-25 trades/year (30-100 over 4 years).
+# Hypothesis: 6h Williams Alligator + 1d Elder Ray (Bull/Bear Power) combination
+# Williams Alligator (jaw/teeth/lips) defines trend direction and alignment
+# Elder Ray power (bull/bear) from 1d measures trend strength via EMA13
+# Long when: Alligator aligned bullish (lips>teeth>jaw) AND 1d bull power > 0
+# Short when: Alligator aligned bearish (jaw>teeth>lips) AND 1d bear power < 0
+# Uses discrete sizing (0.25) to minimize fee churn. Designed for 6h timeframe
+# to capture medium-term trends in both bull and bear markets via trend strength confirmation.
+# Target: 12-37 trades/year (50-150 over 4 years).
 
-name = "1d_Donchian20_1wVolumeSpike_ChopRegime"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dElderRay_TrendStrength"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,85 +31,92 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for volume spike and choppiness
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 1d Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w choppiness index (CHOP)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # EMA13 on 1d close
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    bull_power_1d = high_1d - ema13_1d  # Bull Power: measures bullish strength
+    bear_power_1d = low_1d - ema13_1d   # Bear Power: measures bearish strength (negative when weak)
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Align 1d Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Williams Alligator on 6h: SMAs of median price
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars
+    # Lips: 5-period SMMA shifted 3 bars
+    # Using SMA as approximation for SMMA (simple moving average)
+    median_price = (high + low) / 2
     
-    # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
-    range_14 = hh_14 - ll_14
-    chop = 100 * np.log10(atr_14 / range_14) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
+    # Jaw (13, 8)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # shift 8 bars forward
+    jaw_values = jaw.values
     
-    # Align 1w indicators to 1d timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Teeth (8, 5)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # shift 5 bars forward
+    teeth_values = teeth.values
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Lips (5, 3)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # shift 3 bars forward
+    lips_values = lips.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
+        if (np.isnan(lips_values[i]) or np.isnan(teeth_values[i]) or np.isnan(jaw_values[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: CHOP < 38.2 = trending (breakout), CHOP > 61.8 = ranging (mean revert)
-        is_trending = chop_aligned[i] < 38.2
-        is_ranging = chop_aligned[i] > 61.8
+        # Alligator alignment signals
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_aligned = lips_values[i] > teeth_values[i] and teeth_values[i] > jaw_values[i]
+        # Bearish alignment: Jaw > Teeth > Lips
+        bearish_aligned = jaw_values[i] > teeth_values[i] and teeth_values[i] > lips_values[i]
+        
+        # Elder Ray signals from 1d
+        # Bull power > 0 indicates bullish strength
+        # Bear power < 0 indicates bearish strength (more negative = stronger bearish)
+        bull_power_signal = bull_power_aligned[i] > 0
+        bear_power_signal = bear_power_aligned[i] < 0
         
         if position == 0:
-            # Long: Donchian breakout above upper band + volume spike + (trending OR ranging)
-            if high[i] > highest_high[i] and volume_spike_aligned[i]:
+            # Long: Bullish Alligator alignment AND bullish 1d Elder Ray
+            if bullish_aligned and bull_power_signal:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band + volume spike + (trending OR ranging)
-            elif low[i] < lowest_low[i] and volume_spike_aligned[i]:
+            # Short: Bearish Alligator alignment AND bearish 1d Elder Ray
+            elif bearish_aligned and bear_power_signal:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakdown below middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if low[i] < middle or (low[i] < lowest_low[i] and volume_spike_aligned[i]):
+            # Exit long: Alligator alignment turns bearish OR bear power turns positive (weakening bull)
+            if not bullish_aligned or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout above middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if high[i] > middle or (high[i] > highest_high[i] and volume_spike_aligned[i]):
+            # Exit short: Alligator alignment turns bullish OR bull power turns negative (weakening bear)
+            if not bearish_aligned or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
