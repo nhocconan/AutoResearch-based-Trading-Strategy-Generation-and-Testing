@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d Volume Spike filter and Chop regime.
-# Long: Close breaks above Donchian upper AND 1d volume > 2.0x 20-period MA AND Chop(14) > 61.8 (range) for mean reversion
-# Short: Close breaks below Donchian lower AND 1d volume > 2.0x 20-period MA AND Chop(14) > 61.8 (range) for mean reversion
-# Exit: Opposite Donchian breakout or Chop < 38.2 (trend) or volume drops below 1.5x MA.
-# Uses 1d volume spike to confirm institutional interest, Chop regime to ensure mean-reversion logic works in ranging markets.
-# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low (using 13-period EMA on 6h)
+# Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20-period MA
+# Short: Bull Power < 0 AND Bear Power > 0 (bearish momentum) AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20-period MA
+# Exit: Opposite Elder Ray signal OR 1d trend reversal OR volume drops.
+# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Elder Ray measures price relative to EMA for momentum; 1d EMA34 filters for higher timeframe trend; volume confirmation
+# reduces false signals. Works in bull via long signals and bear via short signals when aligned with 1d trend.
 
-name = "4h_Donchian20_1dVolumeSpike_Chop"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,92 +26,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike and Chop regime
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate 1d volume MA (20-period)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (2.0 * vol_ma_20)
-    
-    # Calculate 1d Chop index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d_val = close_1d[-1] if len(close_1d) > 0 else np.nan  # current 1d close (will be aligned)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Align 1d EMA34 and close to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # ATR (14-period)
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Elder Ray components on 6h: EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = ema_13 - low   # EMA13 - Low
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(tr_sum / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
-    
-    # Align 1d indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Donchian channels (20-period) on 4h
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume regime: current 4h volume > 1.5x 20-period MA (for entry/exit timing)
-    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_4h = volume > (1.5 * vol_ma_20_4h)
+    # Volume regime: current 6h volume > 1.5x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(vol_ma_20_4h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        close_val = close[i]
-        chop_val = chop_aligned[i]
-        vol_spike_1d = volume_spike_aligned[i]
-        vol_spike_4h = volume_spike_4h[i]
+        # Determine 1d trend
+        is_uptrend = close_1d_aligned[i] > ema_34_1d_aligned[i]
+        is_downtrend = close_1d_aligned[i] < ema_34_1d_aligned[i]
         
-        # Determine Chop regime
-        is_range = chop_val > 61.8  # Chop > 61.8 = ranging (mean revert)
-        is_trend = chop_val < 38.2  # Chop < 38.2 = trending
+        # Elder Ray signals
+        is_bullish = bull_power[i] > 0 and bear_power[i] < 0  # High > EMA13 > Low
+        is_bearish = bull_power[i] < 0 and bear_power[i] > 0  # High < EMA13 < Low
         
         # Entry logic
         if position == 0:
-            # Long: Close breaks above Donchian upper AND 1d volume spike AND ranging (mean reversion long)
-            if close_val > donchian_upper[i] and vol_spike_1d and is_range:
+            # Long: Bullish Elder Ray AND 1d uptrend AND volume spike
+            if is_bullish and is_uptrend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian lower AND 1d volume spike AND ranging (mean reversion short)
-            elif close_val < donchian_lower[i] and vol_spike_1d and is_range:
+            # Short: Bearish Elder Ray AND 1d downtrend AND volume spike
+            elif is_bearish and is_downtrend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close breaks below Donchian lower OR trend develops (Chop < 38.2) OR 4h volume drops
-            if close_val < donchian_lower[i] or is_trend or not vol_spike_4h:
+            # Long exit: Bearish Elder Ray OR 1d downtrend OR volume drops
+            if is_bearish or not is_uptrend or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close breaks above Donchian upper OR trend develops (Chop < 38.2) OR 4h volume drops
-            if close_val > donchian_upper[i] or is_trend or not vol_spike_4h:
+            # Short exit: Bullish Elder Ray OR 1d uptrend OR volume drops
+            if is_bullish or not is_downtrend or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
