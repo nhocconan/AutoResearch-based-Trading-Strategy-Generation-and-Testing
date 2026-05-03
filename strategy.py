@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian channels identify volatility-based support/resistance. Breakouts above upper
-# channel in uptrend (price > EMA34) or below lower channel in downtrend capture strong
-# moves with controlled trade frequency. Volume spike confirms conviction. Designed for
-# 19-50 trades/year on 4h to minimize fee drag while maintaining edge in bull/bear markets.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Camarilla pivot levels provide high-probability support/resistance derived from prior day's range.
+# Breakouts above R3 or below S3 with volume confirmation capture strong moves in bull/bear markets.
+# 1d EMA34 filters for trend alignment, reducing false breakouts. Designed for 12-25 trades/year
+# on 12h timeframe to minimize fee drag while maintaining edge across market regimes.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,60 +28,69 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Pre-compute volume EMA20 for efficiency
-    volume_series = pd.Series(volume)
-    vol_ema_20 = volume_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1d Camarilla levels (R3, S3) from prior day's OHLC
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    # We use R3 and S3 as primary breakout levels
+    typical_range = df_1d['high'].values - df_1d['low'].values
+    camarilla_r3 = df_1d['close'].values + 1.1 * typical_range * 1.1 / 4
+    camarilla_s3 = df_1d['close'].values - 1.1 * typical_range * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient warmup for Donchian
+    for i in range(1, n):  # Start after first bar to have prior day's data
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels using data up to current bar
-        lookback = min(20, i+1)
-        highest_high = np.max(high[i-lookback+1:i+1])
-        lowest_low = np.min(low[i-lookback+1:i+1])
+        # Volume spike confirmation: current volume > 2.0 * 20-period EMA of volume
+        if i >= 20:
+            vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        else:
+            vol_ema_20 = volume[i] if i >= 0 else 0
+        volume_spike = volume[i] > (2.0 * vol_ema_20)
         
-        # Volume spike condition
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
-        
-        breakout_long = close[i] > highest_high and volume_spike
-        breakout_short = close[i] < lowest_low and volume_spike
+        # Breakout conditions: price breaks Camarilla R3/S3 with volume spike
+        breakout_long = close[i] > camarilla_r3_aligned[i] and volume_spike
+        breakout_short = close[i] < camarilla_s3_aligned[i] and volume_spike
         
         if position == 0:
-            # Long: break above upper channel in 1d uptrend with volume spike
-            if breakout_long and ema_34_1d_aligned[i] < close[i]:
+            # Long: break above R3 in 1d uptrend with volume spike
+            if breakout_long and ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel in 1d downtrend with volume spike
-            elif breakout_short and ema_34_1d_aligned[i] > close[i]:
+            # Short: break below S3 in 1d downtrend with volume spike
+            elif breakout_short and ema_34_1d_aligned[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below upper channel or loses 1d uptrend
-            if close[i] < highest_high or ema_34_1d_aligned[i] >= close[i]:
+            # Exit long: price crosses below R3 or loses 1d uptrend
+            if close[i] < camarilla_r3_aligned[i] or ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above lower channel or loses 1d downtrend
-            if close[i] > lowest_low or ema_34_1d_aligned[i] <= close[i]:
+            # Exit short: price crosses above S3 or loses 1d downtrend
+            if close[i] > camarilla_s3_aligned[i] or ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
