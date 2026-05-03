@@ -4,9 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves. 1d EMA50 ensures alignment with daily trend.
-# Volume spike confirms institutional participation. Designed for low trade frequency (target: 20-50/year)
-# to minimize fee drag on 4h timeframe. Works in both bull and bear markets by trading with higher timeframe trend.
+# Donchian breakout captures momentum bursts, EMA50 ensures alignment with daily trend to avoid counter-trend trades.
+# Volume confirmation filters weak breakouts. Designed for low trade frequency (target: 20-50/year) to minimize fee drag.
+# Works in both bull and bear markets by trading with the higher timeframe trend.
 
 name = "4h_Donchian20_1dEMA50_VolumeConfirm"
 timeframe = "4h"
@@ -14,7 +14,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -34,26 +34,26 @@ def generate_signals(prices):
     
     # Calculate 1d EMA50 for trend filter
     ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
-    
-    # Align 1d indicators to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Use rolling window with min_periods to avoid look-ahead
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
             not in_session[i]):
             if position != 0:
@@ -66,24 +66,24 @@ def generate_signals(prices):
         is_downtrend = close[i] < ema_50_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high in uptrend with volume confirmation
-            if high[i] > highest_high[i] and is_uptrend and volume_spike_aligned[i]:
+            # Long: Price breaks above Donchian high in uptrend with volume spike
+            if high[i] > donchian_high[i] and is_uptrend and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low in downtrend with volume confirmation
-            elif low[i] < lowest_low[i] and is_downtrend and volume_spike_aligned[i]:
+            # Short: Price breaks below Donchian low in downtrend with volume spike
+            elif low[i] < donchian_low[i] and is_downtrend and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below Donchian low (reversal) or time-based exit
-            if low[i] < lowest_low[i]:
+            # Exit long: Price breaks below Donchian low (reversal)
+            if low[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above Donchian high (reversal) or time-based exit
-            if high[i] > highest_high[i]:
+            # Exit short: Price breaks above Donchian high (reversal)
+            if high[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
