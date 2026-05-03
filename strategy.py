@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Camarilla R3/S3 levels from daily price action provide high-probability breakout zones.
-# 1d EMA34 filter ensures alignment with the daily trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at these key levels.
-# Designed for low trade frequency (target: 12-37/year) to minimize fee drag on 6h timeframe.
-# Works in both bull and bear markets by trading with the higher timeframe trend.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Uses daily timeframe for HTF alignment (more stable than weekly) to avoid overtrading
+# Camarilla levels from previous day provide intraday breakout zones with institutional relevance
+# 1d EMA34 filter ensures alignment with daily trend to avoid counter-trend trades
+# Volume spike confirms participation at key levels
+# Designed for low trade frequency (target: 12-37/year) to minimize fee drag on 12h timeframe
+# Works in both bull and bear markets by trading with the higher timeframe trend
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,7 +56,7 @@ def generate_signals(prices):
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
