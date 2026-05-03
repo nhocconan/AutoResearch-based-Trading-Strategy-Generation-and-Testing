@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long: Close breaks above R3 AND price > 1d EMA50 (uptrend) AND volume > 2.0x 20-period MA
-# Short: Close breaks below S3 AND price < 1d EMA50 (downtrend) AND volume > 2.0x 20-period MA
+# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long: Close breaks above R3 AND price > 12h EMA50 (uptrend) AND volume > 2.0x 20-period MA
+# Short: Close breaks below S3 AND price < 12h EMA50 (downtrend) AND volume > 2.0x 20-period MA
 # Exit: Opposite pivot breakout or EMA50 trend reversal.
-# Discrete sizing 0.25. Target: 60-120 total trades over 4 years (15-30/year).
-# Camarilla pivots provide strong support/resistance; 1d EMA50 filters higher timeframe trend;
+# Discrete sizing 0.25. Target: 80-180 total trades over 4 years (20-45/year).
+# Camarilla pivots provide strong intraday support/resistance; 12h EMA50 filters higher timeframe trend;
 # volume confirmation reduces false signals. Works in bull via long signals with trend alignment
-# and in bear via short signals with trend alignment. 12h timeframe reduces fee drag vs lower TFs.
+# and in bear via short signals with trend alignment.
 
-name = "12h_Camarilla_R3S3_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +25,22 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla pivot levels for 12h (using previous bar's H/L/C)
-    # Camarilla: R3 = Close + ((High - Low) * 1.2500), S3 = Close - ((High - Low) * 1.2500)
+    # Calculate Camarilla pivot levels for 4h (using previous bar's H/L/C)
+    # Camarilla: R4 = Close + ((High - Low) * 1.5000), R3 = Close + ((High - Low) * 1.2500)
+    #          S3 = Close - ((High - Low) * 1.2500), S4 = Close - ((High - Low) * 1.5000)
+    # We use previous bar's high/low/close to calculate current bar's levels
     prev_high = np.concatenate([[np.nan], high[:-1]])
     prev_low = np.concatenate([[np.nan], low[:-1]])
     prev_close = np.concatenate([[np.nan], close[:-1]])
@@ -46,7 +49,7 @@ def generate_signals(prices):
     r3 = prev_close + (camarilla_range * 1.2500)
     s3 = prev_close - (camarilla_range * 1.2500)
     
-    # Volume regime: current 12h volume > 2.0x 20-period MA
+    # Volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -55,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -63,7 +66,7 @@ def generate_signals(prices):
             continue
             
         close_val = close[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
