@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian(20) provides clear price channel structure for breakouts.
-# 12h HMA21 ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at breakout points.
-# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
-# Works in both bull and bear markets by following the 12h trend direction.
+# Target: 30-100 total trades over 4 years (7-25/year).
+# Donchian(20) captures strong momentum breakouts.
+# 1w EMA50 filter ensures alignment with weekly trend to avoid counter-trend trades.
+# Volume spike confirms institutional participation at breakout.
+# ATR trailing stop (2.5x) manages risk while allowing trends to develop.
+# Focus on BTC/ETH as primary targets (works in both bull and bear via trend filter).
 
-name = "4h_Donchian20_12hHMA21_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,42 +26,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels from 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_channel = high_roll
-    lower_channel = low_roll
-    
-    # Calculate 12h HMA21 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Calculate 1w OHLC for Donchian and EMA (from prior completed 1w bar)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:  # Need at least 1 completed bar for prior
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Use prior completed 1w bar's OHLC for Donchian calculation
+    prior_high = np.roll(df_1w['high'].values, 1)
+    prior_low = np.roll(df_1w['low'].values, 1)
+    prior_close = np.roll(df_1w['close'].values, 1)
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
+    prior_close[0] = np.nan
     
-    def wma(values, window):
-        if len(values) < window:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights/weights.sum(), mode='same')
+    # Calculate Donchian channels for prior 1w bar (20-period)
+    # Upper = highest high of prior 20 1w bars
+    # Lower = lowest low of prior 20 1w bars
+    lookback = 20
+    donch_upper = pd.Series(prior_high).rolling(window=lookback, min_periods=lookback).max().values
+    donch_lower = pd.Series(prior_low).rolling(window=lookback, min_periods=lookback).min().values
     
-    wma_half = wma(close_12h, half_len)
-    wma_full = wma(close_12h, 21)
-    hma_12h = 2 * wma_half - wma_full
-    hma_12h = wma(hma_12h, sqrt_len)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Align Donchian levels to 1d timeframe
+    donch_upper_aligned = align_htf_to_ltf(prices, df_1w, donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_1w, donch_lower)
     
-    # Calculate ATR(30) for stoploss (using 4h data)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate ATR(30) for stoploss (using 1d data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 1d data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -72,21 +73,21 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        upper = upper_channel[i]
-        lower = lower_channel[i]
-        hma_trend = hma_12h_aligned[i]
+        upper = donch_upper_aligned[i]
+        lower = donch_lower_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(hma_trend) or np.isnan(atr_val):
+        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(atr_val):
             continue
             
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 12h HMA21
-        long_entry = (close[i] > upper) and (close[i] > hma_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 12h HMA21
-        short_entry = (close[i] < lower) and (close[i] < hma_trend) and vol_spike
+        # Long: break above Donchian upper with volume spike and above 1w EMA50
+        long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
+        # Short: break below Donchian lower with volume spike and below 1w EMA50
+        short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
@@ -94,10 +95,10 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             highest_high_since_entry = max(highest_high_since_entry, high[i])
-            long_exit = close[i] < (highest_high_since_entry - 2.0 * atr_val)
+            long_exit = close[i] < (highest_high_since_entry - 2.5 * atr_val)
         elif position == -1:  # Short position
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            short_exit = close[i] > (lowest_low_since_entry + 2.0 * atr_val)
+            short_exit = close[i] > (lowest_low_since_entry + 2.5 * atr_val)
         
         # Generate signals
         if position == 0:
