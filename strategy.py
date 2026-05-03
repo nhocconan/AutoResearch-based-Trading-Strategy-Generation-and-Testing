@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R1 in 1d uptrend with volume spike (>1.5x 20-period volume MA).
+# Long when price breaks above Camarilla R1 in 1d uptrend with volume spike (>1.8x 20-period volume MA).
 # Short when price breaks below Camarilla S1 in 1d downtrend with volume spike.
 # Uses 1d EMA50 for higher timeframe trend alignment to avoid counter-trend trades.
 # Volume spike confirms institutional participation. Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
 # Camarilla pivot levels provide precise support/resistance based on prior day's range, effective in both trending and ranging markets.
+# Tight volume spike threshold (1.8x) reduces overtrading while maintaining signal quality.
 
 name = "4h_Camarilla_R1S1_Breakout_1dEMA50_VolumeSpike"
 timeframe = "4h"
@@ -53,7 +54,7 @@ def generate_signals(prices):
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)  # Volume at least 1.5x average
+    volume_spike = volume > (volume_ma * 1.8)  # Volume at least 1.8x average (tight threshold)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
