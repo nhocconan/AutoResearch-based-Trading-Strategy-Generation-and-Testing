@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d ADX regime filter and volume confirmation.
-# Long when Elder Bull Power > 0 AND 1d ADX > 25 (trending market) AND 6h volume > 1.5x 20-period volume MA.
-# Short when Elder Bear Power < 0 AND 1d ADX > 25 (trending market) AND 6h volume > 1.5x 20-period volume MA.
-# Exit when Elder Power crosses zero OR ADX < 20 (range market) OR volume normalizes.
+# Hypothesis: 12h Camarilla H4/L4 breakout with 1w EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above 12h Camarilla H4 level AND 1w close > 1w EMA50 (uptrend) AND 12h volume > 1.8x 20-period volume MA.
+# Short when price breaks below 12h Camarilla L4 level AND 1w close < 1w EMA50 (downtrend) AND 12h volume > 1.8x 20-period volume MA.
+# Exit on retracement to 12h Camarilla H4/L4 levels or trend reversal.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Elder Ray measures trend strength via bull/bear power relative to EMA13, ADX filters for trending regimes only,
-# volume confirms institutional participation. Works in both bull and bear by only trading strong trends.
+# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Camarilla levels provide mathematically derived support/resistance, 1w EMA50 filters for higher-timeframe trend alignment, volume confirms participation.
+# Works in both bull and bear markets by only trading breakouts in the direction of the 1w trend when volume confirms.
 
-name = "6h_ElderRay_ADX_Regime_VolumeSpike_Session"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_Breakout_1wEMA50_VolumeSpike_Session"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,100 +31,92 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX regime filter
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50 for trend direction
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for Camarilla levels (previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength regime
-    # ADX requires +DI, -DI, and TR
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d Camarilla levels from previous 1d OHLC (shifted by 1 to avoid look-ahead)
+    df_1d_shifted = df_1d.copy()
+    df_1d_shifted['open'] = df_1d_shifted['open'].shift(1)
+    df_1d_shifted['high'] = df_1d_shifted['high'].shift(1)
+    df_1d_shifted['low'] = df_1d_shifted['low'].shift(1)
+    df_1d_shifted['close'] = df_1d_shifted['close'].shift(1)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate Camarilla levels using previous day's OHLC
+    prev_high = df_1d_shifted['high'].values
+    prev_low = df_1d_shifted['low'].values
+    prev_close = df_1d_shifted['close'].values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate the range
+    range_hl = prev_high - prev_low
     
-    # Smooth TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate Camarilla levels
+    camarilla_h4 = prev_close + 1.35 * range_hl  # H4 level
+    camarilla_l4 = prev_close - 1.35 * range_hl  # L4 level
     
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, 14)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d_shifted, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d_shifted, camarilla_l4)
     
-    # Align 1d ADX to 6h timeframe (wait for completed 1d bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Calculate 6h volume 20-period MA for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume 20-period MA for spike detection
+    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma[i]) or not in_session[i]):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(volume_ma_12h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Regime conditions: trending market (ADX > 25)
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20  # Exit condition for ranging
+        close_val = close[i]
+        high_val = high[i]
+        low_val = low[i]
         
-        # Volume spike condition: current 6h volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma[i] * 1.5)
+        # Volume spike condition: current 12h volume > 1.8x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_12h[i] * 1.8)
         
-        # Elder Ray conditions
-        bull_strong = bull_power[i] > 0  # Bull power positive
-        bear_strong = bear_power[i] < 0  # Bear power negative
+        # Camarilla breakout conditions
+        breakout_up = high_val > camarilla_h4_aligned[i]  # Price breaks above H4 level
+        breakout_down = low_val < camarilla_l4_aligned[i]  # Price breaks below L4 level
+        
+        # 1w trend conditions
+        trend_up = close_val > ema_50_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < ema_50_1w_aligned[i]  # 1w downtrend
         
         if position == 0:
-            # Enter long: bull power positive AND trending AND volume spike
-            if bull_strong and trending and volume_spike:
+            # Long: Camarilla breakout up AND 1w uptrend AND volume spike AND session
+            if breakout_up and trend_up and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power negative AND trending AND volume spike
-            elif bear_strong and trending and volume_spike:
+            # Short: Camarilla breakout down AND 1w downtrend AND volume spike AND session
+            elif breakout_down and trend_down and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bull power turns negative OR ranging market OR volume normalizes
-            if not bull_strong or ranging or not volume_spike:
+            # Exit long: price retouches Camarilla H4/L4 levels OR trend changes
+            if close_val < camarilla_h4_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bear power turns positive OR ranging market OR volume normalizes
-            if not bear_strong or ranging or not volume_spike:
+            # Exit short: price retouches Camarilla H4/L4 levels OR trend changes
+            if close_val > camarilla_l4_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
