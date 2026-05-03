@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d Williams %R(14) mean reversal filter + volume confirmation
-# Donchian channels capture structural breakouts in both bull/bear markets.
-# Williams %R > -20 (overbought) or < -80 (oversold) on 1d provides mean-reversion edge in ranging markets.
-# Volume confirmation (2.0x 20-period EMA) filters false breakouts.
-# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
-# Works in BOTH bull (trend continuation) and bear (mean reversion from extremes) via regime-adaptive logic.
+# Hypothesis: 6h Elder Ray + 1d ADX Regime + Volume Spike
+# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# 1d ADX > 25 defines trending regime, < 20 defines ranging regime (hysteresis)
+# In trending regime (ADX >= 25): trend follow Elder Ray signals
+# In ranging regime (ADX <= 20): mean revert at Elder Ray extremes
+# Volume confirmation (2.0x 20-period EMA) filters low-conviction moves
+# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
 
-name = "4h_Donchian20_1dWilliamsR_MeanRev_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_1dADXRegime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,45 +30,99 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for Williams %R(14) mean reversal filter
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R(14)
+    # Calculate 1d ADX(14) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          ((highest_high - close_1d) / (highest_high - lowest_low)) * -100, 
-                          -50)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Align 1d Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Smoothed TR, DM+ , DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate Donchian channels from previous 4h bar (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    tr_smoothed = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
     
-    # Volume confirmation: 20-period EMA on 4h
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smoothed / tr_smoothed
+    di_minus = 100 * dm_minus_smoothed / tr_smoothed
+    
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    
+    def wilders_smoothing_dx(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        valid_data = data[~np.isnan(data)]
+        if len(valid_data) < period:
+            return result
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    adx_14 = wilders_smoothing_dx(dx, 14)
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate EMA13 for Elder Ray (6h)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume confirmation: 20-period EMA on 6h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
+    for i in range(13, n):  # Start from 13 to have valid EMA13 and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema13[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +131,67 @@ def generate_signals(prices):
         # Volume spike: current volume > 2.0 x 20-period EMA
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Williams %R conditions for mean reversion
-        williams_oversold = williams_r_aligned[i] < -80  # Oversold
-        williams_overbought = williams_r_aligned[i] > -20  # Overbought
+        # Regime definition with hysteresis
+        if adx_aligned[i] >= 25:
+            regime = 'trending'  # Strong trend
+        elif adx_aligned[i] <= 20:
+            regime = 'ranging'   # Weak trend/ranging
+        else:
+            regime = 'transition'  # Between 20-25, hold previous regime
+            # For simplicity, we'll use the previous bar's regime or default to ranging
+            if i > 0:
+                regime = 'trending' if adx_aligned[i-1] >= 25 else 'ranging'
+            else:
+                regime = 'ranging'
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND Williams %R shows oversold mean reversion
-            if close[i] > donchian_upper[i] and williams_oversold and volume_spike:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below lower Donchian AND Williams %R shows overbought mean reversion
-            elif close[i] < donchian_lower[i] and williams_overbought and volume_spike:
-                signals[i] = -0.25
-                position = -1
+            if regime == 'trending':
+                # Trend following: follow Elder Ray direction
+                if bull_power[i] > 0 and volume_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif bear_power[i] < 0 and volume_spike:
+                    signals[i] = -0.25
+                    position = -1
+            else:  # ranging regime
+                # Mean reversion: fade extreme Elder Ray readings
+                if bull_power[i] > 0 and volume_spike:  # Overbought, short
+                    signals[i] = -0.25
+                    position = -1
+                elif bear_power[i] < 0 and volume_spike:  # Oversold, long
+                    signals[i] = 0.25
+                    position = 1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian OR Williams %R shows overbought
-            if close[i] < donchian_lower[i] or williams_overbought:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit long: Elder Ray turns bearish or regime changes against trend
+            if regime == 'trending':
+                # In trend: exit when bear power turns negative (trend weakening)
+                if bear_power[i] < 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # ranging
+                # In range: exit when bull power normalizes (mean reversion complete)
+                if bull_power[i] <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian OR Williams %R shows oversold
-            if close[i] > donchian_upper[i] or williams_oversold:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Exit short: Elder Ray turns bullish or regime changes against trend
+            if regime == 'trending':
+                # In trend: exit when bull power turns positive (trend weakening)
+                if bull_power[i] > 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # ranging
+                # In range: exit when bear power normalizes (mean reversion complete)
+                if bear_power[i] >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
