@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
-# Williams Alligator: Jaw (EMA13, 8-period offset), Teeth (EMA8, 5-period offset), Lips (EMA5, 3-period offset).
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > close[1] AND 1w EMA50 > close AND volume > 1.5x 20-period MA.
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < close[1] AND 1w EMA50 < close AND volume > 1.5x 20-period MA.
-# Exit when alignment breaks (Lips crosses Teeth or Jaw) OR 1w EMA50 crosses price.
-# Uses 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with strict entry conditions.
-# Williams Alligator identifies trend phases, 1w EMA50 filters for higher timeframe trend, volume confirms participation.
-# Designed to work in both bull (strong bullish alignment) and bear (strong bearish alignment) markets.
+# Hypothesis: 6h Williams %R extreme reversal with 1d EMA50 trend filter and volume confirmation.
+# Williams %R < -80 = oversold (long setup), > -20 = overbought (short setup).
+# Only take reversals when price crosses EMA50 on 6h timeframe.
+# 1d EMA50 must agree with trade direction (long only if price > 1d EMA50, short only if price < 1d EMA50).
+# Volume must be > 1.3x 20-period MA to confirm participation.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_WilliamsR_EMA50_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,27 +30,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator components on 1d
-    # Jaw: EMA13, 8-period offset
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
-    # Teeth: EMA8, 5-period offset
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
-    # Lips: EMA5, 3-period offset
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d volume 20-period MA for spike detection
+    # Calculate 6h volume 20-period MA for spike detection
     volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,47 +57,48 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20[i]) or not in_session[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_ma_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Williams Alligator conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Volume confirmation: current 6h volume > 1.3x 20-period volume MA
+        volume_confirm = volume[i] > (volume_ma_20[i] * 1.3)
         
-        # 1w EMA50 trend filter
-        above_1w_ema = close[i] > ema_50_1w_aligned[i]
-        below_1w_ema = close[i] < ema_50_1w_aligned[i]
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # Volume spike condition: current 1d volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_20[i] * 1.5)
+        # Price relative to 6h EMA50 for crossover confirmation
+        ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+        price_above_ema6h = close[i] > ema_50_6h[i]
+        price_below_ema6h = close[i] < ema_50_6h[i]
         
-        # Price momentum: current close vs previous close
-        price_up = close[i] > close[i-1]
-        price_down = close[i] < close[i-1]
+        # 1d EMA50 trend filter
+        price_above_ema1d = close[i] > ema_50_1d_aligned[i]
+        price_below_ema1d = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: Bullish alignment AND above 1w EMA50 AND price up AND volume spike AND session
-            if bullish_alignment and above_1w_ema and price_up and volume_spike:
+            # Long: Williams %R oversold AND price crosses above 6h EMA50 AND price > 1d EMA50 AND volume confirm AND session
+            if oversold and price_above_ema6h and price_above_ema1d and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment AND below 1w EMA50 AND price down AND volume spike AND session
-            elif bearish_alignment and below_1w_ema and price_down and volume_spike:
+            # Short: Williams %R overbought AND price crosses below 6h EMA50 AND price < 1d EMA50 AND volume confirm AND session
+            elif overbought and price_below_ema6h and price_below_ema1d and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bearish alignment OR price crosses below 1w EMA50
-            if bearish_alignment or not above_1w_ema:
+            # Exit long: Williams %R rises above -50 (momentum fading) OR price crosses below 6h EMA50
+            if williams_r[i] > -50 or price_below_ema6h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bullish alignment OR price crosses above 1w EMA50
-            if bullish_alignment or not below_1w_ema:
+            # Exit short: Williams %R falls below -50 (momentum fading) OR price crosses above 6h EMA50
+            if williams_r[i] < -50 or price_above_ema6h:
                 signals[i] = 0.0
                 position = 0
             else:
