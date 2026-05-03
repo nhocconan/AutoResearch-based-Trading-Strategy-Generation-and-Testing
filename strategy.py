@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R extreme reversal with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. Extreme readings (< -80 or > -20) 
-# combined with 1d trend direction and volume spike capture mean-reversion entries in 
-# both bull and bear markets. Designed for 15-35 trades/year on 12h to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian channels identify volatility-based support/resistance. Breakouts above upper
+# channel in uptrend (price > EMA34) or below lower channel in downtrend capture strong
+# moves with controlled trade frequency. Volume spike confirms conviction. Designed for
+# 12-25 trades/year on 12h to minimize fee drag while maintaining edge in bull/bear markets.
 
-name = "12h_WilliamsR_Extreme_1dEMA34_VolumeSpike"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,54 +37,49 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Williams %R (14-period)
-    williams_r = np.full(n, np.nan)
-    for i in range(13, n):
-        highest_high = np.max(high[i-13:i+1])
-        lowest_low = np.min(low[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # neutral when no range
-    
+    # Calculate 12h Donchian channels (20-period)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after sufficient warmup for Williams %R
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: 20-period EMA
+        # Calculate Donchian channels using data up to current bar
+        lookback = min(20, i+1)
+        highest_high = np.max(high[i-lookback+1:i+1])
+        lowest_low = np.min(low[i-lookback+1:i+1])
+        
+        # Breakout conditions: price breaks Donchian channel with volume spike
         vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
         volume_spike = volume[i] > (2.0 * vol_ema_20)
         
-        # Williams %R extreme conditions
-        williams_r_oversold = williams_r[i] < -80  # extreme oversold
-        williams_r_overbought = williams_r[i] > -20  # extreme overbought
+        breakout_long = close[i] > highest_high and volume_spike
+        breakout_short = close[i] < lowest_low and volume_spike
         
         if position == 0:
-            # Long: Williams %R oversold in 1d uptrend with volume spike
-            if williams_r_oversold and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Long: break above upper channel in 1d uptrend with volume spike
+            if breakout_long and ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought in 1d downtrend with volume spike
-            elif williams_r_overbought and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Short: break below lower channel in 1d downtrend with volume spike
+            elif breakout_short and ema_34_1d_aligned[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R exits oversold territory or loses 1d uptrend
-            if williams_r[i] > -50 or ema_34_1d_aligned[i] < close[i]:
+            # Exit long: price crosses below upper channel or loses 1d uptrend
+            if close[i] < highest_high or ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R exits overbought territory or loses 1d downtrend
-            if williams_r[i] < -50 or ema_34_1d_aligned[i] > close[i]:
+            # Exit short: price crosses above lower channel or loses 1d downtrend
+            if close[i] > lowest_low or ema_34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
