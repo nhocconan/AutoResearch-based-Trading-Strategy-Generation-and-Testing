@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Uses daily timeframe for lower trade frequency, with weekly HTF for trend direction.
-# Donchian channels from prior completed 1d bar provide structural breakout levels.
-# Volume confirmation ensures institutional participation. Weekly EMA50 filter avoids counter-trend trades.
-# Discrete sizing 0.25 to manage drawdown. Target: 50-80 total trades over 4 years.
+# Hypothesis: 6h Williams %R mean reversion with 12h EMA50 trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion works.
+# Trend filter ensures we only take mean reversion trades in the direction of higher timeframe trend.
+# Volume confirmation ensures institutional participation. Discrete sizing 0.25 manages drawdown.
+# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe.
 
-name = "1d_Donchian20_1wEMA50_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_12hEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,47 +23,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and volume regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter and volume regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Use prior completed 1d bar's OHLC for Donchian calculation
-    prior_high = np.roll(df_1d['high'].values, 1)
-    prior_low = np.roll(df_1d['low'].values, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
+    # Calculate 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian channels for prior 1d bar (20-period)
-    # Upper = max(high, 20), Lower = min(low, 20)
-    high_series = pd.Series(prior_high)
-    low_series = pd.Series(prior_low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 12h volume regime (high volume when current volume > 1.5x 20-period MA)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_12h > (1.5 * vol_ma_12h)  # High volume regime
     
-    # Align Donchian levels to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Align volume regime to 6h timeframe
+    vol_regime_aligned = align_htf_to_ltf(prices, df_12h, vol_regime)
     
-    # Calculate 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate 1d volume regime (high volume when current volume > 1.5x 20-period MA)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
-    
-    # Align volume regime to 1d timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
-    
-    # Calculate ATR(14) for 1d data (for stoploss)
+    # Calculate ATR(14) for 6h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -77,28 +60,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get current values
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
+        wr = williams_r[i]
+        ema_trend = ema_50_12h_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
+        if np.isnan(wr) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        # Volume confirmation: current 6h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: break above Donchian upper with volume spike, above 1w EMA50
-        long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend)
-        # Short: break below Donchian lower with volume spike, below 1w EMA50
-        short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend)
+        # Long: Williams %R oversold (< -80) with volume spike, above 12h EMA50, and in high volume regime
+        long_entry = (wr < -80) and volume_spike and (close[i] > ema_trend) and vol_reg
+        # Short: Williams %R overbought (> -20) with volume spike, below 12h EMA50, and in high volume regime
+        short_entry = (wr > -20) and volume_spike and (close[i] < ema_trend) and vol_reg
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
