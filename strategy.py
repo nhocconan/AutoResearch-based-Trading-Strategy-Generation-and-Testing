@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13; strong signals occur when power exceeds 2*ATR
-# Combined with 1d ADX>25 for trending markets and volume spike confirmation to avoid false breakouts.
-# Designed for low trade frequency (12-37/year) on 6h timeframe to minimize fee drag.
-# Works in both bull and bear markets by trading with the trend when momentum is confirmed.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Donchian channels identify key support/resistance; breakouts with 12h trend alignment
+# and volume spike provide high-probability continuation trades. Designed for low trade frequency
+# (19-50/year) on 4h timeframe to minimize fee drag. Works in both bull and bear markets by
+# trading breakouts in the direction of the higher timeframe trend.
 
-name = "6h_ElderRay_1dADX25_VolumeSpike_Regime"
-timeframe = "6h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,89 +28,61 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for EMA50 trend filter and volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h EMA50 for trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 12h volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_12h['volume'].values > (2.0 * vol_ema_20)
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 12h indicators to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_1d
-    minus_di = 100 * minus_dm_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate 6h ATR(14) for Elder Ray scaling
-    tr_6h1 = pd.Series(high).diff().abs()
-    tr_6h2 = (pd.Series(high) - pd.Series(close.shift())).abs()
-    tr_6h3 = (pd.Series(low) - pd.Series(close.shift())).abs()
-    tr_6h = pd.concat([tr_6h1, tr_6h2, tr_6h3], axis=1).max(axis=1).values
-    atr_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    # Calculate Donchian(20) channels on primary timeframe
+    # Upper band = 20-period high, Lower band = 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient warmup for indicators
+    for i in range(100, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_13[i]) or np.isnan(atr_6h[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx_1d_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when 1d ADX > 25 (trending market)
-        is_trending = adx_1d_aligned[i] > 25
-        
         if position == 0:
-            # Long: strong bull power (> 2*ATR) in uptrend regime
-            if bull_power[i] > 2.0 * atr_6h[i] and is_trending:
+            # Long: price breaks above Donchian upper with volume spike in uptrend
+            if close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and ema_50_aligned[i] > 0 and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong bear power (> 2*ATR) in downtrend regime
-            elif bear_power[i] > 2.0 * atr_6h[i] and is_trending:
+            # Short: price breaks below Donchian lower with volume spike in downtrend
+            elif close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and ema_50_aligned[i] < 0 and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bull power weakens (< ATR) or bear power emerges
-            if bull_power[i] < atr_6h[i] or bear_power[i] > atr_6h[i]:
+            # Exit long: price re-enters below Donchian upper
+            if close[i] < donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bear power weakens (< ATR) or bull power emerges
-            if bear_power[i] < atr_6h[i] or bull_power[i] > atr_6h[i]:
+            # Exit short: price re-enters above Donchian lower
+            if close[i] > donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
