@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band mean reversion with 1d ADX regime filter
-# In range-bound markets (ADX < 25), price tends to revert to the mean from Bollinger Bands.
-# Strong trends (ADX >= 25) are avoided to prevent counter-trend trading.
-# Volume confirmation (1.5x 20-period EMA) increases signal reliability.
-# Designed for low trade frequency (12-37/year) with discrete sizing to minimize fee drag.
-# Works in both bull and bear markets by adapting to regime via ADX filter.
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX25 trend filter + volume confirmation
+# Donchian channels provide robust breakout structure in both bull and bear markets.
+# 1d ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
+# Volume confirmation (2.0x 20-period EMA) filters false breakouts.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
+# Uses 4h timeframe as specified in experiment instructions.
 
-name = "12h_BBMeanReversion_1dADX25_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX25_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,12 +29,12 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX25 regime filter
+    # Get 1d data for ADX25 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for regime filter
+    # Calculate 1d ADX(14) for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -99,60 +99,58 @@ def generate_signals(prices):
         return result
     
     adx_14 = wilders_smoothing_dx(dx, 14)
-    adx_regime = adx_14  # Using ADX(14), will filter with threshold 25
+    adx_25 = adx_14  # Using ADX(14) as proxy, will filter with threshold 25
     
-    # Align 1d ADX to 12h timeframe
-    adx_regime_aligned = align_htf_to_ltf(prices, df_1d, adx_regime)
+    # Align 1d ADX to 4h timeframe
+    adx_25_aligned = align_htf_to_ltf(prices, df_1d, adx_25)
     
-    # Bollinger Bands (20, 2) on 12h
-    close_series = pd.Series(close)
-    ma_20 = close_series.rolling(window=20, min_periods=20).mean()
-    std_20 = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = (ma_20 + 2 * std_20).values
-    bb_lower = (ma_20 - 2 * std_20).values
-    bb_middle = ma_20.values
+    # Calculate Donchian channels from previous 4h bar (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 4h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid BB and volume EMA
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_regime_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(adx_25_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Range-bound market: ADX < 25 (avoid strong trends)
-        ranging_market = adx_regime_aligned[i] < 25
+        # Volume spike: current volume > 2.0 x 20-period EMA
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Volume confirmation: current volume > 1.5 x 20-period EMA
-        volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
+        # Strong trend: ADX > 25
+        strong_trend = adx_25_aligned[i] > 25
         
         if position == 0:
-            # Long: price touches lower BB in ranging market with volume confirmation
-            if low[i] <= bb_lower[i] and ranging_market and volume_confirm:
+            # Long: price breaks above upper Donchian in strong uptrend with volume spike
+            if close[i] > donchian_upper[i] and strong_trend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB in ranging market with volume confirmation
-            elif high[i] >= bb_upper[i] and ranging_market and volume_confirm:
+            # Short: price breaks below lower Donchian in strong downtrend with volume spike
+            elif close[i] < donchian_lower[i] and strong_trend and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reaches middle BB or exits ranging market
-            if close[i] >= bb_middle[i] or not ranging_market:
+            # Exit long: price breaks below lower Donchian or loses strong trend
+            if close[i] < donchian_lower[i] or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches middle BB or exits ranging market
-            if close[i] <= bb_middle[i] or not ranging_market:
+            # Exit short: price breaks above upper Donchian or loses strong trend
+            if close[i] > donchian_upper[i] or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
