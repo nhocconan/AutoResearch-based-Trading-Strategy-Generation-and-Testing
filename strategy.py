@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
 # Donchian breakouts capture strong momentum moves. 1w EMA50 ensures alignment with higher timeframe trend.
-# Volume confirmation filters false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
+# Volume confirmation filters false breakouts. Designed for 30-100 total trades over 4 years (7-25/year).
 # Works in bull markets via upward breakouts and in bear markets via downward breakdowns with trend filter.
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels on 12h data
+    # Calculate Donchian channels on 1d data
     # Upper band: 20-period high
     # Lower band: 20-period low
     upper_band = np.full(n, np.nan)
@@ -46,7 +46,7 @@ def generate_signals(prices):
         upper_band[i] = np.max(high[i-19:i+1])
         lower_band[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 1d
     vol_ema_20 = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_20_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
