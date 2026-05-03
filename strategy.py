@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# In bull regime (price > 1w EMA50), go long on breakout above R3 with volume spike.
-# In bear regime (price < 1w EMA50), go short on breakdown below S3 with volume spike.
-# Uses Camarilla pivot levels from prior 1d for structure, 1w EMA50 for regime filter,
-# and 1d volume spike for confirmation. Designed for 30-100 total trades over 4 years.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# In bull regime (price > 1d EMA34), go long on breakout above R3 with volume spike.
+# In bear regime (price < 1d EMA34), go short on breakdown below S3 with volume spike.
+# Uses Camarilla pivot levels from prior 1d for structure, 1d EMA34 for regime filter,
+# and 12h volume spike for confirmation. Designed for 50-150 total trades over 4 years.
 # Focus on BTC/ETH; SOL as secondary.
 
-name = "1d_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,19 +37,15 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * range_1d * 1.0 / 4  # R3 level
     camarilla_s3 = close_1d - 1.1 * range_1d * 1.0 / 4  # S3 level
     
-    # Align Camarilla levels to 1d (wait for 1d bar to complete)
+    # Align Camarilla levels to 12h (wait for 1d bar to complete)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Get 1d data for EMA34 trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Calculate volume regime: current 1d volume > 2.0x 20-period MA
+    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -61,7 +57,7 @@ def generate_signals(prices):
         close_val = close[i]
         r3 = r3_aligned[i]
         s3 = s3_aligned[i]
-        ema_trend = ema_50_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
@@ -71,7 +67,7 @@ def generate_signals(prices):
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1w EMA50, bear if close < 1w EMA50
+        # Determine regime: bull if close > 1d EMA34, bear if close < 1d EMA34
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
