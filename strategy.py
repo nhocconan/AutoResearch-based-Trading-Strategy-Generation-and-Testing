@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility regime filter and volume confirmation
-# Donchian breakout captures momentum in direction of higher timeframe volatility regime.
-# ATR ratio (short/long) identifies low volatility squeezes that precede explosive moves.
-# Volume spike confirms institutional participation. Designed for 20-30 trades/year on 4h to minimize fee drag.
-# Works in bull markets via trend continuation and in bear markets via volatility expansion breakdowns.
+# Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries.
+# 1d ADX > 25 ensures we only trade in trending markets (avoiding chop).
+# Volume spike confirms institutional participation. Designed for 12-30 trades/year on 6h.
+# Works in bull markets via buying dips in uptrends and in bear markets via selling rallies in downtrends.
 
-name = "4h_Donchian20_ATRRegime_VolumeSpike"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dADX_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,81 +28,90 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for volatility regime filter
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR ratio (7-period / 30-period) for volatility regime
+    # Calculate 1d ADX(14) for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
+    # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    atr_7 = pd.Series(tr).ewm(span=7, adjust=False, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    atr_ratio = atr_7 / atr_30  # >1 indicates expanding volatility
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # DI and ADX
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate Williams %R(14) on 6h
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after sufficient warmup for ATR calculation
+    for i in range(14, n):  # Start after sufficient warmup for Williams %R
         # Skip if any value is NaN or outside session
-        if (np.isnan(atr_ratio_aligned[i]) or not in_session[i]):
+        if (np.isnan(adx_14_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels using data up to current bar
-        highest_high = np.max(high[i-19:i+1])  # 20-period high
-        lowest_low = np.min(low[i-19:i+1])     # 20-period low
+        # Calculate Williams %R using data up to current bar
+        highest_high = np.max(high[i-13:i+1])  # 14-period high
+        lowest_low = np.min(low[i-13:i+1])     # 14-period low
+        williams_r = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
         
-        # Volume confirmation: 20-period EMA
-        if i >= 19:
-            vol_ema_20 = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
+        # Volume confirmation: 14-period EMA
+        if i >= 13:
+            vol_ema_14 = pd.Series(volume[i-13:i+1]).ewm(span=14, adjust=False, min_periods=1).mean().iloc[-1]
         else:
-            vol_ema_20 = volume[i]
-        volume_spike = volume[i] > (1.5 * vol_ema_20)
+            vol_ema_14 = volume[i]
+        volume_spike = volume[i] > (1.5 * vol_ema_14)
         
-        # Volatility regime filter: only trade when volatility is contracting (<1.0) or mildly expanding (<1.3)
-        # Avoids choppy markets and waits for expansion after contraction
-        vol_regime = atr_ratio_aligned[i] < 1.3
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high
-        breakout_down = close[i] < lowest_low
+        # Williams %R extreme conditions
+        oversold = williams_r < -80
+        overbought = williams_r > -20
         
         if position == 0:
-            # Long: bullish breakout with volume spike and favorable volatility regime
-            if breakout_up and volume_spike and vol_regime:
+            # Long: oversold in 1d uptrend (ADX > 25) with volume spike
+            if oversold and adx_14_aligned[i] > 25 and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakdown with volume spike and favorable volatility regime
-            elif breakout_down and volume_spike and vol_regime:
+            # Short: overbought in 1d downtrend (ADX > 25) with volume spike
+            elif overbought and adx_14_aligned[i] > 25 and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or volatility expands too much
-            midpoint = (highest_high + lowest_low) / 2
-            if close[i] < midpoint or atr_ratio_aligned[i] > 1.5:
+            # Exit long: Williams %R returns to -50 or loses 1d uptrend
+            if williams_r > -50 or adx_14_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or volatility expands too much
-            midpoint = (highest_high + lowest_low) / 2
-            if close[i] > midpoint or atr_ratio_aligned[i] > 1.5:
+            # Exit short: Williams %R returns to -50 or loses 1d downtrend
+            if williams_r < -50 or adx_14_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
