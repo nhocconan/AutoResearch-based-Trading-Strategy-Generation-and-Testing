@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR-based stoploss.
-# Long when price breaks above 4h Donchian upper channel + bull trend (close > 1d EMA34).
-# Short when price breaks below 4h Donchian lower channel + bear trend (close < 1d EMA34).
-# Uses ATR(14) for dynamic stoploss: exit long if price drops 2*ATR from entry, exit short if price rises 2*ATR from entry.
-# Designed for 75-200 total trades over 4 years (19-50/year) with Sharpe > 0.5 on BTC/ETH/SOL.
-# Works in bull via breakout continuation and in bear via short breakdowns with trend filter.
+# Hypothesis: 6h Donchian(20) breakout with 1d ATR volatility filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high + volume spike in low volatility regime.
+# Short when price breaks below 20-period Donchian low + volume spike in low volatility regime.
+# Uses ATR to filter out high volatility periods where breakouts fail, focusing on low vol breakouts that tend to continue.
+# Designed for 50-150 total trades over 4 years (12-37/year) with Sharpe > 0.5 on BTC/ETH/SOL.
+# Works in bull via breakout continuation and in bear via short breakdowns with volatility filter.
 
-name = "4h_Donchian20_1dEMA34_ATRStop"
-timeframe = "4h"
+name = "6h_Donchian20_1dATR_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,89 +22,102 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR(14) for stoploss
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = 0
-    tr3[0] = 0
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14 = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if i == 0:
+            atr_14[i] = np.nan
+        elif i < 14:
+            if i == 1:
+                atr_14[i] = tr[i]
+            else:
+                atr_14[i] = (atr_14[i-1] * (i-1) + tr[i]) / i
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Align ATR to 6h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 6h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume regime: current 6h volume > 1.8x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma_20)
+    
+    # Volatility filter: ATR below its 50-period MA (low volatility regime)
+    atr_ma_50 = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean().values
+    low_volatility = atr_14_aligned < atr_ma_50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    max_high_since_entry = 0.0
-    min_low_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_roll_max[i]) or 
-            np.isnan(low_roll_min[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ma_50[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        donchian_upper = high_roll_max[i]
-        donchian_lower = low_roll_min[i]
-        ema_trend = ema_34_1d_aligned[i]
-        atr_val = atr[i]
-        
-        # Determine trend regime
-        is_bull_trend = close_val > ema_trend
-        is_bear_trend = close_val < ema_trend
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        atr_val = atr_14_aligned[i]
+        atr_ma_val = atr_ma_50[i]
+        vol_spike = volume_spike[i]
+        low_vol = low_volatility[i]
         
         # Breakout conditions
-        long_breakout = close_val > donchian_upper
-        short_breakout = close_val < donchian_lower
+        long_breakout = close_val > upper_channel
+        short_breakout = close_val < lower_channel
         
-        # Entry logic
+        # Entry logic - only in low volatility regime with volume spike
         if position == 0:
-            if is_bull_trend and long_breakout:
-                signals[i] = 0.30
+            if low_vol and vol_spike and long_breakout:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-                max_high_since_entry = close_val
-                min_low_since_entry = close_val
-            elif is_bear_trend and short_breakout:
-                signals[i] = -0.30
+            elif low_vol and vol_spike and short_breakout:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_val
-                max_high_since_entry = close_val
-                min_low_since_entry = close_val
         elif position == 1:
-            # Update max high for trailing stop
-            max_high_since_entry = max(max_high_since_entry, close_val)
-            # ATR stoploss: exit if price drops 2*ATR from entry
-            if close_val < entry_price - 2.0 * atr_val:
+            # Long exit: price re-enters Donchian channel or volatility spikes
+            if close_val < upper_channel:  # Exit when price moves back below upper channel
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Update min low for trailing stop
-            min_low_since_entry = min(min_low_since_entry, close_val)
-            # ATR stoploss: exit if price rises 2*ATR from entry
-            if close_val > entry_price + 2.0 * atr_val:
+            # Short exit: price re-enters Donchian channel or volatility spikes
+            if close_val > lower_channel:  # Exit when price moves back above lower channel
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
