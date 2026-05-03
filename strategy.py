@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band in bull trend (close > 1d EMA34) with volume > 1.8x 20-period MA.
-# Short when price breaks below Donchian lower band in bear trend (close < 1d EMA34) with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee churn. 1d EMA34 provides strong trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band in bull trend (close > 1d EMA50) with volume > 2.0x 20-period MA.
+# Short when price breaks below Donchian lower band in bear trend (close < 1d EMA50) with volume spike.
+# Uses discrete position sizing (0.25) to minimize fee churn. 1d EMA50 provides strong trend filter.
 # Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years (19-50/year).
 # Works in both bull and bear markets: trend filter ensures we only trade in direction of 1d momentum,
-# while Donchian channels provide clear breakout levels based on price structure.
+# while Donchian breakouts capture sustained moves. ATR-based stoploss limits downside.
 
-name = "4h_Donchian20_1dEMA34_Volume"
+name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,41 +25,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Donchian channels (20-period) on 4h data
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume regime: current 4h volume > 1.8x 20-period MA
+    # Volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
+        ema_trend = ema_50_1d_aligned[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
