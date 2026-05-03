@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
-# Long when price breaks above Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5 * MA20 volume.
-# Short when price breaks below Donchian(20) low AND ADX > 25 AND volume > 1.5 * MA20 volume.
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
+# Donchian breakout captures sustained moves in both bull and bear markets.
+# 1d ADX > 25 filters for trending regimes to avoid whipsaws in ranging markets.
+# Volume spike (volume > 1.5 * 20-period MA) confirms breakout strength.
+# Target: 20-50 trades/year (80-200 over 4 years) with discrete position sizing.
 
-name = "4h_Donchian20_1dADX_VolumeBreakout"
+name = "4h_Donchian20_1dADX_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,22 +69,20 @@ def generate_signals(prices):
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.5 * 20-period MA volume
+    # Calculate volume confirmation: volume > 1.5 * 20-period MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirm[i]) or 
-            not in_session[i]):
+            np.isnan(adx_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,27 +92,27 @@ def generate_signals(prices):
         is_trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume confirmation + trending
-            if close[i] > highest_high[i] and volume_confirm[i] and is_trending:
-                signals[i] = 0.25
+            # Long: price breaks above upper Donchian channel + volume spike + trending regime + session
+            if close[i] > highest_high[i] and volume_spike[i] and is_trending:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below Donchian low + volume confirmation + trending
-            elif close[i] < lowest_low[i] and volume_confirm[i] and is_trending:
-                signals[i] = -0.25
+            # Short: price breaks below lower Donchian channel + volume spike + trending regime + session
+            elif close[i] < lowest_low[i] and volume_spike[i] and is_trending:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR reverse signal
-            if close[i] < lowest_low[i] or (close[i] < lowest_low[i] and volume_confirm[i] and is_trending):
+            # Exit long: price breaks below lower Donchian channel OR reverse signal
+            if close[i] < lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR reverse signal
-            if close[i] > highest_high[i] or (close[i] > highest_high[i] and volume_confirm[i] and is_trending):
+            # Exit short: price breaks above upper Donchian channel OR reverse signal
+            if close[i] > highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
