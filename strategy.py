@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for trend direction and Camarilla levels from 1d for entry/exit (same timeframe for structure)
-# Volume confirmation requires 2.0x average volume to ensure strong participation and reduce trades
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 12h timeframe
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses 1d EMA34 for trend direction and Camarilla levels from 1d for entry/exit
+# Volume confirmation requires 1.8x average volume to ensure strong participation
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag on 4h timeframe
 # Works in both bull and bear markets by following the 1d trend direction and using Camarilla for structure
 # Prioritizes BTC/ETH performance with SOL as secondary
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,13 +46,13 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume confirmation: 20-period EMA on 12h volume
+    # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -69,8 +69,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tighter to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.8 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
         # Camarilla R3/S3 breakout with 1d trend filter
         # Long: Price breaks above R3 + volume spike + price above 1d EMA34 (uptrend)
