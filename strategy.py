@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Donchian breakout captures momentum in direction of higher timeframe trend.
-# EMA34 on 1d ensures we only trade with the daily trend (bullish for longs, bearish for shorts).
-# Volume spike confirms institutional participation. Uses discrete position sizing (0.25) to minimize fee drag.
-# Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility regime filter and volume confirmation
+# Donchian breakout captures momentum in direction of higher timeframe volatility regime.
+# ATR ratio (short/long) identifies low volatility squeezes that precede explosive moves.
+# Volume spike confirms institutional participation. Designed for 20-30 trades/year on 4h to minimize fee drag.
+# Works in bull markets via trend continuation and in bear markets via volatility expansion breakdowns.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_ATRRegime_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,22 +28,36 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
+    # Get 1d data for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ATR ratio (7-period / 30-period) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) channels
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    
+    atr_7 = pd.Series(tr).ewm(span=7, adjust=False, min_periods=7).mean().values
+    atr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    atr_ratio = atr_7 / atr_30  # >1 indicates expanding volatility
+    
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient warmup for Donchian
+    for i in range(30, n):  # Start after sufficient warmup for ATR calculation
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(atr_ratio_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,31 +74,35 @@ def generate_signals(prices):
             vol_ema_20 = volume[i]
         volume_spike = volume[i] > (1.5 * vol_ema_20)
         
+        # Volatility regime filter: only trade when volatility is contracting (<1.0) or mildly expanding (<1.3)
+        # Avoids choppy markets and waits for expansion after contraction
+        vol_regime = atr_ratio_aligned[i] < 1.3
+        
         # Donchian breakout conditions
         breakout_up = close[i] > highest_high
         breakout_down = close[i] < lowest_low
         
         if position == 0:
-            # Long: bullish breakout in 1d uptrend with volume spike
-            if breakout_up and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Long: bullish breakout with volume spike and favorable volatility regime
+            if breakout_up and volume_spike and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakdown in 1d downtrend with volume spike
-            elif breakout_down and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Short: bearish breakdown with volume spike and favorable volatility regime
+            elif breakout_down and volume_spike and vol_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or loses 1d uptrend
+            # Exit long: price returns to midpoint or volatility expands too much
             midpoint = (highest_high + lowest_low) / 2
-            if close[i] < midpoint or ema_34_1d_aligned[i] >= close[i]:
+            if close[i] < midpoint or atr_ratio_aligned[i] > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or loses 1d downtrend
+            # Exit short: price returns to midpoint or volatility expands too much
             midpoint = (highest_high + lowest_low) / 2
-            if close[i] > midpoint or ema_34_1d_aligned[i] <= close[i]:
+            if close[i] > midpoint or atr_ratio_aligned[i] > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
