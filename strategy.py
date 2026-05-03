@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX25 trend filter + volume confirmation
+# Hypothesis: 1d Donchian(20) breakout + 1w ADX25 trend filter + volume confirmation
 # Donchian channels provide robust breakout structure in both bull and bear markets.
-# 1d ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
+# 1w ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
 # Volume confirmation (2.0x 20-period EMA) filters false breakouts.
-# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
+# Designed for 30-100 total trades over 4 years (7-25/year) with discrete sizing to minimize fee drag.
+# Uses 1d primary timeframe and 1w HTF as specified in experiment #122158.
 
-name = "4h_Donchian20_1dADX25_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wADX25_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,28 +29,28 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX25 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for ADX25 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align length
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[np.nan], dm_plus])
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
@@ -100,16 +101,16 @@ def generate_signals(prices):
     adx_14 = wilders_smoothing_dx(dx, 14)
     adx_25 = adx_14  # Using ADX(14) as proxy, will filter with threshold 25
     
-    # Align 1d ADX to 4h timeframe
-    adx_25_aligned = align_htf_to_ltf(prices, df_1d, adx_25)
+    # Align 1w ADX to 1d timeframe
+    adx_25_aligned = align_htf_to_ltf(prices, df_1w, adx_25)
     
-    # Calculate Donchian channels from previous 4h bar (20-period)
+    # Calculate Donchian channels from previous 1d bar (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: 20-period EMA on 4h
+    # Volume confirmation: 20-period EMA on 1d
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
