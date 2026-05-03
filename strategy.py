@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. In 12h timeframe,
-# readings below -80 (oversold) in 1d uptrend or above -20 (overbought) in 1d downtrend
-# with volume spike capture mean reversion moves. Designed for 15-25 trades/year
-# on 12h to minimize fee drag while working in both bull and bear markets via
-# trend-filtered contrarian entries.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13. In strong trends (ADX>25 on 1d),
+# we take signals in the direction of the trend: long when Bull Power>0, short when Bear Power<0.
+# Volume spike confirms conviction. Designed for 12-30 trades/year on 6h to minimize fee drag
+# while capturing trending moves in both bull and bear markets.
 
-name = "12h_WilliamsR_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_1dADX_VolumeSpike_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,65 +28,103 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for trend filter
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ADX for regime filter (trending market)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Williams %R (14-period)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1d = wilders_smoothing(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 6h EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Volume confirmation: 20-period EMA
+    volume_s = pd.Series(volume)
+    vol_ema_20 = volume_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ema_20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after sufficient warmup for Williams %R
+    for i in range(13, n):  # Start after EMA13 warmup
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Williams %R using data up to current bar
-        lookback = min(14, i+1)
-        highest_high = np.max(high[i-lookback+1:i+1])
-        lowest_low = np.min(low[i-lookback+1:i+1])
-        
-        # Avoid division by zero
-        if highest_high == lowest_low:
-            williams_r = -50.0  # neutral
-        else:
-            williams_r = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-        
-        # Volume confirmation: current volume > 2.0 * 20-period EMA of volume
-        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
-        volume_spike = volume[i] > (2.0 * vol_ema_20)
-        
-        # Williams %R conditions: < -80 oversold, > -20 overbought
-        oversold = williams_r < -80
-        overbought = williams_r > -20
+        # Regime filter: only trade in trending markets (ADX > 25)
+        is_trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: Williams %R oversold in 1d uptrend with volume spike
-            if oversold and ema_34_1d_aligned[i] > close[i] and volume_spike:
+            # Enter long: Bull Power > 0 (bulls in control) in uptrend with volume spike
+            if bull_power[i] > 0 and is_trending and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought in 1d downtrend with volume spike
-            elif overbought and ema_34_1d_aligned[i] < close[i] and volume_spike:
+            # Enter short: Bear Power < 0 (bears in control) in uptrend with volume spike
+            elif bear_power[i] < 0 and is_trending and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (exiting oversold) or loses 1d uptrend
-            if williams_r > -50 or ema_34_1d_aligned[i] < close[i]:
+            # Exit long: Bull Power <= 0 or loses trending regime
+            if bull_power[i] <= 0 or not is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (exiting overbought) or loses 1d downtrend
-            if williams_r < -50 or ema_34_1d_aligned[i] > close[i]:
+            # Exit short: Bear Power >= 0 or loses trending regime
+            if bear_power[i] >= 0 or not is_trending:
                 signals[i] = 0.0
                 position = 0
             else:
