@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year). Camarilla pivots provide structure in ranging markets,
+# Target: 75-200 total trades over 4 years (19-50/year). Camarilla pivots provide structure in ranging markets,
 # breakouts capture trends. Works in bull via long breakouts, in bear via short signals.
-# 12h timeframe reduces trade frequency vs 4h/6h, minimizing fee drag while capturing medium-term moves.
+# Proven pattern from top performers: Camarilla pivot + HTF trend + volume confirmation + ATR stop.
 
-name = "12h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_r3 = prior_close_1d + 1.1 * camarilla_range / 4
     camarilla_s3 = prior_close_1d - 1.1 * camarilla_range / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
