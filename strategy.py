@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via smoothed SMAs
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades
-# Volume spike (>2.0x 20-period EMA) filters low-probability breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 1d Camarilla H4/L4 breakout with 1w EMA50 trend filter and volume confirmation
+# Camarilla H4/L4 levels provide strong daily support/resistance for breakouts
+# 1w EMA50 ensures alignment with weekly trend to avoid counter-trend trades
+# Volume spike (>1.8x 20-period EMA) filters low-probability breakouts
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_H4L4_Breakout_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Williams Alligator on 12h: Jaw (13), Teeth (8), Lips (5) SMAs
-    # All values shifted by future offset as per Alligator specification
-    close_series = pd.Series(close)
-    jaw = close_series.rolling(window=13, min_periods=13).mean().shift(8).values  # Jaw: 13-period, shifted 8
-    teeth = close_series.rolling(window=8, min_periods=8).mean().shift(5).values   # Teeth: 8-period, shifted 5
-    lips = close_series.rolling(window=5, min_periods=5).mean().shift(3).values   # Lips: 5-period, shifted 3
+    # Calculate Camarilla levels from previous 1d bar
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Shift to use previous bar's typical price (no look-ahead)
+    typical_price_prev = np.roll(typical_price, 1)
+    typical_price_prev[0] = np.nan  # First bar has no previous
     
-    # Volume confirmation: 20-period EMA on 12h volume
+    # Camarilla H4, L4 levels based on previous bar
+    # H4 = close + 1.1*(high - low) / 2
+    # L4 = close - 1.1*(high - low) / 2
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
+    
+    camarilla_h4 = close_prev + 1.1 * (high_prev - low_prev) / 2.0
+    camarilla_l4 = close_prev - 1.1 * (high_prev - low_prev) / 2.0
+    
+    # Volume confirmation: 20-period EMA on 1d volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -49,36 +62,36 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.8 x 20-period EMA (balanced to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
-        # Alligator signals with 1d trend filter
-        # Long: Lips > Teeth > Jaw (bullish alignment) + price above 1d EMA34 + volume spike
-        # Short: Lips < Teeth < Jaw (bearish alignment) + price below 1d EMA34 + volume spike
+        # Camarilla breakout signals with 1w trend filter
+        # Long: Break above H4 + price above 1w EMA50 + volume spike
+        # Short: Break below L4 + price below 1w EMA50 + volume spike
         if position == 0:
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
+            if close[i] > camarilla_h4[i] and close[i] > ema_50_1w_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
+            elif close[i] < camarilla_l4[i] and close[i] < ema_50_1w_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator lines cross (Lips < Teeth) OR price below 1d EMA34
-            if lips[i] < teeth[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Price breaks below L4 (reversion to mean) OR below 1w EMA50
+            if close[i] < camarilla_l4[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator lines cross (Lips > Teeth) OR price above 1d EMA34
-            if lips[i] > teeth[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Price breaks above H4 (reversion to mean) OR above 1w EMA50
+            if close[i] > camarilla_h4[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
