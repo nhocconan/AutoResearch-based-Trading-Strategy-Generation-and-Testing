@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakouts capture strong momentum moves with proven efficacy.
-# 1w EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at breakout.
-# ATR trailing stop (2.5x) manages risk while allowing trends to develop.
+# Target: 30-100 total trades over 4 years (7-25/year).
+# Donchian breakouts capture strong momentum moves with proven efficacy on SOLUSDT.
+# 1w EMA50 filter ensures alignment with weekly trend to avoid counter-trend trades.
+# Volume spike confirms institutional participation at key levels.
+# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
 # Focus on BTC/ETH as primary targets; SOL is secondary.
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,20 +36,20 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR(30) for stoploss (using 4h data)
+    # Calculate ATR(30) for stoploss (using 1d data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 4h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 1d data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate Donchian channels (20-period) on 1d data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,10 +80,10 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             highest_high_since_entry = max(highest_high_since_entry, high[i])
-            long_exit = close[i] < (highest_high_since_entry - 2.5 * atr_val)
+            long_exit = close[i] < (highest_high_since_entry - 2.0 * atr_val)
         elif position == -1:  # Short position
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            short_exit = close[i] > (lowest_low_since_entry + 2.5 * atr_val)
+            short_exit = close[i] > (lowest_low_since_entry + 2.0 * atr_val)
         
         # Generate signals
         if position == 0:
