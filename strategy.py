@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Long: Close breaks above upper band AND price > 12h EMA50 (uptrend) AND volume > 2.0x 20-period MA
-# Short: Close breaks below lower band AND price < 12h EMA50 (downtrend) AND volume > 2.0x 20-period MA
-# Exit: Opposite Donchian breakout or EMA50 trend reversal.
-# Discrete sizing 0.25. Target: 80-180 total trades over 4 years (20-45/year).
-# Donchian channels provide clear structure; 12h EMA50 filters higher timeframe trend;
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long: Close breaks above upper band AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-period MA
+# Short: Close breaks below lower band AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-period MA
+# Exit: Opposite Donchian breakout or EMA34 trend reversal.
+# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Donchian channels provide clear structure; 1d EMA34 filters higher timeframe trend;
 # volume confirmation reduces false signals. Works in bull via long signals with trend alignment
 # and in bear via short signals with trend alignment.
 
-name = "6h_Donchian20_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +26,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Donchian(20) channels using previous 20 periods (excluding current)
     high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume regime: current 6h volume > 2.0x 20-period MA
+    # Volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,7 +57,7 @@ def generate_signals(prices):
             continue
             
         close_val = close[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
