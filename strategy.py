@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and choppiness regime filter
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
 # Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
 # choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
 # Designed to work in both bull and bear markets by adapting to regime.
-# Target: 19-50 trades/year (75-200 over 4 years).
+# Target: 12-37 trades/year (50-150 over 4 years).
 
-name = "4h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -61,11 +61,11 @@ def generate_signals(prices):
     # Handle division by zero and invalid values
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
