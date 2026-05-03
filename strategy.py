@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
-# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
-# choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
-# Designed to work in both bull and bear markets by adapting to regime.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d volume spike + choppiness regime filter
+# Camarilla pivot levels provide precise support/resistance for institutional breakouts,
+# volume spike confirms participation, choppiness regime ensures we trade with the trend.
+# Designed to work in both bull and bear markets by adapting to volatility regimes.
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -61,20 +61,30 @@ def generate_signals(prices):
     # Handle division by zero and invalid values
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous 1d
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_vals = typical_price.values
+    
+    # Camarilla levels: R3/S3 = typical_price ± 1.1 * (H - L) / 2
+    hl_range = df_1d['high'].values - df_1d['low'].values
+    camarilla_r3 = typical_price_vals + 1.1 * hl_range / 2
+    camarilla_s3 = typical_price_vals - 1.1 * hl_range / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
             not in_session[i]):
             if position != 0:
@@ -87,26 +97,26 @@ def generate_signals(prices):
         is_ranging = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: Donchian breakout above upper band + volume spike + (trending OR ranging)
-            if high[i] > highest_high[i] and volume_spike_aligned[i]:
+            # Long: Close above R3 + volume spike + (trending OR ranging)
+            if close[i] > camarilla_r3_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band + volume spike + (trending OR ranging)
-            elif low[i] < lowest_low[i] and volume_spike_aligned[i]:
+            # Short: Close below S3 + volume spike + (trending OR ranging)
+            elif close[i] < camarilla_s3_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakdown below middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if low[i] < middle or (low[i] < lowest_low[i] and volume_spike_aligned[i]):
+            # Exit long: Close below midpoint of R3 and S3 OR reverse signal
+            midpoint = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if close[i] < midpoint or (close[i] < camarilla_s3_aligned[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout above middle band OR reverse signal
-            middle = (highest_high[i] + lowest_low[i]) / 2
-            if high[i] > middle or (high[i] > highest_high[i] and volume_spike_aligned[i]):
+            # Exit short: Close above midpoint of R3 and S3 OR reverse signal
+            midpoint = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
+            if close[i] > midpoint or (close[i] > camarilla_r3_aligned[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
