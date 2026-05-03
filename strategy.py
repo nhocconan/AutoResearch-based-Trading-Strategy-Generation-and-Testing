@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d Weekly Pivot Direction Filter
-# Uses 1d Ichimoku (Tenkan/Kijun/Senkou Span A/B) for trend regime and cloud filter.
-# Enters long when price breaks above cloud in bull regime (price > weekly pivot),
-# enters short when price breaks below cloud in bear regime (price < weekly pivot).
-# Weekly pivot from 1w data provides structural bias to avoid counter-trend trades.
-# Designed for 50-150 total trades over 4 years with discrete position sizing.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# In bull regime (price > 1d EMA34), go long on breakout above upper band with volume spike.
+# In bear regime (price < 1d EMA34), go short on breakdown below lower band with volume spike.
+# Uses Donchian channels from prior completed 1d for structure, 1d EMA34 for regime filter,
+# and 12h volume spike for confirmation. Designed for 50-150 total trades over 4 years.
+# Focus on BTC/ETH as primary symbols.
 
-name = "6h_IchimokuCloud_1dWeeklyPivot_Filter"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,62 +22,30 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation (prior completed 1d bar)
+    # Get 1d data for Donchian channels (prior completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough data for Ichimoku (26*2)
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Ichimoku components
+    # Calculate prior 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Align Donchian channels to 12h (wait for 1d bar to complete)
+    dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Get 1d data for EMA34 trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Align Ichimoku components to 6h (wait for 1d bar to complete)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Get 1w data for weekly pivot points (prior completed 1w bar)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points from prior completed 1w bar
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot: (H + L + C)/3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3
-    # Weekly R1: 2*P - L
-    weekly_r1 = 2 * weekly_pivot - low_1w
-    # Weekly S1: 2*P - H
-    weekly_s1 = 2 * weekly_pivot - high_1w
-    
-    # Align weekly pivot levels to 6h (wait for 1w bar to complete)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,55 +53,53 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        dh = dh_aligned[i]
+        dl = dl_aligned[i]
+        ema_trend = ema_34_aligned[i]
+        vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or 
-            np.isnan(senkou_a_val) or np.isnan(senkou_b_val) or
-            np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val)):
+        if np.isnan(dh) or np.isnan(dl) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine Ichimoku trend: bullish if Tenkan > Kijun
-        is_ichimoku_bullish = tenkan_val > kijun_val
-        # Determine cloud: green if Senkou A > Senkou B (bullish cloud)
-        is_green_cloud = senkou_a_val > senkou_b_val
-        # Determine price relative to cloud
-        is_above_cloud = close_val > max(senkou_a_val, senkou_b_val)
-        is_below_cloud = close_val < min(senkou_a_val, senkou_b_val)
+        # Determine regime: bull if close > 1d EMA34, bear if close < 1d EMA34
+        is_bull_regime = close_val > ema_trend
+        is_bear_regime = close_val < ema_trend
         
-        # Determine weekly pivot regime: bull if price > pivot, bear if price < pivot
-        is_bull_regime = close_val > pivot_val
-        is_bear_regime = close_val < pivot_val
+        # Regime-based entry conditions
+        if is_bull_regime:
+            # Long: breakout above upper Donchian band with volume spike
+            long_entry = (close_val > dh) and vol_spike
+        else:
+            long_entry = False
+            
+        if is_bear_regime:
+            # Short: breakdown below lower Donchian band with volume spike
+            short_entry = (close_val < dl) and vol_spike
+        else:
+            short_entry = False
         
         # Generate signals
         if position == 0:
-            # Long entry: price breaks above cloud in bull regime with Ichimoku bullish bias
-            if is_above_cloud and is_bull_regime and is_ichimoku_bullish:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below cloud in bear regime with Ichimoku bearish bias
-            elif is_below_cloud and is_bear_regime and not is_ichimoku_bullish:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below cloud or regime turns bearish
-            if is_below_cloud or not is_bull_regime:
+            # Exit on breakdown below lower band (failure of bullish breakout) or regime change to bear
+            if close_val < dl or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above cloud or regime turns bullish
-            if is_above_cloud or is_bull_regime:
+            # Exit on breakout above upper band (failure of bearish breakdown) or regime change to bull
+            if close_val > dh or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
