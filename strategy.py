@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-# In bull regime (close > 1w EMA50), go long on upper Donchian breakout with volume spike.
-# In bear regime (close < 1w EMA50), go short on lower Donchian breakout with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 15-30 trades/year.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h trend filter and volume confirmation.
+# In low volatility regimes (BB Width < 20th percentile), price is primed for breakout.
+# We enter long when price breaks above upper BB with volume spike in bullish 12h trend (close > 12h EMA50).
+# We enter short when price breaks below lower BB with volume spike in bearish 12h trend (close < 12h EMA50).
+# This captures explosive moves after consolidation, works in both bull and bear markets by using 12h trend filter.
 
-name = "1d_Donchian20_1wTrend_VolumeSpike_Regime"
-timeframe = "1d"
+name = "6h_BB_Squeeze_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +18,85 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 20-period Donchian channels (primary timeframe)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    # Calculate volume regime: current 1d volume > 2.0x 20-period MA
+    # Bollinger Band Squeeze: width < 20th percentile of last 50 periods
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
+    
+    # Volume confirmation: current volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Get current values
-        upper_dc = donchian_high[i]
-        lower_dc = donchian_low[i]
-        ema_trend = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
-        close_val = close[i]
-        
         # Skip if any value is NaN
-        if np.isnan(upper_dc) or np.isnan(lower_dc) or np.isnan(ema_trend):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1w EMA50, bear if close < 1w EMA50
-        is_bull_regime = close_val > ema_trend
-        is_bear_regime = close_val < ema_trend
+        close_val = close[i]
+        bb_w = bb_width[i]
+        squeeze_now = squeeze[i]
+        vol_spike = volume_spike[i]
+        ema_trend = ema_50_12h_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
         
-        # Regime-based entry conditions
-        if is_bull_regime:
-            # Long: price breaks above upper Donchian with volume spike
-            long_entry = (close_val > upper_dc) and vol_spike
-        else:
-            long_entry = False
-            
-        if is_bear_regime:
-            # Short: price breaks below lower Donchian with volume spike
-            short_entry = (close_val < lower_dc) and vol_spike
-        else:
-            short_entry = False
+        # Determine 12h trend regime
+        is_bull_trend = close_val > ema_trend
+        is_bear_trend = close_val < ema_trend
+        
+        # Breakout conditions
+        long_breakout = close_val > upper
+        short_breakout = close_val < lower
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            # Look for breakout from squeeze with volume spike and trend alignment
+            if squeeze_now and long_breakout and vol_spike and is_bull_trend:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            elif squeeze_now and short_breakout and vol_spike and is_bear_trend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on close below lower Donchian (breakdown) or regime change to bear
-            if close_val < lower_dc or close_val < ema_trend:
+            # Exit: loss of bullish momentum or volatility expansion (end of squeeze)
+            if close_val < sma_20[i] or not squeeze_now:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on close above upper Donchian (breakout) or regime change to bull
-            if close_val > upper_dc or close_val > ema_trend:
+            # Exit: loss of bearish momentum or volatility expansion
+            if close_val > sma_20[i] or not squeeze_now:
                 signals[i] = 0.0
                 position = 0
             else:
