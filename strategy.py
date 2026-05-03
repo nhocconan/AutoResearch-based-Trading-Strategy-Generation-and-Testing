@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX25 regime filter and volume confirmation.
-# Long when Bull Power > 0 AND ADX > 25 (trending market) AND volume spike (>1.5x 20-period volume MA).
-# Short when Bear Power < 0 AND ADX > 25 AND volume spike.
-# Uses 1d EMA13 for trend direction (price > EMA13 = uptrend for long, price < EMA13 = downtrend for short).
-# Elder Ray measures trend strength via price-EMA relationship. ADX filters for trending regimes only.
-# Volume spike confirms institutional participation. Designed for 6h timeframe to achieve 50-150 total trades over 4 years.
-# Works in both bull and bear markets by only trading in the direction of the 1d trend when ADX confirms strength.
+# Hypothesis: 12h Camarilla Pivot R3/S3 breakout with 1d volume spike and ADX25 regime filter.
+# Long when price breaks above R3 AND volume spike (>1.5x 20-period MA) AND ADX > 25.
+# Short when price breaks below S3 AND volume spike AND ADX > 25.
+# Camarilla pivots from 1d provide intraday support/resistance levels. Breakouts indicate strong momentum.
+# Volume spike confirms institutional participation. ADX filter ensures we only trade in trending regimes.
+# Designed for 12h timeframe to achieve 50-150 total trades over 4 years with tight entry conditions.
 
-name = "6h_ElderRay_1dADX25_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADX25"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,22 +25,29 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Get 1d data for Elder Ray calculation and ADX filter
+    # Get 1d data for Camarilla pivot calculation and ADX filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d Camarilla pivot levels
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
+    # where C = (H+L+CLOSE)/3 (typical price)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema_13_1d
-    bear_power = df_1d['low'].values - ema_13_1d
+    camarilla_r3 = typical_price + ((high_1d - low_1d) * 1.1 / 4)
+    camarilla_s3 = typical_price - ((high_1d - low_1d) * 1.1 / 4)
     
-    # Align Elder Ray components to lower timeframe (1d -> 6h)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align Camarilla levels to lower timeframe (1d -> 12h)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate 1d ADX (14-period)
     # True Range
@@ -70,9 +76,6 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align EMA13 for trend direction
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (volume_ma * 1.5)  # Volume at least 1.5x average
@@ -82,45 +85,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(ema_13_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        open_val = open_prices[i]
         vol_spike = volume_spike[i]
-        bull_val = bull_power_aligned[i]
-        bear_val = bear_power_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         adx_val = adx_aligned[i]
-        ema13_val = ema_13_1d_aligned[i]
-        
-        # Trend direction from EMA13
-        trend_up = close_val > ema13_val   # 1d uptrend
-        trend_down = close_val < ema13_val  # 1d downtrend
         
         if position == 0:
-            # Long: Bull Power > 0 AND ADX > 25 AND uptrend AND volume spike
-            if bull_val > 0 and adx_val > 25 and trend_up and vol_spike:
+            # Long: Price breaks above R3 AND volume spike AND ADX > 25
+            if close_val > r3_val and vol_spike and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND ADX > 25 AND downtrend AND volume spike
-            elif bear_val < 0 and adx_val > 25 and trend_down and vol_spike:
+            # Short: Price breaks below S3 AND volume spike AND ADX > 25
+            elif close_val < s3_val and vol_spike and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Exit: Bull Power <= 0 (loss of bullish momentum)
-            if bull_val <= 0:
+            # Exit: Price breaks below S3 (reversal signal)
+            if close_val < s3_val:
                 exit_signal = True
             # Exit: ADX <= 25 (trend weakening)
             elif adx_val <= 25:
-                exit_signal = True
-            # Exit: Trend changes to downtrend
-            elif not trend_up:
                 exit_signal = True
             
             if exit_signal:
@@ -131,14 +125,11 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Exit: Bear Power >= 0 (loss of bearish momentum)
-            if bear_val >= 0:
+            # Exit: Price breaks above R3 (reversal signal)
+            if close_val > r3_val:
                 exit_signal = True
             # Exit: ADX <= 25 (trend weakening)
             elif adx_val <= 25:
-                exit_signal = True
-            # Exit: Trend changes to uptrend
-            elif not trend_down:
                 exit_signal = True
             
             if exit_signal:
