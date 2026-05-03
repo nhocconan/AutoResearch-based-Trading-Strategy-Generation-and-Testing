@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long: Close breaks above R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-period MA
 # Short: Close breaks below S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-period MA
 # Exit: Opposite Camarilla breakout or EMA34 trend reversal.
-# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
 # Camarilla levels provide strong intraday support/resistance; 1d EMA34 filters higher timeframe trend;
 # volume confirmation reduces false signals. Works in bull via long signals with trend alignment
 # and in bear via short signals with trend alignment.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values  # needed for Camarilla calculation
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -48,11 +47,11 @@ def generate_signals(prices):
     R3 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low)
     S3 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume regime: current 4h volume > 2.0x 20-period MA
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
