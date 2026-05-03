@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h EMA50 trend filter and volume confirmation.
-# In bull regime (price > 4h EMA50), go long on breakout above R1 with volume spike.
-# In bear regime (price < 4h EMA50), go short on breakdown below S1 with volume spike.
-# Uses 4h Camarilla pivots from prior completed 4h bar for structure, 4h EMA50 for regime filter,
-# and 1h volume spike for confirmation. Designed for 15-37 trades/year on 1h timeframe.
-# Focus on BTC/ETH as primary symbols with session filter (08-20 UTC) to reduce noise.
+# Hypothesis: 6h Ichimoku Cloud with 1d Weekly Pivot Direction Filter
+# Uses 1d Ichimoku (Tenkan/Kijun/Senkou Span A/B) for trend regime and cloud filter.
+# Enters long when price breaks above cloud in bull regime (price > weekly pivot),
+# enters short when price breaks below cloud in bear regime (price < weekly pivot).
+# Weekly pivot from 1w data provides structural bias to avoid counter-trend trades.
+# Designed for 50-150 total trades over 4 years with discrete position sizing.
 
-name = "1h_Camarilla_R1S1_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "6h_IchimokuCloud_1dWeeklyPivot_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,102 +22,121 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivots (prior completed 4h bar)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1d data for Ichimoku calculation (prior completed 1d bar)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need enough data for Ichimoku (26*2)
         return np.zeros(n)
     
-    # Calculate prior 4h Camarilla levels (based on previous 4h bar's OHLC)
-    # Using typical Camarilla formula for R1, S1
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1d Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla R1 and S1: R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
-    camarilla_r1 = close_4h + (1.1 * (high_4h - low_4h) / 12)
-    camarilla_s1 = close_4h - (1.1 * (high_4h - low_4h) / 12)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Align Camarilla levels to 1h (wait for 4h bar to complete)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Get 4h data for EMA50 trend filter
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Calculate volume regime: current 1h volume > 2.0x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align Ichimoku components to 6h (wait for 1d bar to complete)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Get 1w data for weekly pivot points (prior completed 1w bar)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points from prior completed 1w bar
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot: (H + L + C)/3
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3
+    # Weekly R1: 2*P - L
+    weekly_r1 = 2 * weekly_pivot - low_1w
+    # Weekly S1: 2*P - H
+    weekly_s1 = 2 * weekly_pivot - high_1w
+    
+    # Align weekly pivot levels to 6h (wait for 1w bar to complete)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Get current values
         close_val = close[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        ema_trend = ema_50_aligned[i]
-        vol_spike = volume_spike[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(r1) or np.isnan(s1) or np.isnan(ema_trend):
+        if (np.isnan(tenkan_val) or np.isnan(kijun_val) or 
+            np.isnan(senkou_a_val) or np.isnan(senkou_b_val) or
+            np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 4h EMA50, bear if close < 4h EMA50
-        is_bull_regime = close_val > ema_trend
-        is_bear_regime = close_val < ema_trend
+        # Determine Ichimoku trend: bullish if Tenkan > Kijun
+        is_ichimoku_bullish = tenkan_val > kijun_val
+        # Determine cloud: green if Senkou A > Senkou B (bullish cloud)
+        is_green_cloud = senkou_a_val > senkou_b_val
+        # Determine price relative to cloud
+        is_above_cloud = close_val > max(senkou_a_val, senkou_b_val)
+        is_below_cloud = close_val < min(senkou_a_val, senkou_b_val)
         
-        # Regime-based entry conditions
-        if is_bull_regime:
-            # Long: breakout above Camarilla R1 with volume spike
-            long_entry = (close_val > r1) and vol_spike
-        else:
-            long_entry = False
-            
-        if is_bear_regime:
-            # Short: breakdown below Camarilla S1 with volume spike
-            short_entry = (close_val < s1) and vol_spike
-        else:
-            short_entry = False
+        # Determine weekly pivot regime: bull if price > pivot, bear if price < pivot
+        is_bull_regime = close_val > pivot_val
+        is_bear_regime = close_val < pivot_val
         
         # Generate signals
         if position == 0:
-            if long_entry:
-                signals[i] = 0.20
+            # Long entry: price breaks above cloud in bull regime with Ichimoku bullish bias
+            if is_above_cloud and is_bull_regime and is_ichimoku_bullish:
+                signals[i] = 0.25
                 position = 1
-            elif short_entry:
-                signals[i] = -0.20
+            # Short entry: price breaks below cloud in bear regime with Ichimoku bearish bias
+            elif is_below_cloud and is_bear_regime and not is_ichimoku_bullish:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on breakdown below S1 (failure of bullish breakout) or regime change to bear
-            if close_val < s1 or close_val < ema_trend:
+            # Exit long: price breaks below cloud or regime turns bearish
+            if is_below_cloud or not is_bull_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit on breakout above R1 (failure of bearish breakdown) or regime change to bull
-            if close_val > r1 or close_val > ema_trend:
+            # Exit short: price breaks above cloud or regime turns bullish
+            if is_above_cloud or is_bull_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
