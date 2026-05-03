@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-# Bull Power = High - EMA13 (measures bull strength), Bear Power = EMA13 - Low (measures bear strength).
-# In bull regime (price > 12h EMA50), go long when Bull Power > 0 and rising with volume spike.
-# In bear regime (price < 12h EMA50), go short when Bear Power > 0 and rising with volume spike.
-# Uses 12h EMA50 for regime filter to avoid counter-trend trades, and Elder Ray to measure
-# momentum strength within the regime. Designed for 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > 1d EMA200) and volume confirmation.
+# In bull regime (price > 1d EMA200), go long on breakout above 20-period high with volume spike.
+# In bear regime (price < 1d EMA200), go short on breakdown below 20-period low with volume spike.
+# Uses Donchian channels for structure, 1d EMA200 for regime filter, and 4h volume spike for confirmation.
+# Designed for 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
 
-name = "6h_ElderRay_12hEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA200_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +23,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA200 trend filter
+    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate Elder Ray components: EMA13 of close, then Bull/Bear Power
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13  # measures bull strength: high above EMA13
-    bear_power = ema_13 - low   # measures bear strength: EMA13 above low
+    # Calculate Donchian channels (20-period) on 4h data
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate rising momentum: current power > previous power
-    bull_power_rising = bull_power > np.roll(bull_power, 1)
-    bear_power_rising = bear_power > np.roll(bear_power, 1)
-    # Handle first bar
-    bull_power_rising[0] = False
-    bear_power_rising[0] = False
-    
-    # Calculate volume regime: current 6h volume > 2.0x 20-period MA
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -55,34 +46,32 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        ema_trend = ema_50_12h_aligned[i]
-        bp = bull_power[i]
-        bp_rising = bull_power_rising[i]
-        br = bear_power[i]
-        br_rising = bear_power_rising[i]
+        upper_donchian = high_ma_20[i]
+        lower_donchian = low_ma_20[i]
+        ema_trend = ema_200_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_trend) or np.isnan(bp) or np.isnan(br):
+        if np.isnan(upper_donchian) or np.isnan(lower_donchian) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 12h EMA50, bear if close < 12h EMA50
+        # Determine regime: bull if close > 1d EMA200, bear if close < 1d EMA200
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
         # Regime-based entry conditions
         if is_bull_regime:
-            # Long: Bull Power > 0 and rising with volume spike
-            long_entry = (bp > 0) and bp_rising and vol_spike
+            # Long: breakout above upper Donchian with volume spike
+            long_entry = (close_val > upper_donchian) and vol_spike
         else:
             long_entry = False
             
         if is_bear_regime:
-            # Short: Bear Power > 0 and rising with volume spike
-            short_entry = (br > 0) and br_rising and vol_spike
+            # Short: breakdown below lower Donchian with volume spike
+            short_entry = (close_val < lower_donchian) and vol_spike
         else:
             short_entry = False
         
@@ -95,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on Bull Power <= 0 (loss of bullish momentum) or regime change to bear
-            if bp <= 0 or close_val < ema_trend:
+            # Exit on breakdown below lower Donchian (failure of bullish breakout) or regime change to bear
+            if close_val < lower_donchian or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on Bear Power <= 0 (loss of bearish momentum) or regime change to bull
-            if br <= 0 or close_val > ema_trend:
+            # Exit on breakout above upper Donchian (failure of bearish breakdown) or regime change to bull
+            if close_val > upper_donchian or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
