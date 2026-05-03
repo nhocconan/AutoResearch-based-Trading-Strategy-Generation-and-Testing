@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 1d EMA(34) trend filter with volume confirmation
-# Williams %R identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold
-# In trending markets, we look for pullbacks to extreme %R levels in direction of 1d EMA(34) trend
-# Volume confirmation ensures institutional participation. Designed for low trade frequency (19-50/year)
-# Works in both bull and bear markets by trading with higher timeframe trend during pullbacks
+# Hypothesis: 4h Williams %R reversal with 1d EMA(34) trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions; reversals from extreme levels
+# with volume spike indicate potential turning points. 1d EMA(34) ensures we trade
+# with the higher timeframe trend to avoid counter-trend whipsaws. Designed for low
+# trade frequency (19-50/year) to minimize fee drag. Works in both bull and bear markets
+# by capturing mean reversals within the prevailing trend.
 
 name = "4h_WilliamsR_1dEMA34_Trend_Volume_v1"
 timeframe = "4h"
@@ -35,12 +36,10 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Williams %R on 4h (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation (2.0x 20-period average) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -60,28 +59,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) + price above 1d EMA(34) + volume spike
-            if (williams_r[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]):
+            # Long entry: Williams %R crosses above -80 from below + price above 1d EMA(34) + volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Williams %R > -20 (overbought) + price below 1d EMA(34) + volume spike
-            elif (williams_r[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]):
+            # Short entry: Williams %R crosses below -20 from above + price below 1d EMA(34) + volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: Williams %R > -20 (overbought) or price below 1d EMA(34) (trend reversal)
-            if williams_r[i] > -20 or close[i] < ema_34_1d_aligned[i]:
+            # Exit: Williams %R crosses above -20 (overbought) or price below 1d EMA(34) (trend reversal)
+            if (williams_r[i] > -20 and williams_r[i-1] <= -20) or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: Williams %R < -80 (oversold) or price above 1d EMA(34) (trend reversal)
-            if williams_r[i] < -80 or close[i] > ema_34_1d_aligned[i]:
+            # Exit: Williams %R crosses below -80 (oversold) or price above 1d EMA(34) (trend reversal)
+            if (williams_r[i] < -80 and williams_r[i-1] >= -80) or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
