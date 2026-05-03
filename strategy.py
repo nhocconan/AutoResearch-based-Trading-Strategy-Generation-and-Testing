@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Uses 12h EMA50 for trend direction (long only when price > EMA50, short only when price < EMA50).
-# Entry: price breaks above Camarilla R3 level with volume > 2.0x 20-period MA for longs,
-#        or breaks below Camarilla S3 level with volume spike for shorts.
-# Exit: ATR(14) trailing stop (2.0x ATR) or reversal of 12h EMA50 trend.
-# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-# Camarilla levels provide intraday support/resistance; 12h EMA50 filters counter-trend trades;
-# volume confirmation reduces false breakouts. Works in bull via trend-following breakouts
-# and in bear via short breakdowns with trend alignment.
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
+# Uses 1w EMA13, EMA8, EMA5 for trend direction (long when EMA5 > EMA8 > EMA13, short when reverse).
+# Entry: price crosses above/below Alligator jaws (EMA13) with volume > 1.5x 20-period MA.
+# Exit: ATR(14) trailing stop (2.5x ATR) or Alligator convergence (EMA8 crosses EMA13).
+# Discrete sizing 0.25. Target: 30-100 total trades over 4 years (7-25/year).
+# Alligator identifies trend exhaustion; 1w filter ensures alignment with higher timeframe;
+# volume confirmation reduces false signals. Works in bull via trend continuation and
+# in bear via counter-trend retraces with higher timeframe alignment.
 
-name = "4h_Camarilla_R3S3_12hEMA50_Volume_ATR"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wTrend_Volume_ATR"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +26,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 2:
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA5, EMA8, EMA13 for Alligator
+    close_1w = df_1w['close'].values
+    ema5_1w = pd.Series(close_1w).ewm(span=5, min_periods=5, adjust=False).mean().values
+    ema8_1w = pd.Series(close_1w).ewm(span=8, min_periods=8, adjust=False).mean().values
+    ema13_1w = pd.Series(close_1w).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Align to 1d timeframe
+    ema5_1w_aligned = align_htf_to_ltf(prices, df_1w, ema5_1w)
+    ema8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema8_1w)
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -45,25 +51,14 @@ def generate_signals(prices):
     tr = np.concatenate([[tr[0]], tr])  # same length as prices
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.25*(high-low), 
-    #            S3 = close - 1.25*(high-low), S4 = close - 1.5*(high-low)
-    # We need previous day's OHLC - using actual Binance 1d data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        camarilla_r3 = np.full(n, np.nan)
-        camarilla_s3 = np.full(n, np.nan)
-    else:
-        # Calculate Camarilla levels for each 1d bar
-        camarilla_r3_1d = df_1d['close'] + 1.25 * (df_1d['high'] - df_1d['low'])
-        camarilla_s3_1d = df_1d['close'] - 1.25 * (df_1d['high'] - df_1d['low'])
-        # Align to 4h timeframe (wait for 1d bar to close)
-        camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d.values)
-        camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d.values)
+    # Calculate 1d Alligator (EMA5, EMA8, EMA13)
+    ema5_1d = pd.Series(close).ewm(span=5, min_periods=5, adjust=False).mean().values
+    ema8_1d = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
+    ema13_1d = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Volume regime: current 4h volume > 2.0x 20-period MA
+    # Volume regime: current 1d volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,23 +68,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema5_1w_aligned[i]) or np.isnan(ema8_1w_aligned[i]) or np.isnan(ema13_1w_aligned[i]) or
+            np.isnan(ema5_1d[i]) or np.isnan(ema8_1d[i]) or np.isnan(ema13_1d[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        ema_trend = ema_50_12h_aligned[i]
-        r3_level = camarilla_r3[i]
-        s3_level = camarilla_s3[i]
+        ema5_1w_val = ema5_1w_aligned[i]
+        ema8_1w_val = ema8_1w_aligned[i]
+        ema13_1w_val = ema13_1w_aligned[i]
+        ema5_1d_val = ema5_1d[i]
+        ema8_1d_val = ema8_1d[i]
+        ema13_1d_val = ema13_1d[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
-        # Determine trend regime
-        is_uptrend = close_val > ema_trend
-        is_downtrend = close_val < ema_trend
+        # Determine 1w trend regime
+        is_uptrend_1w = (ema5_1w_val > ema8_1w_val) and (ema8_1w_val > ema13_1w_val)
+        is_downtrend_1w = (ema5_1w_val < ema8_1w_val) and (ema8_1w_val < ema13_1w_val)
+        
+        # Determine 1d Alligator alignment
+        is_alligator_long = (ema5_1d_val > ema8_1d_val) and (ema8_1d_val > ema13_1d_val)
+        is_alligator_short = (ema5_1d_val < ema8_1d_val) and (ema8_1d_val < ema13_1d_val)
+        is_alligator_converging = abs(ema8_1d_val - ema13_1d_val) < (0.001 * close_val)  # convergence filter
         
         # Update highest/lowest since entry for ATR stop
         if position == 1:
@@ -99,31 +103,31 @@ def generate_signals(prices):
         
         # Entry logic
         if position == 0:
-            # Long: break above R3 with volume spike in uptrend
-            if close_val > r3_level and vol_spike and is_uptrend:
+            # Long: price above Alligator lips (EMA5) with volume spike in 1w uptrend and 1d Alligator aligned
+            if close_val > ema5_1d_val and vol_spike and is_uptrend_1w and is_alligator_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
                 highest_since_entry = high[i]
-            # Short: break below S3 with volume spike in downtrend
-            elif close_val < s3_level and vol_spike and is_downtrend:
+            # Short: price below Alligator lips (EMA5) with volume spike in 1w downtrend and 1d Alligator aligned
+            elif close_val < ema5_1d_val and vol_spike and is_downtrend_1w and is_alligator_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
                 lowest_since_entry = low[i]
         elif position == 1:
-            # Long exit: ATR stoploss OR price breaks below S3 OR trend turns down
-            atr_stop = highest_since_entry - (2.0 * atr_val)
-            if close_val < atr_stop or close_val < s3_level or not is_uptrend:
+            # Long exit: ATR stoploss OR price below Alligator jaws (EMA13) OR 1w trend turns down OR Alligator converging
+            atr_stop = highest_since_entry - (2.5 * atr_val)
+            if close_val < atr_stop or close_val < ema13_1d_val or not is_uptrend_1w or is_alligator_converging:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ATR stoploss OR price breaks above R3 OR trend turns up
-            atr_stop = lowest_since_entry + (2.0 * atr_val)
-            if close_val > atr_stop or close_val > r3_level or not is_downtrend:
+            # Short exit: ATR stoploss OR price above Alligator jaws (EMA13) OR 1w trend turns up OR Alligator converging
+            atr_stop = lowest_since_entry + (2.5 * atr_val)
+            if close_val > atr_stop or close_val > ema13_1d_val or not is_downtrend_1w or is_alligator_converging:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
