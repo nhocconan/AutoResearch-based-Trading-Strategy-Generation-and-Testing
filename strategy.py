@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + choppiness regime filter
-# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
-# choppiness regime ensures we trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
-# Designed to work in both bull and bear markets by adapting to regime.
-# Target: 19-50 trades/year (75-200 over 4 years).
+# Hypothesis: 1d Donchian(20) breakout + 1w volume spike + ADX trend filter
+# Donchian breakout captures sustained momentum, 1w volume spike confirms institutional interest,
+# ADX > 25 ensures we only trade in clear trending markets to avoid whipsaws in ranging conditions.
+# Designed to work in both bull and bear markets by trading with the trend.
+# Target: 7-25 trades/year (30-100 over 4 years).
 
-name = "4h_Donchian20_1dVolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "1d_Donchian20_1wVolumeSpike_ADXTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,71 +28,87 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for volume spike and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for volume spike and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
     
-    # Calculate 1d choppiness index (CHOP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w ADX(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[:period])
+        # Subsequent values: smoothed = previous_smoothed - (previous_smoothed / period) + current_value
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
-    range_14 = hh_14 - ll_14
-    chop = 100 * np.log10(atr_14 / range_14) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
+    atr_1w = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Align 1d indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / np.where(atr_1w == 0, np.nan, atr_1w)
+    di_minus = 100 * dm_minus_smooth / np.where(atr_1w == 0, np.nan, atr_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, np.nan, (di_plus + di_minus))
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align 1w indicators to 1d timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 1d Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):  # Increased warmup for ADX calculation
         # Skip if any value is NaN or outside session
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(adx_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: CHOP < 38.2 = trending (breakout), CHOP > 61.8 = ranging (mean revert)
-        is_trending = chop_aligned[i] < 38.2
-        is_ranging = chop_aligned[i] > 61.8
+        # Trend filter: ADX > 25 indicates strong trend
+        is_trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: Donchian breakout above upper band + volume spike + (trending OR ranging)
-            if high[i] > highest_high[i] and volume_spike_aligned[i]:
+            # Long: Donchian breakout above upper band + volume spike + trending
+            if high[i] > highest_high[i] and volume_spike_aligned[i] and is_trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band + volume spike + (trending OR ranging)
-            elif low[i] < lowest_low[i] and volume_spike_aligned[i]:
+            # Short: Donchian breakdown below lower band + volume spike + trending
+            elif low[i] < lowest_low[i] and volume_spike_aligned[i] and is_trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
