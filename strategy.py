@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation.
 # In bull regime (price > 1d EMA34), go long when Williams %R crosses above -80 (oversold bounce) with volume spike.
-# In bear regime (price < 1d EMA34), go short when Williams %R crosses below -20 (overbought rejection) with volume spike.
-# Uses 1d EMA34 for regime filter, 6h Williams %R for mean reversion entries, and 6h volume spike for confirmation.
-# Designed for 50-150 total trades over 4 years. Focus on BTC/ETH as primary symbols.
+# In bear regime (price < 1d EMA34), go short when Williams %R crosses below -20 (overbought bounce) with volume spike.
+# Uses Williams %R from 12h data, 1d EMA34 for regime filter, and 12h volume spike for confirmation.
+# Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
+# Focus on BTC/ETH as primary symbols.
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike_Trend"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,18 +29,35 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Get 12h data for Williams %R and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Williams %R (14-period) on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate volume regime: current 6h volume > 2.0x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Calculate 12h volume regime: current 12h volume > 2.0x 20-period MA
+    vol_12h = df_12h['volume'].values
+    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    volume_spike = vol_12h > (2.0 * vol_ma_aligned)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
+    
+    # Williams %R thresholds
+    oversold = -80
+    overbought = -20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,12 +65,12 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        wr = williams_r[i]
         ema_trend = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
+        wr = williams_r_aligned[i]
+        vol_spike = volume_spike_aligned[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr) or np.isnan(ema_trend):
+        if np.isnan(ema_trend) or np.isnan(wr) or np.isnan(vol_spike):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,20 +80,25 @@ def generate_signals(prices):
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Williams %R crossover signals
-        wr_cross_above_80 = (wr > -80) and (i > 100 and williams_r[i-1] <= -80)
-        wr_cross_below_20 = (wr < -20) and (i > 100 and williams_r[i-1] >= -20)
+        # Williams %R conditions (need previous value for crossover)
+        if i > 100:
+            wr_prev = williams_r_aligned[i-1]
+            wr_oversold_cross = (wr_prev <= oversold) and (wr > oversold)
+            wr_overbought_cross = (wr_prev >= overbought) and (wr < overbought)
+        else:
+            wr_oversold_cross = False
+            wr_overbought_cross = False
         
         # Regime-based entry conditions
         if is_bull_regime:
             # Long: Williams %R crosses above -80 (oversold bounce) with volume spike
-            long_entry = wr_cross_above_80 and vol_spike
+            long_entry = wr_oversold_cross and vol_spike
         else:
             long_entry = False
             
         if is_bear_regime:
-            # Short: Williams %R crosses below -20 (overbought rejection) with volume spike
-            short_entry = wr_cross_below_20 and vol_spike
+            # Short: Williams %R crosses below -20 (overbought bounce) with volume spike
+            short_entry = wr_overbought_cross and vol_spike
         else:
             short_entry = False
         
@@ -88,21 +111,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on Williams %R crosses above -20 (overbought) or regime change to bear
-            if wr_cross_above_20 := (wr > -20) and (i > 100 and williams_r[i-1] <= -20):
-                signals[i] = 0.0
-                position = 0
-            elif close_val < ema_trend:  # regime change to bear
+            # Exit on Williams %R crossing below -50 (momentum loss) or regime change to bear
+            if wr < -50 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on Williams %R crosses below -80 (oversold) or regime change to bull
-            if wr_cross_below_80 := (wr < -80) and (i > 100 and williams_r[i-1] >= -80):
-                signals[i] = 0.0
-                position = 0
-            elif close_val > ema_trend:  # regime change to bull
+            # Exit on Williams %R crossing above -50 (momentum loss) or regime change to bull
+            if wr > -50 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
