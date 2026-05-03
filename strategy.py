@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivot levels (R3/S3) act as strong support/resistance where price often reverses or breaks out.
-# 1d EMA34 ensures alignment with the daily trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation in the breakout.
-# Designed for low trade frequency (20-50/year) on 4h timeframe to minimize fee drag.
-# Works in both bull and bear markets by trading with the higher timeframe trend.
+# Hypothesis: 6h Williams %R Extreme + 1d Elder Ray + Volume Spike
+# Williams %R identifies overbought/oversold conditions on 6h timeframe.
+# Elder Ray (1d) confirms bull/bear power alignment for trend filter.
+# Volume spike confirms institutional participation.
+# Designed for low trade frequency (12-37/year) to minimize fee drag on 6h timeframe.
+# Works in both bull and bear markets by combining mean reversion (Williams %R extremes)
+# with trend filter (Elder Ray) and volume confirmation.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dElderRay_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,66 +30,69 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA and volume
+    # Get 1d data for Elder Ray and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema_13
+    bear_power = df_1d['low'].values - ema_13
     
     # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 1d indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Calculate Camarilla levels for 4h timeframe using typical price
-    typical_price = (high + low + close) / 3
-    camarilla_high = typical_price.max()
-    camarilla_low = typical_price.min()
-    camarilla_range = camarilla_high - camarilla_low
-    R3 = camarilla_high + (camarilla_range * 1.125 / 4)
-    S3 = camarilla_low - (camarilla_range * 1.125 / 4)
+    # Calculate 6h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):  # Start after sufficient warmup for indicators
+    for i in range(50, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
-        if (np.isnan(R3) or np.isnan(S3) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend direction
-        is_uptrend = close[i] > ema_34_aligned[i]
-        is_downtrend = close[i] < ema_34_aligned[i]
+        # Determine daily trend direction from Elder Ray
+        is_bullish = bull_power_aligned[i] > 0  # Bull Power positive = bullish
+        is_bearish = bear_power_aligned[i] < 0  # Bear Power negative = bearish
         
         if position == 0:
-            # Long: Price breaks above R3 in uptrend with volume spike
-            if high[i] > R3 and is_uptrend and volume_spike_aligned[i]:
+            # Long: Williams %R oversold (< -80) in bullish daily regime with volume spike
+            if williams_r[i] < -80 and is_bullish and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 in downtrend with volume spike
-            elif low[i] < S3 and is_downtrend and volume_spike_aligned[i]:
+            # Short: Williams %R overbought (> -20) in bearish daily regime with volume spike
+            elif williams_r[i] > -20 and is_bearish and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S3 (reversal to downside)
-            if low[i] < S3:
+            # Exit long: Williams %R returns above -50 (mean reversion) or bearish shift
+            if williams_r[i] > -50 or not is_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above R3 (reversal to upside)
-            if high[i] > R3:
+            # Exit short: Williams %R returns below -50 (mean reversion) or bullish shift
+            if williams_r[i] < -50 or not is_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
