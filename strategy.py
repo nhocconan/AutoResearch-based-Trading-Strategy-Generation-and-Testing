@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
-# Long when price breaks above R3 in bull trend (close > 1d EMA34) with volume > 2.0x 20-period MA.
-# Short when price breaks below S3 in bear trend (close < 1d EMA34) with volume spike.
-# Camarilla levels provide structure; 1d EMA34 filters whipsaw; volume confirms participation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike.
+# Long when price breaks above R3 in bull trend (close > 1w EMA50) with volume > 2.0x 20-period MA.
+# Short when price breaks below S3 in bear trend (close < 1w EMA50) with volume spike.
+# Uses 1w trend filter for stronger regime confirmation, reducing whipsaw in ranging markets.
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25.
-# Works in both bull and bear by following the 1d trend direction.
+# Works in both bull and bear by following the 1w trend direction.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d Camarilla levels (based on previous 1d bar)
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # Using previous 1d bar's high, low, close
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 4
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 4
+    # Calculate 1w Camarilla levels (based on previous 1w bar)
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
+    camarilla_r3 = c_1w + (h_1w - l_1w) * 1.1 / 4
+    camarilla_s3 = c_1w - (h_1w - l_1w) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1w bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Volume regime: current 6h volume > 2.0x 20-period MA
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -56,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,7 +62,7 @@ def generate_signals(prices):
             continue
             
         close_val = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         r3 = r3_aligned[i]
         s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
