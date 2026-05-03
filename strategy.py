@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > 1d EMA200) and volume confirmation.
-# In bull regime (price > 1d EMA200), go long on breakout above 20-period high with volume spike.
-# In bear regime (price < 1d EMA200), go short on breakdown below 20-period low with volume spike.
-# Uses Donchian channels for structure, 1d EMA200 for regime filter, and 4h volume spike for confirmation.
-# Designed for 75-200 total trades over 4 years (19-50/year) on BTC/ETH/SOL.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume spike confirmation.
+# In bull regime (price > 1d EMA200), go long on breakout above upper Donchian with volume spike.
+# In bear regime (price < 1d EMA200), go short on breakdown below lower Donchian with volume spike.
+# Uses Donchian channels from 4h for structure, 1d EMA200 for regime filter,
+# and 4h volume spike for confirmation. Designed for 75-200 total trades over 4 years.
 
 name = "4h_Donchian20_1dEMA200_Trend_VolumeSpike"
 timeframe = "4h"
@@ -29,10 +29,10 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d EMA200 trend filter
-    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200 = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate 4h Donchian channels (20-period)
     high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
