@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses 4h timeframe for balanced trade frequency, with 1d for trend direction and volume regime.
-# Donchian levels from prior completed 1d bar provide clear breakout levels.
-# Breakouts with volume indicate institutional participation. Trend filter avoids counter-trend trades.
-# Discrete sizing 0.25 to manage drawdown. Target: 100-200 total trades over 4 years.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Uses daily timeframe for lower trade frequency, with weekly HTF for trend direction.
+# Donchian channels from prior completed 1d bar provide structural breakout levels.
+# Volume confirmation ensures institutional participation. Weekly EMA50 filter avoids counter-trend trades.
+# Discrete sizing 0.25 to manage drawdown. Target: 50-80 total trades over 4 years.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_Trend"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,45 +23,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation, trend filter, and volume regime
+    # Get 1d data for Donchian calculation and volume regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     # Use prior completed 1d bar's OHLC for Donchian calculation
-    # Need 20 prior 1d bars for Donchian(20)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    prior_high = np.roll(df_1d['high'].values, 1)
+    prior_low = np.roll(df_1d['low'].values, 1)
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
     
-    # Calculate Donchian channels for prior 20 completed 1d bars
-    # Upper = max(high of last 20 days), Lower = min(low of last 20 days)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels for prior 1d bar (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20)
+    high_series = pd.Series(prior_high)
+    low_series = pd.Series(prior_low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Shift by 1 to use prior completed day's Donchian levels
-    donchian_upper = np.roll(donchian_upper, 1)
-    donchian_lower = np.roll(donchian_lower, 1)
-    donchian_upper[0] = np.nan
-    donchian_lower[0] = np.nan
-    
-    # Align Donchian levels to 4h timeframe
+    # Align Donchian levels to 1d timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate 1d volume regime (high volume when current volume > 1.5x 20-period MA)
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_regime = vol_1d > (1.5 * vol_ma_20)  # High volume regime
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
     
-    # Align volume regime to 4h timeframe
+    # Align volume regime to 1d timeframe
     vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    # Calculate ATR(14) for 4h data (for stoploss)
+    # Calculate ATR(14) for 1d data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -77,7 +79,7 @@ def generate_signals(prices):
         # Get current values
         upper = donchian_upper_aligned[i]
         lower = donchian_lower_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
         
@@ -88,15 +90,15 @@ def generate_signals(prices):
                 position = 0
             continue
             
-        # Volume confirmation: current 4h volume > 1.5x 20-period MA
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: break above Donchian upper with volume spike, above 1d EMA50, and in high volume regime
-        long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend) and vol_reg
-        # Short: break below Donchian lower with volume spike, below 1d EMA50, and in high volume regime
-        short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend) and vol_reg
+        # Long: break above Donchian upper with volume spike, above 1w EMA50
+        long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend)
+        # Short: break below Donchian lower with volume spike, below 1w EMA50
+        short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend)
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
