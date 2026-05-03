@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Uses 1d EMA34 for trend direction (long only when price > EMA34, short only when price < EMA34).
 # Entry: price breaks above Camarilla R3 level with volume > 2.0x 20-period MA for longs,
 #        or breaks below Camarilla S3 level with volume spike for shorts.
 # Exit: ATR(14) trailing stop (2.0x ATR) or reversal of 1d EMA34 trend.
-# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-# Camarilla levels provide support/resistance; 1d EMA34 filters counter-trend trades;
+# Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+# Camarilla levels from 1d provide robust daily support/resistance; 1d EMA34 filters counter-trend trades;
 # volume confirmation reduces false breakouts. Works in bull via trend-following breakouts
 # and in bear via short breakdowns with trend alignment.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Volume_ATR"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,11 +50,11 @@ def generate_signals(prices):
     #            S3 = close - 1.25*(high-low), S4 = close - 1.5*(high-low)
     camarilla_r3_1d = df_1d['close'] + 1.25 * (df_1d['high'] - df_1d['low'])
     camarilla_s3_1d = df_1d['close'] - 1.25 * (df_1d['high'] - df_1d['low'])
-    # Align to 12h timeframe (wait for 1d bar to close)
+    # Align to 4h timeframe (wait for 1d bar to close)
     camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d.values)
     camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d.values)
     
-    # Volume regime: current 12h volume > 2.0x 20-period MA
+    # Volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
