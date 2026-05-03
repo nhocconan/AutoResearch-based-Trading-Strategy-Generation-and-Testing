@@ -7,7 +7,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above Donchian upper band in bull trend (close > 1d EMA50) with volume > 2.0x 20-period MA.
 # Short when price breaks below Donchian lower band in bear trend (close < 1d EMA50) with volume spike.
 # Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
-# Donchian channels provide clear structure, 1d EMA50 offers robust trend filter, volume confirms conviction.
 
 name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
@@ -34,8 +33,8 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Donchian channels (20-period) on 4h data
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,8 +45,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_ma_20[i]) or 
-            np.isnan(low_ma_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_h[i]) or 
+            np.isnan(donchian_l[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,8 +54,8 @@ def generate_signals(prices):
             
         close_val = close[i]
         ema_trend = ema_50_1d_aligned[i]
-        upper_band = high_ma_20[i]
-        lower_band = low_ma_20[i]
+        upper_band = donchian_h[i]
+        lower_band = donchian_l[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
