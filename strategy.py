@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Long when: price breaks above 4h Camarilla R3 level AND close > 12h EMA50 AND volume > 2.0x 24-bar average
-# Short when: price breaks below 4h Camarilla S3 level AND close < 12h EMA50 AND volume > 2.0x 24-bar average
+# Hypothesis: 1h strategy using 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when: price breaks above 4h Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 24-bar average
+# Short when: price breaks below 4h Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 24-bar average
 # Exit via ATR(24) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses 4h Camarilla for structure (proven edge), 12h EMA50 for HTF trend alignment, volume spike for confirmation
-# Discrete sizing 0.28 balances return and fee drag. Target: 75-200 total trades over 4 years = 19-50/year.
+# Uses 4h Camarilla for structure (proven edge), 1d EMA34 for HTF trend alignment, volume spike for confirmation
+# Discrete sizing 0.20 balances return and fee drag. Target: 60-150 total trades over 4 years = 15-37/year.
+# Session filter (08-20 UTC) reduces noise trades.
 
-name = "4h_Camarilla_R3_S3_12hEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,6 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Pre-compute session hours for filtering (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Calculate 4h Camarilla pivots (based on previous 4h bar)
     df_4h = get_htf_data(prices, '4h')
@@ -50,20 +54,20 @@ def generate_signals(prices):
         camarilla_r3[i] = close_prev + range_prev * 1.1 / 4  # R3 level
         camarilla_s3[i] = close_prev - range_prev * 1.1 / 4  # S3 level
     
-    # Align 4h Camarilla levels to 4h timeframe (completed 4h bar only)
+    # Align 4h Camarilla levels to 1h timeframe (completed 4h bar only)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
-    # Calculate 12h EMA50 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate 1d EMA34 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h ATR(24) for stoploss
+    # 1h ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -81,26 +85,32 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start after warmup (need enough for ATR, Camarilla, EMA calculations)
-    start_idx = 50 + 24 + 5  # EMA50(12h) warmup + ATR(24) + buffer
+    start_idx = 50 + 24 + 34  # EMA34(1d) warmup + ATR(24) + buffer
     
     for i in range(start_idx, n):
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # Check for NaN values in indicators
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above 4h Camarilla R3 with volume spike AND bullish trend (close > 12h EMA50)
-            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
-                signals[i] = 0.28
+            # Long entry: price breaks above 4h Camarilla R3 with volume spike AND bullish trend (close > 1d EMA34)
+            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below 4h Camarilla S3 with volume spike AND bearish trend (close < 12h EMA50)
-            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.28
+            # Short entry: price breaks below 4h Camarilla S3 with volume spike AND bearish trend (close < 1d EMA34)
+            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
                 entry_bar = i
                 lowest_since_entry = low[i]
@@ -115,7 +125,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.20
         
         elif position == -1:  # Short position
             # Update lowest low since entry
@@ -125,6 +135,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.20
     
     return signals
