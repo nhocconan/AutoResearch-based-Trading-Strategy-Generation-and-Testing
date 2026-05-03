@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Extreme Reversal with 1d volume spike and chop regime filter.
-# Williams %R identifies overbought/oversold conditions. Extreme readings below -90 (oversold) or above -10 (overbought) 
-# signal potential reversals. Entry requires: Williams %R crossing back above -90 from below for longs, 
-# or crossing below -10 from above for shorts, confirmed by 1d volume spike (>2x 20-period MA) and 
-# choppiness regime (CHOP > 61.8 = ranging market favorable for mean reversion). 
-# Exit when Williams %R returns to neutral zone (-50) or chop regime ends (CHOP < 38.2).
-# Designed to work in both bull (buy oversold bounces) and bear (sell overbought bounces) markets 
-# by fading extremes in ranging conditions. Target: 20-50 trades/year.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter.
+# Donchian breakout captures momentum. Entry requires price breaking above/below 20-period Donchian channel
+# confirmed by 1d volume spike (>1.5x 20-period volume MA) and chop regime (CHOP > 61.8 = ranging, favorable for breakout continuation).
+# Exit on opposite Donchian(10) touch or chop regime ending (CHOP < 38.2 = trending, risk of false breakout).
+# Works in bull/bear by following momentum in ranging markets where breakouts have higher success rate.
+# Target: 25-40 trades/year.
 
-name = "4h_WilliamsR_Extreme_1dVolumeSpike_ChopRegime"
+name = "4h_Donchian20_VolumeSpike_ChopRegime"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,57 +66,53 @@ def generate_signals(prices):
     # Align 1d indicators to 4h timeframe
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
     
-    # Calculate 4h Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_4h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r_4h = ((highest_high_4h - close) / (highest_high_4h - lowest_low_4h)) * -100
-    # Handle division by zero when high == low
-    williams_r_4h = np.where((highest_high_4h - lowest_low_4h) == 0, -50, williams_r_4h)
+    # Calculate 4h Donchian channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_4h[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume spike condition: current 1d volume > 2x 20-period volume MA
-        # Need to get current 1d volume - use the aligned 1d data point
-        # Since we're on 4h timeframe, we need to check if current 4h bar is within 1d bar
-        # Simpler approach: use 1d volume directly from df_1d aligned
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        volume_spike = vol_1d_aligned[i] > (vol_ma_20_1d_aligned[i] * 2.0)
+        # Volume spike condition: current 1d volume > 1.5x 20-period volume MA
+        volume_spike = vol_1d_aligned[i] > (vol_ma_20_1d_aligned[i] * 1.5)
         
-        # Chop regime condition: CHOP > 61.8 = ranging (good for mean reversion)
+        # Chop regime condition: CHOP > 61.8 = ranging (favorable for breakout)
         chop_ranging = chop_1d_aligned[i] > 61.8
         chop_trending = chop_1d_aligned[i] < 38.2
         
         if position == 0:
-            # Long: Williams %R crossed above -90 from below (exiting oversold) AND volume spike AND chop ranging AND session
-            if i > 0 and williams_r_4h[i-1] <= -90 and williams_r_4h[i] > -90 and volume_spike and chop_ranging:
+            # Long: price breaks above 20-period Donchian high AND volume spike AND chop ranging AND session
+            if close[i] > highest_high_20[i] and volume_spike and chop_ranging:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crossed below -10 from above (exiting overbought) AND volume spike AND chop ranging AND session
-            elif i > 0 and williams_r_4h[i-1] >= -10 and williams_r_4h[i] < -10 and volume_spike and chop_ranging:
+            # Short: price breaks below 20-period Donchian low AND volume spike AND chop ranging AND session
+            elif close[i] < lowest_low_20[i] and volume_spike and chop_ranging:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (-50) OR chop regime ends (trending) OR reverse signal
-            if williams_r_4h[i] >= -50 or chop_trending or (i > 0 and williams_r_4h[i-1] >= -10 and williams_r_4h[i] < -10):
+            # Exit long: price touches 10-period Donchian low OR chop regime ends (trending) OR reverse signal
+            if close[i] < lowest_low_10[i] or chop_trending or (close[i] < lowest_low_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (-50) OR chop regime ends (trending) OR reverse signal
-            if williams_r_4h[i] <= -50 or chop_trending or (i > 0 and williams_r_4h[i-1] <= -90 and williams_r_4h[i] > -90):
+            # Exit short: price touches 10-period Donchian high OR chop regime ends (trending) OR reverse signal
+            if close[i] > highest_high_10[i] or chop_trending or (close[i] > highest_high_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
