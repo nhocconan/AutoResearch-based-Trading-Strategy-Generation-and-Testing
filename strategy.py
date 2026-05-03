@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) upper band in bull trend (close > 1w EMA50) with volume spike.
-# Short when price breaks below Donchian(20) lower band in bear trend (close < 1w EMA50) with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Donchian breakouts capture strong momentum moves, especially effective when aligned with higher timeframe trend.
-# Volume confirmation reduces false breakouts. Designed for 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 in bull trend (close > 1d EMA50) with volume spike.
+# Short when price breaks below S3 in bear trend (close < 1d EMA50) with volume spike.
+# Uses discrete position sizing (0.30) to minimize fee churn.
+# Camarilla pivot levels provide strong intraday support/resistance derived from prior day range.
+# The 1d EMA50 filter ensures we only take breakout trades in the direction of the higher timeframe trend.
+# Volume confirmation reduces false breakouts. Designed for 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_1dEMA50_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,20 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need at least 50 for EMA + buffer
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 51:  # Need at least 50 for EMA + 1 for current
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) channels on 1d timeframe
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get prior day's high, low, close for Camarilla calculation (using 1d data)
+    # Camarilla levels: based on previous day's range
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Volume regime: current 1d volume > 2.0x 20-period MA
+    # Calculate Camarilla R3 and S3 levels
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (they update once per day)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -46,48 +59,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        donchian_upper = highest_high_20[i]
-        donchian_lower = lowest_low_20[i]
-        ema_trend = ema_50_1w_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        r3_level = camarilla_r3_aligned[i]
+        s3_level = camarilla_s3_aligned[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
         is_bull_trend = close_val > ema_trend
         is_bear_trend = close_val < ema_trend
         
-        # Donchian breakout conditions
-        breakout_long = close_val > donchian_upper
-        breakout_short = close_val < donchian_lower
-        
         # Entry logic
         if position == 0:
-            if is_bull_trend and breakout_long and vol_spike:
-                signals[i] = 0.25
+            if is_bull_trend and close_val > r3_level and vol_spike:
+                signals[i] = 0.30
                 position = 1
-            elif is_bear_trend and breakout_short and vol_spike:
-                signals[i] = -0.25
+            elif is_bear_trend and close_val < s3_level and vol_spike:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian lower band OR trend reversal
-            if close_val < donchian_lower or close_val < ema_trend:
+            # Long exit: price closes below EMA50 OR below R3 (failed breakout)
+            if close_val < ema_trend or close_val < r3_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price closes above Donchian upper band OR trend reversal
-            if close_val > donchian_upper or close_val > ema_trend:
+            # Short exit: price closes above EMA50 OR above S3 (failed breakout)
+            if close_val > ema_trend or close_val > s3_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
