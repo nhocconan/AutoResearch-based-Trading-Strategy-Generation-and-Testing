@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d EMA50 trend filter and volume confirmation.
-# Williams %R < -80 = oversold (long setup), > -20 = overbought (short setup).
-# Only take reversals when price crosses EMA50 on 6h timeframe.
-# 1d EMA50 must agree with trade direction (long only if price > 1d EMA50, short only if price < 1d EMA50).
-# Volume must be > 1.3x 20-period MA to confirm participation.
-# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and chop regime filter.
+# Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period MA AND 1d chop > 61.8 (range).
+# Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period MA AND 1d chop > 61.8 (range).
+# Exit when price reverts to Camarilla Pivot level OR chop < 38.2 (trend regime).
+# Uses 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Camarilla provides precise intraday support/resistance, volume confirms participation, chop filter avoids trending markets where mean reversion fails.
 
-name = "6h_WilliamsR_EMA50_Volume_TrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_VolumeSpike_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,75 +29,90 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla, volume, and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d Camarilla levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Camarilla levels use previous day's range
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    range_1d = prev_high - prev_low
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Camarilla levels
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    camarilla_r3 = camarilla_pivot + (range_1d * 1.1 / 4)
+    camarilla_s3 = camarilla_pivot - (range_1d * 1.1 / 4)
     
-    # Calculate 6h volume 20-period MA for spike detection
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate 1d volume 20-period MA for spike detection
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    
+    # Calculate 1d Choppiness Index (CHOP)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # ATR(14) - smoothed TR
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # CHOP = 100 * log10(sum TR(14) / (ATR(14) * 14)) / log10(14)
+    chop_1d = 100 * np.log10(sum_tr_14 / (atr_1d * 14)) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma_20[i]) or not in_session[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 6h volume > 1.3x 20-period volume MA
-        volume_confirm = volume[i] > (volume_ma_20[i] * 1.3)
+        # Volume spike condition: current 1d volume > 2.0x 20-period volume MA
+        volume_spike = volume_1d[i] > (volume_ma_20_1d[i] * 2.0)
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        
-        # Price relative to 6h EMA50 for crossover confirmation
-        ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-        price_above_ema6h = close[i] > ema_50_6h[i]
-        price_below_ema6h = close[i] < ema_50_6h[i]
-        
-        # 1d EMA50 trend filter
-        price_above_ema1d = close[i] > ema_50_1d_aligned[i]
-        price_below_ema1d = close[i] < ema_50_1d_aligned[i]
+        # Chop regime condition: CHOP > 61.8 = ranging (good for mean reversion)
+        chop_ranging = chop_1d_aligned[i] > 61.8
+        chop_trending = chop_1d_aligned[i] < 38.2
         
         if position == 0:
-            # Long: Williams %R oversold AND price crosses above 6h EMA50 AND price > 1d EMA50 AND volume confirm AND session
-            if oversold and price_above_ema6h and price_above_ema1d and volume_confirm:
+            # Long: price breaks above R3 AND volume spike AND chop ranging AND session
+            if close[i] > camarilla_r3_aligned[i] and volume_spike and chop_ranging:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought AND price crosses below 6h EMA50 AND price < 1d EMA50 AND volume confirm AND session
-            elif overbought and price_below_ema6h and price_below_ema1d and volume_confirm:
+            # Short: price breaks below S3 AND volume spike AND chop ranging AND session
+            elif close[i] < camarilla_s3_aligned[i] and volume_spike and chop_ranging:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (momentum fading) OR price crosses below 6h EMA50
-            if williams_r[i] > -50 or price_below_ema6h:
+            # Exit long: price returns to pivot OR chop becomes trending
+            if close[i] <= camarilla_pivot_aligned[i] or chop_trending:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (momentum fading) OR price crosses above 6h EMA50
-            if williams_r[i] < -50 or price_above_ema6h:
+            # Exit short: price returns to pivot OR chop becomes trending
+            if close[i] >= camarilla_pivot_aligned[i] or chop_trending:
                 signals[i] = 0.0
                 position = 0
             else:
