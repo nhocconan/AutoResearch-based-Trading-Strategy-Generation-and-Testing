@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme + 1d Volume Spike + Choppiness Regime Filter
-# Williams %R identifies overbought/oversold conditions; extreme readings (<-90 or >-10) signal exhaustion.
-# Volume spike confirms institutional participation in the reversal.
-# Choppiness regime filter avoids whipsaws: trade mean reversion in ranges (CHOP > 61.8), avoid breakouts in strong trends (CHOP < 38.2).
-# Designed to work in both bull and bear markets by fading extremes in ranging regimes.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ADX trend filter
+# Donchian breakout captures sustained momentum in both bull and bear markets.
+# Weekly volume spike confirms institutional participation.
+# ADX > 25 ensures we only trade in trending conditions, avoiding choppy markets.
+# Designed for low trade frequency (target: 7-25 trades/year) to minimize fee drag.
+# Works in bull markets via breakouts and in bear markets via breakdowns.
 
-name = "12h_WilliamsR_Extreme_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "1d_Donchian20_1wVolumeSpike_ADXTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,49 +29,54 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for volume spike and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for volume spike and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
     
-    # Calculate 1d choppiness index (CHOP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w ADX(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/14)
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
-    range_14 = hh_14 - ll_14
-    chop = 100 * np.log10(atr_14 / range_14) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
+    # Plus and Minus Directional Indicators
+    di_plus = 100 * dm_plus_14 / np.where(atr_14 == 0, 1, atr_14)
+    di_minus = 100 * dm_minus_14 / np.where(atr_14 == 0, 1, atr_14)
     
-    # Align 1d indicators to 12h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Directional Index (DX) and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50.0, williams_r)
+    # Align 1w indicators to 1d timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 1d Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,35 +84,37 @@ def generate_signals(prices):
     for i in range(30, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or not in_session[i]):
+            np.isnan(volume_spike_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (avoid)
-        is_ranging = chop_aligned[i] > 61.8
+        # Trend filter: ADX > 25 indicates trending market
+        is_trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: Williams %R < -90 (oversold) + volume spike + ranging regime
-            if williams_r[i] < -90 and volume_spike_aligned[i] and is_ranging:
+            # Long: Donchian breakout above upper band + volume spike + trending
+            if high[i] > highest_high[i] and volume_spike_aligned[i] and is_trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -10 (overbought) + volume spike + ranging regime
-            elif williams_r[i] > -10 and volume_spike_aligned[i] and is_ranging:
+            # Short: Donchian breakdown below lower band + volume spike + trending
+            elif low[i] < lowest_low[i] and volume_spike_aligned[i] and is_trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R > -50 (recovered from oversold) OR reverse signal
-            if williams_r[i] > -50 or (williams_r[i] > -10 and volume_spike_aligned[i]):
+            # Exit long: Donchian breakdown below middle band OR reverse signal
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if low[i] < middle or (low[i] < lowest_low[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R < -50 (recovered from overbought) OR reverse signal
-            if williams_r[i] < -50 or (williams_r[i] < -90 and volume_spike_aligned[i]):
+            # Exit short: Donchian breakout above middle band OR reverse signal
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if high[i] > middle or (high[i] > highest_high[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
