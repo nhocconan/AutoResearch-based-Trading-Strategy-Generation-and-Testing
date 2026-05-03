@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses ATR-based trailing stop for risk management. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year).
-# Donchian breakouts capture strong momentum moves with proven efficacy.
-# 1d EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation at breakout.
-# ATR trailing stop (2.5x) manages risk while allowing trends to develop.
-# Focus on BTC/ETH as primary targets.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation.
+# Uses ATR-based trailing stop for risk management. Discrete sizing 0.20.
+# Target: 60-150 total trades over 4 years (15-37/year).
+# 1h timeframe balances trade frequency and precision; 4h/1d HTF provides directional bias.
+# Volume spike confirms institutional participation at key levels.
+# ATR trailing stop (2.0x) manages risk while allowing trends to develop.
+# Session filter (08-20 UTC) reduces noise trades.
+# Focus on BTC/ETH as primary targets; SOL is secondary.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R3_S3_4hEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +25,54 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Calculate 1d OHLC for Donchian channels (from prior completed 1d bar)
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 1d OHLC for Camarilla pivot levels (from prior completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 1 completed bar for prior
         return np.zeros(n)
     
-    # Use prior completed 1d bar's OHLC for Donchian calculation
+    # Use prior completed 1d bar's OHLC for Camarilla calculation
     prior_high = np.roll(df_1d['high'].values, 1)
     prior_low = np.roll(df_1d['low'].values, 1)
+    prior_close = np.roll(df_1d['close'].values, 1)
+    prior_open = np.roll(df_1d['open'].values, 1)
     prior_high[0] = np.nan
     prior_low[0] = np.nan
+    prior_close[0] = np.nan
+    prior_open[0] = np.nan
     
-    # Calculate Donchian channels for prior 1d bar (20-period)
-    # Upper = max(high over last 20 days)
-    # Lower = min(low over last 20 days)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Calculate Camarilla levels for prior 1d bar
+    # R3 = Close + (High - Low) * 1.05
+    # S3 = Close - (High - Low) * 1.05
+    cam_high = prior_close + (prior_high - prior_low) * 1.05
+    cam_low = prior_close - (prior_high - prior_low) * 1.05
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    # Align Camarilla levels to 1h timeframe
+    cam_high_aligned = align_htf_to_ltf(prices, df_1d, cam_high)
+    cam_low_aligned = align_htf_to_ltf(prices, df_1d, cam_low)
     
-    donch_upper = rolling_max(prior_high, 20)
-    donch_lower = rolling_min(prior_low, 20)
+    # Calculate 4h EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Align Donchian channels to 12h timeframe
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate ATR(30) for stoploss (using 12h data)
+    # Calculate ATR(30) for stoploss (using 1h data)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=30, min_periods=30, adjust=False).mean().values
     
-    # Volume confirmation: volume > 2.0x 30-bar average (on 12h data)
+    # Volume confirmation: volume > 2.0x 30-bar average (on 1h data)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -81,10 +82,19 @@ def generate_signals(prices):
     lowest_low_since_entry = 0
     
     for i in range(100, n):  # Start after sufficient warmup
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0  # Close position outside session
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         # Get current values
-        upper = donch_upper_aligned[i]
-        lower = donch_lower_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        upper = cam_high_aligned[i]
+        lower = cam_low_aligned[i]
+        ema_trend = ema_50_4h_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
@@ -93,10 +103,10 @@ def generate_signals(prices):
             continue
             
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1d EMA50
-        long_entry = (close[i] > upper) and (close[i] > ema_trend) and vol_spike
-        # Short: break below Donchian lower with volume spike and below 1d EMA50
-        short_entry = (close[i] < lower) and (close[i] < ema_trend) and vol_spike
+        # Long: break above Camarilla R3 with volume spike and above 4h EMA50
+        long_entry = (close[i] > upper) and vol_spike and (close[i] > ema_trend)
+        # Short: break below Camarilla S3 with volume spike and below 4h EMA50
+        short_entry = (close[i] < lower) and vol_spike and (close[i] < ema_trend)
         
         # Exit conditions (trailing stop)
         long_exit = False
@@ -104,19 +114,19 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             highest_high_since_entry = max(highest_high_since_entry, high[i])
-            long_exit = close[i] < (highest_high_since_entry - 2.5 * atr_val)
+            long_exit = close[i] < (highest_high_since_entry - 2.0 * atr_val)
         elif position == -1:  # Short position
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            short_exit = close[i] > (lowest_low_since_entry + 2.5 * atr_val)
+            short_exit = close[i] > (lowest_low_since_entry + 2.0 * atr_val)
         
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 highest_high_since_entry = high[i]
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -124,12 +134,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
