@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts, in bear via short signals.
-# Proven pattern from top performers: price channel + HTF trend + volume confirmation + ATR stop.
-# Focus on 6h timeframe to reduce trade frequency vs lower timeframes while maintaining sufficient sample size.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakouts above R3, in bear via breakdowns below S3.
+# Uses weekly EMA50 to filter trend direction (long only above, short only below) reducing false signals.
+# Volume spike confirms institutional interest in breakouts. 12h timeframe minimizes fee drag vs lower TFs.
+# Proven pattern: price channel + HTF trend + volume confirmation + ATR stop.
 
-name = "6h_Camarilla_R3_S3_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_1wEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Camarilla levels from prior 6h bar (using close of previous completed 6h bar)
-    # We need to get 6h OHLC data, but since we're on 6h timeframe, we can use the current bar's data
-    # Camarilla levels are calculated based on previous day's range, but for intraday we use previous bar
-    # For 6h timeframe, we'll use the prior completed 6h bar's high/low/close
-    
-    # Calculate typical price for prior bar
-    typical_price = (high + low + close) / 3
-    # Shift by 1 to get prior bar's values
-    prior_typical = np.roll(typical_price, 1)
-    prior_typical[0] = np.nan  # First value has no prior
-    
+    # Calculate 12h Camarilla levels from prior 12h bar
     prior_high = np.roll(high, 1)
     prior_high[0] = np.nan
     prior_low = np.roll(low, 1)
@@ -41,26 +32,18 @@ def generate_signals(prices):
     prior_close = np.roll(close, 1)
     prior_close[0] = np.nan
     
-    # Camarilla levels calculation (based on prior bar's range)
-    # R4 = Close + 1.5 * (High - Low)
-    # R3 = Close + 1.1 * (High - Low)
-    # S3 = Close - 1.1 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    # We'll use R3/S3 for fade/breakout logic
-    
-    # Calculate using prior completed bar to avoid look-ahead
     prior_range = prior_high - prior_low
     camarilla_r3 = prior_close + 1.1 * prior_range
     camarilla_s3 = prior_close - 1.1 * prior_range
     
-    # Calculate 1d EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
@@ -78,11 +61,11 @@ def generate_signals(prices):
     highest_high_since_entry = 0
     lowest_low_since_entry = 0
     
-    for i in range(100, n):  # Start after sufficient warmup
+    for i in range(100, n):
         # Get current values
         camarilla_r3_val = camarilla_r3[i]
         camarilla_s3_val = camarilla_s3[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
@@ -91,9 +74,9 @@ def generate_signals(prices):
             continue
             
         # Entry conditions
-        # Long: break above R3 with volume spike and above 1d EMA34
+        # Long: break above R3 with volume spike and above 1w EMA50
         long_entry = (close[i] > camarilla_r3_val) and (close[i] > ema_trend) and vol_spike
-        # Short: break below S3 with volume spike and below 1d EMA34
+        # Short: break below S3 with volume spike and below 1w EMA50
         short_entry = (close[i] < camarilla_s3_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
