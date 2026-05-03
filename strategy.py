@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 6h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above H3 in 1d uptrend (price > EMA34).
 # Short when price breaks below L3 in 1d downtrend (price < EMA34).
 # Volume must be > 2.0x 20-period MA to confirm breakout strength.
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # The Camarilla H3/L3 levels provide strong support/resistance with higher breakout validity than H4/L4.
 # Volume confirmation ensures breakout validity, and the 1d EMA34 ensures we only trade with the higher timeframe trend.
 
-name = "4h_Camarilla_H3L3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
