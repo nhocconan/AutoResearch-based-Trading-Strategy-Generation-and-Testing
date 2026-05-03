@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w EMA50 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion
-# from extreme levels works well. Trend filter ensures we trade with the weekly trend.
-# Volume confirmation reduces false signals. Designed for 20-40 trades/year on 1d to
-# minimize fee drag while maintaining edge in both bull and bear markets.
+# Hypothesis: 6h Williams %R extreme + 1d ADX25 trend filter + volume confirmation
+# Williams %R identifies overbought/oversold conditions. Extreme readings (<-90 or >-10)
+# combined with 1d ADX > 25 (strong trend) and volume spike capture momentum exhaustion
+# reversals in both bull and bear markets. Designed for 12-30 trades/year on 6h to
+# minimize fee drag while maintaining edge via confluence of momentum, trend, and volume.
 
-name = "1d_WilliamsR_MeanReversion_1wEMA50_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dADX25_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,59 +28,96 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Volume confirmation: 20-period EMA
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
+    # Smoothed TR and DM
+    tr_ma = pd.Series(tr).ewm(span=25, adjust=False, min_periods=25).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(span=25, adjust=False, min_periods=25).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(span=25, adjust=False, min_periods=25).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).ewm(span=25, adjust=False, min_periods=25).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Williams %R (14-period) on 6h data
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(14, n):  # Start after sufficient warmup for Williams %R
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(adx_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R conditions with volume confirmation
-        vol_confirm = volume[i] > vol_ema_20[i]
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Williams %R calculation using data up to current bar
+        lookback = min(14, i+1)
+        highest_high = np.max(high[i-lookback+1:i+1])
+        lowest_low = np.min(low[i-lookback+1:i+1])
+        
+        if highest_high == lowest_low:
+            williams_r = -50  # avoid division by zero
+        else:
+            williams_r = (highest_high - close[i]) / (highest_high - lowest_low) * -100
+        
+        # Volume spike confirmation (20-period EMA)
+        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[i]
+        volume_spike = volume[i] > (2.0 * vol_ema_20)
+        
+        # Extreme Williams %R conditions with trend filter and volume
+        williams_oversold = williams_r < -90  # extreme oversold
+        williams_overbought = williams_r > -10  # extreme overbought
+        strong_trend = adx_1d_aligned[i] > 25  # strong 1d trend
         
         if position == 0:
-            # Long: oversold in weekly uptrend with volume confirmation
-            if oversold and ema_50_1w_aligned[i] > close[i] and vol_confirm:
+            # Long: extreme oversold in strong trend with volume spike
+            if williams_oversold and strong_trend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought in weekly downtrend with volume confirmation
-            elif overbought and ema_50_1w_aligned[i] < close[i] and vol_confirm:
+            # Short: extreme overbought in strong trend with volume spike
+            elif williams_overbought and strong_trend and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above -50 (middle) or loses weekly uptrend
-            if williams_r[i] > -50 or ema_50_1w_aligned[i] < close[i]:
+            # Exit long: Williams %R rises above -50 or trend weakens
+            if williams_r > -50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below -50 (middle) or loses weekly downtrend
-            if williams_r[i] < -50 or ema_50_1w_aligned[i] > close[i]:
+            # Exit short: Williams %R falls below -50 or trend weakens
+            if williams_r < -50 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
