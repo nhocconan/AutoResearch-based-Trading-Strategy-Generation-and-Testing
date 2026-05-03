@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low. Long when Bull Power > 0 + volume spike in bull trend (price > 12h EMA50).
-# Short when Bear Power > 0 + volume spike in bear trend (price < 12h EMA50). Uses 12h EMA50 for regime, 6h for entry timing.
-# Designed for 50-150 total trades over 4 years. Works in both bull (Bull Power) and bear (Bear Power) regimes.
+# Hypothesis: 12h Williams %R with 1d EMA50 trend filter and volume spike confirmation.
+# Williams %R measures overbought/oversold levels. Long when %R < -80 (oversold) in uptrend (price > 1d EMA50) with volume spike.
+# Short when %R > -20 (overbought) in downtrend (price < 1d EMA50) with volume spike.
+# Designed for 50-150 total trades over 4 years. Works in both bull (oversold bounces) and bear (overbought reversals) regimes.
 
-name = "6h_ElderRay_12hEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,23 +22,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate Williams %R (14-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
-    
-    # Volume regime: current 6h volume > 2.0x 20-period MA
+    # Volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -48,32 +46,31 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        ema_trend = ema_50_12h_aligned[i]
-        bp = bull_power[i]
-        bb = bear_power[i]
+        ema_trend = ema_50_1d_aligned[i]
+        wr = williams_r[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(ema_trend) or np.isnan(bp) or np.isnan(bb):
+        if np.isnan(ema_trend) or np.isnan(wr):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 12h EMA50, bear if close < 12h EMA50
+        # Determine regime: bull if close > 1d EMA50, bear if close < 1d EMA50
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
         # Regime-based entry conditions
         if is_bull_regime:
-            # Long: Bull Power > 0 (buying strength) + volume spike
-            long_entry = (bp > 0) and vol_spike
+            # Long: Oversold (%R < -80) + volume spike
+            long_entry = (wr < -80) and vol_spike
         else:
             long_entry = False
             
         if is_bear_regime:
-            # Short: Bear Power > 0 (selling strength) + volume spike
-            short_entry = (bb > 0) and vol_spike
+            # Short: Overbought (%R > -20) + volume spike
+            short_entry = (wr > -20) and vol_spike
         else:
             short_entry = False
         
@@ -86,15 +83,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on Bull Power <= 0 (loss of buying strength) or regime change to bear
-            if bp <= 0 or close_val < ema_trend:
+            # Exit on %R > -50 (return from oversold) or regime change to bear
+            if wr > -50 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on Bear Power <= 0 (loss of selling strength) or regime change to bull
-            if bb <= 0 or close_val > ema_trend:
+            # Exit on %R < -50 (return from overbought) or regime change to bull
+            if wr < -50 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
