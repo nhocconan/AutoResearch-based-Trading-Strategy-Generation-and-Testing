@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d EMA34 for strong trend direction (long only when price > EMA34, short only when price < EMA34).
-# Entry: price breaks above Camarilla R3 level with volume > 2.0x 20-period MA for longs,
-#        or breaks below Camarilla S3 level with volume spike for shorts.
-# Exit: ATR(14) trailing stop (2.5x ATR) or reversal of 1d EMA34 trend.
-# Discrete sizing 0.25. Target: 80-180 total trades over 4 years (20-45/year).
-# Camarilla levels from 1d provide robust daily support/resistance; 1d EMA34 filters counter-trend trades;
-# volume confirmation reduces false breakouts. Works in bull via trend-following breakouts
-# and in bear via short breakdowns with trend alignment.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13(close), Bear Power = Low - EMA13(close)
+# Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA34 (uptrend) AND volume > 1.5x 20-period MA
+# Short: Bear Power < 0 AND Bull Power > 0 (bearish momentum) AND price < 1d EMA34 (downtrend) AND volume > 1.5x 20-period MA
+# Exit: Opposite Elder Ray signal or EMA34 trend reversal.
+# Discrete sizing 0.25. Target: 60-140 total trades over 4 years (15-35/year).
+# Elder Ray measures price relative to EMA13 to detect bull/bear power; 1d EMA34 filters higher timeframe trend;
+# volume confirmation reduces false signals. Works in bull via long signals with trend alignment
+# and in bear via short signals with trend alignment.
 
-name = "4h_Camarilla_R3S3_1dEMA34_Volume_ATR"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,46 +27,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA34 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[tr[0]], tr])  # same length as prices
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R3 = close + 1.1666*(high-low), S3 = close - 1.1666*(high-low)
-    camarilla_r3_1d = df_1d['close'] + 1.1666 * (df_1d['high'] - df_1d['low'])
-    camarilla_s3_1d = df_1d['close'] - 1.1666 * (df_1d['high'] - df_1d['low'])
-    # Align to 4h timeframe (wait for 1d bar to close)
-    camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d.values)
-    camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d.values)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Volume regime: current 4h volume > 2.0x 20-period MA
+    # Volume regime: current 6h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for long ATR stop
-    lowest_since_entry = 0.0   # for short ATR stop
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,51 +63,36 @@ def generate_signals(prices):
             
         close_val = close[i]
         ema_trend = ema_34_1d_aligned[i]
-        r3_level = camarilla_r3[i]
-        s3_level = camarilla_s3[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         vol_spike = volume_spike[i]
-        atr_val = atr[i]
         
         # Determine trend regime
         is_uptrend = close_val > ema_trend
         is_downtrend = close_val < ema_trend
         
-        # Update highest/lowest since entry for ATR stop
-        if position == 1:
-            highest_since_entry = max(highest_since_entry, high[i])
-        elif position == -1:
-            lowest_since_entry = min(lowest_since_entry, low[i]) if lowest_since_entry != 0 else low[i]
-        
         # Entry logic
         if position == 0:
-            # Long: break above R3 with volume spike in uptrend
-            if close_val > r3_level and vol_spike and is_uptrend:
+            # Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND uptrend AND volume spike
+            if bp > 0 and br < 0 and is_uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = high[i]
-            # Short: break below S3 with volume spike in downtrend
-            elif close_val < s3_level and vol_spike and is_downtrend:
+            # Short: Bear Power < 0 AND Bull Power > 0 (bearish momentum) AND downtrend AND volume spike
+            elif br < 0 and bp > 0 and is_downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = low[i]
         elif position == 1:
-            # Long exit: ATR stoploss OR price breaks below S3 OR trend turns down
-            atr_stop = highest_since_entry - (2.5 * atr_val)
-            if close_val < atr_stop or close_val < s3_level or not is_uptrend:
+            # Long exit: Bear Power >= 0 (loss of bullish momentum) OR trend turns down
+            if br >= 0 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ATR stoploss OR price breaks above R3 OR trend turns up
-            atr_stop = lowest_since_entry + (2.5 * atr_val)
-            if close_val > atr_stop or close_val > r3_level or not is_downtrend:
+            # Short exit: Bull Power <= 0 (loss of bearish momentum) OR trend turns up
+            if bp <= 0 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
