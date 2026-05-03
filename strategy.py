@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above upper Donchian band (from prior completed 4h bar) with volume > 1.5x 20-period MA and close > 1d EMA34 (uptrend).
-# Short when price breaks below lower Donchian band with volume spike and close < 1d EMA34 (downtrend).
-# Uses discrete position sizing 0.25 to limit fee churn. Target: 75-200 total trades over 4 years (19-50/year).
-# Donchian breakouts capture structural moves; 1d EMA34 filters counter-trend trades in bear markets.
-# Volume confirmation reduces false breakouts. Works in both bull and bear via trend alignment.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses actual Donchian channel calculation from prior 12h bar (H, L) to derive upper/lower bands.
+# Long when price breaks above upper band with volume > 1.5x 20-period MA and close > 1d EMA34 (uptrend).
+# Short when price breaks below lower band with volume spike and close < 1d EMA34 (downtrend).
+# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+# Donchian channels provide structural breakout levels; EMA34 filters counter-trend trades.
+# Volume confirmation reduces false breakouts. Works in bull/bear via trend alignment.
 
-name = "4h_Donchian20_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,21 +35,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Get 4h data for Donchian(20)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 12h data for Donchian(20)
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_4h) < 2:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian(20) from prior 4h bar (H20, L20) - wait for completed bar
-    h20 = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    l20 = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Donchian(20) from prior 12h bar (H20, L20) - wait for completed bar
+    h20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
+    l20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 4h timeframe (wait for completed 4h bar)
-    upper_band = align_htf_to_ltf(prices, df_4h, h20)
-    lower_band = align_htf_to_ltf(prices, df_4h, l20)
+    # Align Donchian levels to 12h timeframe (wait for completed 12h bar)
+    upper_band = align_htf_to_ltf(prices, df_12h, h20)
+    lower_band = align_htf_to_ltf(prices, df_12h, l20)
     
-    # Volume regime: current 4h volume > 1.5x 20-period MA
+    # Volume regime: current 12h volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
