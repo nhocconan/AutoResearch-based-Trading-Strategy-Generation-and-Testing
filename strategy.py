@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high in bull trend (close > 1d EMA50) with volume > 1.5x 20-period MA.
-# Short when price breaks below 20-period Donchian low in bear trend (close < 1d EMA50) with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# 1d EMA50 provides higher timeframe trend filter to avoid counter-trend trades.
-# Volume confirmation ensures moves have institutional participation.
-# Target: 75-200 total trades over 4 years (19-50/year) with Sharpe > 0 on BTC/ETH/SOL.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above Donchian upper band in bull trend (close > 1d EMA50) with volume > 1.5x 20-period MA.
+# Short when price breaks below Donchian lower band in bear trend (close < 1d EMA50) with volume spike.
+# Uses discrete position sizing (0.25) to minimize fee churn. 1d EMA50 avoids counter-trend trades.
+# Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
 
 name = "4h_Donchian20_1dEMA50_Volume"
 timeframe = "4h"
@@ -57,8 +55,8 @@ def generate_signals(prices):
             
         close_val = close[i]
         ema_trend = ema_50_1d_aligned[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
         vol_spike = volume_spike[i]
         
         # Determine trend regime
@@ -66,8 +64,8 @@ def generate_signals(prices):
         is_bear_trend = close_val < ema_trend
         
         # Donchian breakout conditions
-        breakout_up = close_val > upper_channel
-        breakout_down = close_val < lower_channel
+        breakout_up = close_val > upper_band
+        breakout_down = close_val < lower_band
         
         # Entry logic
         if position == 0:
@@ -78,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below lower channel OR trend reversal
-            if close_val < lower_channel or close_val < ema_trend:
+            # Long exit: price breaks below lower band OR trend reversal
+            if close_val < lower_band or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above upper channel OR trend reversal
-            if close_val > upper_channel or close_val > ema_trend:
+            # Short exit: price breaks above upper band OR trend reversal
+            if close_val > upper_band or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
