@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above H3 in 1d uptrend (price > EMA34).
 # Short when price breaks below L3 in 1d downtrend (price < EMA34).
 # Volume must be > 2.0x 20-period MA to confirm breakout strength.
-# Uses discrete sizing 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years.
-# This strategy focuses on BTC and ETH as primary targets, using 1d trend filter to avoid counter-trend trades.
+# Uses discrete sizing 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
+# This strategy uses 1d trend filter (more robust than 12h) to avoid counter-trend trades in both bull and bear markets.
 # The Camarilla H3/L3 levels provide strong support/resistance with higher breakout validity than H4/L4.
 # Volume confirmation ensures breakout validity, and the 1d EMA34 ensures we only trade with the higher timeframe trend.
 
-name = "12h_Camarilla_H3L3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +29,7 @@ def generate_signals(prices):
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34
