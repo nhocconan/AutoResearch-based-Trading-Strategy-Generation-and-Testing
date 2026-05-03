@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13. Combined with 1d EMA34 for higher timeframe trend
-# and volume spike confirmation, this strategy aims to capture strong directional moves with low trade frequency.
-# Works in both bull and bear markets by trading in the direction of the higher timeframe trend.
+# Hypothesis: 12h Williams Alligator strategy with 1d EMA34 trend filter and volume confirmation
+# The Williams Alligator (jaw/teeth/lips) identifies trend strength and direction.
+# When lips cross above teeth and jaw with volume confirmation in uptrend → long
+# When lips cross below teeth and jaw with volume confirmation in downtrend → short
+# Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades
+# Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag
+# Works in both bull and bear markets by trading with the 1d trend
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,9 +30,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for EMA34 trend filter and volume spike
+    # Get 1d data for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -39,17 +42,18 @@ def generate_signals(prices):
     vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Calculate Elder Ray components on 6h data
-    # EMA13 for reference
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema_13
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA, shifted 8 bars
+    # Teeth: 8-period SMMA, shifted 5 bars  
+    # Lips: 5-period SMMA, shifted 3 bars
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    jaw = pd.Series(close).ewm(alpha=1/13, adjust=False).mean().shift(8).values
+    teeth = pd.Series(close).ewm(alpha=1/8, adjust=False).mean().shift(5).values
+    lips = pd.Series(close).ewm(alpha=1/5, adjust=False).mean().shift(3).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,36 +61,40 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after sufficient warmup for indicators
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend direction from 1d EMA34
+        # Determine 1d trend direction
         is_uptrend = close[i] > ema_34_aligned[i]
         is_downtrend = close[i] < ema_34_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bullish momentum) with volume spike in uptrend
-            if bull_power[i] > 0 and volume_spike_aligned[i] and is_uptrend:
+            # Long: lips cross above teeth and jaw with volume confirmation in uptrend
+            if (lips[i] > teeth[i] and lips[i] > jaw[i] and 
+                lips[i-1] <= teeth[i-1] and lips[i-1] <= jaw[i-1] and
+                is_uptrend and volume_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish momentum) with volume spike in downtrend
-            elif bear_power[i] < 0 and volume_spike_aligned[i] and is_downtrend:
+            # Short: lips cross below teeth and jaw with volume confirmation in downtrend
+            elif (lips[i] < teeth[i] and lips[i] < jaw[i] and 
+                  lips[i-1] >= teeth[i-1] and lips[i-1] >= jaw[i-1] and
+                  is_downtrend and volume_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power turns negative or loses volume confirmation
-            if bull_power[i] <= 0:
+            # Exit long: lips cross below teeth (trend weakening)
+            if lips[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power turns positive or loses volume confirmation
-            if bear_power[i] >= 0:
+            # Exit short: lips cross above teeth (trend weakening)
+            if lips[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
