@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-bar high), price > 1d EMA34, and volume > 2.0x 20-bar average
-# Short when price breaks below Donchian lower (20-bar low), price < 1d EMA34, and volume > 2.0x 20-bar average
-# Uses 1d EMA for higher timeframe trend alignment (matches experiment HTF)
-# Volume spike confirms breakout strength
-# Discrete position sizing (0.25) to minimize fee churn
-# Designed for low trade frequency (19-50/year on 4h) to avoid fee drag
-# Works in bull (breakouts above rising EMA) and bear (breakdowns below falling EMA)
+# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold), price > 1d EMA34, and volume > 1.8x 20-bar average
+# Short when Williams %R crosses below -20 (overbought), price < 1d EMA34, and volume > 1.8x 20-bar average
+# Williams %R identifies exhaustion points; EMA34 ensures trend alignment; volume confirms strength
+# Designed for low trade frequency (12-37/year on 6h) to avoid fee drag
+# Works in bull (buying dips in uptrend) and bear (selling rallies in downtrend)
 
-name = "4h_Donchian20_Volume_1dEMA34_Trend_Volume_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,47 +26,48 @@ def generate_signals(prices):
     
     # Get 1d data for EMA(34) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Calculate EMA(34) on 1d for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h timeframe (wait for completed 1d bar)
+    # Align 1d EMA to 6h timeframe (wait for completed 1d bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels on 4h (20-period)
-    # Upper = rolling max(high, 20), Lower = rolling min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R on 6h (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation (2.0x 20-period average)
+    # Volume confirmation (1.8x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for all calculations)
-    start_idx = max(34, 20) + 1  # EMA(34) + Donchian(20) + volume MA(20) warmup + shift(1)
+    start_idx = max(34, 20, 14) + 1  # EMA(34) + volume MA(20) + Williams %R(14) warmup + shift(1)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price > Donchian upper, price > 1d EMA34, volume spike
-            if (close[i] > donchian_upper[i] and 
+            # Long entry: Williams %R crosses above -80 (from below), price > 1d EMA34, volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
                 close[i] > ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price < Donchian lower, price < 1d EMA34, volume spike
-            elif (close[i] < donchian_lower[i] and 
+            # Short entry: Williams %R crosses below -20 (from above), price < 1d EMA34, volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
                   close[i] < ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -76,18 +75,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price < Donchian lower or price < 1d EMA34
-            if (close[i] < donchian_lower[i] or 
-                close[i] < ema_34_1d_aligned[i]):
+            # Exit: Williams %R crosses above -20 (overbought) or price < 1d EMA34
+            if (williams_r[i] > -20 and williams_r[i-1] <= -20) or \
+               (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price > Donchian upper or price > 1d EMA34
-            if (close[i] > donchian_upper[i] or 
-                close[i] > ema_34_1d_aligned[i]):
+            # Exit: Williams %R crosses below -80 (oversold) or price > 1d EMA34
+            if (williams_r[i] < -80 and williams_r[i-1] >= -80) or \
+               (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
