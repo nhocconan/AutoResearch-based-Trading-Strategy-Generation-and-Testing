@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout + 4h EMA50 trend filter + volume confirmation
-# Camarilla pivot levels provide intraday support/resistance with high probability reversal/breakout points.
-# 4h EMA50 ensures alignment with medium-term trend to avoid counter-trend trades.
-# Volume confirmation (1.5x 20-period EMA) filters false breakouts.
-# Designed for 60-150 total trades over 4 years (15-37/year) with discrete sizing to minimize fee drag.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
+# Hypothesis: 6h Donchian(20) breakout + 1w ADX25 trend filter + volume confirmation
+# Donchian channels provide robust breakout structure in both bull and bear markets.
+# Weekly ADX > 25 ensures strong trend alignment to avoid whipsaws and counter-trend trades.
+# Volume confirmation (2.0x 20-period EMA) filters false breakouts.
+# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
+# Weekly timeframe captures major trend shifts, reducing noise from lower timeframes.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_VolumeSpike"
-timeframe = "1h"
+name = "6h_Donchian20_1wADX25_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,71 +29,131 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for ADX25 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous 1h bar
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed TR, DM+ , DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr_smoothed = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smoothed / tr_smoothed
+    di_minus = 100 * dm_minus_smoothed / tr_smoothed
+    
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    
+    def wilders_smoothing_dx(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        valid_data = data[~np.isnan(data)]
+        if len(valid_data) < period:
+            return result
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]) or np.isnan(data[i]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    adx_14 = wilders_smoothing_dx(dx, 14)
+    adx_25 = adx_14  # Using ADX(14) as proxy, will filter with threshold 25
+    
+    # Align 1w ADX to 6h timeframe
+    adx_25_aligned = align_htf_to_ltf(prices, df_1w, adx_25)
+    
+    # Calculate Donchian channels from previous 6h bar (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Use previous bar's OHLC to avoid look-ahead
-    R3 = close_series.shift(1) + ((high_series.shift(1) - low_series.shift(1)) * 1.1 / 4)
-    S3 = close_series.shift(1) - ((high_series.shift(1) - low_series.shift(1)) * 1.1 / 4)
-    
-    # Volume confirmation: 20-period EMA
+    # Volume confirmation: 20-period EMA on 6h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have valid previous bar data
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(R3.iloc[i]) or np.isnan(S3.iloc[i]) or 
+        if (np.isnan(adx_25_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume spike: current volume > 2.0 x 20-period EMA
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Medium-term trend: price above/below 4h EMA50
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Strong trend: ADX > 25
+        strong_trend = adx_25_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend with volume spike
-            if close[i] > R3.iloc[i] and uptrend and volume_spike:
-                signals[i] = 0.20
+            # Long: price breaks above upper Donchian in strong uptrend with volume spike
+            if close[i] > donchian_upper[i] and strong_trend and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in downtrend with volume spike
-            elif close[i] < S3.iloc[i] and downtrend and volume_spike:
-                signals[i] = -0.20
+            # Short: price breaks below lower Donchian in strong downtrend with volume spike
+            elif close[i] < donchian_lower[i] and strong_trend and volume_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 or loses uptrend
-            if close[i] < S3.iloc[i] or not uptrend:
+            # Exit long: price breaks below lower Donchian or loses strong trend
+            if close[i] < donchian_lower[i] or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 or loses downtrend
-            if close[i] > R3.iloc[i] or not downtrend:
+            # Exit short: price breaks above upper Donchian or loses strong trend
+            if close[i] > donchian_upper[i] or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
