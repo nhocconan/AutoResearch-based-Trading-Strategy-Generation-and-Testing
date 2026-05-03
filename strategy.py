@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX trend filter + volume spike confirmation.
-# Long when Williams %R(14) crosses above -80 (oversold bounce) in 1d uptrend (ADX>25 and +DI>-DI) with volume spike.
-# Short when Williams %R(14) crosses below -20 (overbought rejection) in 1d downtrend (ADX>25 and +DI<+DI) with volume spike.
+# Hypothesis: 12h Williams %R reversal with 1d EMA50 trend filter and volume spike confirmation.
+# Long when Williams %R crosses above -80 from below in 1d uptrend (price > EMA50) with volume spike.
+# Short when Williams %R crosses below -20 from above in 1d downtrend (price < EMA50) with volume spike.
 # Uses discrete sizing 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years.
-# Williams %R identifies overextended moves, 1d ADX ensures higher timeframe trend alignment,
+# Williams %R identifies overbought/oversold conditions, 1d EMA50 ensures higher timeframe alignment,
 # Volume spike confirms institutional interest. Works in both bull and bear markets by only trading with
-# the 1d trend, avoiding counter-trend whipsaws. Designed for 6h timeframe to minimize fee drag.
+# the 1d trend, avoiding counter-trend whipsaws. Designed for 12h timeframe to minimize fee drag.
 
-name = "6h_WilliamsR_1dADX_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,67 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Williams %R calculation
-    df_6h = get_htf_data(prices, '6h')
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_6h) < 14:
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Calculate 6h Williams %R
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Calculate 12h Williams %R (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Williams %R = (highest high - close) / (highest high - lowest low) * -100
-    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_6h) / (highest_high - lowest_low) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
     
-    # Get 1d data for ADX calculation
+    # Align Williams %R to 15m timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # DI values
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Align ADX, DI+ and DI- to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus)
-    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike detection (20-period volume MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -96,43 +64,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        wr = williams_r_aligned[i]
-        adx_val = adx_aligned[i]
-        di_plus_val = di_plus_aligned[i]
-        di_minus_val = di_minus_aligned[i]
+        close_val = close[i]
         vol_spike = volume_spike[i]
-        
-        # Trend conditions: ADX > 25 indicates strong trend
-        strong_uptrend = adx_val > 25 and di_plus_val > di_minus_val
-        strong_downtrend = adx_val > 25 and di_plus_val < di_minus_val
+        williams_r_val = williams_r_aligned[i]
+        trend_up = close_val > ema_50_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_50_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold bounce) in uptrend with volume spike
-            if wr > -80 and wr <= -75 and strong_uptrend and vol_spike:  # Crossing above -80
+            # Long: Williams %R crosses above -80 from below AND 1d uptrend AND volume spike
+            if i > 100 and williams_r_val > -80 and williams_r_aligned[i-1] <= -80 and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought rejection) in downtrend with volume spike
-            elif wr < -20 and wr >= -15 and strong_downtrend and vol_spike:  # Crossing below -20
+            # Short: Williams %R crosses below -20 from above AND 1d downtrend AND volume spike
+            elif i > 100 and williams_r_val < -20 and williams_r_aligned[i-1] >= -20 and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -20 (overbought) or trend weakens
-            if wr >= -20 or adx_val < 20:  # Overbought or trend weakening
+            # Exit long: Williams %R crosses below -50 from above (reversal signal)
+            if i > 100 and williams_r_val < -50 and williams_r_aligned[i-1] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -80 (oversold) or trend weakens
-            if wr <= -80 or adx_val < 20:  # Oversold or trend weakening
+            # Exit short: Williams %R crosses above -50 from below (reversal signal)
+            if i > 100 and williams_r_val > -50 and williams_r_aligned[i-1] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
