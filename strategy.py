@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Reversal with 1d EMA50 Trend Filter and Volume Confirmation
-# Uses weekly Camarilla pivot levels (R3/S3, R4/S4) calculated from prior week OHLC
-# In uptrend (price > 1d EMA50): buy at S3/S4 with volume spike, target R3/R4
-# In downtrend (price < 1d EMA50): sell at R3/R4 with volume spike, target S3/S4
-# Weekly pivots provide strong institutional levels; volume confirms participation
-# Trend filter avoids counter-trend whipsaws; reversals at extreme pivots have high RR
-# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag
+# Hypothesis: 12h Williams %R with 1w EMA200 trend filter and volume confirmation
+# Williams %R measures overbought/oversold: %R = (Highest High - Close)/(Highest High - Lowest Low) * -100
+# In bull markets: buy when %R crosses above -80 from below + price above 1w EMA200 + volume spike
+# In bear markets: sell when %R crosses below -20 from above + price below 1w EMA200 + volume spike
+# Works in both regimes by capturing momentum reversals at extremes
+# Volume spike (>2.0x 24-period EMA) confirms institutional participation
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 
-name = "6h_WeeklyPivot_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA200_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,81 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (based on prior week OHLC)
-    # R4 = close + 1.5*(high - low), R3 = close + 1.0*(high - low)
-    # S3 = close - 1.0*(high - low), S4 = close - 1.5*(high - low)
-    wk_high = df_w['high'].values
-    wk_low = df_w['low'].values
-    wk_close = df_w['close'].values
+    # Calculate 1w EMA(200) for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    pivot_range = wk_high - wk_low
-    r4 = wk_close + 1.5 * pivot_range
-    r3 = wk_close + 1.0 * pivot_range
-    s3 = wk_close - 1.0 * pivot_range
-    s4 = wk_close - 1.5 * pivot_range
+    # Calculate Williams %R(14) on 12h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50.0  # neutral when range is zero
+    )
     
-    # Align weekly pivot levels to 6h (wait for weekly close)
-    r4_aligned = align_htf_to_ltf(prices, df_w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_w, s4)
-    
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 24-period EMA on 12h volume (2x lookback for 12h)
     vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_24 = vol_series.ewm(span=24, adjust=False, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(williams_r[i-1]) or np.isnan(vol_ema_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 2.0 x 24-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (2.0 * vol_ema_24[i])
         
+        # Williams %R signals with 1w trend filter
+        # Long: %R crosses above -80 from below + price above 1w EMA200 + volume spike
+        # Short: %R crosses below -20 from above + price below 1w EMA200 + volume spike
         if position == 0:
-            # Long: price at S3/S4 (weekly support) in uptrend + volume spike
-            if ((close[i] <= s3_aligned[i] * 1.002 or close[i] <= s4_aligned[i] * 1.002) and
-                close[i] > ema_50_1d_aligned[i] and volume_spike):
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
+                close[i] > ema_200_1w_aligned[i] and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price at R3/R4 (weekly resistance) in downtrend + volume spike
-            elif ((close[i] >= r3_aligned[i] * 0.998 or close[i] >= r4_aligned[i] * 0.998) and
-                  close[i] < ema_50_1d_aligned[i] and volume_spike):
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
+                  close[i] < ema_200_1w_aligned[i] and volume_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reaches R3/R4 (weekly resistance) OR closes below 1d EMA50
-            if close[i] >= r3_aligned[i] * 0.998 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: %R rises above -20 (overbought) OR price below 1w EMA200
+            if williams_r[i] > -20 or close[i] < ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches S3/S4 (weekly support) OR closes above 1d EMA50
-            if close[i] <= s3_aligned[i] * 1.002 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: %R falls below -80 (oversold) OR price above 1w EMA200
+            if williams_r[i] < -80 or close[i] > ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
