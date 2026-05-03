@@ -3,90 +3,98 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band in bull trend (close > 1d EMA50) with volume > 1.8x 20-period MA.
-# Short when price breaks below Donchian lower band in bear trend (close < 1d EMA50) with volume spike.
-# Uses discrete position sizing (0.25) to minimize fee churn. 1d EMA50 provides responsive trend filter.
-# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR-based stoploss.
+# Long when price breaks above 20-day Donchian high in bull trend (close > 1w EMA50).
+# Short when price breaks below 20-day Donchian low in bear trend (close < 1w EMA50).
+# Uses discrete position sizing (0.25) to minimize fee churn. ATR-based stoploss manages risk.
+# Trend filter ensures alignment with higher timeframe momentum. Target: 30-100 total trades over 4 years.
 
-name = "4h_Donchian20_1dEMA50_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_ATRStop"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate ATR(14) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Donchian channels (20-period)
-    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume regime: current 4h volume > 1.8x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_h[i]) or 
-            np.isnan(donchian_l[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             continue
             
         close_val = close[i]
-        ema_trend = ema_50_1d_aligned[i]
-        upper_band = donchian_h[i]
-        lower_band = donchian_l[i]
-        vol_spike = volume_spike[i]
+        ema_trend = ema_50_1w_aligned[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        atr_val = atr[i]
         
         # Determine trend regime
         is_bull_trend = close_val > ema_trend
         is_bear_trend = close_val < ema_trend
         
         # Donchian breakout conditions
-        breakout_upper = close_val > upper_band
-        breakout_lower = close_val < lower_band
+        breakout_up = close_val > upper_channel
+        breakout_down = close_val < lower_channel
         
         # Entry logic
         if position == 0:
-            if is_bull_trend and breakout_upper and vol_spike:
+            if is_bull_trend and breakout_up:
                 signals[i] = 0.25
                 position = 1
-            elif is_bear_trend and breakout_lower and vol_spike:
+                entry_price = close_val
+            elif is_bear_trend and breakout_down:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_val
         elif position == 1:
-            # Long exit: price breaks below lower band OR trend reversal
-            if close_val < lower_band or close_val < ema_trend:
+            # Long exit: stoploss hit OR trend reversal
+            if close_val < entry_price - 2.5 * atr_val or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above upper band OR trend reversal
-            if close_val > upper_band or close_val > ema_trend:
+            # Short exit: stoploss hit OR trend reversal
+            if close_val > entry_price + 2.5 * atr_val or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
     
