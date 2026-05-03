@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
-# Designed to capture sustained moves aligned with intermediate trend while filtering low-momentum breakouts.
-# Uses discrete position sizing (0.25) to minimize fee drift. Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
+# Designed to capture sustained moves aligned with daily trend while filtering low-momentum breakouts.
+# Uses discrete position sizing (0.25) to minimize fee drift. Target: 50-150 trades over 4 years.
 # Works in bull/bear markets by following 1d EMA direction and requiring volume confirmation.
 
-name = "6h_Donchian20_1dEMA_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 6h timeframe
+    # Align Donchian levels to 12h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
@@ -44,10 +44,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
