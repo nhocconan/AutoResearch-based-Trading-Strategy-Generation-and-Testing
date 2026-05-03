@@ -3,16 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA34 trend + volume confirmation + ATR stoploss
-# Long when price breaks above 12h Donchian upper(20) with volume > 1.5x 20-bar average AND 1d EMA34 uptrend (close > EMA34)
-# Short when price breaks below 12h Donchian lower(20) with volume > 1.5x 20-bar average AND 1d EMA34 downtrend (close < EMA34)
+# Hypothesis: 4h Williams Alligator + 1d EMA34 trend + volume confirmation
+# Long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) AND price > lips AND 1d EMA34 uptrend AND volume > 1.5x 20-bar average
+# Short when jaws < teeth < lips AND price < lips AND 1d EMA34 downtrend AND volume > 1.5x 20-bar average
 # Exit via ATR trailing stop: long exit when price < highest_high_since_entry - 2.0 * ATR, short exit when price > lowest_low_since_entry + 2.0 * ATR
-# 12h timeframe reduces trade frequency to avoid fee drag, Donchian provides objective breakout levels, 1d EMA34 filters for higher-timeframe bias, volume confirms conviction.
-# Target: 50-150 total trades over 4 years = 12-37/year. Uses discrete sizing (0.25) to minimize fee drag.
+# Williams Alligator uses smoothed moving averages (SMMA) to identify trend alignment and avoid choppy markets.
+# 1d EMA34 provides higher-timeframe bias filter. Volume confirms conviction.
+# Target: 75-200 total trades over 4 years = 19-50/year. Uses discrete sizing (0.25) to minimize fee drag.
 
-name = "12h_Donchian20_Volume_1dEMA34_ATRStop_v1"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
+    if len(source) < length:
+        return np.full_like(source, np.nan, dtype=float)
+    result = np.empty_like(source)
+    result[:] = np.nan
+    # First value is simple average
+    result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT_VALUE) / length
+    for i in range(length, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,16 +46,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Load 12h data ONCE before loop for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Calculate Williams Alligator (SMMA-based)
+    # Jaws: 13-period SMMA of median price
+    # Teeth: 8-period SMMA of median price  
+    # Lips: 5-period SMMA of median price
+    median_price = (high + low) / 2
+    jaws = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
     # Calculate ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -61,26 +73,26 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start after warmup (need enough for all calculations)
-    start_idx = max(20, 34) + 1  # Donchian(20) + EMA34(1d) + volume MA(20) + shift(1)
+    start_idx = max(20, 34) + 1  # volume MA(20) + EMA34(1d) + shift(1)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above 12h Donchian upper with volume spike AND 1d EMA34 uptrend
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_spike[i] and close[i] > ema_34_aligned[i]):
+            # Long entry: jaws > teeth > lips AND price > lips AND 1d EMA34 uptrend AND volume spike
+            if (jaws[i] > teeth[i] and teeth[i] > lips[i] and 
+                close[i] > lips[i] and close[i] > ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below 12h Donchian lower with volume spike AND 1d EMA34 downtrend
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_spike[i] and close[i] < ema_34_aligned[i]):
+            # Short entry: jaws < teeth < lips AND price < lips AND 1d EMA34 downtrend AND volume spike
+            elif (jaws[i] < teeth[i] and teeth[i] < lips[i] and 
+                  close[i] < lips[i] and close[i] < ema_34_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
