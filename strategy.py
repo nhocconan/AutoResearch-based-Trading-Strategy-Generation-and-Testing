@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Donchian breakout captures momentum in direction of higher timeframe trend.
-# EMA34 on 1w ensures we only trade with the weekly trend (bullish for longs, bearish for shorts).
-# Volume spike confirms institutional participation. Designed for 20-40 trades/year on 4h to minimize fee drag.
+# EMA34 on 1d ensures we only trade with the daily trend (bullish for longs, bearish for shorts).
+# Volume spike confirms institutional participation. Designed for 12-25 trades/year on 12h to minimize fee drag.
 # Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
-# Weekly trend filter reduces whipsaw vs daily, improving bear market performance.
+# Uses 12h timeframe as required by experiment #121762.
 
-name = "4h_Donchian20_1wEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,14 +29,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Donchian(20) channels
     signals = np.zeros(n)
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_34_1w_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +66,26 @@ def generate_signals(prices):
         breakout_down = close[i] < lowest_low
         
         if position == 0:
-            # Long: bullish breakout in 1w uptrend with volume spike
-            if breakout_up and ema_34_1w_aligned[i] < close[i] and volume_spike:
+            # Long: bullish breakout in 1d uptrend with volume spike
+            if breakout_up and ema_34_1d_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakdown in 1w downtrend with volume spike
-            elif breakout_down and ema_34_1w_aligned[i] > close[i] and volume_spike:
+            # Short: bearish breakdown in 1d downtrend with volume spike
+            elif breakout_down and ema_34_1d_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint or loses 1w uptrend
+            # Exit long: price returns to midpoint or loses 1d uptrend
             midpoint = (highest_high + lowest_low) / 2
-            if close[i] < midpoint or ema_34_1w_aligned[i] >= close[i]:
+            if close[i] < midpoint or ema_34_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint or loses 1w downtrend
+            # Exit short: price returns to midpoint or loses 1d downtrend
             midpoint = (highest_high + lowest_low) / 2
-            if close[i] > midpoint or ema_34_1w_aligned[i] <= close[i]:
+            if close[i] > midpoint or ema_34_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
