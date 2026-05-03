@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
 # Uses ATR(24) trailing stop for risk management. Discrete sizing 0.25 to balance return and fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakouts above R3, in bear via breakdowns below S3.
-# Uses weekly EMA50 to filter trend direction (long only above, short only below) reducing false signals.
-# Volume spike confirms institutional interest in breakouts. 12h timeframe minimizes fee drag vs lower TFs.
-# Proven pattern: price channel + HTF trend + volume confirmation + ATR stop.
+# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts, in bear via short signals.
+# Proven pattern from top performers: price channel + HTF trend + volume confirmation + ATR stop.
+# Focus on 4h timeframe to reduce trade frequency vs lower timeframes while maintaining sufficient sample size.
 
-name = "12h_Camarilla_R3_S3_1wEMA50_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +23,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels from prior 12h bar
+    # Calculate 4h Donchian channels (20-period) from prior completed 4h bar
+    # We need to use the prior completed bar's high/low to avoid look-ahead
     prior_high = np.roll(high, 1)
     prior_high[0] = np.nan
     prior_low = np.roll(low, 1)
     prior_low[0] = np.nan
-    prior_close = np.roll(close, 1)
-    prior_close[0] = np.nan
     
-    prior_range = prior_high - prior_low
-    camarilla_r3 = prior_close + 1.1 * prior_range
-    camarilla_s3 = prior_close - 1.1 * prior_range
+    # Calculate rolling max/min on prior bars to get Donchian levels
+    # Using pandas rolling on the prior series to avoid look-ahead
+    prior_high_series = pd.Series(prior_high)
+    prior_low_series = pd.Series(prior_low)
+    donchian_high = prior_high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = prior_low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(24) for stoploss
     tr1 = high[1:] - low[1:]
@@ -61,23 +62,23 @@ def generate_signals(prices):
     highest_high_since_entry = 0
     lowest_low_since_entry = 0
     
-    for i in range(100, n):
+    for i in range(100, n):  # Start after sufficient warmup
         # Get current values
-        camarilla_r3_val = camarilla_r3[i]
-        camarilla_s3_val = camarilla_s3[i]
-        ema_trend = ema_50_1w_aligned[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_spike = volume_spike[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(camarilla_r3_val) or np.isnan(camarilla_s3_val) or np.isnan(ema_trend) or np.isnan(atr_val):
+        if np.isnan(donchian_high_val) or np.isnan(donchian_low_val) or np.isnan(ema_trend) or np.isnan(atr_val):
             continue
             
         # Entry conditions
-        # Long: break above R3 with volume spike and above 1w EMA50
-        long_entry = (close[i] > camarilla_r3_val) and (close[i] > ema_trend) and vol_spike
-        # Short: break below S3 with volume spike and below 1w EMA50
-        short_entry = (close[i] < camarilla_s3_val) and (close[i] < ema_trend) and vol_spike
+        # Long: break above Donchian high with volume spike and above 1d EMA50
+        long_entry = (close[i] > donchian_high_val) and (close[i] > ema_trend) and vol_spike
+        # Short: break below Donchian low with volume spike and below 1d EMA50
+        short_entry = (close[i] < donchian_low_val) and (close[i] < ema_trend) and vol_spike
         
         # Exit conditions (trailing stop)
         long_exit = False
