@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions (above -20 = overbought, below -80 = oversold).
-# Long when %R crosses above -80 from below in 1d uptrend (close > EMA34) with volume spike.
-# Short when %R crosses below -20 from above in 1d downtrend (close < EMA34) with volume spike.
+# Hypothesis: 12h Williams Alligator with 1d trend filter (EMA34) and volume confirmation.
+# Alligator: Jaw (EMA13, 8-bar shift), Teeth (EMA8, 5-bar shift), Lips (EMA5, 3-bar shift).
+# Long when Lips > Teeth > Jaw (bullish alignment) and price > Lips, with volume > 1.5x 20-period MA.
+# Short when Lips < Teeth < Jaw (bearish alignment) and price < Lips, with volume spike.
 # Uses discrete sizing 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years.
-# Williams %R works well in ranging markets and captures reversals in trends, suitable for BTC/ETH 6h timeframe.
 
-name = "6h_WilliamsR_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,56 +34,67 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R(14) on 6h
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Williams Alligator on 12h
+    # Jaw: EMA13, 8-bar shift
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
     
-    # Volume confirmation: current volume > 1.3x 20-period MA
+    # Teeth: EMA8, 5-bar shift
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
+    
+    # Lips: EMA5, 3-bar shift
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
+    
+    # Volume confirmation: current volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or 
+            np.isnan(jaw[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         close_val = close[i]
-        williams_r_val = williams_r[i]
         trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
         trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         vol_spike = volume_spike[i]
         
+        # Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
         # Entry logic
         if position == 0:
-            # Long: Williams %R crosses above -80 from below AND 1d uptrend AND volume spike
-            if williams_r_val > -80 and williams_r[i-1] <= -80 and trend_up and vol_spike:
+            # Long: bullish alignment AND price > Lips AND 1d uptrend AND volume spike
+            if bullish_alignment and close_val > lips[i] and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from above AND 1d downtrend AND volume spike
-            elif williams_r_val < -20 and williams_r[i-1] >= -20 and trend_down and vol_spike:
+            # Short: bearish alignment AND price < Lips AND 1d downtrend AND volume spike
+            elif bearish_alignment and close_val < lips[i] and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R rises above -20 OR 1d trend turns down
-            if williams_r_val > -20 or not trend_up:
+            # Long exit: bearish alignment OR price < Lips OR 1d trend turns down
+            if bearish_alignment or close_val < lips[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R falls below -80 OR 1d trend turns up
-            if williams_r_val < -80 or not trend_down:
+            # Short exit: bullish alignment OR price > Lips OR 1d trend turns up
+            if bullish_alignment or close_val > lips[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
