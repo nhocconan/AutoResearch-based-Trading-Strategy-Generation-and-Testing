@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d HMA21 trend filter and volume spike confirmation.
-# Uses 12h timeframe for lower trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# 1d HTF provides Camarilla pivot levels and trend direction. Volume spike confirms institutional interest.
-# ATR-based trailing stop manages risk. Discrete sizing 0.25 balances return and drawdown.
-# Designed to work in both bull (breakouts with trend) and bear (faded breaks via regime) markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d HMA21 trend filter and volume spike confirmation.
+# Uses 4h timeframe for optimal trade frequency, 1d for HTF direction and pivot calculation.
+# Breakouts above R3 (long) or below S3 (short) with volume confirmation and trend alignment.
+# ATR-based trailing stop for risk management. Discrete sizing 0.25 to balance return and drawdown.
+# Target: 100-200 total trades over 4 years (25-50/year) to minimize fee drag while capturing Camarilla edge.
 
-name = "12h_Camarilla_R3_S3_1dHMA21_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dHMA21_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_r3 = prior_close + (prior_high - prior_low) * 1.1 / 4
     camarilla_s3 = prior_close - (prior_high - prior_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -73,10 +73,10 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
     
-    # Align volume regime to 12h timeframe
+    # Align volume regime to 4h timeframe
     vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    # Calculate ATR(14) for 12h data (for stoploss)
+    # Calculate ATR(14) for 4h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -103,7 +103,7 @@ def generate_signals(prices):
                 position = 0
             continue
             
-        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
