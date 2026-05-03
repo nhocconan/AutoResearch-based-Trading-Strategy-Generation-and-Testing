@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high in 1d uptrend (ADX>25) with volume spike (>2.0x 20-period volume MA).
-# Short when price breaks below 20-period Donchian low in 1d downtrend (ADX>25) with volume spike.
-# Uses 1d ADX for higher timeframe trend strength to avoid whipsaw in ranging markets.
-# Volume spike confirms institutional participation. Designed for 6h timeframe to achieve 50-150 total trades over 4 years.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high in 1d uptrend with volume spike (>1.5x 20-period volume MA).
+# Short when price breaks below 20-period Donchian low in 1d downtrend with volume spike.
+# Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume spike confirms institutional participation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
 
-name = "6h_Donchian20_1dADX25_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,59 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and ADX trend filter
+    # Get 1d data for Donchian calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels from prior 1d bar
+    # Calculate Donchian channels from prior 1d bar (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian(20) high and low
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Donchian(20): upper = max(high, lookback=20), lower = min(low, lookback=20)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    # Align Donchian levels to lower timeframe (1d -> 6h)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    # Calculate 1d ADX(14) for trend strength filter
-    # ADX calculation: +DM, -DM, TR, then smoothed
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr = np.maximum(
-        high_1d[1:] - low_1d[1:],
-        np.maximum(np.abs(high_1d[1:] - high_1d[:-1]), np.abs(low_1d[1:] - low_1d[:-1]))
-    )
-    # Prepend first values to maintain array length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
+    donchian_upper = rolling_max(high_1d, 20)
+    donchian_lower = rolling_min(low_1d, 20)
     
-    # Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Align Donchian levels to lower timeframe (1d -> 12h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    period_adx = 14
-    plus_di_14 = 100 * wilders_smoothing(plus_dm, period_adx) / wilders_smoothing(tr, period_adx)
-    minus_di_14 = 100 * wilders_smoothing(minus_dm, period_adx) / wilders_smoothing(tr, period_adx)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = wilders_smoothing(dx, period_adx)
-    
-    # Align ADX to lower timeframe (1d -> 6h)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike detection (20-period volume MA on primary timeframe)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 2.0)  # Volume at least 2.0x average
+    volume_spike = volume > (volume_ma * 1.5)  # Volume at least 1.5x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,8 +68,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,27 +77,28 @@ def generate_signals(prices):
             
         close_val = close[i]
         vol_spike = volume_spike[i]
-        trend_strong = adx_aligned[i] > 25  # Strong trend filter
+        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
+        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
         
         if position == 0:
-            # Long: price breaks above Donchian high AND strong trend AND volume spike
-            if close_val > donchian_high_aligned[i] and trend_strong and vol_spike:
+            # Long: price breaks above Donchian upper AND 1d uptrend AND volume spike
+            if close_val > donchian_upper_aligned[i] and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_val
-            # Short: price breaks below Donchian low AND strong trend AND volume spike
-            elif close_val < donchian_low_aligned[i] and trend_strong and vol_spike:
+            # Short: price breaks below Donchian lower AND 1d downtrend AND volume spike
+            elif close_val < donchian_lower_aligned[i] and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_val
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Exit: price breaks below Donchian low (opposite level)
-            if close_val < donchian_low_aligned[i]:
+            # Exit: price breaks below Donchian lower (opposite level)
+            if close_val < donchian_lower_aligned[i]:
                 exit_signal = True
-            # Exit: trend weakens (ADX < 20)
-            elif adx_aligned[i] < 20:
+            # Exit: 1d trend changes to downtrend
+            elif not trend_up:
                 exit_signal = True
             
             if exit_signal:
@@ -123,11 +109,11 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Exit: price breaks above Donchian high (opposite level)
-            if close_val > donchian_high_aligned[i]:
+            # Exit: price breaks above Donchian upper (opposite level)
+            if close_val > donchian_upper_aligned[i]:
                 exit_signal = True
-            # Exit: trend weakens (ADX < 20)
-            elif adx_aligned[i] < 20:
+            # Exit: 1d trend changes to uptrend
+            elif not trend_down:
                 exit_signal = True
             
             if exit_signal:
