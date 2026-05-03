@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# In bull regime (price > 1d EMA34), go long on breakout above R3 with volume spike.
-# In bear regime (price < 1d EMA34), go short on breakdown below S3 with volume spike.
-# Uses Camarilla pivot levels from prior completed 1d for structure, 1d EMA34 for regime filter,
-# and 4h volume spike for confirmation. Designed for 75-200 total trades over 4 years.
-# Focus on BTC/ETH as primary symbols, proven to work in both bull and bear markets.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
+# In bull regime (price > 1d EMA34), go long when Williams %R < -80 (oversold) with volume spike.
+# In bear regime (price < 1d EMA34), go short when Williams %R > -20 (overbought) with volume spike.
+# Uses 1d EMA34 for regime filter, 6h Williams %R for mean reversion signals, and 6h volume spike for confirmation.
+# Designed for 50-150 total trades over 4 years with focus on BTC/ETH.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA34_VolumeSpike_MR"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +23,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and EMA34 (prior completed 1d bar)
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate prior 1d Camarilla pivot levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Camarilla levels: R3 = PP + Range * 1.1/2, S3 = PP - Range * 1.1/2
-    camarilla_r3 = pp + (range_1d * 1.1 / 2.0)
-    camarilla_s3 = pp - (range_1d * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 4h (wait for 1d bar to complete)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Get 1d data for EMA34 trend filter
+    # Calculate 1d EMA34
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Calculate volume regime: current 6h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -60,13 +47,12 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        wr = williams_r[i]
         ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend):
+        if np.isnan(wr) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,16 +62,16 @@ def generate_signals(prices):
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Regime-based entry conditions
+        # Mean reversion entry conditions
         if is_bull_regime:
-            # Long: breakout above R3 with volume spike
-            long_entry = (close_val > r3) and vol_spike
+            # Long: oversold condition (Williams %R < -80) with volume spike
+            long_entry = (wr < -80) and vol_spike
         else:
             long_entry = False
             
         if is_bear_regime:
-            # Short: breakdown below S3 with volume spike
-            short_entry = (close_val < s3) and vol_spike
+            # Short: overbought condition (Williams %R > -20) with volume spike
+            short_entry = (wr > -20) and vol_spike
         else:
             short_entry = False
         
@@ -98,15 +84,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on breakdown below S3 (failure of bullish breakout) or regime change to bear
-            if close_val < s3 or close_val < ema_trend:
+            # Exit when Williams %R returns to neutral (> -50) or regime changes to bear
+            if wr > -50 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on breakout above R3 (failure of bearish breakdown) or regime change to bull
-            if close_val > r3 or close_val > ema_trend:
+            # Exit when Williams %R returns to neutral (< -50) or regime changes to bull
+            if wr < -50 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
