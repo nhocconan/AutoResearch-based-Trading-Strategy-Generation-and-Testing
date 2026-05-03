@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h volume spike + choppiness regime filter
-# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
-# choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
+# Hypothesis: 1d Donchian(20) breakout + 1w volume spike + choppiness regime filter
+# Donchian breakout captures sustained momentum, 1w volume spike confirms institutional interest,
+# choppiness regime ensures we trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
 # Designed to work in both bull and bear markets by adapting to regime.
-# Target: 19-50 trades/year (75-200 over 4 years).
+# Target: 7-25 trades/year (30-100 over 4 years) on 1d timeframe.
 
-name = "4h_Donchian20_12hVolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "1d_Donchian20_1wVolumeSpike_ChopRegime"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,32 +28,32 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for volume spike and choppiness
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1w data for volume spike and choppiness
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h volume spike (volume > 2.0 * 20-period EMA of volume)
-    vol_ema_20 = pd.Series(df_12h['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = df_12h['volume'].values > (2.0 * vol_ema_20)
+    # Calculate 1w volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1w['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1w['volume'].values > (2.0 * vol_ema_20)
     
-    # Calculate 12h choppiness index (CHOP)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1w choppiness index (CHOP)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR(14) - sum of TR over 14 periods
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
     # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
     # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
     range_14 = hh_14 - ll_14
@@ -61,11 +61,11 @@ def generate_signals(prices):
     # Handle division by zero and invalid values
     chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
-    # Align 12h indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Align 1w indicators to 1d timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
