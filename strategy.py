@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 12h timeframe for lower trade frequency (target: 50-150 total trades over 4 years).
-# Donchian channels from prior completed 12h bar provide structural breakout levels.
-# 1d EMA50 determines trend direction to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Discrete sizing 0.25 to manage drawdown.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses 4h timeframe for balanced trade frequency, with 1d for trend direction and volume regime.
+# Donchian channels from prior completed 1d bar provide clear breakout levels.
+# Breakouts with volume indicate institutional participation. Trend filter avoids counter-trend trades.
+# Discrete sizing 0.25 to manage drawdown. Target: 75-200 total trades over 4 years.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation and 1d data for trend/volume filters
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for Donchian calculation, trend filter, and volume regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 20 or len(df_1d) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Use prior completed 12h bar's OHLC for Donchian calculation
-    prior_high_12h = np.roll(df_12h['high'].values, 1)
-    prior_low_12h = np.roll(df_12h['low'].values, 1)
-    prior_high_12h[0] = np.nan
-    prior_low_12h[0] = np.nan
+    # Use prior completed 1d bar's OHLC for Donchian calculation
+    prior_high = np.roll(df_1d['high'].values, 1)
+    prior_low = np.roll(df_1d['low'].values, 1)
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
     
-    # Calculate Donchian channels for prior 12h bar (20-period)
-    upper_chan = pd.Series(prior_high_12h).rolling(window=20, min_periods=20).max().values
-    lower_chan = pd.Series(prior_low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) levels for prior 1d bar
+    # Upper = max(high over last 20 days), Lower = min(low over last 20 days)
+    high_20 = pd.Series(prior_high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(prior_low).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe
-    upper_chan_aligned = align_htf_to_ltf(prices, df_12h, upper_chan)
-    lower_chan_aligned = align_htf_to_ltf(prices, df_12h, lower_chan)
+    # Align Donchian levels to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     # Calculate 1d EMA50 trend filter
     close_1d = df_1d['close'].values
@@ -53,10 +53,10 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
     
-    # Align volume regime to 12h timeframe
+    # Align volume regime to 4h timeframe
     vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    # Calculate ATR(14) for 12h data (for stoploss)
+    # Calculate ATR(14) for 4h data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -70,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get current values
-        upper = upper_chan_aligned[i]
-        lower = lower_chan_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
         ema_trend = ema_50_1d_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
@@ -83,14 +83,14 @@ def generate_signals(prices):
                 position = 0
             continue
             
-        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: break above upper channel with volume spike, above 1d EMA50, and in high volume regime
+        # Long: break above Donchian upper with volume spike, above 1d EMA50, and in high volume regime
         long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend) and vol_reg
-        # Short: break below lower channel with volume spike, below 1d EMA50, and in high volume regime
+        # Short: break below Donchian lower with volume spike, below 1d EMA50, and in high volume regime
         short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend) and vol_reg
         
         # Exit conditions (ATR-based trailing stop)
