@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Width Regime + 1d RSI(2) Extreme Reversion
-# Bollinger Band Width (BBW) identifies regime: low BBW = squeeze (impending breakout),
-# high BBW = expansion (trending or volatile). In low volatility regimes (BBW < 20th percentile),
-# we mean-revert using 1d RSI(2) extremes: long when RSI(2) < 10, short when RSI(2) > 90.
-# Volume confirmation (>1.5x 20-period EMA) filters false breakouts.
-# Works in both bull and bear markets by adapting to volatility regime.
-# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# In bull markets: buy when price breaks above 20-period Donchian high + price above 1d EMA50 + volume spike
+# In bear markets: sell when price breaks below 20-period Donchian low + price below 1d EMA50 + volume spike
+# Donchian channels provide clear structure for breakouts in both regimes
+# Volume spike (>2.0x 20-period EMA) confirms institutional participation and reduces false breakouts
+# 1d EMA50 ensures we trade with the higher timeframe trend to avoid counter-trend whipsaws
+# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag
 
-name = "6h_BBW_Regime_RSI2_Extreme"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,87 +20,70 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI(2) extreme filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d RSI(2) for extreme reversion signals
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], 100.0)  # Handle division by zero
-    rsi_2 = 100.0 - (100.0 / (1.0 + rs))
-    rsi_2_values = rsi_2.values
-    rsi_2_aligned = align_htf_to_ltf(prices, df_1d, rsi_2_values)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Bollinger Band Width (BBW) on 6h for regime detection
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
-    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
-    upper_band = sma + (std_dev * bb_std)
-    lower_band = sma - (std_dev * bb_std)
-    bb_width = ((upper_band - lower_band) / sma) * 100  # Percentage
-    bb_width_values = bb_width.values
+    # Calculate Donchian(20) on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20th percentile of BBW for regime threshold (using expanding window)
-    bb_width_percentile_20 = pd.Series(bb_width_values).expanding(min_periods=bb_period).quantile(0.20).values
-    
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(bb_period, n):  # Start from bb_period to have valid indicators
+    for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(rsi_2_aligned[i]) or np.isnan(bb_width_values[i]) or 
-            np.isnan(bb_width_percentile_20[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Regime detection: low BBW = squeeze (mean reversion opportunity)
-        low_volatility_regime = bb_width_values[i] < bb_width_percentile_20[i]
-        
-        # RSI(2) extreme signals from 1d
-        rsi_extreme_long = rsi_2_aligned[i] < 10
-        rsi_extreme_short = rsi_2_aligned[i] > 90
-        
+        # Donchian breakout signals with 1d trend filter
+        # Long: price breaks above Donchian high + price above 1d EMA50 + volume spike
+        # Short: price breaks below Donchian low + price below 1d EMA50 + volume spike
         if position == 0:
-            # Enter long in low volatility regime with RSI(2) extreme oversold + volume spike
-            if low_volatility_regime and rsi_extreme_long and volume_spike:
+            if (close[i] > donchian_high[i-1] and  # Break above previous Donchian high
+                close[i] > ema_50_1d_aligned[i] and  # Above 1d EMA50 (bullish trend)
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short in low volatility regime with RSI(2) extreme overbought + volume spike
-            elif low_volatility_regime and rsi_extreme_short and volume_spike:
+            elif (close[i] < donchian_low[i-1] and  # Break below previous Donchian low
+                  close[i] < ema_50_1d_aligned[i] and  # Below 1d EMA50 (bearish trend)
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI(2) reverts to neutral (above 50) OR volatility expands (exit regime)
-            if rsi_2_aligned[i] > 50 or not low_volatility_regime:
+            # Exit long: price breaks below Donchian low OR price below 1d EMA50
+            if close[i] < donchian_low[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI(2) reverts to neutral (below 50) OR volatility expands (exit regime)
-            if rsi_2_aligned[i] < 50 or not low_volatility_regime:
+            # Exit short: price breaks above Donchian high OR price above 1d EMA50
+            if close[i] > donchian_high[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
