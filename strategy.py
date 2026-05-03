@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R extreme levels with 1d ADX trend filter and volume spike confirmation.
-# Long when 4h Williams %R crosses above -20 from below (extreme short-term oversold) AND 1d ADX > 25 (strong trend) AND 4h volume > 1.5x 20-period volume MA.
-# Short when 4h Williams %R crosses below -80 from above (extreme short-term overbought) AND 1d ADX > 25 (strong trend) AND 4h volume > 1.5x 20-period volume MA.
-# Exit when Williams %R returns to -50 (mean reversion) or ADX < 20 (trend weakness).
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d ADX regime filter and volume confirmation.
+# Long when Elder Bull Power > 0 AND 1d ADX > 25 (trending market) AND 6h volume > 1.5x 20-period volume MA.
+# Short when Elder Bear Power < 0 AND 1d ADX > 25 (trending market) AND 6h volume > 1.5x 20-period volume MA.
+# Exit when Elder Power crosses zero OR ADX < 20 (range market) OR volume normalizes.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Williams %R captures short-term exhaustion, ADX confirms trend strength for follow-through, volume validates participation.
-# Works in both bull and bear markets by trading mean reversions within strong trends when volume confirms.
+# Designed for 6h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
+# Elder Ray measures trend strength via bull/bear power relative to EMA13, ADX filters for trending regimes only,
+# volume confirms institutional participation. Works in both bull and bear by only trading strong trends.
 
-name = "4h_WilliamsR_Extreme_1dADX_Trend_VolumeSpike_Session"
-timeframe = "4h"
+name = "6h_ElderRay_ADX_Regime_VolumeSpike_Session"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,116 +31,100 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength
+    # Calculate 1d ADX for trend strength regime
+    # ADX requires +DI, -DI, and TR
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    tr[0] = tr1[0]  # First period
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
+    # Smooth TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
+            result[period-1] = np.mean(data[:period])
             for i in range(period, len(data)):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_1d = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
     
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    # Align 1d ADX to 6h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, 14)
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Calculate 4h Williams %R
-    highest_high_4h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r_4h = np.where((highest_high_4h - lowest_low_4h) != 0, 
-                             -100 * (highest_high_4h - close) / (highest_high_4h - lowest_low_4h), -50)
-    
-    # Calculate 4h volume 20-period MA for spike detection
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume 20-period MA for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r_4h[i]) or 
-            np.isnan(volume_ma_4h[i]) or not in_session[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        close_val = close[i]
+        # Regime conditions: trending market (ADX > 25)
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20  # Exit condition for ranging
         
-        # Williams %R conditions
-        wr_current = williams_r_4h[i]
-        wr_prev = williams_r_4h[i-1]
+        # Volume spike condition: current 6h volume > 1.5x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma[i] * 1.5)
         
-        # Cross above -20 from below (oversold bounce)
-        wr_cross_up = (wr_prev <= -20) and (wr_current > -20)
-        # Cross below -80 from above (overbought rejection)
-        wr_cross_down = (wr_prev >= -80) and (wr_current < -80)
-        
-        # Volume spike condition: current 4h volume > 1.5x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_4h[i] * 1.5)
-        
-        # 1d ADX trend condition: ADX > 25 for strong trend
-        strong_trend = adx_1d_aligned[i] > 25
-        # Weak trend condition for exit: ADX < 20
-        weak_trend = adx_1d_aligned[i] < 20
+        # Elder Ray conditions
+        bull_strong = bull_power[i] > 0  # Bull power positive
+        bear_strong = bear_power[i] < 0  # Bear power negative
         
         if position == 0:
-            # Long: Williams %R cross above -20 AND strong trend AND volume spike AND session
-            if wr_cross_up and strong_trend and volume_spike:
+            # Enter long: bull power positive AND trending AND volume spike
+            if bull_strong and trending and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R cross below -80 AND strong trend AND volume spike AND session
-            elif wr_cross_down and strong_trend and volume_spike:
+            # Enter short: bear power negative AND trending AND volume spike
+            elif bear_strong and trending and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to -50 OR trend weakens
-            if wr_current >= -50 or weak_trend:
+            # Exit long: bull power turns negative OR ranging market OR volume normalizes
+            if not bull_strong or ranging or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to -50 OR trend weakens
-            if wr_current <= -50 or weak_trend:
+            # Exit short: bear power turns positive OR ranging market OR volume normalizes
+            if not bear_strong or ranging or not volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
