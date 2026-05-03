@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian(20) breakout for direction and 1h RSI(14) for entry timing.
-# 4h Donchian provides robust structure for breakouts in both bull and bear markets.
-# 1h RSI(14) < 30 for longs and > 70 for shorts ensures we enter on pullbacks within the trend.
-# Volume confirmation (current volume > 1.5x 20-period EMA) filters false breakouts.
-# Session filter (08-20 UTC) reduces noise trades.
-# Designed for 60-150 total trades over 4 years (15-37/year) with discrete position sizing (0.20).
-# Works in bull markets via upward breaks at upper channel on RSI pullbacks and in bear markets via downward breaks at lower channel on RSI pullbacks.
+# Hypothesis: 6h Donchian(20) breakout with weekly ATR regime filter and volume confirmation
+# Donchian breakouts capture momentum in both bull and bear markets.
+# Weekly ATR regime filter: only trade when weekly ATR(14) is below its 50-period EMA (low volatility regime) to avoid whipsaws.
+# Volume confirmation ensures breakouts have participation. Designed for 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via upward breaks and bear markets via downward breaks, but only in low-volatility regimes where trends are cleaner.
 
-name = "1h_Donchian20_RSI14_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyATRRegime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,75 +28,83 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h data for Donchian(20) direction filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data for ATR regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    high_series_4h = pd.Series(high_4h)
-    low_series_4h = pd.Series(low_4h)
-    donchian_upper_4h = high_series_4h.rolling(window=20, min_periods=20).max().values
-    donchian_lower_4h = low_series_4h.rolling(window=20, min_periods=20).min().values
+    # Calculate 1w ATR(14) and its 50-period EMA for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 4h Donchian to 1h timeframe (waits for completed 4h bar)
-    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
     
-    # Calculate 1h RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # ATR(14)
+    atr_14_1w = np.full(len(close_1w), np.nan)
+    for i in range(14, len(tr)):
+        atr_14_1w[i] = np.nanmean(tr[i-13:i+1])
     
-    # Volume confirmation: 20-period EMA on 1h
+    # EMA50 of ATR
+    atr_series = pd.Series(atr_14_1w)
+    atr_ema_50_1w = atr_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Regime: low volatility when ATR(14) < EMA50(ATR)
+    atr_regime_low = atr_14_1w < atr_ema_50_1w
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1w, atr_regime_low.astype(float))
+    
+    # Calculate Donchian channels from previous 6h bar (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Volume confirmation: 20-period EMA on 6h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start from 14 to have valid RSI
+    for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(donchian_upper_4h_aligned[i]) or np.isnan(donchian_lower_4h_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(vol_ema_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ema_20[i]) or np.isnan(atr_regime_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        atr_regime = bool(atr_regime_aligned[i])
         
         if position == 0:
-            # Long: price near lower Donchian (pullback) in uptrend alignment with RSI oversold and volume spike
-            if close[i] > donchian_lower_4h_aligned[i] and close[i] < donchian_upper_4h_aligned[i] and \
-               rsi_values[i] < 30 and volume_spike:
-                signals[i] = 0.20
+            # Long: price breaks above upper Donchian in low volatility regime with volume spike
+            if close[i] > donchian_upper[i] and atr_regime and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price near upper Donchian (pullback) in downtrend alignment with RSI overbought and volume spike
-            elif close[i] < donchian_upper_4h_aligned[i] and close[i] > donchian_lower_4h_aligned[i] and \
-                 rsi_values[i] > 70 and volume_spike:
-                signals[i] = -0.20
+            # Short: price breaks below lower Donchian in low volatility regime with volume spike
+            elif close[i] < donchian_lower[i] and atr_regime and volume_spike:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought or price breaks above upper Donchian (taking profit)
-            if rsi_values[i] > 70 or close[i] >= donchian_upper_4h_aligned[i]:
+            # Exit long: price breaks below lower Donchian or regime changes to high volatility
+            if close[i] < donchian_lower[i] or not atr_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI oversold or price breaks below lower Donchian (taking profit)
-            if rsi_values[i] < 30 or close[i] <= donchian_lower_4h_aligned[i]:
+            # Exit short: price breaks above upper Donchian or regime changes to high volatility
+            if close[i] > donchian_upper[i] or not atr_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
