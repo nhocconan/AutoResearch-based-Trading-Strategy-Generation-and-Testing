@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d EMA34 trend filter + ATR-based stoploss
-# Long when price breaks above 20-bar Donchian high with volume > 1.5x 24-bar average and close > 1d EMA34 (uptrend)
-# Short when price breaks below 20-bar Donchian low with volume > 1.5x 24-bar average and close < 1d EMA34 (downtrend)
-# Exit via ATR trailing stop: long exit when price < highest_high_since_entry - 2.0 * ATR, short exit when price > lowest_low_since_entry + 2.0 * ATR
-# Donchian channels provide clear structure, volume confirms conviction, 1d EMA34 filters for higher-timeframe trend, ATR stop manages risk.
-# Target: 75-200 total trades over 4 years = 19-50/year. Uses discrete sizing (0.30) to balance return and fee drag.
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d EMA34 trend filter + ATR-based stoploss
+# Long when price breaks above 20-bar Donchian high with volume > 1.8x 24-bar average and close > 1d EMA34 (uptrend)
+# Short when price breaks below 20-bar Donchian low with volume > 1.8x 24-bar average and close < 1d EMA34 (downtrend)
+# Exit via ATR trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR, short exit when price > lowest_low_since_entry + 2.5 * ATR
+# 12h timeframe reduces trade frequency, Donchian channels provide structure, volume confirms conviction,
+# 1d EMA34 filters for higher-timeframe trend, wider ATR stop reduces whipsaw. Target: 12-37 trades/year.
 
-name = "4h_Donchian20_Volume_1dEMA34_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Volume_1dEMA34_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,9 +43,9 @@ def generate_signals(prices):
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation (1.5x 24-period average)
+    # Volume confirmation (1.8x 24-period average - stricter for fewer trades)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,14 +67,14 @@ def generate_signals(prices):
             # Long entry: price breaks above Donchian high with volume spike and close > 1d EMA34 (uptrend)
             if (close[i] > donchian_high[i] and 
                 volume_spike[i] and close[i] > ema_34_aligned[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
             # Short entry: price breaks below Donchian low with volume spike and close < 1d EMA34 (downtrend)
             elif (close[i] < donchian_low[i] and 
                   volume_spike[i] and close[i] < ema_34_aligned[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_bar = i
                 lowest_since_entry = low[i]
@@ -84,21 +84,21 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, high[i])
-            # ATR trailing stop: exit when price < highest_high_since_entry - 2.0 * ATR
-            if close[i] < highest_since_entry - 2.0 * atr[i]:
+            # ATR trailing stop: exit when price < highest_high_since_entry - 2.5 * ATR
+            if close[i] < highest_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, low[i])
-            # ATR trailing stop: exit when price > lowest_low_since_entry + 2.0 * ATR
-            if close[i] > lowest_since_entry + 2.0 * atr[i]:
+            # ATR trailing stop: exit when price > lowest_low_since_entry + 2.5 * ATR
+            if close[i] > lowest_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
