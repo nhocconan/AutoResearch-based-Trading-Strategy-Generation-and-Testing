@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 12h EMA50 trend filter and volume spike confirmation.
-# In bull trend (price > 12h EMA50), go long when Williams %R crosses above -80 from oversold with volume spike.
-# In bear trend (price < 12h EMA50), go short when Williams %R crosses below -20 from overbought with volume spike.
-# Uses 12h EMA50 for regime (proven effective on BTC/ETH) and 6h Williams %R for mean-reversion entries.
-# Designed for 50-150 total trades over 4 years with discrete position sizing to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# In bull regime (price > 1d EMA34), go long on breakout above R3 with volume spike.
+# In bear regime (price < 1d EMA34), go short on breakdown below S3 with volume spike.
+# Uses Camarilla levels from prior completed 1d for structure, 1d EMA34 for regime filter,
+# and 4h volume spike for confirmation. Designed for 75-200 total trades over 4 years.
+# Focus on BTC/ETH as primary symbols.
 
-name = "6h_WilliamsR_12hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for Camarilla levels and EMA34 (prior completed 1d bar)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate prior 1d Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Camarilla levels: R3, S3
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
+    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
     
-    # Calculate volume regime: current 6h volume > 2.0x 20-period MA
+    # Align Camarilla levels to 4h (wait for 1d bar to complete)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get 1d data for EMA34 trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -48,31 +57,32 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        wr = williams_r[i]
-        ema_trend = ema_50_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr) or np.isnan(ema_trend):
+        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine trend regime: bull if close > 12h EMA50, bear if close < 12h EMA50
-        is_bull_trend = close_val > ema_trend
-        is_bear_trend = close_val < ema_trend
+        # Determine regime: bull if close > 1d EMA34, bear if close < 1d EMA34
+        is_bull_regime = close_val > ema_trend
+        is_bear_regime = close_val < ema_trend
         
-        # Williams %R entry conditions with volume confirmation
-        if is_bull_trend:
-            # Long: Williams %R crosses above -80 (oversold recovery) with volume spike
-            long_entry = (wr > -80) and (i > 100 and williams_r[i-1] <= -80) and vol_spike
+        # Regime-based entry conditions
+        if is_bull_regime:
+            # Long: breakout above R3 with volume spike
+            long_entry = (close_val > r3) and vol_spike
         else:
             long_entry = False
             
-        if is_bear_trend:
-            # Short: Williams %R crosses below -20 (overbought rejection) with volume spike
-            short_entry = (wr < -20) and (i > 100 and williams_r[i-1] >= -20) and vol_spike
+        if is_bear_regime:
+            # Short: breakdown below S3 with volume spike
+            short_entry = (close_val < s3) and vol_spike
         else:
             short_entry = False
         
@@ -85,15 +95,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on Williams %R crossing below -50 (momentum loss) or trend change to bear
-            if wr < -50 or close_val < ema_trend:
+            # Exit on breakdown below S3 (failure of bullish breakout) or regime change to bear
+            if close_val < s3 or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on Williams %R crossing above -50 (momentum loss) or trend change to bull
-            if wr > -50 or close_val > ema_trend:
+            # Exit on breakout above R3 (failure of bearish breakdown) or regime change to bull
+            if close_val > r3 or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
