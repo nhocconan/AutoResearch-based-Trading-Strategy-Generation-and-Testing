@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# 1d ADX > 25 ensures we only trade in trending markets (avoiding chop).
-# Volume spike confirms institutional participation. Designed for 12-30 trades/year on 6h.
-# Works in bull markets via buying dips in uptrends and in bear markets via selling rallies in downtrends.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Donchian breakout captures momentum in direction of higher timeframe trend.
+# EMA34 on 1w ensures we only trade with the weekly trend (bullish for longs, bearish for shorts).
+# Volume spike confirms institutional participation. Designed for 12-25 trades/year on 12h to minimize fee drag.
+# Works in bull markets via trend continuation and in bear markets via shorting breakdowns in downtrends.
 
-name = "6h_WilliamsR_Extreme_1dADX_Trend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,90 +28,64 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI and ADX
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Calculate Williams %R(14) on 6h
+    # Calculate Donchian(20) channels
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after sufficient warmup for Williams %R
+    for i in range(20, n):  # Start after sufficient warmup for Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(adx_14_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1w_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Williams %R using data up to current bar
-        highest_high = np.max(high[i-13:i+1])  # 14-period high
-        lowest_low = np.min(low[i-13:i+1])     # 14-period low
-        williams_r = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        # Calculate Donchian channels using data up to current bar
+        highest_high = np.max(high[i-19:i+1])  # 20-period high
+        lowest_low = np.min(low[i-19:i+1])     # 20-period low
         
-        # Volume confirmation: 14-period EMA
-        if i >= 13:
-            vol_ema_14 = pd.Series(volume[i-13:i+1]).ewm(span=14, adjust=False, min_periods=1).mean().iloc[-1]
+        # Volume confirmation: 20-period EMA
+        if i >= 19:
+            vol_series = pd.Series(volume[i-19:i+1])
+            vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
         else:
-            vol_ema_14 = volume[i]
-        volume_spike = volume[i] > (1.5 * vol_ema_14)
+            vol_ema_20 = volume[i]
+        volume_spike = volume[i] > (1.5 * vol_ema_20)
         
-        # Williams %R extreme conditions
-        oversold = williams_r < -80
-        overbought = williams_r > -20
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high
+        breakout_down = close[i] < lowest_low
         
         if position == 0:
-            # Long: oversold in 1d uptrend (ADX > 25) with volume spike
-            if oversold and adx_14_aligned[i] > 25 and volume_spike:
+            # Long: bullish breakout in 1w uptrend with volume spike
+            if breakout_up and ema_34_1w_aligned[i] < close[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought in 1d downtrend (ADX > 25) with volume spike
-            elif overbought and adx_14_aligned[i] > 25 and volume_spike:
+            # Short: bearish breakdown in 1w downtrend with volume spike
+            elif breakout_down and ema_34_1w_aligned[i] > close[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or loses 1d uptrend
-            if williams_r > -50 or adx_14_aligned[i] <= 25:
+            # Exit long: price returns to midpoint or loses 1w uptrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] < midpoint or ema_34_1w_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or loses 1d downtrend
-            if williams_r < -50 or adx_14_aligned[i] <= 25:
+            # Exit short: price returns to midpoint or loses 1w downtrend
+            midpoint = (highest_high + lowest_low) / 2
+            if close[i] > midpoint or ema_34_1w_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
