@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian breakout captures strong momentum moves, EMA50 on weekly ensures alignment with major trend
-# Volume spike (>2.0x 20-period EMA) confirms institutional participation
-# Works in both bull and bear markets by trading breakouts in direction of weekly trend
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# Hypothesis: 6h Bollinger Band Width Regime + 1d RSI(2) Extreme Reversion
+# Bollinger Band Width (BBW) identifies regime: low BBW = squeeze (impending breakout),
+# high BBW = expansion (trending or volatile). In low volatility regimes (BBW < 20th percentile),
+# we mean-revert using 1d RSI(2) extremes: long when RSI(2) < 10, short when RSI(2) > 90.
+# Volume confirmation (>1.5x 20-period EMA) filters false breakouts.
+# Works in both bull and bear markets by adapting to volatility regime.
+# Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_BBW_Regime_RSI2_Extreme"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,66 +20,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for RSI(2) extreme filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d RSI(2) for extreme reversion signals
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], 100.0)  # Handle division by zero
+    rsi_2 = 100.0 - (100.0 / (1.0 + rs))
+    rsi_2_values = rsi_2.values
+    rsi_2_aligned = align_htf_to_ltf(prices, df_1d, rsi_2_values)
     
-    # Calculate Donchian channels (20-period) on 1d data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Bollinger Band Width (BBW) on 6h for regime detection
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper_band = sma + (std_dev * bb_std)
+    lower_band = sma - (std_dev * bb_std)
+    bb_width = ((upper_band - lower_band) / sma) * 100  # Percentage
+    bb_width_values = bb_width.values
     
-    # Volume confirmation: 20-period EMA on 1d volume
+    # Calculate 20th percentile of BBW for regime threshold (using expanding window)
+    bb_width_percentile_20 = pd.Series(bb_width_values).expanding(min_periods=bb_period).quantile(0.20).values
+    
+    # Volume confirmation: 20-period EMA on 6h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start from 50 to have valid indicators
+    for i in range(bb_period, n):  # Start from bb_period to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(rsi_2_aligned[i]) or np.isnan(bb_width_values[i]) or 
+            np.isnan(bb_width_percentile_20[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.5 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
-        # Donchian breakout signals with 1w trend filter
-        # Long: price breaks above upper Donchian + price above 1w EMA50 + volume spike
-        # Short: price breaks below lower Donchian + price below 1w EMA50 + volume spike
+        # Regime detection: low BBW = squeeze (mean reversion opportunity)
+        low_volatility_regime = bb_width_values[i] < bb_width_percentile_20[i]
+        
+        # RSI(2) extreme signals from 1d
+        rsi_extreme_long = rsi_2_aligned[i] < 10
+        rsi_extreme_short = rsi_2_aligned[i] > 90
+        
         if position == 0:
-            if (high[i] > highest_high[i-1] and  # Break above upper Donchian
-                close[i] > ema_50_1w_aligned[i] and volume_spike):
+            # Enter long in low volatility regime with RSI(2) extreme oversold + volume spike
+            if low_volatility_regime and rsi_extreme_long and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif (low[i] < lowest_low[i-1] and  # Break below lower Donchian
-                  close[i] < ema_50_1w_aligned[i] and volume_spike):
+            # Enter short in low volatility regime with RSI(2) extreme overbought + volume spike
+            elif low_volatility_regime and rsi_extreme_short and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian OR closes below 1w EMA50
-            if low[i] < lowest_low[i-1] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: RSI(2) reverts to neutral (above 50) OR volatility expands (exit regime)
+            if rsi_2_aligned[i] > 50 or not low_volatility_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian OR closes above 1w EMA50
-            if high[i] > highest_high[i-1] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: RSI(2) reverts to neutral (below 50) OR volatility expands (exit regime)
+            if rsi_2_aligned[i] < 50 or not low_volatility_regime:
                 signals[i] = 0.0
                 position = 0
             else:
