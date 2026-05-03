@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Supertrend for trend direction and 6h price action for entry timing.
-# Long when: 6h close > 12h Supertrend (uptrend) AND 6h close > 6h Donchian(20) upper band with volume > 1.5x 20-bar average
-# Short when: 6h close < 12h Supertrend (downtrend) AND 6h close < 6h Donchian(20) lower band with volume > 1.5x 20-bar average
+# Hypothesis: 4h strategy using 1d Williams Alligator for trend direction and 4h price action for entry timing.
+# Long when: 4h close > 1d Alligator Jaw (uptrend) AND 4h close > 4h Donchian(20) upper band with volume > 1.5x 20-bar average
+# Short when: 4h close < 1d Alligator Jaw (downtrend) AND 4h close < 4h Donchian(20) lower band with volume > 1.5x 20-bar average
 # Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses 12h Supertrend for robust trend filtering (avoids whipsaw), 6h Donchian breakouts for entry precision, volume for confirmation
-# Discrete sizing 0.25 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
+# Uses 1d Williams Alligator for robust trend filtering (avoids whipsaw), 4h Donchian breakouts for entry precision, volume for confirmation
+# Discrete sizing 0.25 balances return and fee drag. Target: 75-200 total trades over 4 years = 19-50/year.
 
-name = "6h_Supertrend12h_Donchian20_Volume_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Alligator1d_Donchian20_Volume_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,57 +25,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Supertrend for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 1d Williams Alligator (Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR for Supertrend (10 period)
-    tr1_12h = high_12h[1:] - low_12h[1:]
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
-    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Smoothed Moving Average (SMMA) function
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        # First value is simple moving average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Supertrend calculation (10, 3.0)
-    hl2_12h = (high_12h + low_12h) / 2
-    upperband_12h = hl2_12h + 3.0 * atr_12h
-    lowerband_12h = hl2_12h - 3.0 * atr_12h
+    # Alligator lines
+    jaw_1d = smma(close_1d, 13)  # Jaw (Blue) - 13-period SMMA
+    teeth_1d = smma(close_1d, 8)  # Teeth (Red) - 8-period SMMA
+    lips_1d = smma(close_1d, 5)   # Lips (Green) - 5-period SMMA
     
-    supertrend_12h = np.full_like(close_12h, np.nan)
-    direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
+    # Align 1d Alligator Jaw to 4h timeframe (completed 1d bar only)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
     
-    for i in range(1, len(close_12h)):
-        if np.isnan(supertrend_12h[i-1]):
-            # Initialize
-            supertrend_12h[i] = lowerband_12h[i]
-            direction_12h[i] = 1
-        else:
-            if close_12h[i] > upperband_12h[i-1]:
-                supertrend_12h[i] = lowerband_12h[i]
-                direction_12h[i] = 1
-            elif close_12h[i] < lowerband_12h[i-1]:
-                supertrend_12h[i] = upperband_12h[i]
-                direction_12h[i] = -1
-            else:
-                supertrend_12h[i] = supertrend_12h[i-1]
-                direction_12h[i] = direction_12h[i-1]
-                
-                # Adjust bands
-                if direction_12h[i] == 1 and lowerband_12h[i] < lowerband_12h[i-1]:
-                    lowerband_12h[i] = lowerband_12h[i-1]
-                if direction_12h[i] == -1 and upperband_12h[i] > upperband_12h[i-1]:
-                    upperband_12h[i] = upperband_12h[i-1]
-    
-    # Align 12h Supertrend and direction to 6h timeframe (completed 12h bar only)
-    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend_12h)
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
-    
-    # 6h Donchian(20) for entry timing
+    # 4h Donchian(20) for entry timing
     donchian_window = 20
     upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().shift(1).values
     lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().shift(1).values
@@ -98,25 +77,24 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start after warmup (need enough for Donchian and ATR calculations)
-    start_idx = max(donchian_window, 20) + 5
+    start_idx = max(donchian_window, 30) + 5
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(supertrend_12h_aligned[i]) or np.isnan(direction_12h_aligned[i]) or 
-            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: 12h Supertrend uptrend AND price breaks above 6h Donchian upper with volume spike
-            if direction_12h_aligned[i] == 1 and close[i] > upper_channel[i] and volume_spike[i]:
+            # Long entry: 1d Alligator Jaw uptrend (price > jaw) AND price breaks above 4h Donchian upper with volume spike
+            if close[i] > jaw_1d_aligned[i] and close[i] > upper_channel[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: 12h Supertrend downtrend AND price breaks below 6h Donchian lower with volume spike
-            elif direction_12h_aligned[i] == -1 and close[i] < lower_channel[i] and volume_spike[i]:
+            # Short entry: 1d Alligator Jaw downtrend (price < jaw) AND price breaks below 4h Donchian lower with volume spike
+            elif close[i] < jaw_1d_aligned[i] and close[i] < lower_channel[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
