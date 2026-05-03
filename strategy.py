@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Hypothesis: 4h Donchian(20) breakout + 12h HMA21 trend filter + volume confirmation
 # Donchian channels provide robust breakout structure in both bull and bear markets.
-# 1w EMA50 ensures alignment with the major trend to avoid counter-trend trades.
-# Volume confirmation (2.0x 20-period EMA) filters false breakouts.
-# Designed for 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
+# 12h HMA21 > price confirms uptrend, HMA21 < price confirms downtrend to avoid counter-trend trades.
+# Volume confirmation (1.5x 20-period EMA) filters false breakouts.
+# Designed for 75-200 total trades over 4 years (19-50/year) with discrete sizing to minimize fee drag.
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_12hHMA21_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,25 +28,37 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for HMA21 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h HMA(21)
+    close_12h = df_12h['close'].values
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Align 1w EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    def wma(values, window):
+        if len(values) < window:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Calculate Donchian channels from previous 12h bar (20-period)
+    wma_half = wma(close_12h, half_len)
+    wma_full = wma(close_12h, 21)
+    hma_21 = 2 * wma_half - wma_full
+    hma_21 = wma(hma_21, sqrt_len)
+    
+    # Align 12h HMA21 to 4h timeframe
+    hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
+    
+    # Calculate Donchian channels from previous 4h bar (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: 20-period EMA on 12h
+    # Volume confirmation: 20-period EMA on 4h
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -55,19 +67,19 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start from 20 to have valid Donchian and volume EMA
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(hma_21_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(vol_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.5 x 20-period EMA
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
-        # Uptrend: price above 1w EMA50, Downtrend: price below 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Uptrend: price > HMA21, Downtrend: price < HMA21
+        uptrend = close[i] > hma_21_aligned[i]
+        downtrend = close[i] < hma_21_aligned[i]
         
         if position == 0:
             # Long: price breaks above upper Donchian in uptrend with volume spike
