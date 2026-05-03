@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA50 trend filter + ATR regime filter
-# Elder Ray measures bull/bear power relative to EMA13; trend filter ensures we trade with higher timeframe direction
-# ATR regime filter avoids ranging markets (low ATR) and extreme volatility (high ATR)
-# Works in bull/bear: 1d EMA50 defines major trend, Elder Ray captures momentum within that trend
-# Target: 12-30 trades/year (50-120 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume spike confirmation
+# Donchian breakouts capture momentum in trending markets, work in both bull/bear
+# 1d EMA50 ensures trading with higher timeframe trend to avoid counter-trend whipsaws
+# Volume spike (>1.8x 20-period EMA) confirms breakout authenticity and reduces false signals
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
+# Discrete position sizing (0.25) to reduce churn, ATR-based stoploss via signal=0
 
-name = "6h_ElderRay_1dEMA50_ATRRegime"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,63 +34,52 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) for regime filter on 6h data
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Donchian channels (20-period) on 4h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # ATR regime: avoid low volatility (<0.5*20-period mean) and extreme volatility (>2.0*20-period mean)
-    atr_ma = pd.Series(atr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_regime = (atr > 0.5 * atr_ma) & (atr < 2.0 * atr_ma)
-    
-    # Calculate EMA(13) for Elder Ray on 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Volume confirmation: 20-period EMA on 4h volume
+    vol_series = pd.Series(volume)
+    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(atr_regime[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade in moderate volatility
-        if not atr_regime[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Volume spike: current volume > 1.8 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
-        # Elder Ray signals with 1d trend filter
-        # Long: Bull Power > 0 (bulls in control) + price above 1d EMA50
-        # Short: Bear Power < 0 (bears in control) + price below 1d EMA50
+        # Donchian breakout signals with 1d trend filter
+        # Long: price breaks above Donchian upper + price above 1d EMA50 + volume spike
+        # Short: price breaks below Donchian lower + price below 1d EMA50 + volume spike
         if position == 0:
-            if bull_power[i] > 0 and close[i] > ema_50_1d_aligned[i]:
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            elif bear_power[i] < 0 and close[i] < ema_50_1d_aligned[i]:
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and volume_spike):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 (bulls lose control) OR price below 1d EMA50
-            if bull_power[i] <= 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price breaks below Donchian lower OR price below 1d EMA50
+            if close[i] < lowest_low[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 (bears lose control) OR price above 1d EMA50
-            if bear_power[i] >= 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price breaks above Donchian upper OR price above 1d EMA50
+            if close[i] > highest_high[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
