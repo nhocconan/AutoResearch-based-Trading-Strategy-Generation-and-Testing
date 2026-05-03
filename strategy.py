@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
-# Donchian breakout captures sustained moves in both bull and bear markets.
-# 1d ADX > 25 filters for trending regimes to avoid whipsaws in ranging markets.
-# Volume spike (volume > 1.5 * 20-period MA) confirms breakout strength.
-# Target: 20-50 trades/year (80-200 over 4 years) with discrete position sizing.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
+# Donchian breakout captures sustained momentum, volume spike confirms institutional interest,
+# choppiness regime ensures we only trade in clear trends (CHOP < 38.2) or mean-revert in ranges (CHOP > 61.8).
+# Designed to work in both bull and bear markets by adapting to regime.
+# Target: 12-37 trades/year (50-150 over 4 years).
 
-name = "4h_Donchian20_1dADX_VolumeSpike"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolumeSpike_ChopRegime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,12 +28,16 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for volume spike and choppiness
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period) for regime filtering
+    # Calculate 1d volume spike (volume > 2.0 * 20-period EMA of volume)
+    vol_ema_20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = df_1d['volume'].values > (2.0 * vol_ema_20)
+    
+    # Calculate 1d choppiness index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -44,75 +48,68 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    dm_plus = np.concatenate([[np.nan], np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                                                 np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)])
-    dm_minus = np.concatenate([[np.nan], np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                                                  np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)])
+    # ATR(14) - sum of TR over 14 periods
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smoothed = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smoothed = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
-    plus_di_1d = 100 * dm_plus_smoothed / atr_1d
-    minus_di_1d = 100 * dm_minus_smoothed / atr_1d
+    # Choppiness Index: 100 * log10(atr_14 / (hh_14 - ll_14)) / log10(14)
+    range_14 = hh_14 - ll_14
+    chop = 100 * np.log10(atr_14 / range_14) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop = np.where((range_14 == 0) | np.isnan(chop), 50.0, chop)
     
-    # Directional Index (DX) and ADX
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    # Handle division by zero when both DI are zero
-    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align 1d indicators to 12h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate Donchian channels (20-period) on 4h
+    # Calculate 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_1d_aligned[i]) or not in_session[i]):
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-            
-        # Regime filter: only trade when ADX > 25 (trending market)
-        is_trending = adx_1d_aligned[i] > 25
+        
+        # Regime filter: CHOP < 38.2 = trending (breakout), CHOP > 61.8 = ranging (mean revert)
+        is_trending = chop_aligned[i] < 38.2
+        is_ranging = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel + volume spike + trending regime + session
-            if close[i] > highest_high[i] and volume_spike[i] and is_trending:
-                signals[i] = 0.30
+            # Long: Donchian breakout above upper band + volume spike + (trending OR ranging)
+            if high[i] > highest_high[i] and volume_spike_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian channel + volume spike + trending regime + session
-            elif close[i] < lowest_low[i] and volume_spike[i] and is_trending:
-                signals[i] = -0.30
+            # Short: Donchian breakdown below lower band + volume spike + (trending OR ranging)
+            elif low[i] < lowest_low[i] and volume_spike_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower Donchian channel OR reverse signal
-            if close[i] < lowest_low[i] or (close[i] < lowest_low[i] and volume_spike[i]):
+            # Exit long: Donchian breakdown below middle band OR reverse signal
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if low[i] < middle or (low[i] < lowest_low[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper Donchian channel OR reverse signal
-            if close[i] > highest_high[i] or (close[i] > highest_high[i] and volume_spike[i]):
+            # Exit short: Donchian breakout above middle band OR reverse signal
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if high[i] > middle or (high[i] > highest_high[i] and volume_spike_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
