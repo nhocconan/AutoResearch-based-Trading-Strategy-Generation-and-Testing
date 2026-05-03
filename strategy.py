@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted RSI + 12h Supertrend regime filter.
-# Volume-Weighted RSI (VWRSI) incorporates volume into RSI calculation, making it more responsive to institutional flow.
-# In trending regimes (12h Supertrend), trade in direction of VWRSI extremes with volume confirmation.
-# Designed to capture momentum shifts validated by volume, working in both bull and bear markets by filtering chop.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
+# Long when price breaks above Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5 * MA20 volume.
+# Short when price breaks below Donchian(20) low AND ADX > 25 AND volume > 1.5 * MA20 volume.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
 
-name = "6h_VolumeWeightedRSI_12hSupertrend_Regime"
-timeframe = "6h"
+name = "4h_Donchian20_1dADX_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,130 +27,90 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h data for Supertrend regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Supertrend (ATR=10, mult=3.0)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d ADX (14-period) for regime filtering
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR using Wilder's smoothing
-    atr_12h = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    dm_plus = np.concatenate([[np.nan], np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                                                 np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)])
+    dm_minus = np.concatenate([[np.nan], np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                                                  np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)])
     
-    # Supertrend calculation
-    hl2_12h = (high_12h + low_12h) / 2
-    upper_band_12h = hl2_12h + (3.0 * atr_12h)
-    lower_band_12h = hl2_12h - (3.0 * atr_12h)
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smoothed = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smoothed = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Initialize Supertrend
-    supertrend_12h = np.full_like(close_12h, np.nan)
-    direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
+    # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
+    plus_di_1d = 100 * dm_plus_smoothed / atr_1d
+    minus_di_1d = 100 * dm_minus_smoothed / atr_1d
     
-    # Start from index 10 (after min_periods)
-    for i in range(10, len(close_12h)):
-        if np.isnan(upper_band_12h[i]) or np.isnan(lower_band_12h[i]) or np.isnan(atr_12h[i]):
-            continue
-            
-        if i == 10:
-            supertrend_12h[i] = lower_band_12h[i]
-            direction_12h[i] = 1
-        else:
-            prev_close = close_12h[i-1]
-            prev_supertrend = supertrend_12h[i-1]
-            prev_direction = direction_12h[i-1]
-            
-            if prev_direction == 1:
-                # Was in uptrend
-                if close_12h[i] <= prev_supertrend:
-                    # Reverse to downtrend
-                    supertrend_12h[i] = upper_band_12h[i]
-                    direction_12h[i] = -1
-                else:
-                    # Stay in uptrend
-                    supertrend_12h[i] = max(lower_band_12h[i], prev_supertrend)
-                    direction_12h[i] = 1
-            else:
-                # Was in downtrend
-                if close_12h[i] >= prev_supertrend:
-                    # Reverse to uptrend
-                    supertrend_12h[i] = lower_band_12h[i]
-                    direction_12h[i] = 1
-                else:
-                    # Stay in downtrend
-                    supertrend_12h[i] = min(upper_band_12h[i], prev_supertrend)
-                    direction_12h[i] = -1
+    # Directional Index (DX) and ADX
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    # Handle division by zero when both DI are zero
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 12h Supertrend direction to 6h timeframe
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    # Align 1d ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 6h Volume-Weighted RSI (14-period)
-    # Typical Price
-    tp_6h = (high + low + close) / 3
+    # Calculate Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume-weighted typical price change
-    vwtp_6h = tp_6h * volume
-    
-    # Price change
-    delta_tp = np.diff(tp_6h, prepend=tp_6h[0])
-    
-    # Volume-weighted price change
-    vw_delta_tp = delta_tp * volume
-    
-    # Separate gains and losses (volume-weighted)
-    gains = np.where(vw_delta_tp >= 0, vw_delta_tp, 0)
-    losses = np.where(vw_delta_tp < 0, -vw_delta_tp, 0)
-    
-    # Smoothed average gains and losses (using Wilder's smoothing = EMA with alpha=1/period)
-    avg_gains = pd.Series(gains).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_losses = pd.Series(losses).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Relative Strength (RS) and RSI
-    rs_6h = np.divide(avg_gains, avg_losses, out=np.zeros_like(avg_gains), where=avg_losses!=0)
-    rsi_6h = 100 - (100 / (1 + rs_6h))
+    # Volume confirmation: volume > 1.5 * 20-period MA volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(lookback, n):
         # Skip if any value is NaN or outside session
-        if (np.isnan(rsi_6h[i]) or np.isnan(direction_12h_aligned[i]) or not in_session[i]):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirm[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Regime filter: only trade when 12h Supertrend is defined (not NaN)
-        is_uptrend = direction_12h_aligned[i] == 1
-        is_downtrend = direction_12h_aligned[i] == -1
+        # Regime filter: only trade when ADX > 25 (trending market)
+        is_trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: VWRSI < 30 (oversold) AND 12h uptrend AND session
-            if rsi_6h[i] < 30 and is_uptrend:
+            # Long: price breaks above Donchian high + volume confirmation + trending
+            if close[i] > highest_high[i] and volume_confirm[i] and is_trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: VWRSI > 70 (overbought) AND 12h downtrend AND session
-            elif rsi_6h[i] > 70 and is_downtrend:
+            # Short: price breaks below Donchian low + volume confirmation + trending
+            elif close[i] < lowest_low[i] and volume_confirm[i] and is_trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: VWRSI >= 50 (mean reversion) OR reverse signal
-            if rsi_6h[i] >= 50 or (rsi_6h[i] > 70 and is_downtrend):
+            # Exit long: price breaks below Donchian low OR reverse signal
+            if close[i] < lowest_low[i] or (close[i] < lowest_low[i] and volume_confirm[i] and is_trending):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: VWRSI <= 50 (mean reversion) OR reverse signal
-            if rsi_6h[i] <= 50 or (rsi_6h[i] < 30 and is_uptrend):
+            # Exit short: price breaks above Donchian high OR reverse signal
+            if close[i] > highest_high[i] or (close[i] > highest_high[i] and volume_confirm[i] and is_trending):
                 signals[i] = 0.0
                 position = 0
             else:
