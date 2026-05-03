@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla R4/S4 breakout with volume spike confirmation and 1d ADX25 trend filter.
-# Long when: price breaks above 1d Camarilla R4 AND volume > 2.0x 20-bar average AND ADX(14) > 25 on 1d
-# Short when: price breaks below 1d Camarilla S4 AND volume > 2.0x 20-bar average AND ADX(14) > 25 on 1d
+# Hypothesis: 6h strategy using 1d Camarilla R4/S4 breakout with 1w EMA34 trend filter and volume spike confirmation.
+# Long when: price breaks above 1d Camarilla R4 level AND close > 1w EMA34 AND volume > 2.0x 20-bar average
+# Short when: price breaks below 1d Camarilla S4 level AND close < 1w EMA34 AND volume > 2.0x 20-bar average
 # Exit via ATR(20) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses proven Camarilla structure with volume confirmation and ADX trend filter to reduce false breakouts.
-# Discrete sizing 0.28 balances return and fee drag. Target: 75-150 total trades over 4 years = 19-38/year.
+# Uses 1d Camarilla for structure (proven edge), 1w EMA34 for trend alignment, volume spike for confirmation
+# Discrete sizing 0.28 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "4h_Camarilla_R4_S4_1dADX25_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_1wEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,46 +50,20 @@ def generate_signals(prices):
         camarilla_r4[i] = close_prev + range_prev * 1.1 / 2
         camarilla_s4[i] = close_prev - range_prev * 1.1 / 2
     
-    # Align 1d Camarilla levels to 4h timeframe (completed 1d bar only)
+    # Align 1d Camarilla levels to 6h timeframe (completed 1d bar only)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 1d ADX(14) for trend filter
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        alpha = 1.0 / period
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1d = wilder_smooth(tr_1d, 14)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilder_smooth(dx_1d, 14)
-    
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 4h ATR(20) for stoploss
+    # 6h ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -106,26 +80,26 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup (need enough for ATR, Camarilla, ADX calculations)
-    start_idx = 20 + 14 + 14 + 5  # ATR(20) + ADX(14) smoothing + buffer
+    # Start after warmup (need enough for ATR, Camarilla, EMA calculations)
+    start_idx = 20 + 34 + 5  # ATR(20) + EMA34 warmup + buffer
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
         if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above 1d Camarilla R4 with volume spike AND strong trend (ADX > 25)
-            if close[i] > camarilla_r4_aligned[i] and volume_spike[i] and adx_1d_aligned[i] > 25:
+            # Long entry: price breaks above 1d Camarilla R4 with volume spike AND bullish trend (close > 1w EMA34)
+            if close[i] > camarilla_r4_aligned[i] and volume_spike[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.28
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below 1d Camarilla S4 with volume spike AND strong trend (ADX > 25)
-            elif close[i] < camarilla_s4_aligned[i] and volume_spike[i] and adx_1d_aligned[i] > 25:
+            # Short entry: price breaks below 1d Camarilla S4 with volume spike AND bearish trend (close < 1w EMA34)
+            elif close[i] < camarilla_s4_aligned[i] and volume_spike[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.28
                 position = -1
                 entry_bar = i
