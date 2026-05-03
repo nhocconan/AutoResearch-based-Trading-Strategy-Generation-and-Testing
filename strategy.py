@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 4h Donchian upper band AND 1w close > 1w EMA50 (uptrend) AND 4h volume > 1.8x 20-period volume MA.
-# Short when price breaks below 4h Donchian lower band AND 1w close < 1w EMA50 (downtrend) AND 4h volume > 1.8x 20-period volume MA.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above 1d Donchian upper band AND 1w close > 1w EMA50 (uptrend) AND 1d volume > 2.0x 20-period volume MA.
+# Short when price breaks below 1d Donchian lower band AND 1w close < 1w EMA50 (downtrend) AND 1d volume > 2.0x 20-period volume MA.
 # Exit on retracement to opposite Donchian band or trend reversal.
 # Uses session filter (08-20 UTC) to avoid low-liquidity periods. Position size 0.25.
-# Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year) with strict entry conditions.
+# Designed for 1d timeframe to achieve 30-100 total trades over 4 years (7-25/year) with strict entry conditions.
 # Donchian channels provide clear breakout levels, 1w EMA50 filters for higher-timeframe trend alignment, volume confirms participation.
 # Works in both bull and bear markets by only trading breakouts in the direction of the 1w trend when volume confirms.
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike_Session"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_Session"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,12 +40,12 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 4h Donchian(20) from previous period to avoid look-ahead
+    # Calculate 1d Donchian(20) from previous period to avoid look-ahead
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4h volume 20-period MA for spike detection
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume 20-period MA for spike detection
+    volume_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +53,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any value is NaN or outside session
         if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ma_4h[i]) or not in_session[i]):
+            np.isnan(lowest_20[i]) or np.isnan(volume_ma_1d[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,8 +63,8 @@ def generate_signals(prices):
         high_val = high[i]
         low_val = low[i]
         
-        # Volume spike condition: current 4h volume > 1.8x 20-period volume MA
-        volume_spike = volume[i] > (volume_ma_4h[i] * 1.8)
+        # Volume spike condition: current 1d volume > 2.0x 20-period volume MA
+        volume_spike = volume[i] > (volume_ma_1d[i] * 2.0)
         
         # Donchian breakout conditions
         breakout_up = high_val > highest_20[i]   # Price breaks above upper band
