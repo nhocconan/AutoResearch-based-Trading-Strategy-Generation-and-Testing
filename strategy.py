@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA(50) trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# In strong uptrends, Bull Power expands and stays positive; in downtrends, Bear Power expands and stays negative
-# We use 6h for entry timing, 12h EMA(50) for trend alignment, and volume spike for confirmation
-# Long: Bull Power > 0 AND Bear Power < 0 (bulls in control) AND price > 12h EMA50 AND volume spike
-# Short: Bear Power < 0 AND Bull Power > 0 (bears in control) AND price < 12h EMA50 AND volume spike
-# This avoids whipsaws by requiring both bull and bear power to confirm regime
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing trends
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation
+# Donchian channels capture volatility-based breakouts that work in both bull and bear markets
+# 1d EMA(34) ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume spike (>2.0x 20-period EMA) filters low-probability breakouts
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
-name = "6h_ElderRay_12hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Elder Ray components on 6h: need EMA13 first
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Calculate Donchian(20) channels on 4h data
+    # Upper channel = highest high of last 20 periods
+    # Lower channel = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 20-period EMA on 6h volume
+    # Volume confirmation: 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -51,8 +50,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,28 +60,26 @@ def generate_signals(prices):
         # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
         volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Elder Ray signals with 12h trend filter
-        # Long: Bull Power > 0 (bulls in control) AND Bear Power < 0 (no bear pressure) 
-        #       AND price above 12h EMA50 AND volume spike
-        # Short: Bear Power < 0 (bears in control) AND Bull Power > 0 (no bull pressure)
-        #        AND price below 12h EMA50 AND volume spike
+        # Donchian breakout signals with 1d trend filter
+        # Long: Break above upper channel + price above 1d EMA34 + volume spike
+        # Short: Break below lower channel + price below 1d EMA34 + volume spike
         if position == 0:
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_50_12h_aligned[i] and volume_spike:
+            if close[i] > upper_channel[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            elif bear_power[i] < 0 and bull_power[i] > 0 and close[i] < ema_50_12h_aligned[i] and volume_spike:
+            elif close[i] < lower_channel[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bears take over (Bear Power > 0) OR price breaks below 12h EMA50
-            if bear_power[i] > 0 or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: Price breaks below lower channel (reversion to mean) OR below 1d EMA34
+            if close[i] < lower_channel[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bulls take over (Bull Power < 0) OR price breaks above 12h EMA50
-            if bull_power[i] < 0 or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: Price breaks above upper channel (reversion to mean) OR above 1d EMA34
+            if close[i] > upper_channel[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
