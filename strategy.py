@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 in 1d uptrend with volume spike (>1.5x 20-period volume MA).
-# Short when price breaks below Camarilla S3 in 1d downtrend with volume spike.
-# Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
-# Volume spike confirms institutional participation. Designed for 6h timeframe to achieve 50-150 total trades over 4 years.
-# Camarilla pivot levels provide precise support/resistance based on prior day's range, effective in both trending and ranging markets.
+# Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) AND Alligator Mouth is open (Jaw > Teeth > Lips) AND 1w uptrend AND volume spike (>1.8x 50-period volume MA).
+# Short when price < Alligator Lips AND Alligator Mouth is open (Lips < Teeth < Jaw) AND 1w downtrend AND volume spike.
+# Uses 1w EMA50 for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume spike confirms institutional participation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years.
+# Williams Alligator identifies trend absence/presence and direction via smoothed moving averages.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,45 +25,47 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 1d timeframe (based on previous day's range)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Williams Alligator on primary timeframe (12h)
+    # Smoothed Moving Average (SMMA) = EMA with alpha = 1/period
+    def smma(data, period):
+        if len(data) < period:
+            return np.full_like(data, np.nan, dtype=np.float64)
+        result = np.empty_like(data)
+        result[:] = np.nan
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Camarilla levels: based on previous day's high, low, close
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
+    # Alligator components: Jaw (13), Teeth (8), Lips (5)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Align Camarilla levels to lower timeframe (1d -> 6h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Get 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection (20-period volume MA on primary timeframe)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)  # Volume at least 1.5x average
+    # Volume spike detection (50-period volume MA on primary timeframe)
+    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (volume_ma * 1.8)  # Volume at least 1.8x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,28 +74,36 @@ def generate_signals(prices):
         close_val = close[i]
         open_val = open_prices[i]
         vol_spike = volume_spike[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        trend_up = close_val > ema_34_1d_aligned[i]   # 1d uptrend
-        trend_down = close_val < ema_34_1d_aligned[i]  # 1d downtrend
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        trend_up = close_val > ema_50_1w_aligned[i]   # 1w uptrend
+        trend_down = close_val < ema_50_1w_aligned[i]  # 1w downtrend
+        
+        # Alligator Mouth open conditions
+        mouth_open_up = jaw_val > teeth_val > lips_val   # Bullish alignment
+        mouth_open_down = lips_val < teeth_val < jaw_val  # Bearish alignment
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND 1d uptrend AND volume spike
-            if close_val > r3_level and open_val <= r3_level and trend_up and vol_spike:
+            # Long: price > Jaw AND mouth open bullish AND 1w uptrend AND volume spike
+            if close_val > jaw_val and mouth_open_up and trend_up and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 AND 1d downtrend AND volume spike
-            elif close_val < s3_level and open_val >= s3_level and trend_down and vol_spike:
+            # Short: price < Lips AND mouth open bearish AND 1w downtrend AND volume spike
+            elif close_val < lips_val and mouth_open_down and trend_down and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit conditions for long
             exit_signal = False
-            # Exit: price closes below Camarilla S3 (reversal signal)
-            if close_val < s3_level:
+            # Exit: price closes below Teeth (trend weakening)
+            if close_val < teeth_val:
                 exit_signal = True
-            # Exit: 1d trend changes to downtrend
+            # Exit: 1w trend changes to downtrend
             elif not trend_up:
+                exit_signal = True
+            # Exit: Alligator mouth closes (loss of momentum)
+            elif not mouth_open_up:
                 exit_signal = True
             
             if exit_signal:
@@ -104,11 +114,14 @@ def generate_signals(prices):
         elif position == -1:
             # Exit conditions for short
             exit_signal = False
-            # Exit: price closes above Camarilla R3 (reversal signal)
-            if close_val > r3_level:
+            # Exit: price closes above Teeth (trend weakening)
+            if close_val > teeth_val:
                 exit_signal = True
-            # Exit: 1d trend changes to uptrend
+            # Exit: 1w trend changes to uptrend
             elif not trend_down:
+                exit_signal = True
+            # Exit: Alligator mouth closes (loss of momentum)
+            elif not mouth_open_down:
                 exit_signal = True
             
             if exit_signal:
