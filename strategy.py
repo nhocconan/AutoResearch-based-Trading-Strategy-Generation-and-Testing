@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation
-# Long when price breaks above weekly Camarilla R3 level with 1w EMA34 uptrend and volume > 1.5x 20-bar average
-# Short when price breaks below weekly Camarilla S3 level with 1w EMA34 downtrend and volume > 1.5x 20-bar average
-# Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.0 * ATR
-#                      short exit when price > lowest_low_since_entry + 2.0 * ATR
-# Uses weekly Camarilla pivot levels for structure, weekly EMA34 for trend filter, volume for confirmation
-# Discrete sizing 0.25 balances return and fee drag. Target: 30-100 total trades over 4 years = 7-25/year.
+# Hypothesis: 6h strategy using 12h Supertrend for trend direction and 6h price action for entry timing.
+# Long when: 6h close > 12h Supertrend (uptrend) AND 6h close > 6h Donchian(20) upper band with volume > 1.5x 20-bar average
+# Short when: 6h close < 12h Supertrend (downtrend) AND 6h close < 6h Donchian(20) lower band with volume > 1.5x 20-bar average
+# Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
+#                      short exit when price > lowest_low_since_entry + 2.5 * ATR
+# Uses 12h Supertrend for robust trend filtering (avoids whipsaw), 6h Donchian breakouts for entry precision, volume for confirmation
+# Discrete sizing 0.25 balances return and fee drag. Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "1d_Camarilla_R3S3_1wEMA34_Volume_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Supertrend12h_Donchian20_Volume_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,27 +25,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla pivot levels (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 12h Supertrend for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Prior week's OHLC for Camarilla calculation
-    ph = df_1w['high'].shift(1).values  # prior week high
-    pl = df_1w['low'].shift(1).values   # prior week low
-    pc = df_1w['close'].shift(1).values # prior week close
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
+    # ATR for Supertrend (10 period)
+    tr1_12h = high_12h[1:] - low_12h[1:]
+    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align Camarilla levels to 1d timeframe (completed 1w bar only)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Supertrend calculation (10, 3.0)
+    hl2_12h = (high_12h + low_12h) / 2
+    upperband_12h = hl2_12h + 3.0 * atr_12h
+    lowerband_12h = hl2_12h - 3.0 * atr_12h
     
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    supertrend_12h = np.full_like(close_12h, np.nan)
+    direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_12h)):
+        if np.isnan(supertrend_12h[i-1]):
+            # Initialize
+            supertrend_12h[i] = lowerband_12h[i]
+            direction_12h[i] = 1
+        else:
+            if close_12h[i] > upperband_12h[i-1]:
+                supertrend_12h[i] = lowerband_12h[i]
+                direction_12h[i] = 1
+            elif close_12h[i] < lowerband_12h[i-1]:
+                supertrend_12h[i] = upperband_12h[i]
+                direction_12h[i] = -1
+            else:
+                supertrend_12h[i] = supertrend_12h[i-1]
+                direction_12h[i] = direction_12h[i-1]
+                
+                # Adjust bands
+                if direction_12h[i] == 1 and lowerband_12h[i] < lowerband_12h[i-1]:
+                    lowerband_12h[i] = lowerband_12h[i-1]
+                if direction_12h[i] == -1 and upperband_12h[i] > upperband_12h[i-1]:
+                    upperband_12h[i] = upperband_12h[i-1]
+    
+    # Align 12h Supertrend and direction to 6h timeframe (completed 12h bar only)
+    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend_12h)
+    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    
+    # 6h Donchian(20) for entry timing
+    donchian_window = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().shift(1).values
+    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().shift(1).values
     
     # ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
@@ -64,25 +97,26 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup (need enough for EMA34 and ATR calculations)
-    start_idx = 50  # EMA34 needs 34 bars, plus buffer
+    # Start after warmup (need enough for Donchian and ATR calculations)
+    start_idx = max(donchian_window, 20) + 5
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(supertrend_12h_aligned[i]) or np.isnan(direction_12h_aligned[i]) or 
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla R3 with 1w EMA34 uptrend and volume spike
-            if close[i] > camarilla_r3_aligned[i] and ema_34_aligned[i] > ema_34_aligned[i-1] and volume_spike[i]:
+            # Long entry: 12h Supertrend uptrend AND price breaks above 6h Donchian upper with volume spike
+            if direction_12h_aligned[i] == 1 and close[i] > upper_channel[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: price breaks below Camarilla S3 with 1w EMA34 downtrend and volume spike
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_aligned[i] < ema_34_aligned[i-1] and volume_spike[i]:
+            # Short entry: 12h Supertrend downtrend AND price breaks below 6h Donchian lower with volume spike
+            elif direction_12h_aligned[i] == -1 and close[i] < lower_channel[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
@@ -93,8 +127,8 @@ def generate_signals(prices):
         elif position == 1:  # Long position
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, high[i])
-            # ATR trailing stop: exit when price < highest_high_since_entry - 2.0 * ATR
-            if close[i] < highest_since_entry - 2.0 * atr[i]:
+            # ATR trailing stop: exit when price < highest_high_since_entry - 2.5 * ATR
+            if close[i] < highest_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,8 +137,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, low[i])
-            # ATR trailing stop: exit when price > lowest_low_since_entry + 2.0 * ATR
-            if close[i] > lowest_since_entry + 2.0 * atr[i]:
+            # ATR trailing stop: exit when price > lowest_low_since_entry + 2.5 * ATR
+            if close[i] > lowest_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
