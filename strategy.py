@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams Alligator for trend direction and 4h price action for entry timing.
-# Long when: 4h close > 1d Alligator Jaw (uptrend) AND 4h close > 4h Donchian(20) upper band with volume > 1.5x 20-bar average
-# Short when: 4h close < 1d Alligator Jaw (downtrend) AND 4h close < 4h Donchian(20) lower band with volume > 1.5x 20-bar average
+# Hypothesis: 4h strategy using 1d Camarilla pivot R3/S3 levels for breakout entries with volume confirmation and 1w EMA34 trend filter.
+# Long when: price breaks above 1d Camarilla R3 with volume > 2.0x 20-bar average AND close > 1w EMA34 (bullish trend)
+# Short when: price breaks below 1d Camarilla S3 with volume > 2.0x 20-bar average AND close < 1w EMA34 (bearish trend)
 # Exit via ATR(14) trailing stop: long exit when price < highest_high_since_entry - 2.5 * ATR
 #                      short exit when price > lowest_low_since_entry + 2.5 * ATR
-# Uses 1d Williams Alligator for robust trend filtering (avoids whipsaw), 4h Donchian breakouts for entry precision, volume for confirmation
+# Uses 1w EMA34 for robust trend filtering (avoids whipsaw in chop), 1d Camarilla R3/S3 for precise breakout levels, volume for confirmation
 # Discrete sizing 0.25 balances return and fee drag. Target: 75-200 total trades over 4 years = 19-50/year.
 
-name = "4h_Alligator1d_Donchian20_Volume_ATRStop_v1"
+name = "4h_Camarilla_R3S3_1wEMA34_Volume_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,50 +25,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Williams Alligator (Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA)
+    # Calculate 1d Camarilla pivot levels (R3, S3)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Smoothed Moving Average (SMMA) function
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        # First value is simple moving average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate typical price and pivot point for Camarilla
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    pivot_1d = typical_price_1d  # Camarilla uses typical price as pivot
+    range_1d = high_1d - low_1d
     
-    # Alligator lines
-    jaw_1d = smma(close_1d, 13)  # Jaw (Blue) - 13-period SMMA
-    teeth_1d = smma(close_1d, 8)  # Teeth (Red) - 8-period SMMA
-    lips_1d = smma(close_1d, 5)   # Lips (Green) - 5-period SMMA
+    # Camarilla R3 and S3 levels
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align 1d Alligator Jaw to 4h timeframe (completed 1d bar only)
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    # Align 1d Camarilla levels to 4h timeframe (completed 1d bar only)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # 4h Donchian(20) for entry timing
-    donchian_window = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().shift(1).values
-    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().shift(1).values
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # ATR(14) for stoploss
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # 4h ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation (1.5x 20-period average)
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,25 +73,26 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start after warmup (need enough for Donchian and ATR calculations)
-    start_idx = max(donchian_window, 30) + 5
+    # Start after warmup (need enough for ATR and volume calculations)
+    start_idx = 20 + 5
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: 1d Alligator Jaw uptrend (price > jaw) AND price breaks above 4h Donchian upper with volume spike
-            if close[i] > jaw_1d_aligned[i] and close[i] > upper_channel[i] and volume_spike[i]:
+            # Long entry: price breaks above 1d Camarilla R3 with volume spike AND bullish trend (close > 1w EMA34)
+            if close[i] > r3_1d_aligned[i] and volume_spike[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_bar = i
                 highest_since_entry = high[i]
-            # Short entry: 1d Alligator Jaw downtrend (price < jaw) AND price breaks below 4h Donchian lower with volume spike
-            elif close[i] < jaw_1d_aligned[i] and close[i] < lower_channel[i] and volume_spike[i]:
+            # Short entry: price breaks below 1d Camarilla S3 with volume spike AND bearish trend (close < 1w EMA34)
+            elif close[i] < s3_1d_aligned[i] and volume_spike[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_bar = i
