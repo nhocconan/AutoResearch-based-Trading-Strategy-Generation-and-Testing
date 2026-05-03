@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Mean Reversion with 1w EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In bull regime (price > 1w EMA50),
-# we go long when %R crosses above -80 from below. In bear regime (price < 1w EMA50),
-# we go short when %R crosses below -20 from above. Volume spike confirms momentum.
-# This combines mean reversion entries with higher timeframe trend filtering for robustness
-# in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# In bull regime (price > 1d EMA50), we go long on Donchian upper breakout with volume spike.
+# In bear regime (price < 1d EMA50), we go short on Donchian lower breakout with volume spike.
+# Uses discrete position sizing (0.25) to minimize fee drag and ATR-based stoploss via signal=0.
 
-name = "6h_WilliamsR_1wTrend_VolumeSpike_Regime"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +22,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Williams %R (14-period) on primary timeframe
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Donchian channels (20-period) on primary timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume regime: current 6h volume > 2.0x 20-period MA
+    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -48,30 +45,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Get current values
-        wr = williams_r[i]
+        highest_val = highest_20[i]
+        lowest_val = lowest_20[i]
         ema_trend = ema_50_aligned[i]
         vol_spike = volume_spike[i]
         close_val = close[i]
         
         # Skip if any value is NaN
-        if np.isnan(wr) or np.isnan(ema_trend) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(highest_val) or np.isnan(lowest_val) or np.isnan(ema_trend):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Determine regime: bull if close > 1w EMA50, bear if close < 1w EMA50
+        # Determine regime: bull if close > 1d EMA50, bear if close < 1d EMA50
         is_bull_regime = close_val > ema_trend
         is_bear_regime = close_val < ema_trend
         
-        # Williams %R cross conditions with momentum
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        
-        # Long: %R crosses above -80 from below (oversold recovery) with volume spike in bull regime
-        long_entry = is_bull_regime and (wr_prev < -80) and (wr >= -80) and vol_spike
-        
-        # Short: %R crosses below -20 from above (overbought rejection) with volume spike in bear regime
-        short_entry = is_bear_regime and (wr_prev > -20) and (wr <= -20) and vol_spike
+        # Regime-based entry conditions
+        if is_bull_regime:
+            # Long: price breaks above Donchian upper channel with volume spike
+            long_entry = (close_val > highest_val) and vol_spike
+        else:
+            long_entry = False
+            
+        if is_bear_regime:
+            # Short: price breaks below Donchian lower channel with volume spike
+            short_entry = (close_val < lowest_val) and vol_spike
+        else:
+            short_entry = False
         
         # Generate signals
         if position == 0:
@@ -82,15 +84,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on %R crossing above -20 (overbought) or regime change to bear
-            if wr >= -20 or close_val < ema_trend:
+            # Exit on price retracing to midpoint of Donchian channel or regime change to bear
+            midpoint = (highest_val + lowest_val) / 2.0
+            if close_val < midpoint or close_val < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on %R crossing below -80 (oversold) or regime change to bull
-            if wr <= -80 or close_val > ema_trend:
+            # Exit on price retracing to midpoint of Donchian channel or regime change to bull
+            midpoint = (highest_val + lowest_val) / 2.0
+            if close_val > midpoint or close_val > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
