@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-# Donchian(20) breakout captures momentum, weekly pivot provides HTF bias (from 1w timeframe),
-# volume confirmation ensures institutional participation. Designed for low trade frequency
-# (12-37/year) to minimize fee drag. Works in both bull and bear markets by using
-# weekly pivot as regime filter (above pivot = bullish bias, below = bearish bias).
+# Hypothesis: 4h Williams %R + volume confirmation + 1d EMA(34) trend filter
+# Williams %R: momentum oscillator identifying overbought/oversold conditions
+# Long: Williams %R < -80 (oversold) + price above 1d EMA(34) + volume spike
+# Short: Williams %R > -20 (overbought) + price below 1d EMA(34) + volume spike
+# Uses 1d EMA(34) for stronger trend alignment to reduce whipsaw in choppy markets
+# Designed for low trade frequency (19-50/year) to minimize fee drag. Works in both bull and bear markets.
 
-name = "6h_Donchian20_WeeklyPivot_Volume_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_Volume_1dEMA34_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot (HTF bias)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA(34) trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    # We'll use the weekly pivot as the main bias indicator
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate EMA(34) on 1d for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate pivot for each weekly bar
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
+    # Align 1d EMA to 4h timeframe (wait for completed 1d bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly pivot to 6h timeframe (wait for completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Williams %R on 4h: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Donchian(20) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (2.0x 20-period average) on 6h
+    # Volume confirmation (2.0x 20-period average) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     volume_spike = volume > (vol_ma * 2.0)
     
@@ -57,38 +48,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough for all calculations)
-    start_idx = 60  # max(20 for Donchian + 20 for volume MA +1 for shift)
+    start_idx = 50  # max(14 for Williams %R, 34 for 1d EMA, 20 for volume MA +1 for shift)
     
     for i in range(start_idx, n):
         # Check for NaN values in indicators
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian(20) high AND above weekly pivot (bullish bias) + volume spike
-            if (close[i] > donchian_high[i] and close[i] > weekly_pivot_aligned[i] and volume_spike[i]):
+            # Long entry: Williams %R oversold (< -80) + price above 1d EMA(34) + volume spike
+            if (williams_r[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian(20) low AND below weekly pivot (bearish bias) + volume spike
-            elif (close[i] < donchian_low[i] and close[i] < weekly_pivot_aligned[i] and volume_spike[i]):
+            # Short entry: Williams %R overbought (> -20) + price below 1d EMA(34) + volume spike
+            elif (williams_r[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         
         elif position == 1:  # Long position
-            # Exit: price breaks below Donchian(20) low OR below weekly pivot (bearish bias shift)
-            if close[i] < donchian_low[i] or close[i] < weekly_pivot_aligned[i]:
+            # Exit: Williams %R overbought (> -20) OR price below 1d EMA(34)
+            if williams_r[i] > -20 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian(20) high OR above weekly pivot (bullish bias shift)
-            if close[i] > donchian_high[i] or close[i] > weekly_pivot_aligned[i]:
+            # Exit: Williams %R oversold (< -80) OR price above 1d EMA(34)
+            if williams_r[i] < -80 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
