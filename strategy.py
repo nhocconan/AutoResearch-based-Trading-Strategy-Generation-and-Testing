@@ -4,18 +4,18 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout captures strong momentum moves; EMA34 filter ensures alignment with daily trend
-# Volume spike (1.5x 20-period EMA) confirms breakout validity and reduces false signals
-# Works in both bull and bear markets: breakouts occur in trending regimes regardless of direction
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# Donchian breakouts capture strong momentum moves, effective in both bull and bear markets
+# 1d EMA34 provides robust trend filter that reduces false breakouts during ranging periods
+# Volume confirmation ensures breakouts have participation, reducing fakeouts
+# Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee-efficient range
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
+name = "4h_Donchian20_VolumeSpike_1dEMA34_Trend"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start from 20 to have valid Donchian bands
+    for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or np.isnan(vol_ema_20[i])):
@@ -57,12 +57,12 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA (balanced to avoid overtrading)
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume spike: current volume > 1.8 x 20-period EMA (balanced to avoid overtrading)
+        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
         
         # Donchian breakout signals with 1d trend filter
-        # Long: price breaks above upper band + volume spike + price above 1d EMA34
-        # Short: price breaks below lower band + volume spike + price below 1d EMA34
+        # Long: price breaks above Donchian upper + volume spike + price above 1d EMA34
+        # Short: price breaks below Donchian lower + volume spike + price below 1d EMA34
         if position == 0:
             if (close[i] > donchian_upper[i] and volume_spike and 
                 close[i] > ema_34_1d_aligned[i]):
@@ -73,14 +73,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower band (reversal) OR price below 1d EMA34
+            # Exit long: price breaks below Donchian lower (reversal) OR price below 1d EMA34
             if close[i] < donchian_lower[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper band (reversal) OR price above 1d EMA34
+            # Exit short: price breaks above Donchian upper (reversal) OR price above 1d EMA34
             if close[i] > donchian_upper[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
