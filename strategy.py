@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Uses 4h timeframe for optimal trade frequency (target: 19-50/year), 1d for HTF direction.
-# Breakouts above Donchian upper (long) or below lower (short) with volume confirmation and trend alignment.
+# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation.
+# Uses 1d timeframe for lower trade frequency (target: 7-25/year), 1w for HTF direction and pivot calculation.
+# Breakouts above R1 (long) or below S1 (short) with volume confirmation and trend alignment.
 # ATR-based trailing stop for risk management. Discrete sizing 0.25 to balance return and drawdown.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while capturing breakout edge.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while capturing Camarilla edge.
+# Works in both bull and bear markets: trend filter ensures we only trade with the 1w trend,
+# volume confirmation avoids false breakouts, and Camarilla levels provide institutional support/resistance.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_Trend"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_1wEMA50_VolumeSpike_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +25,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Camarilla calculation, trend filter, and volume regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Use prior completed 1w bar's OHLC for Camarilla calculation
+    prior_close = np.roll(df_1w['close'].values, 1)
+    prior_high = np.roll(df_1w['high'].values, 1)
+    prior_low = np.roll(df_1w['low'].values, 1)
+    prior_close[0] = np.nan
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
     
-    # Calculate 1d volume regime (high volume when current volume > 1.5x 20-period MA)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_regime = vol_1d > (1.5 * vol_ma_1d)  # High volume regime
+    # Calculate Camarilla levels for prior 1w bar
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = prior_close + (prior_high - prior_low) * 1.1 / 12
+    camarilla_s1 = prior_close - (prior_high - prior_low) * 1.1 / 12
     
-    # Align volume regime to 4h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Align Camarilla levels to 1d timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # Calculate Donchian channels (20-period) for 4h data
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate ATR(14) for 4h data (for stoploss)
+    # Calculate 1w volume regime (high volume when current volume > 1.5x 20-period MA)
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_regime = vol_1w > (1.5 * vol_ma_1w)  # High volume regime
+    
+    # Align volume regime to 1d timeframe
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime)
+    
+    # Calculate ATR(14) for 1d data (for stoploss)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,28 +74,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Get current values
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
         ema_trend = ema_50_aligned[i]
         vol_reg = vol_regime_aligned[i]
         atr_val = atr[i]
         
         # Skip if any value is NaN
-        if np.isnan(upper) or np.isnan(lower) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
+        if np.isnan(r1) or np.isnan(s1) or np.isnan(ema_trend) or np.isnan(vol_reg) or np.isnan(atr_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        # Volume confirmation: current 4h volume > 1.5x 20-period MA
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
         volume_spike = volume[i] > (1.5 * vol_ma_20)
         
         # Entry conditions
-        # Long: break above Donchian upper with volume spike and above 1d EMA50
-        long_entry = (close[i] > upper) and volume_spike and (close[i] > ema_trend)
-        # Short: break below Donchian lower with volume spike and below 1d EMA50
-        short_entry = (close[i] < lower) and volume_spike and (close[i] < ema_trend)
+        # Long: break above R1 with volume spike, above 1w EMA50, and in high volume regime
+        long_entry = (close[i] > r1) and volume_spike and (close[i] > ema_trend) and vol_reg
+        # Short: break below S1 with volume spike, below 1w EMA50, and in high volume regime
+        short_entry = (close[i] < s1) and volume_spike and (close[i] < ema_trend) and vol_reg
         
         # Exit conditions (ATR-based trailing stop)
         long_exit = False
