@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves. 1d EMA50 ensures alignment with higher timeframe trend.
-# Volume spike confirms conviction. Designed for 20-40 trades/year on 4h to minimize fee drag.
-# Works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA50).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian channels capture volatility-based breakouts. Trend filter ensures alignment with
+# higher timeframe direction. Volume spike confirms conviction. Designed for 20-50 trades/year
+# on 4h to minimize fee drag while maintaining edge in bull/bear markets via strict entry conditions.
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,19 +29,22 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate volume EMA20 for spike detection
+    volume_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(34, n):  # Start after sufficient warmup for EMA and Donchian
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ema_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,36 +55,32 @@ def generate_signals(prices):
         highest_high = np.max(high[i-lookback+1:i+1])
         lowest_low = np.min(low[i-lookback+1:i+1])
         
-        # Volume confirmation: current volume > 2.0 * 20-period volume EMA
-        if i >= 19:
-            vol_ema = pd.Series(volume[i-19:i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1]
-        else:
-            vol_ema = volume[i]
-        volume_spike = volume[i] > (2.0 * vol_ema)
+        # Volume spike condition
+        volume_spike = volume[i] > (2.0 * volume_ema_20[i])
         
         # Breakout conditions
         breakout_long = close[i] > highest_high and volume_spike
         breakout_short = close[i] < lowest_low and volume_spike
         
         if position == 0:
-            # Enter long: break above upper channel in 1d uptrend
-            if breakout_long and ema_50_1d_aligned[i] < close[i]:
+            # Long: break above upper channel in 1d uptrend with volume spike
+            if breakout_long and ema_34_1d_aligned[i] < close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower channel in 1d downtrend
-            elif breakout_short and ema_50_1d_aligned[i] > close[i]:
+            # Short: break below lower channel in 1d downtrend with volume spike
+            elif breakout_short and ema_34_1d_aligned[i] > close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price crosses below upper channel or loses 1d uptrend
-            if close[i] < highest_high or ema_50_1d_aligned[i] > close[i]:
+            if close[i] < highest_high or ema_34_1d_aligned[i] >= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price crosses above lower channel or loses 1d downtrend
-            if close[i] > lowest_low or ema_50_1d_aligned[i] < close[i]:
+            if close[i] > lowest_low or ema_34_1d_aligned[i] <= close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
