@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses prior completed 1d Camarilla levels for structure, 1d EMA34 for trend regime,
-# and 4h volume spike for confirmation. Designed for 75-200 total trades over 4 years.
-# Focus on BTC/ETH as primary symbols with balanced long/short logic.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# In bull regime (price > 1d EMA34), go long on breakout above R3 with volume spike.
+# In bear regime (price < 1d EMA34), go short on breakdown below S3 with volume spike.
+# Uses Camarilla levels from prior completed 1d for structure, 1d EMA34 for regime filter,
+# and 12h volume spike for confirmation. Designed for 50-150 total trades over 4 years.
+# Focus on BTC/ETH as primary symbols.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,29 +34,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3, S3, R4, S4 levels based on prior 1d range
-    # Range = high_1d - low_1d
-    # R3 = close_1d + (high_1d - low_1d) * 1.1/4
-    # S3 = close_1d - (high_1d - low_1d) * 1.1/4
-    # R4 = close_1d + (high_1d - low_1d) * 1.1/2
-    # S4 = close_1d - (high_1d - low_1d) * 1.1/2
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - range_1d * 1.1 / 4
-    camarilla_r4 = close_1d + range_1d * 1.1 / 2
-    camarilla_s4 = close_1d - range_1d * 1.1 / 2
+    # Camarilla R3, S3 calculation
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 4h (wait for 1d bar to complete)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align Camarilla levels to 12h (wait for 1d bar to complete)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Get 1d data for EMA34 trend filter
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate volume regime: current 4h volume > 2.0x 20-period MA
+    # Calculate volume regime: current 12h volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
@@ -64,10 +56,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Get current values
         close_val = close[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
         ema_trend = ema_34_aligned[i]
         vol_spike = volume_spike[i]
         
