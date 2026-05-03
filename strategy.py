@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above Camarilla R3 level in 1d uptrend with volume spike (>1.8x 20-period volume MA).
 # Short when price breaks below Camarilla S3 level in 1d downtrend with volume spike.
-# Using 12h primary timeframe to target 12-37 trades/year (50-150 total over 4 years).
-# 1d EMA34 ensures higher timeframe alignment, avoiding counter-trend trades.
-# Volume spike confirms institutional participation.
-# Designed for BTC/ETH resilience in both bull and bear markets via tight entries and regime-aware filtering.
+# Uses 1d EMA34 for higher timeframe trend alignment to avoid counter-trend trades.
+# Volume spike confirms institutional participation. Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
@@ -40,15 +38,11 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to lower timeframe (1d -> 12h)
+    # Align Camarilla levels to lower timeframe (1d -> 4h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 1d data for trend filter (EMA34)
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
