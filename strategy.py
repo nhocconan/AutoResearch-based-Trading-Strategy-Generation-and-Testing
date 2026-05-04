@@ -3,107 +3,98 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d HTF for signal direction and 1h for entry timing.
-# Long when: price > 4h EMA50, price > 1d EMA200, and 1h RSI(14) crosses above 30 (mean reversion in uptrend).
-# Short when: price < 4h EMA50, price < 1d EMA200, and 1h RSI(14) crosses below 70 (mean reversion in downtrend).
-# Uses 4h EMA50 for intermediate trend and 1d EMA200 for long-term trend alignment.
-# RSI extremes provide mean-reversion entries within the trend, reducing whipsaw.
-# Session filter (08-20 UTC) to avoid low-volume noise periods.
-# Target: 15-30 trades/year per symbol via strict trend+RSI confluence.
+# Hypothesis: 6h Williams %R + 1d EMA34 trend filter + volume confirmation
+# Long when Williams %R crosses above -80 from oversold, price > 1d EMA34, and volume > 1.5x 20-period volume EMA
+# Short when Williams %R crosses below -20 from overbought, price < 1d EMA34, and volume > 1.5x 20-period volume EMA
+# Williams %R identifies short-term reversals; 1d EMA34 filters for intermediate-term trend alignment to reduce whipsaw
+# Volume confirmation ensures breakout/retest validity. Targets 12-37 trades/year on 6h with strict entry conditions.
+# Works in bull markets via longs in uptrend and bear markets via shorts in downtrend.
 
-name = "1h_EMA50_EMA200_RSI_MeanReversion_TrendFilter"
-timeframe = "1h"
+name = "6h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Session filter: 08-20 UTC (precomputed)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA50 - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_4h_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
-    
-    # Get 1d data for EMA200 - ONCE before loop
+    # Get 1d data for HTF EMA34 and Williams %R calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Neutral when undefined
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # RSI cross signals
-    rsi_above_30 = (rsi > 30) & (np.append([False], rsi[:-1] <= 30))  # Cross above 30
-    rsi_below_70 = (rsi < 70) & (np.append([False], rsi[:-1] >= 70))  # Cross below 70
+    # Align 1d EMA34 to 6h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate Williams %R on 1d data (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
+    # Handle division by zero (when high == low)
+    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
+    
+    # Align Williams %R to 6h timeframe
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    
+    # Calculate volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Skip if any value is NaN or outside session
-        if (np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_1d_200_aligned[i]) or 
-            np.isnan(rsi[i]) or not in_session[i]):
+    for i in range(100, n):
+        # Skip if any value is NaN
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: uptrend alignment + RSI mean reversion entry
-            if (close[i] > ema_4h_50_aligned[i] and 
-                close[i] > ema_1d_200_aligned[i] and 
-                rsi_above_30[i]):
-                signals[i] = 0.20
+            # Long conditions: Williams %R crosses above -80 (from oversold) AND price > 1d EMA34 AND volume spike
+            williams_r_prev = williams_r_1d_aligned[i-1] if i > 0 else -100
+            williams_r_cross_up = (williams_r_prev <= -80) and (williams_r_1d_aligned[i] > -80)
+            if williams_r_cross_up and (close[i] > ema34_1d_aligned[i]) and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: downtrend alignment + RSI mean reversion entry
-            elif (close[i] < ema_4h_50_aligned[i] and 
-                  close[i] < ema_1d_200_aligned[i] and 
-                  rsi_below_70[i]):
-                signals[i] = -0.20
+            # Short conditions: Williams %R crosses below -20 (from overbought) AND price < 1d EMA34 AND volume spike
+            elif (williams_r_prev >= -20) and (williams_r_1d_aligned[i] < -20) and (close[i] < ema34_1d_aligned[i]) and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: trend breakdown or RSI overbought
-            if (close[i] < ema_4h_50_aligned[i] or 
-                close[i] < ema_1d_200_aligned[i] or 
-                rsi[i] > 70):
+            # Exit long: Williams %R crosses below -50 (momentum loss) OR price < 1d EMA34 (trend break)
+            williams_r_prev = williams_r_1d_aligned[i-1] if i > 0 else -100
+            williams_r_cross_down = (williams_r_prev >= -50) and (williams_r_1d_aligned[i] < -50)
+            if williams_r_cross_down or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: trend reversal or RSI oversold
-            if (close[i] > ema_4h_50_aligned[i] or 
-                close[i] > ema_1d_200_aligned[i] or 
-                rsi[i] < 30):
+            # Exit short: Williams %R crosses above -50 (momentum loss) OR price > 1d EMA34 (trend break)
+            williams_r_prev = williams_r_1d_aligned[i-1] if i > 0 else -100
+            williams_r_cross_up = (williams_r_prev <= -50) and (williams_r_1d_aligned[i] > -50)
+            if williams_r_cross_up or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
