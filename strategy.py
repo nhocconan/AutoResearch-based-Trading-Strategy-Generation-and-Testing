@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
-# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
-# Uses 4h for entry timing, 1d for trend direction to avoid counter-trend trades.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 2x 20 EMA
+# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 2x 20 EMA
+# Uses 4h for precise entry timing, 1d for trend direction to avoid counter-trend trades.
 # Discrete sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Volume confirmation reduces false breakouts. Trend filter ensures directional alignment.
 
-name = "4h_Camarilla_R3S3_1dTrend_VolumeConfirm"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,7 +33,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
     # Calculate Camarilla levels for each day
     # R3 = close + (high - low) * 1.1/2
@@ -61,7 +59,7 @@ def generate_signals(prices):
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)
+    volume_spike = volume > (vol_ema_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
