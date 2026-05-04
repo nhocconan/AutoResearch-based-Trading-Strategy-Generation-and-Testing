@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20 EMA volume)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20 EMA volume)
 # Uses Camarilla pivot levels (R3/S3) from 1d for institutional breakout structure
 # 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume confirmation filters false breakouts (>1.5x average volume)
+# Volume confirmation filters false breakouts (>1.5x average volume) - balanced to target trade frequency
 # Discrete sizing 0.25 minimizes fee churn while maintaining profitability
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 # Works in bull markets (continuation at R3) and bear markets (continuation at S3)
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm_Balanced_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm_Balanced_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
     
