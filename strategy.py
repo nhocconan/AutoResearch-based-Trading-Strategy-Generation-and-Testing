@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume confirmation
-# Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when %R < -80 (oversold) + 1d EMA34 uptrend + volume spike
-# Short when %R > -20 (overbought) + 1d EMA34 downtrend + volume spike
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# Discrete sizing 0.25 targets 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Hypothesis: 12h Bollinger Band Width regime + Donchian(20) breakout with volume confirmation
+# Bollinger Band Width < 0.05 = low volatility squeeze (range regime) → mean reversion at bands
+# Bollinger Band Width > 0.10 = high volatility expansion (trend regime) → breakout continuation
+# In range regime: fade Donchian touches (short upper band, long lower band)
+# In trend regime: breakout Donchian breaks (long upper break, short lower break)
+# Volume confirmation filters false breakouts. Works in both bull/bear via regime adaptation.
 
-name = "4h_WilliamsR_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_BBW_Donchian_Regime_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,59 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2) on primary timeframe
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper_band = basis + 2.0 * dev
+    lower_band = basis - 2.0 * dev
+    bb_width = (upper_band - lower_band) / basis  # normalized bandwidth
     
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA34 trend filter from prior completed 1d bar
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_shifted = np.roll(ema34_1d, 1)
-    ema34_1d_shifted[0] = np.nan
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
-    
-    # Williams %R (14-period)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # Donchian channels (20)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
+    # Regime filter: Bollinger Band Width
+    # Low BW (< 0.05) = squeeze/range regime → mean reversion
+    # High BW (> 0.10) = expansion/trend regime → breakout
+    range_regime = bb_width < 0.05
+    trend_regime = bb_width > 0.10
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(basis[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R oversold AND 1d EMA34 uptrend AND volume spike
-            if williams_r[i] < -80 and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: Williams %R overbought AND 1d EMA34 downtrend AND volume spike
-            elif williams_r[i] > -20 and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.25
-                position = -1
+            # Range regime: mean reversion at bands
+            if range_regime[i]:
+                if close[i] >= upper_band[i] and volume[i] > vol_ema_20[i]:
+                    signals[i] = -0.25  # short at upper band
+                    position = -1
+                elif close[i] <= lower_band[i] and volume[i] > vol_ema_20[i]:
+                    signals[i] = 0.25   # long at lower band
+                    position = 1
+            # Trend regime: breakout continuation
+            elif trend_regime[i]:
+                if close[i] > donchian_high[i] and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = 0.25   # long breakout
+                    position = 1
+                elif close[i] < donchian_low[i] and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = -0.25  # short breakdown
+                    position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 OR price closes below EMA13
-            if williams_r[i] > -50 or close[i] < pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values[i]:
+            # Exit long: range regime + price at lower band OR trend regime + donchian low break
+            if range_regime[i] and close[i] <= lower_band[i]:
+                signals[i] = 0.0
+                position = 0
+            elif trend_regime[i] and close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 OR price closes above EMA13
-            if williams_r[i] < -50 or close[i] > pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values[i]:
+            # Exit short: range regime + price at upper band OR trend regime + donchian high break
+            if range_regime[i] and close[i] >= upper_band[i]:
+                signals[i] = 0.0
+                position = 0
+            elif trend_regime[i] and close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
