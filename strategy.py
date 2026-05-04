@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20 EMA volume)
-# Uses 4h Donchian channel breakouts for structure - captures strong momentum at key support/resistance
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20 EMA volume)
+# Uses 12h Camarilla pivot levels (R3/S3) for structure - captures strong momentum at key support/resistance
 # 1d EMA50 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume confirmation filters false breakouts (>2.0x average volume) - tight to reduce trades to 19-50/year target
-# Discrete sizing 0.30 balances profit potential with drawdown control
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Works in bull markets (continuation at upper band) and bear markets (continuation at lower band)
+# Volume confirmation filters false breakouts (>2.0x average volume) - tighter to reduce trades to 12-37/year target
+# Discrete sizing 0.25 minimizes fee churn while maintaining profitability
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
+# Works in bull markets (continuation at R3) and bear markets (continuation at S3)
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA50_VolumeConfirm_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,27 +42,30 @@ def generate_signals(prices):
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period) from prior completed 4h bar
-    # We need to get 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate 12h Camarilla levels (R3, S3) from prior completed 12h bar
+    # Typical price for Camarilla calculation
+    typical_price = (high + low + close) / 3.0
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate pivot and ranges using rolling window of 1 period (previous bar)
+    # For 12h timeframe, we use the previous completed 12h bar's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate rolling max/min for Donchian channels
-    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Pivot point (PP) = (H + L + C) / 3
+    pp = (prev_high + prev_low + prev_close) / 3.0
     
-    # Align to 4h timeframe and shift by 1 bar to avoid look-ahead (use completed bar)
-    upper_4h_shifted = np.roll(upper_4h, 1)
-    upper_4h_shifted[0] = np.nan
-    lower_4h_shifted = np.roll(lower_4h, 1)
-    lower_4h_shifted[0] = np.nan
+    # Range = H - L
+    range_hl = prev_high - prev_low
     
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h_shifted)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h_shifted)
+    # Camarilla levels:
+    # R3 = PP + (Range * 1.1/4) = PP + Range * 0.275
+    # S3 = PP - (Range * 1.1/4) = PP - Range * 0.275
+    r3 = pp + (range_hl * 0.275)
+    s3 = pp - (range_hl * 0.275)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,34 +73,34 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or 
-            np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i])):
+            np.isnan(r3[i]) or np.isnan(s3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian band AND price > 1d EMA50 AND volume spike
-            if close[i] > upper_4h_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.30
+            # Long conditions: price breaks above R3 AND price > 1d EMA50 AND volume spike
+            if close[i] > r3[i] and close[i] > ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower Donchian band AND price < 1d EMA50 AND volume spike
-            elif close[i] < lower_4h_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.30
+            # Short conditions: price breaks below S3 AND price < 1d EMA50 AND volume spike
+            elif close[i] < s3[i] and close[i] < ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower Donchian band OR price crosses below 1d EMA50
-            if close[i] < lower_4h_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price returns to S3 OR price crosses below 1d EMA50
+            if close[i] < s3[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper Donchian band OR price crosses above 1d EMA50
-            if close[i] > upper_4h_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price returns to R3 OR price crosses above 1d EMA50
+            if close[i] > r3[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
