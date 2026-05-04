@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike
-# Long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 2.0x 20-period volume EMA
-# Short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 2.0x 20-period volume EMA
-# Uses Camarilla pivot levels from 1d for precise intraday structure, targeting 12-37 trades/year on 12h.
-# Volume spike filter (2.0x) is tight to avoid overtrading. EMA34 trend filter reduces whipsaw.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 2x 20-period volume EMA
+# Short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 2x 20-period volume EMA
+# Uses 1d EMA34 for major trend filter to reduce whipsaw, targeting 20-50 trades/year on 4h.
+# Volume spike filter (2.0x) is strict to avoid overtrading. Camarilla levels provide institutional structure.
 # Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,37 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF Camarilla levels and trend filter - ONCE before loop
+    # Get 1d data for HTF trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_bullish_1d = close_1d > ema_34_1d
     trend_bearish_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Camarilla levels from previous 1d bar (standard formula)
-    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_r3 = close_1d + camarilla_range
-    camarilla_s3 = close_1d - camarilla_range
+    # Calculate Camarilla levels from previous 1d bar
+    # Classic Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # We use previous completed 1d bar to calculate levels for current 4h bar
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    for i in range(len(df_1d)):
+        # Get the 1d bar index
+        idx_1d = i
+        if idx_1d > 0:  # Need previous bar to calculate levels
+            prev_close = close_1d[idx_1d - 1]
+            prev_high = high_1d[idx_1d - 1]
+            prev_low = low_1d[idx_1d - 1]
+            range_ = prev_high - prev_low
+            camarilla_r3[idx_1d] = prev_close + 1.1 * range_
+            camarilla_s3[idx_1d] = prev_close - 1.1 * range_
+    
+    # Align Camarilla levels to 4h timeframe (already aligned via index mapping)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate volume spike filter (20-period volume EMA from 12h data)
+    # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2.0x average for confirmation
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
