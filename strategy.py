@@ -3,42 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d HMA21 trend filter and volume confirmation
-# Long when price breaks above R3 AND 1d HMA21 rising (uptrend) AND volume > 1.5x 20 EMA
-# Short when price breaks below S3 AND 1d HMA21 falling (downtrend) AND volume > 1.5x 20 EMA
-# Uses 4h for primary signals (balanced trade frequency), 1d for trend to avoid counter-trend trades.
-# Discrete sizing (0.25) to balance return and fee drag. Target: 20-50 trades/year.
+# Hypothesis: 6h Williams %R Extreme + 1d Trend + Volume Confirmation
+# Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
+# Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 6h for primary signals (lower trade frequency ideal for 6h), 1d for trend to avoid counter-trend trades.
+# Williams %R identifies exhaustion points in ranging/bear markets. Trend filter ensures we trade with higher timeframe momentum.
+# Discrete sizing (0.25) to balance return and fee drag. Target: 12-37 trades/year (50-150 total over 4 years).
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
-name = "4h_Camarilla_R3S3_1dHMA21_VolumeConfirm"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_hma(arr, period):
-    """Calculate Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    weights_half = np.arange(1, half_period + 1)
-    wma_half = np.convolve(arr, weights_half/weights_half.sum(), mode='valid')
-    
-    # WMA of full period
-    weights_full = np.arange(1, period + 1)
-    wma_full = np.convolve(arr, weights_full/weights_full.sum(), mode='valid')
-    
-    # HMA calculation
-    raw_hma = 2 * wma_half - wma_full
-    weights_sqrt = np.arange(1, sqrt_period + 1)
-    hma = np.convolve(raw_hma, weights_sqrt/weights_sqrt.sum(), mode='valid')
-    
-    # Pad with NaN to match original length
-    hma_full = np.full_like(arr, np.nan)
-    start_idx = period - len(hma)
-    hma_full[start_idx:] = hma
-    return hma_full
 
 def generate_signals(prices):
     n = len(prices)
@@ -50,36 +25,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Calculate 6h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    
+    # Get 1d data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get daily OHLC arrays
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
-    # Calculate Camarilla levels for each day
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d HMA21 for trend filter
-    hma_21_1d = calculate_hma(close_1d, 21)
-    # Uptrend when HMA rising, downtrend when HMA falling
-    hma_rising = np.diff(hma_21_1d, prepend=np.nan) > 0
-    hma_falling = np.diff(hma_21_1d, prepend=np.nan) < 0
-    
-    # Align 1d HMA trend to 4h timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising.astype(float))
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling.astype(float))
+    # Align 1d trend to 6h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -90,8 +57,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or 
+            np.isnan(downtrend_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -99,30 +67,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND 1d HMA rising AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                hma_rising_aligned[i] > 0.5 and 
+            # Long conditions: Williams %R < -80 (oversold) AND 1d uptrend AND volume spike
+            if (williams_r[i] < -80 and 
+                uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND 1d HMA falling AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  hma_falling_aligned[i] > 0.5 and 
+            # Short conditions: Williams %R > -20 (overbought) AND 1d downtrend AND volume spike
+            elif (williams_r[i] > -20 and 
+                  downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR 1d HMA starts falling
-            if (close[i] < s3_aligned[i] or 
-                hma_falling_aligned[i] > 0.5):
+            # Exit long: Williams %R > -20 (overbought) OR 1d trend changes to downtrend
+            if (williams_r[i] > -20 or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR 1d HMA starts rising
-            if (close[i] > r3_aligned[i] or 
-                hma_rising_aligned[i] > 0.5):
+            # Exit short: Williams %R < -80 (oversold) OR 1d trend changes to uptrend
+            if (williams_r[i] < -80 or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
