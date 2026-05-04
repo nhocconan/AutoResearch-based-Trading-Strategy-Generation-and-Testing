@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d EMA34 trend + volume spike confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) provides trend direction and avoids whipsaw
-# 1d EMA34 filters for higher timeframe trend alignment
-# Volume spike (>2.0x 20 EMA) confirms breakout strength
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Donchian channel from prior completed 4h for structure, 1d EMA34 for higher timeframe trend filter
+# Volume confirmation (>2.5x 20 EMA) ensures breakout has strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h.
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
+# 1d EMA34 provides stronger trend filter than 12h EMA50, reducing whipsaw in both bull and bear markets.
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,14 +34,28 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # Using EMA as proxy for SMMA (common approximation)
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Get 4h data for Donchian channel structure
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: 20-period EMA of volume
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian upper/lower channels on completed 4h bars
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Shift by 1 to use only completed 4h bar (avoid look-ahead)
+    donchian_high_shifted = np.roll(donchian_high, 1)
+    donchian_low_shifted = np.roll(donchian_low, 1)
+    donchian_high_shifted[0] = np.nan
+    donchian_low_shifted[0] = np.nan
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_shifted)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_shifted)
+    
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,24 +71,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Lips > Teeth > Jaw (bullish alignment) + price above EMA34 + volume spike
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: price breaks above Donchian high + price above 1d EMA34 + volume spike
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (2.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Lips < Teeth < Jaw (bearish alignment) + price below EMA34 + volume spike
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: price breaks below Donchian low + price below 1d EMA34 + volume spike
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (2.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator lines cross (Lips < Teeth) OR price crosses below EMA34
-            if lips[i] < teeth[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price returns to Donchian midpoint OR price crosses below 1d EMA34
+            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+            if not np.isnan(donchian_mid) and (close[i] < donchian_mid or close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator lines cross (Lips > Teeth) OR price crosses above EMA34
-            if lips[i] > teeth[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price returns to Donchian midpoint OR price crosses above 1d EMA34
+            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+            if not np.isnan(donchian_mid) and (close[i] > donchian_mid or close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
