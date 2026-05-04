@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 12h EMA50 Trend Filter + Volume Spike Confirmation
-# Williams %R identifies overbought/oversold conditions. Long when %R crosses above -80 from below (oversold bounce) in 12h uptrend with volume spike.
-# Short when %R crosses below -20 from above (overbought rejection) in 12h downtrend with volume spike.
-# 12h EMA50 ensures alignment with intermediate trend to avoid counter-trend trades.
-# Designed for 12-37 trades/year on 6h to minimize fee drag while capturing mean reversion swings within the trend.
-# Works in bull markets via long signals in uptrend pullbacks and bear markets via short signals in downtrend rallies.
+# Hypothesis: 4h Volume-Weighted Average Price (VWAP) deviation + 1d EMA50 trend filter + ATR-based volatility filter
+# Long when price > VWAP (bullish bias) AND 1d uptrend AND volatility expansion (ATR ratio > 1.0)
+# Short when price < VWAP (bearish bias) AND 1d downtrend AND volatility expansion (ATR ratio > 1.0)
+# VWAP provides dynamic support/resistance; EMA50 filters counter-trend trades; ATR ratio ensures trades occur during volatile regimes
+# Designed for 30-60 trades/year on 4h to minimize fee drag while capturing volatile breakouts in both bull and bear markets
 
-name = "6h_WilliamsR_12hEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_VWAP_Deviation_1dEMA50_ATR_VolFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for HTF trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 6h data (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Calculate 4h VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    # Avoid division by zero
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
     
-    # Calculate volume spike filter (20-period volume EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
+    # Calculate 4h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar TR
+    tr2[0] = np.abs(high[0] - close[0])  # First bar TR
+    tr3[0] = np.abs(low[0] - close[0])   # First bar TR
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma_50  # Current ATR vs 50-period average ATR
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_spike[i])):
+        # Skip if any value is NaN or invalid
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(atr_ratio[i]) or vwap_den[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R crosses above -80 from below AND 12h uptrend AND volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # crossover above -80
-                close[i] > ema_50_aligned[i] and  # 12h uptrend
-                volume_spike[i]):
+            # Long conditions: price > VWAP (bullish bias) AND 1d uptrend AND volatility expansion
+            if (close[i] > vwap[i] and 
+                close[i] > ema_50_aligned[i] and  # 1d uptrend
+                atr_ratio[i] > 1.0):  # Volatility expansion
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R crosses below -20 from above AND 12h downtrend AND volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # crossover below -20
-                  close[i] < ema_50_aligned[i] and  # 12h downtrend
-                  volume_spike[i]):
+            # Short conditions: price < VWAP (bearish bias) AND 1d downtrend AND volatility expansion
+            elif (close[i] < vwap[i] and 
+                  close[i] < ema_50_aligned[i] and  # 1d downtrend
+                  atr_ratio[i] > 1.0):  # Volatility expansion
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought) OR 12h trend turns down
-            if (williams_r[i] > -20 or 
-                close[i] < ema_50_aligned[i]):
+            # Exit long: price < VWAP OR 1d trend turns down OR volatility contraction
+            if (close[i] < vwap[i] or 
+                close[i] < ema_50_aligned[i] or 
+                atr_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold) OR 12h trend turns up
-            if (williams_r[i] < -80 or 
-                close[i] > ema_50_aligned[i]):
+            # Exit short: price > VWAP OR 1d trend turns up OR volatility contraction
+            if (close[i] > vwap[i] or 
+                close[i] > ema_50_aligned[i] or 
+                atr_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
