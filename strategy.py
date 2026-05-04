@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 6h timeframe targeting 12-37 trades/year with discrete sizing (0.25)
 # Uses 1d EMA34 for trend direction to capture longer-term momentum with noise reduction
-# Uses 4h volume > 2.0x 20-period EMA for strong confirmation to filter weak breakouts
-# Designed for 4h timeframe targeting 20-50 trades/year with discrete sizing (0.25)
+# Uses 6h volume > 2.0x 20-period EMA for strong confirmation to filter weak breakouts
 # Works in bull markets (breakouts with volume in uptrend) and bear markets (breakouts with volume in downtrend)
 # Camarilla R3/S3 levels provide institutional pivot points with statistical significance
-# 1d timeframe aligns with HTF reference and reduces noise vs lower timeframes
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,21 +49,21 @@ def generate_signals(prices):
     r4 = close_1d + 1.1 * camarilla_range
     s4 = close_1d - 1.1 * camarilla_range
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align Camarilla levels to 6h timeframe (use previous day's levels)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Get 4h data for volume EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for volume EMA
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h volume EMA(20) for volume confirmation
-    vol_4h = df_4h['volume'].values
-    vol_ema_20 = pd.Series(vol_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20)
+    # Calculate 6h volume EMA(20) for volume confirmation
+    vol_6h = df_6h['volume'].values
+    vol_ema_20 = pd.Series(vol_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,7 +78,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0 x 20-period EMA
+        # Volume confirmation: current 6h volume > 2.0 x 20-period EMA
         volume_confirmed = volume[i] > (2.0 * vol_ema_20_aligned[i])
         
         if position == 0:
