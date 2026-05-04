@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation
 # Uses 4h EMA50 to confirm trend direction and avoid whipsaws in both bull/bear markets
-# Camarilla R3/S3 from prior 1d session provide institutional breakout levels
+# Camarilla H3/L3 from prior 1d session provide institutional breakout levels
 # Volume confirmation (>1.8x 20 EMA) filters low-participation false breakouts
 # Session filter (08-20 UTC) to avoid low-liquidity periods
 # Discrete sizing 0.20 limits risk and reduces fee churn
 # Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 # Works in both bull and bear: EMA50 ensures we only trade with the trend, Camarilla provides precise entry/exit levels.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeConfirm_Session"
+name = "1h_Camarilla_H3L3_4hEMA50_VolumeConfirm_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -49,13 +49,13 @@ def generate_signals(prices):
     typical_1d = (high_1d + low_1d + close_1d_vals) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla R3, S3 levels (most significant for breakouts)
-    camarilla_r3 = close_1d_vals + 1.1 * range_1d / 2.0
-    camarilla_s3 = close_1d_vals - 1.1 * range_1d / 2.0
+    # Camarilla H3, L3 levels (most significant for breakouts)
+    camarilla_h3 = close_1d_vals + 1.1 * range_1d / 4.0
+    camarilla_l3 = close_1d_vals - 1.1 * range_1d / 4.0
     
     # Align Camarilla levels to 1h timeframe (completed 1d bar only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Calculate 4h EMA50 trend filter
     close_4h = df_4h['close'].values
@@ -72,7 +72,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,12 +90,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 + price above 4h EMA50 + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: price breaks above Camarilla H3 + price above 4h EMA50 + volume spike
+            if close[i] > h3_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 + price below 4h EMA50 + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: price breaks below Camarilla L3 + price below 4h EMA50 + volume spike
+            elif close[i] < l3_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = -0.20
                 position = -1
         elif position == 1:
