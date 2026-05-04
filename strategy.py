@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R Extreme with 1d ADX trend filter and volume confirmation
-# Williams %R measures overbought/oversold: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Long when %R < -80 (oversold) AND rising AND 1d ADX > 25 (trending) AND volume > 1.5x 20 EMA
-# Short when %R > -20 (overbought) AND falling AND 1d ADX > 25 AND volume > 1.5x 20 EMA
-# Uses 6h timeframe for lower frequency, Williams %R for momentum extremes, 1d ADX to filter choppy markets,
-# volume confirmation to avoid false signals. Designed for 12-37 trades/year with discrete sizing (0.25).
-# Works in bull markets via buying oversold dips in uptrends and bear markets via selling overbought rallies in downtrends.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# Long when price breaks above Donchian upper band AND 1d ADX > 25 AND volume > 1.5x 20 EMA
+# Short when price breaks below Donchian lower band AND 1d ADX > 25 AND volume > 1.5x 20 EMA
+# Uses 4h timeframe for optimal trade frequency, Donchian for structure, 1d ADX to filter chop,
+# volume confirmation to avoid false signals. Designed for 20-50 trades/year with discrete sizing (0.30).
+# Works in bull markets via longs in strong uptrends and bear markets via shorts in strong downtrends.
 
-name = "6h_WilliamsR_Extreme_1dADX_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Donchian20_1dADX_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -58,16 +57,17 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_trending = adx > 25  # Strong trend filter
     
-    # Align 1d ADX trend to 6h timeframe
+    # Align 1d ADX trend to 4h timeframe
     adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending.astype(float))
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
     
-    # Calculate rate of change of Williams %R (to detect turning points)
-    williams_r_roc = np.diff(williams_r, prepend=williams_r[0])
+    for i in range(lookback - 1, n):
+        upper_band[i] = np.max(high[i - lookback + 1:i + 1])
+        lower_band[i] = np.min(low[i - lookback + 1:i + 1])
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -76,45 +76,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(lookback, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_trending_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(williams_r_roc[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_trending_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R < -80 (oversold) AND rising AND 1d trending AND volume spike
-            if (williams_r[i] < -80 and 
-                williams_r_roc[i] > 0 and 
+            # Long conditions: price breaks above upper band AND 1d trending AND volume spike
+            if (close[i] > upper_band[i] and 
                 adx_trending_aligned[i] > 0.5 and 
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: Williams %R > -20 (overbought) AND falling AND 1d trending AND volume spike
-            elif (williams_r[i] > -20 and 
-                  williams_r_roc[i] < 0 and 
+            # Short conditions: price breaks below lower band AND 1d trending AND volume spike
+            elif (close[i] < lower_band[i] and 
                   adx_trending_aligned[i] > 0.5 and 
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R >= -20 (overbought) OR 1d trend weakens
-            if (williams_r[i] >= -20 or 
+            # Exit long: price closes below upper band OR 1d trend weakens
+            if (close[i] < upper_band[i] or 
                 adx_trending_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Williams %R <= -80 (oversold) OR 1d trend weakens
-            if (williams_r[i] <= -80 or 
+            # Exit short: price closes above lower band OR 1d trend weakens
+            if (close[i] > lower_band[i] or 
                 adx_trending_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
