@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for trend direction and Camarilla levels from 1d for entry/exit
-# Volume confirmation requires 2.0x average volume to ensure strong participation and reduce overtrading
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 12h timeframe
-# Works in both bull and bear markets by following the 1d trend direction and using Camarilla for structure
-# Prioritizes BTC/ETH performance with SOL as secondary
+# Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year) and minimize fee drag
+# 1d EMA34 establishes trend direction; Camarilla levels from 1d provide structural support/resistance
+# Volume confirmation (2.0x 20-period EMA) ensures strong participation and reduces false breakouts
+# Designed to work in both bull and bear markets by following the 1d trend and using Camarilla for precise entries
+# Prioritizes BTC/ETH performance with SOL as secondary; discrete position sizing (0.25) to control churn
 
 name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm_Tight"
 timeframe = "12h"
@@ -35,22 +35,17 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar (HLC of completed daily bar)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels using previous completed 1d bar
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
     # Align Camarilla levels to 12h timeframe (use previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Volume confirmation: 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
@@ -59,11 +54,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start from 100 to have valid indicators
+    for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ema_20[i])):
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
