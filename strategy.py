@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R reversal with 1w EMA34 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions on daily timeframe.
-# 1w EMA34 provides primary trend direction to avoid counter-trend trades.
-# Volume spike confirms institutional participation at turning points.
-# Designed for 10-25 trades/year to minimize fee drag on 1d timeframe.
-# Works in bull markets via buying oversold dips in uptrend and selling overbought rallies.
-# Works in bear markets via selling overbought rallies in downtrend and buying oversold bounces.
+# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation
+# Uses Ichimoku components (Tenkan, Kijun, Senkou Span A/B) from 6h for entry signals,
+# 1d EMA50 for trend filter to avoid counter-trend trades, and volume spike for confirmation.
+# Designed for 12-30 trades/year on 6h timeframe to minimize fee drag.
+# Works in bull markets via bullish TK crosses above cloud and in bear markets via bearish TK crosses below cloud.
+# The 1d EMA50 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
 
-name = "1d_WilliamsR14_1wEMA34_VolumeSpike_TrendFilter"
-timeframe = "1d"
+name = "6h_Ichimoku_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34 trend filter from prior completed 1w bar
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_shifted = np.roll(ema34_1w, 1)
-    ema34_1w_shifted[0] = np.nan
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w_shifted)
+    # Calculate 1d EMA50 trend filter from prior completed 1d bar
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_shifted = np.roll(ema50_1d, 1)
+    ema50_1d_shifted[0] = np.nan
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_shifted)
     
-    # Calculate Williams %R(14) on 1d timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high_14 - close) / (highest_high_14 - lowest_low_14)) * -100
+    # Calculate Ichimoku components on 6h timeframe
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Shift by 1 to avoid look-ahead (use prior completed bar)
-    williams_r_shifted = np.roll(williams_r, 1)
-    williams_r_shifted[0] = np.nan
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Volume confirmation: 20-period EMA of volume on 1d timeframe
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Shift Senkou Spans forward by 26 periods
+    senkou_a_leading = np.roll(senkou_a, 26)
+    senkou_b_leading = np.roll(senkou_b, 26)
+    senkou_a_leading[:26] = np.nan
+    senkou_b_leading[:26] = np.nan
+    
+    # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,33 +70,46 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(williams_r_shifted[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(tenkan[i]) or
+            np.isnan(kijun[i]) or
+            np.isnan(senkou_a_leading[i]) or
+            np.isnan(senkou_b_leading[i]) or
             np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_leading[i], senkou_b_leading[i])
+        cloud_bottom = min(senkou_a_leading[i], senkou_b_leading[i])
+        
         if position == 0:
-            # Long conditions: Williams %R oversold (< -80) AND above 1w EMA34 AND volume spike
-            if williams_r_shifted[i] < -80 and close[i] > ema34_1w_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: bullish TK cross (Tenkan > Kijun) AND price above cloud AND above 1d EMA50 AND volume spike
+            if (tenkan[i] > kijun[i] and 
+                close[i] > cloud_top and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > (2.0 * vol_ema_20[i])):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought (> -20) AND below 1w EMA34 AND volume spike
-            elif williams_r_shifted[i] > -20 and close[i] < ema34_1w_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: bearish TK cross (Tenkan < Kijun) AND price below cloud AND below 1d EMA50 AND volume spike
+            elif (tenkan[i] < kijun[i] and 
+                  close[i] < cloud_bottom and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > (2.0 * vol_ema_20[i])):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (exiting oversold) OR closes below 1w EMA34
-            if williams_r_shifted[i] > -50 or close[i] < ema34_1w_aligned[i]:
+            # Exit long: price closes below cloud OR bearish TK cross
+            if close[i] < cloud_bottom or tenkan[i] < kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (exiting overbought) OR closes above 1w EMA34
-            if williams_r_shifted[i] < -50 or close[i] > ema34_1w_aligned[i]:
+            # Exit short: price closes above cloud OR bullish TK cross
+            if close[i] > cloud_top or tenkan[i] > kijun[i]:
                 signals[i] = 0.0
                 position = 0
             else:
