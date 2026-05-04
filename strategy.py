@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
-# In ranging markets (1d ADX < 25): fade extreme Elder Ray readings (mean reversion)
-# In trending markets (1d ADX >= 25): Elder Ray pullback in trend direction
-# Volume confirmation (>1.5x 20-period EMA) ensures participation. Uses discrete sizing (0.25) to minimize fees.
-# Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year).
-# BTC/ETH edge: Elder Ray measures bull/bear power relative to EMA13; ADX regime avoids whipsaws; volume confirms conviction.
+# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ADX regime filter
+# In trending markets (1d ADX >= 25): breakout above/below Donchian(20) with volume > 1.5x 20-period EMA
+# In ranging markets (1d ADX < 25): fade Donchian extremes with volume confirmation
+# Uses discrete sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year).
+# Works in both bull/bear via regime filter - trend following in strong trends, mean reversion in chop.
 
-name = "6h_ElderRay_1dADX_Regime_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,17 +43,14 @@ def generate_signals(prices):
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian channel (20-period) on 12h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +71,25 @@ def generate_signals(prices):
         if position == 0:
             # Determine regime: ranging (ADX<25) or trending (ADX>=25)
             if adx_aligned[i] < 25:
-                # Ranging market: mean reversion from extreme Elder Ray readings
-                if bear_power[i] <= np.percentile(bear_power[max(0, i-100):i+1], 5) and volume_confirm:
+                # Ranging market: fade Donchian extremes (mean reversion)
+                if close[i] <= lowest_low[i] and volume_confirm:
                     signals[i] = 0.25
                     position = 1
-                elif bull_power[i] >= np.percentile(bull_power[max(0, i-100):i+1], 95) and volume_confirm:
+                elif close[i] >= highest_high[i] and volume_confirm:
                     signals[i] = -0.25
                     position = -1
             else:
-                # Trending market: Elder Ray pullback in trend direction
-                # Long: bull power pullback in uptrend (ADX rising and +DI > -DI)
-                # Short: bear power pullback in downtrend (ADX rising and -DI > +DI)
-                if (bull_power[i] <= np.percentile(bull_power[max(0, i-100):i+1], 40) and 
-                    volume_confirm and 
-                    adx_aligned[i] > adx_aligned[max(0, i-1)]):
+                # Trending market: Donchian breakout in trend direction
+                if close[i] > highest_high[i] and volume_confirm:
                     signals[i] = 0.25
                     position = 1
-                elif (bear_power[i] >= np.percentile(bear_power[max(0, i-100):i+1], 60) and 
-                      volume_confirm and 
-                      adx_aligned[i] > adx_aligned[max(0, i-1)]):
+                elif close[i] < lowest_low[i] and volume_confirm:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: Elder Ray exhaustion OR ADX weakening OR volume drops
-            if (bull_power[i] >= np.percentile(bull_power[max(0, i-100):i+1], 70) or 
+            # Exit long: price returns to midpoint of Donchian channel OR ADX weakens (<20) OR volume drops
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if (close[i] <= midpoint or 
                 adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
@@ -107,8 +97,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Elder Ray exhaustion OR ADX weakening OR volume drops
-            if (bear_power[i] <= np.percentile(bear_power[max(0, i-100):i+1], 30) or 
+            # Exit short: price returns to midpoint of Donchian channel OR ADX weakens (<20) OR volume drops
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if (close[i] >= midpoint or 
                 adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
