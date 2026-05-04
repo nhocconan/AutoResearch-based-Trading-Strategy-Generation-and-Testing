@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# Long when Elder Bull Power > 0 AND 1d ADX > 25 (trending) AND 1d +DI > -DI
-# Short when Elder Bear Power < 0 AND 1d ADX > 25 (trending) AND 1d -DI > +DI
-# Uses Elder Ray to measure bull/bear power relative to 13-period EMA, ADX to filter ranging markets.
-# Designed for 6h timeframe: targets 12-37 trades/year (50-150 total over 4 years) with discrete position sizing (0.25).
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+# Long when price breaks above 20-period Donchian high AND 1d bullish trend (close > EMA50) AND volume > 1.8x 20-period volume EMA
+# Short when price breaks below 20-period Donchian low AND 1d bearish trend (close < EMA50) AND volume > 1.8x 20-period volume EMA
+# Exit when price crosses the 20-period Donchian midpoint or 1d trend reverses
+# Uses discrete sizing 0.30 to balance return and drawdown, targeting ~30-60 trades/year on 4h.
 # Works in bull markets via longs in bullish 1d trend and bear markets via shorts in bearish 1d trend.
 
-name = "6h_ElderRay_1dADX_TrendFilter"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,107 +22,77 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF regime filter - ONCE before loop
+    # Get 1d data for HTF trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_1d = close_1d > ema_50_1d
+    trend_bearish_1d = close_1d < ema_50_1d
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Align 1d trend to 4h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate 1d ADX and DI
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # Calculate Donchian(20) channels
+    donchian_period = 20
+    high_roll = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    low_roll = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI and ADX
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d regime indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
-    
-    # Align Elder Ray to 6h (no additional delay needed - same timeframe calculation)
-    # But we need to align the EMA13 used in Elder Ray calculation
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    
-    # Recalculate Elder Ray using aligned EMA13 for consistency
-    bull_power_aligned = high - ema_13_aligned
-    bear_power_aligned = low - ema_13_aligned
+    # Calculate volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 1.8)  # Volume at least 1.8x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
-            np.isnan(minus_di_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 AND ADX > 25 AND +DI > -DI
-            if (bull_power_aligned[i] > 0 and 
-                adx_aligned[i] > 25 and 
-                plus_di_aligned[i] > minus_di_aligned[i]):
-                signals[i] = 0.25
+            # Long conditions: price breaks above Donchian high AND 1d bullish trend AND volume spike
+            if (close[i] > donchian_high[i] and 
+                trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
+                volume_spike[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: Bear Power < 0 AND ADX > 25 AND -DI > +DI
-            elif (bear_power_aligned[i] < 0 and 
-                  adx_aligned[i] > 25 and 
-                  minus_di_aligned[i] > plus_di_aligned[i]):
-                signals[i] = -0.25
+            # Short conditions: price breaks below Donchian low AND 1d bearish trend AND volume spike
+            elif (close[i] < donchian_low[i] and 
+                  trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
+                  volume_spike[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR ADX <= 25 OR -DI > +DI (trend weakening)
-            if (bull_power_aligned[i] <= 0 or 
-                adx_aligned[i] <= 25 or 
-                minus_di_aligned[i] > plus_di_aligned[i]):
+            # Exit long: price closes below Donchian midpoint OR 1d trend turns bearish
+            if (close[i] < donchian_mid[i] or 
+                trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Bear Power >= 0 OR ADX <= 25 OR +DI > -DI (trend weakening)
-            if (bear_power_aligned[i] >= 0 or 
-                adx_aligned[i] <= 25 or 
-                plus_di_aligned[i] > minus_di_aligned[i]):
+            # Exit short: price closes above Donchian midpoint OR 1d trend turns bullish
+            if (close[i] > donchian_mid[i] or 
+                trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
