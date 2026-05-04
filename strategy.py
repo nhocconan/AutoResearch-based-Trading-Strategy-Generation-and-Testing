@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian breakout with 4h trend filter and 1d volume spike confirmation
-# In 4h uptrend (price > 20 EMA): long when 1h price breaks above 20-period Donchian high + 1d volume > 1.5x 20 EMA
-# In 4h downtrend (price < 20 EMA): short when 1h price breaks below 20-period Donchian low + 1d volume > 1.5x 20 EMA
-# Uses discrete sizing (0.20) to minimize fees and session filter (08-20 UTC) to reduce noise.
-# Designed for 1h timeframe targeting 60-150 total trades over 4 years (15-37/year).
-# BTC/ETH edge: Donchian breakouts capture momentum; 4h EMA filter avoids counter-trend trades; volume confirms institutional participation.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# In ranging/weak trending markets (price between daily EMA34 ± 1.5*ATR): fade at Camarilla R3/S3 levels
+# In strong trending markets (price outside daily EMA34 ± 1.5*ATR): breakout continuation at R4/S4
+# Volume confirmation (>1.3x 20-period EMA) ensures institutional participation
+# Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year)
+# BTC/ETH edge: Camarilla levels provide mathematically derived support/resistance; 
+# daily EMA34+ATR regime filter avoids whipsaws; volume confirms breakout validity
 
-name = "1h_Donchian20_4hEMA20_1dVolumeSpike"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_R4S4_1dEMA34_ATR_Regime_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,80 +24,111 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Session filter: 08-20 UTC (pre-compute to avoid datetime64 arithmetic errors)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h 20-period EMA
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for regime calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d 20-period EMA of volume
-    vol_ema_20_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20_1d)
+    # Calculate 1d EMA34 and ATR(14)
+    close_1d = pd.Series(df_1d['close'])
+    ema_34 = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ATR calculation
+    high_1d = pd.Series(df_1d['high'])
+    low_1d = pd.Series(df_1d['low'])
+    tr1 = high_1d - low_1d
+    tr2 = (high_1d - close_1d.shift(1)).abs()
+    tr3 = (low_1d - close_1d.shift(1)).abs()
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d indicators to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla uses previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = prev_close + prev_range * 1.1 / 4
+    s3 = prev_close - prev_range * 1.1 / 4
+    r4 = prev_close + prev_range * 1.1 / 2
+    s4 = prev_close - prev_range * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ema_20_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session and volume confirmation
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        volume_confirm = volume[i] > (1.5 * vol_ema_20_1d_aligned[i])
+        # Regime detection: compare price to EMA34 ± 1.5*ATR
+        upper_band = ema_34_aligned[i] + 1.5 * atr_1d_aligned[i]
+        lower_band = ema_34_aligned[i] - 1.5 * atr_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3 x 20-period EMA
+        volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            # Determine 4h trend: bullish (price > EMA20) or bearish (price < EMA20)
-            if close[i] > ema_20_4h_aligned[i]:
-                # Bullish trend: look for long breakout
-                if high[i] > highest_high[i] and volume_confirm:
-                    signals[i] = 0.20
+            if close[i] > upper_band:
+                # Strong uptrend: look for breakout at R4
+                if close[i] > r4_aligned[i] and volume_confirm:
+                    signals[i] = 0.25
                     position = 1
-            else:
-                # Bearish trend: look for short breakout
-                if low[i] < lowest_low[i] and volume_confirm:
-                    signals[i] = -0.20
+            elif close[i] < lower_band:
+                # Strong downtrend: look for breakdown at S4
+                if close[i] < s4_aligned[i] and volume_confirm:
+                    signals[i] = -0.25
                     position = -1
+            else:
+                # Ranging/weak trend: fade at R3/S3
+                if close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
+                    # Near R3: potential short
+                    if close[i] < (r3_aligned[i] + s3_aligned[i]) / 2 and volume_confirm:
+                        signals[i] = -0.25
+                        position = -1
+                    # Near S3: potential long
+                    elif close[i] > (r3_aligned[i] + s3_aligned[i]) / 2 and volume_confirm:
+                        signals[i] = 0.25
+                        position = 1
         elif position == 1:
-            # Exit long: price closes below 4h EMA20 OR Donchian mid-channel
-            if close[i] < ema_20_4h_aligned[i]:
+            # Exit long: price below S3 OR volume drops OR reversal signal
+            if (close[i] < s3_aligned[i] or 
+                volume[i] < vol_ema_20[i] or
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above 4h EMA20 OR Donchian mid-channel
-            if close[i] > ema_20_4h_aligned[i]:
+            # Exit short: price above R3 OR volume drops OR reversal signal
+            if (close[i] > r3_aligned[i] or 
+                volume[i] < vol_ema_20[i] or
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
