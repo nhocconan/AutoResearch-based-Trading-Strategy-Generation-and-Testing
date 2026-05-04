@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses 4h EMA50 for trend direction to capture longer-term momentum with noise reduction
-# Uses 1h volume > 2.0x 20-period EMA for strong confirmation to filter weak breakouts
-# Designed for 1h timeframe targeting 15-37 trades/year with discrete sizing (0.20)
-# Works in bull markets (breakouts with volume in uptrend) and bear markets (breakouts with volume in downtrend)
-# Camarilla pivot levels provide clear structural breakout points based on prior day's range
-# 4h timeframe aligns with HTF reference and reduces noise vs lower timeframes
+# Hypothesis: 6h Williams Alligator + 1d Volume Spike Regime
+# Uses Williams Alligator (Jaw=13, Teeth=8, Lips=5) from 1d timeframe to define market regime:
+#   - Alligator sleeping (lines intertwined) = range market → mean reversion at extremes
+#   - Alligator awakening (lines diverging) = trending market → breakout continuation
+# Combines with 6h Donchian(20) breakout for entries and 6h volume > 1.5x 20-period EMA for confirmation
+# Designed for 6h timeframe targeting 12-37 trades/year with discrete sizing (0.25)
+# Works in bull markets (breakouts with volume in uptrend regime) and bear markets (breakouts with volume in downtrend regime)
+# Williams Alligator provides regime awareness to avoid false breakouts in chop
+# Volume spike confirms institutional participation behind breakouts
 
-name = "1h_Camarilla_R3S3_VolumeSpike_4hEMA50_Trend"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dRegime_Donchian20_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,103 +26,117 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Session filter: 08-20 UTC (pre-compute hours once)
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 1d data for Camarilla pivot calculation (prior day's range)
+    # Get 1d data for Williams Alligator regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 1d bar (HLC of previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Williams Alligator (Smoothed Moving Average - SMMA)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
     
-    # Camarilla R3, S3, R4, S4 levels
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # R4 = close + (high - low) * 1.1/2
-    # S4 = close - (high - low) * 1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        sma = np.mean(arr[:period])
+        result[period-1] = sma
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align Camarilla levels to 1h timeframe (wait for prior day's close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    jaw = smma(median_1d, 13)
+    teeth = smma(median_1d, 8)
+    lips = smma(median_1d, 5)
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Shift as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Align to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Get 6h data for Donchian channels (20-period)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 6h Donchian channels
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    upper_channel = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Get 1h data for volume EMA (for volume confirmation)
-    if len(close) < 20:
+    upper_aligned = align_htf_to_ltf(prices, df_6h, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, lower_channel)
+    
+    # Get 6h data for volume EMA
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 1h volume EMA(20) for volume confirmation
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 6h volume EMA(20) for volume confirmation
+    vol_6h = df_6h['volume'].values
+    vol_ema_20 = pd.Series(vol_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(vol_ema_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume confirmation: current 6h volume > 1.5 x 20-period EMA
+        volume_confirmed = volume[i] > (1.5 * vol_ema_20_aligned[i])
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Alligator regime detection
+        # Sleeping (intertwined): max distance between lines < 0.5% of price
+        max_line = max(jaw_aligned[i], teeth_aligned[i], lips_aligned[i])
+        min_line = min(jaw_aligned[i], teeth_aligned[i], lips_aligned[i])
+        alligator_sleeping = (max_line - min_line) / close[i] < 0.005
         
-        # Volume confirmation: current 1h volume > 2.0 x 20-period EMA
-        volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
+        # Awakening (diverging): lines separated and ordered
+        # Bullish: Lips > Teeth > Jaw
+        # Bearish: Jaw > Teeth > Lips
+        bullish_regime = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        bearish_regime = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 + volume confirmation + 4h EMA > EMA50 (uptrend)
-            if (close[i] > camarilla_r3_aligned[i] and volume_confirmed and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            # Long: price breaks above upper Donchian + volume confirmation + bullish regime OR sleeping with bullish bias
+            if (close[i] > upper_aligned[i] and volume_confirmed and 
+                (bullish_regime or (alligator_sleeping and close[i] > (jaw_aligned[i] + teeth_aligned[i] + lips_aligned[i])/3))):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 + volume confirmation + 4h EMA < EMA50 (downtrend)
-            elif (close[i] < camarilla_s3_aligned[i] and volume_confirmed and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: price breaks below lower Donchian + volume confirmation + bearish regime OR sleeping with bearish bias
+            elif (close[i] < lower_aligned[i] and volume_confirmed and 
+                  (bearish_regime or (alligator_sleeping and close[i] < (jaw_aligned[i] + teeth_aligned[i] + lips_aligned[i])/3))):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Camarilla S3 (mean reversion) OR 4h EMA < EMA50 (trend change)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: price falls below lower Donchian OR Alligator turns bearish
+            if close[i] < lower_aligned[i] or bearish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above Camarilla R3 (mean reversion) OR 4h EMA > EMA50 (trend change)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: price rises above upper Donchian OR Alligator turns bullish
+            if close[i] > upper_aligned[i] or bullish_regime:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
