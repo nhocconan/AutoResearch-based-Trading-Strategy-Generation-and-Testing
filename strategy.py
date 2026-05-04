@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA21 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels represent stronger breakout zones than R1/S1, reducing false signals
-# Breakout above R3 with bullish 1w EMA21 trend and volume spike = long
-# Breakdown below S3 with bearish 1w EMA21 trend and volume spike = short
-# Uses 1d primary timeframe targeting 30-100 total trades over 4 years (7-25/year)
-# 1w trend filter provides robust bull/bear market adaptation
-# Volume confirmation ensures breakout legitimacy
-# Discrete position sizing (0.30) minimizes fee churn
+# Hypothesis: 6h Elder Ray + Volume Spike with 1d ADX Regime Filter
+# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
+# Long when Bull Power > 0 AND rising AND volume spike in bullish 1d ADX > 25 regime
+# Short when Bear Power > 0 AND rising AND volume spike in bearish 1d ADX > 25 regime
+# Uses 1d ADX to only trade in strong trends, avoiding whipsaws in ranging markets
+# Volume spike confirms institutional participation. Discrete sizing (0.25) minimizes fee churn.
+# Target: 12-30 trades/year (50-120 total over 4 years) to overcome fee drag.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA21_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_VolumeSpike_1dADX25_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +24,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Get 1w data for Camarilla pivot calculation and EMA21 trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: R3 = Close + 1.1*(High-Low)/6, S3 = Close - 1.1*(High-Low)/6
-    camarilla_range = high_1w - low_1w
-    r3 = close_1w + (1.1 * camarilla_range / 6)
-    s3 = close_1w - (1.1 * camarilla_range / 6)
+    # Calculate 1d ADX (14) for regime filter
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align with index
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
+        
+        # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+        tr_period = len(tr)
+        atr = np.full(tr_period, np.nan)
+        plus_dm_smooth = np.full(tr_period, np.nan)
+        minus_dm_smooth = np.full(tr_period, np.nan)
+        
+        # First values: simple average
+        if tr_period >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period])
+            minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period])
+            
+            # Wilder's smoothing
+            for i in range(period, tr_period):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        
+        # DX and ADX
+        dx = np.full(tr_period, np.nan)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = np.full(tr_period, np.nan)
+        
+        # First ADX: simple average of DX
+        if tr_period >= 2*period-1:
+            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+            # Wilder's smoothing for ADX
+            for i in range(2*period-1, tr_period):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align to 1d timeframe (wait for completed 1w bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 1w EMA21 trend filter from prior completed 1w bar
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_shifted = np.roll(ema21_1w, 1)
-    ema21_1w_shifted[0] = np.nan
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w_shifted)
+    # Calculate 6h EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
+    
+    # Slope of Elder Ray (rising trend confirmation)
+    bull_power_slope = bull_power - np.roll(bull_power, 1)
+    bear_power_slope = bear_power - np.roll(bear_power, 1)
+    bull_power_slope[0] = np.nan
+    bear_power_slope[0] = np.nan
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -59,35 +111,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bull_power_slope[i]) or np.isnan(bear_power_slope[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filter: only trade when 1d ADX > 25 (strong trend)
+        strong_trend = adx_1d_aligned[i] > 25
+        
         if position == 0:
-            # Long conditions: break above R3 AND 1w EMA21 uptrend AND volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema21_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.30
+            # Long conditions: Bull Power > 0 AND rising AND volume spike in strong bullish trend
+            if (bull_power[i] > 0 and bull_power_slope[i] > 0 and 
+                volume[i] > (2.0 * vol_ema_20[i]) and strong_trend):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S3 AND 1w EMA21 downtrend AND volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema21_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.30
+            # Short conditions: Bear Power > 0 AND rising AND volume spike in strong bearish trend
+            elif (bear_power[i] > 0 and bear_power_slope[i] > 0 and 
+                  volume[i] > (2.0 * vol_ema_20[i]) and strong_trend):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below R3 OR below 1w EMA21
-            if close[i] < r3_aligned[i] or close[i] < ema21_1w_aligned[i]:
+            # Exit long: Bull Power <= 0 OR falling OR weak trend
+            if (bull_power[i] <= 0 or bull_power_slope[i] <= 0 or not strong_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above S3 OR above 1w EMA21
-            if close[i] > s3_aligned[i] or close[i] > ema21_1w_aligned[i]:
+            # Exit short: Bear Power <= 0 OR falling OR weak trend
+            if (bear_power[i] <= 0 or bear_power_slope[i] <= 0 or not strong_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
