@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme with 12h trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND 12h close > 12h EMA34 (uptrend) AND volume > 1.5x 20 EMA
-# Short when Williams %R > -20 (overbought) AND 12h close < 12h EMA34 (downtrend) AND volume > 1.5x 20 EMA
-# Uses 6h for entry timing, 12h for trend direction to avoid counter-trend trades.
-# Williams %R catches reversals in bear markets; trend filter ensures we trade with higher timeframe momentum.
-# Discrete sizing (0.25) to minimize fee churn. Target: 12-30 trades/year.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above upper Donchian(20) AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below lower Donchian(20) AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for structure and entry timing, 1d for trend direction to avoid counter-trend trades.
+# Discrete sizing (0.25) to balance return and fee drag. Target: 25-50 trades/year.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
-name = "6h_WilliamsR_Extreme_12hTrend_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Williams %R (14-period)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    upper_donchian = np.full(n, np.nan)
+    lower_donchian = np.full(n, np.nan)
     
-    # Get 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    for i in range(lookback, n):
+        upper_donchian[i] = np.max(high[i-lookback:i])
+        lower_donchian[i] = np.min(low[i-lookback:i])
+    
+    # Get 1d data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     # Uptrend when close > EMA34, downtrend when close < EMA34
-    uptrend_12h = close_12h > ema_34_12h
-    downtrend_12h = close_12h < ema_34_12h
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Align 12h trend to 6h timeframe
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    # Align 1d trend to 4h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -59,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
+        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,30 +68,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Williams %R < -80 (oversold) AND 12h uptrend AND volume spike
-            if (williams_r[i] < -80 and 
-                uptrend_12h_aligned[i] > 0.5 and 
+            # Long conditions: price breaks above upper Donchian AND 1d uptrend AND volume spike
+            if (close[i] > upper_donchian[i] and 
+                uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R > -20 (overbought) AND 12h downtrend AND volume spike
-            elif (williams_r[i] > -20 and 
-                  downtrend_12h_aligned[i] > 0.5 and 
+            # Short conditions: price breaks below lower Donchian AND 1d downtrend AND volume spike
+            elif (close[i] < lower_donchian[i] and 
+                  downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R > -50 (exit oversold) OR 12h trend changes to downtrend
-            if (williams_r[i] > -50 or 
-                downtrend_12h_aligned[i] > 0.5):
+            # Exit long: price breaks below lower Donchian OR 1d trend changes to downtrend
+            if (close[i] < lower_donchian[i] or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R < -50 (exit overbought) OR 12h trend changes to uptrend
-            if (williams_r[i] < -50 or 
-                uptrend_12h_aligned[i] > 0.5):
+            # Exit short: price breaks above upper Donchian OR 1d trend changes to uptrend
+            if (close[i] > upper_donchian[i] or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
