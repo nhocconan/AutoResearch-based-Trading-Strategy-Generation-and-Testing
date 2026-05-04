@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13, indicating trend strength.
-# 12h EMA50 provides higher-timeframe trend bias to avoid counter-trend trades.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability intraday support/resistance.
+# 1d EMA34 offers higher-timeframe trend bias to avoid counter-trend trades.
 # Volume confirmation ensures trades have participation.
-# Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets via trend-filtered momentum.
+# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
+# Works in both bull and bear markets via trend-filtered breakouts.
 
-name = "6h_ElderRay_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,24 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivots and EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
+    # R1 = PP + (H-L)*1.1/12, S1 = PP - (H-L)*1.1/12
+    # Using previous day's data to avoid look-ahead
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    # Pivot Point (PP) = (H + L + C) / 3
+    pp = (high_1d + low_1d + close_1d_arr) / 3.0
+    # R1 and S1 levels
+    r1 = pp + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = pp - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Get 6h data for volume EMA(20) for volume confirmation
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 4h data for volume EMA(20) for volume confirmation
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,39 +60,42 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.3 x 20-period EMA
-        volume_confirmed = volume[i] > (1.3 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.5 x 20-period EMA
+        volume_confirmed = volume[i] > (1.5 * vol_ema_20[i])
         
-        # 12h trend: bullish if close > EMA50, bearish if close < EMA50
-        bullish_trend = close[i] > ema_50_12h_aligned[i]
-        bearish_trend = close[i] < ema_50_12h_aligned[i]
+        # 1d trend: bullish if close > EMA34, bearish if close < EMA34
+        bullish_trend = close[i] > ema_34_1d_aligned[i]
+        bearish_trend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) + volume confirmation + bullish 12h trend
-            if (bull_power[i] > 0 and volume_confirmed and bullish_trend):
+            # Long: Close breaks above R1 + volume confirmation + bullish 1d trend
+            if (close[i] > r1_aligned[i] and volume_confirmed and bullish_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) + volume confirmation + bearish 12h trend
-            elif (bear_power[i] < 0 and volume_confirmed and bearish_trend):
+            # Short: Close breaks below S1 + volume confirmation + bearish 1d trend
+            elif (close[i] < s1_aligned[i] and volume_confirmed and bearish_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 (bulls lose control) OR 12h trend turns bearish
-            if bull_power[i] <= 0 or bearish_trend:
+            # Exit long: Close drops below PP (pivot point) OR 1d trend turns bearish
+            # Calculate PP for exit condition
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if (close[i] < pp_aligned[i] or bearish_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 (bears lose control) OR 12h trend turns bullish
-            if bear_power[i] >= 0 or bullish_trend:
+            # Exit short: Close rises above PP (pivot point) OR 1d trend turns bullish
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if (close[i] > pp_aligned[i] or bullish_trend):
                 signals[i] = 0.0
                 position = 0
             else:
