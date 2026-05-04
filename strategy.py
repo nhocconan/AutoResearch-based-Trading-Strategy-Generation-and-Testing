@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Donchian channels from 12h for structure, 1d EMA34 for trend filter (proven BTC/ETH edge),
-# and volume spike for confirmation. Designed for 12-37 trades/year to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Donchian channels from 4h for structure, 1d EMA34 for trend filter (proven BTC/ETH edge),
+# and volume spike for confirmation. Designed for 20-30 trades/year to minimize fee drag.
 # Works in bull markets via upside breakouts and in bear markets via downside breakdowns.
 # The 1d EMA34 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
-# Target timeframe: 12h, HTF: 1d
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_TrendFilter"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +36,7 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate 12h Donchian channels (20-period) from prior completed 12h bar
+    # Calculate 4h Donchian channels (20-period) from prior completed 4h bar
     donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_h_shifted = np.roll(donchian_h, 1)
@@ -45,7 +44,7 @@ def generate_signals(prices):
     donchian_h_shifted[0] = np.nan
     donchian_l_shifted[0] = np.nan
     
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
