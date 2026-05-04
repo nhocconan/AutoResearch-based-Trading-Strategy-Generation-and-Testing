@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.8x 20 EMA
-# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.8x 20 EMA
-# Uses 4h for entry precision and 1d for trend direction to avoid counter-trend trades.
-# Discrete sizing (0.25) to balance profit and fee drag. Target: 20-40 trades/year.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for primary timeframe (lower trade frequency, less fee drag), 1d for trend to avoid counter-trend trades.
+# Discrete sizing (0.25) to balance profit and fee efficiency. Target: 20-50 trades/year.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
 name = "4h_Camarilla_R3S3_1dTrend_VolumeConfirm"
@@ -47,6 +47,8 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter - ONCE before loop
     close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     # Uptrend when close > EMA34, downtrend when close < EMA34
     uptrend_1d = close_1d > ema_34_1d
@@ -58,7 +60,7 @@ def generate_signals(prices):
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.8)
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
