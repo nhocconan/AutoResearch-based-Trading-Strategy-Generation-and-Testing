@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with volume spike confirmation and ATR-based trend filter
-# Uses 1d Camarilla levels for institutional support/resistance
-# Uses 4h ATR ratio (current/20-period) > 1.2 to ensure sufficient momentum (avoid chop)
-# Uses 4h volume > 1.5x 20-period EMA for confirmation
-# Designed for 4h timeframe targeting 25-35 trades/year with discrete sizing (0.25)
-# Volume spike + ATR filter reduces false breakouts while capturing strong momentum moves
-# Works in bull markets (breakouts with volume) and bear markets (trend continuation signals)
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume spike and 1d trend filter
+# Uses 1d EMA50 for trend direction (bull/bear alignment)
+# Uses 4h volume > 2.0x 20-period EMA for high-conviction breakouts
+# Uses 1h Camarilla levels from prior 1d session for institutional S/R
+# Session filter 08-20 UTC to avoid low-liquidity periods
+# Discrete sizing 0.20 to control drawdown and minimize fee churn
+# Target: 15-30 trades/year per symbol by requiring confluence of trend, volume, and breakout
+# Works in bull markets (breakouts with volume in uptrend) and bear markets (breakouts with volume in downtrend)
 
-name = "4h_Camarilla_R3S3_Breakout_VolumeSpike_ATR12"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_4hVolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,57 +26,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 1d data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data for ATR and volume
+    # Get 4h data for volume confirmation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 4h ATR for trend filter (period=14)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Wilder's ATR smoothing
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            first_avg = np.nansum(values[1:period+1])
-            result[period] = first_avg
-            for i in range(period+1, len(values)):
-                result[i] = result[i-1] - (result[i-1]/period) + values[i]
-        return result
-    
-    atr_period = 14
-    atr = wilders_smoothing(tr, atr_period)
-    
-    # Calculate 4h ATR EMA(20) for normalization
-    atr_series = pd.Series(atr)
-    atr_ema_20 = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_ema_20_aligned = align_htf_to_ltf(prices, df_4h, atr_ema_20)
-    
-    # Calculate 4h volume EMA(20) for volume confirmation
-    vol_4h = df_4h['volume'].values
-    vol_series = pd.Series(vol_4h)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20)
-    
-    # Calculate ATR ratio (current ATR / ATR EMA) for momentum filter
-    atr_ratio = np.where(atr_ema_20_aligned > 0, atr / atr_ema_20_aligned, 1.0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_4h, atr_ratio)
-    
-    # Calculate camarilla levels: R3, S3 from 1d OHLC
+    # Calculate 1d OHLC for Camarilla levels (prior day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -84,52 +54,56 @@ def generate_signals(prices):
     r3 = close_1d + 1.1 * camarilla_range / 2
     s3 = close_1d - 1.1 * camarilla_range / 2
     
-    # Align camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 4h volume EMA(20) for volume confirmation
+    vol_4h = df_4h['volume'].values
+    vol_ema_20_4h = pd.Series(vol_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ema_20_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20_4h_aligned[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5 x 20-period EMA
-        volume_confirmed = volume[i] > (1.5 * vol_ema_20_aligned[i])
-        
-        # Momentum confirmation: ATR ratio > 1.2 (sufficient momentum)
-        momentum_confirmed = atr_ratio_aligned[i] > 1.2
+        # Volume confirmation: current 1h volume > 2.0 x 4h volume EMA(20)
+        # Scale 4h EMA to 1h by assuming 4x volume per 4h bar (approximate)
+        volume_confirmed = volume[i] > (2.0 * vol_ema_20_4h_aligned[i] / 4.0)
         
         if position == 0:
-            # Long: close breaks above R3 + volume confirmation + momentum confirmation
+            # Long: close breaks above R3 + volume confirmation + price > 1d EMA50 (uptrend)
             if (close[i] > r3_aligned[i] and volume_confirmed and 
-                momentum_confirmed):
-                signals[i] = 0.25
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: close breaks below S3 + volume confirmation + momentum confirmation
+            # Short: close breaks below S3 + volume confirmation + price < 1d EMA50 (downtrend)
             elif (close[i] < s3_aligned[i] and volume_confirmed and 
-                  momentum_confirmed):
-                signals[i] = -0.25
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 (mean reversion)
-            if close[i] < s3_aligned[i]:
+            # Exit long: price falls below S3 (mean reversion) OR close < 1d EMA50 (trend change)
+            if close[i] < s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price rises above R3 (mean reversion)
-            if close[i] > r3_aligned[i]:
+            # Exit short: price rises above R3 (mean reversion) OR close > 1d EMA50 (trend change)
+            if close[i] > r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
