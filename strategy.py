@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Keltner Channel breakout + 1d ADX trend filter + volume confirmation
-# Uses Keltner Channel (EMA20 ± ATR*2) on 6h for volatility-based breakouts,
-# filtered by 1d ADX > 25 to ensure trending markets and avoid whipsaw in ranges.
-# Volume confirmation requires current volume > 1.5x 20-period average.
-# Designed for 12-30 trades/year (~50-120 total over 4 years) to minimize fee drag.
-# Works in bull/bear markets by only taking breakouts in the direction of the 1d trend (ADX > 25).
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ADX regime filter
+# Uses Donchian channel breakouts for trend capture, confirmed by 1d volume spikes
+# and filtered by 4h ADX>25 to avoid whipsaw in ranging markets. Designed for
+# 20-40 trades/year (~80-160 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakouts and in bear markets via short breakdowns.
+# Volume spike confirms institutional participation; ADX ensures trending conditions.
 
-name = "6h_KeltnerBreakout_1dADX_VolumeFilter"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolumeSpike_ADXRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,118 +24,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation - ONCE before loop
+    # Get 1d data for volume spike calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate 1d volume spike: volume > 2.0 * 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_20)
+    
+    # Align volume spike to 4h timeframe (wait for completed 1d bar)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    
+    # Calculate 4h Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h ADX for regime filter (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with original indices
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed TR, DM+ , DM- (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, period)
-    
-    # Align ADX to 6h timeframe (wait for completed 1d bar)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 6h Keltner Channel: EMA20 ± ATR*2
-    # EMA20
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ATR (6h) for Keltner Channel width
-    tr_6h1 = np.abs(high[1:] - low[1:])
-    tr_6h2 = np.abs(high[1:] - close[:-1])
-    tr_6h3 = np.abs(low[1:] - close[:-1])
-    tr_6h = np.maximum(tr_6h1, np.maximum(tr_6h2, tr_6h3))
-    tr_6h = np.concatenate([[np.nan], tr_6h])
-    atr_6h = pd.Series(tr_6h).ewm(span=10, adjust=False, min_periods=10).mean().values  # ATR(10) for KC
-    
-    # Keltner Channel bands
-    kc_upper = ema20 + 2 * atr_6h
-    kc_lower = ema20 - 2 * atr_6h
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma20)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # ADX filter: only trade when trending (ADX > 25)
-        if adx_1d_aligned[i] <= 25:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Volume spike condition: 1d volume > 2.0 * 20-day average
+        vol_spike = volume_spike_1d_aligned[i] > 0.5
+        
+        # ADX regime filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # Long: price breaks above Keltner Upper Band + volume confirmation
-            if close[i] > kc_upper[i] and volume_ok[i]:
+            # Long conditions: price breaks above Donchian upper band + volume spike + strong trend
+            if (close[i] > highest_high_20[i] and vol_spike and strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Keltner Lower Band + volume confirmation
-            elif close[i] < kc_lower[i] and volume_ok[i]:
+            # Short conditions: price breaks below Donchian lower band + volume spike + strong trend
+            elif (close[i] < lowest_low_20[i] and vol_spike and strong_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Keltner Channel (close inside bands)
-            if kc_lower[i] <= close[i] <= kc_upper[i]:
+            # Exit long: price re-enters Donchian channel OR ADX falls below 20
+            if (close[i] <= highest_high_20[i] and close[i] >= lowest_low_20[i]) or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Keltner Channel (close inside bands)
-            if kc_lower[i] <= close[i] <= kc_upper[i]:
+            # Exit short: price re-enters Donchian channel OR ADX falls below 20
+            if (close[i] <= highest_high_20[i] and close[i] >= lowest_low_20[i]) or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
