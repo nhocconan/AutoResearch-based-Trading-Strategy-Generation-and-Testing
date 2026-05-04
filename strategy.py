@@ -4,7 +4,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from 1d for structure (proven BTC/ETH edge), 1d EMA34 for trend filter,
+# Uses Camarilla pivot levels from 1d for structure (proven ETH/SOL edge), 1d EMA34 for trend filter,
 # and volume spike for confirmation. Designed for 20-30 trades/year to minimize fee drag.
 # Works in bull markets via upside breakouts at R3/R4 and in bear markets via downside breakdowns at S3/S4.
 # The 1d EMA34 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
@@ -38,20 +38,16 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3) from prior completed 1d bar
+    # Calculate 1d Camarilla levels (R3, S3) from prior completed 1d bar
     # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
     #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
-    # We use R3 and S3 as primary breakout levels
-    cam_range = (high_1d - low_1d) * 1.1
-    camarilla_r3 = close_1d + cam_range / 4
-    camarilla_s3 = close_1d - cam_range / 4
-    
-    # Shift to use only prior completed 1d bar
+    rng = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * rng * 1.1 / 4
+    camarilla_s3 = close_1d - 1.1 * rng * 1.1 / 4
     camarilla_r3_shifted = np.roll(camarilla_r3, 1)
     camarilla_s3_shifted = np.roll(camarilla_s3, 1)
     camarilla_r3_shifted[0] = np.nan
     camarilla_s3_shifted[0] = np.nan
-    
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_shifted)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_shifted)
     
