@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
 # Uses 1d EMA50 for trend direction and Donchian channels from 4h for entry/exit
 # Volume confirmation requires 1.5x average volume to ensure strong participation
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag on 4h timeframe
+# Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag on 4h timeframe
 # Works in both bull and bear markets by following the 1d trend direction and using Donchian for structure
 # Prioritizes BTC/ETH performance with SOL as secondary
 
@@ -42,15 +42,14 @@ def generate_signals(prices):
     # Calculate Donchian channels from previous completed 4h bar
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
     
-    # Donchian(20): upper = max(high,20), lower = min(low,20) using previous completed 4h bar
+    # Donchian(20): upper = max(high, last 20 periods), lower = min(low, last 20 periods)
     high_series = pd.Series(high_4h)
     low_series = pd.Series(low_4h)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Donchian levels to 4h timeframe
+    # Align Donchian levels to 4h timeframe (use previous bar's levels)
     donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
@@ -70,7 +69,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 1.5 x 20-period EMA (balanced to avoid overtrading)
+        # Volume spike: current volume > 1.5 x 20-period EMA (tight to avoid overtrading)
         volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
         # Donchian breakout with 1d trend filter
