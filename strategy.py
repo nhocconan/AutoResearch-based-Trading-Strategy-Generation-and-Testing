@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d EMA50 trend filter and volume confirmation
-# Williams Alligator (jaw=13, teeth=8, lips=5) identifies trends via SMAs with forward shift
-# Trend filter: 1d EMA50 ensures alignment with higher timeframe direction
-# Volume confirmation: >1.3x 20-period volume EMA filters low-participation signals
-# Session filter: 08-20 UTC to avoid low liquidity periods
-# Discrete sizing 0.25 balances risk and minimizes fee churn
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Works in bull/bear: Alligator identifies trends, EMA50 filter reduces whipsaw
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses 1w EMA50 for higher timeframe trend alignment (reduces whipsaw vs shorter TF)
+# Donchian(20) from prior 1d session provide institutional breakout levels
+# Volume confirmation (>1.5x 20 EMA) filters low-participation false breakouts
+# Session filter (08-20 UTC) to avoid low-liquidity periods
+# Discrete sizing 0.25 limits risk and reduces fee churn
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d.
+# Works in both bull and bear: trend filter adapts to higher timeframe direction.
 
-name = "4h_WilliamsAlligator_1dEMA50_VolumeConfirm_Session"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_Session"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,27 +30,23 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend direction
-    close_1d = pd.Series(df_1d['close'])
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend direction
+    close_1w = pd.Series(df_1w['close'])
+    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe (completed 1d bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1w EMA50 to 1d timeframe (completed 1w bar only)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Williams Alligator components on 4h timeframe
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    jaw = pd.Series(high + low).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMMA, shifted 5 bars forward
-    teeth = pd.Series(high + low).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    lips = pd.Series(high + low).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Donchian levels from previous 1d bar (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Volume confirmation: 20-period EMA of volume on 1d timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -58,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,17 +72,19 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_aligned[i] and volume[i] > (1.3 * vol_ema_20[i]):
+            # Long conditions: price breaks above Donchian high + uptrend + volume spike
+            if close[i] > high_20[i] and close[i] > ema50_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema50_aligned[i] and volume[i] > (1.3 * vol_ema_20[i]):
+            # Short conditions: price breaks below Donchian low + downtrend + volume spike
+            elif close[i] < low_20[i] and close[i] < ema50_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment breaks OR trend changes OR volume drops
-            if (lips[i] <= teeth[i] or 
+            # Exit long: price returns to Donchian midpoint OR trend changes OR weak volume
+            midpoint = (high_20[i] + low_20[i]) / 2.0
+            
+            if (close[i] < midpoint or 
                 close[i] < ema50_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
@@ -94,8 +92,10 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment breaks OR trend changes OR volume drops
-            if (lips[i] >= teeth[i] or 
+            # Exit short: price returns to Donchian midpoint OR trend changes OR weak volume
+            midpoint = (high_20[i] + low_20[i]) / 2.0
+            
+            if (close[i] > midpoint or 
                 close[i] > ema50_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
