@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Uses 1d HTF for reliable trend alignment and Camarilla levels from 1d for institutional support/resistance.
-# Volume confirmation (2.0x 20-period EMA) ensures breakout conviction.
-# Designed for 12h timeframe targeting 12-37 trades/year (50-150 total) with discrete sizing (0.25).
-# Works in bull markets by buying R3 breakouts in uptrends and bear markets by selling S3 breakdowns in downtrends.
-# The 1d EMA50 trend filter provides stable trend detection with minimal lag.
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation (1.5x 20-period EMA) + 1d ADX(14) > 25 trend filter
+# Uses Donchian channels for structure, volume for conviction, and ADX for regime filtering to avoid whipsaws.
+# Designed for 4h timeframe targeting 20-50 trades/year (80-200 total) with discrete sizing (0.30).
+# Works in bull markets by buying upper band breakouts in uptrends and bear markets by selling lower band breakdowns in downtrends.
+# The 1d ADX(14) > 25 filter ensures we only trade in trending conditions, reducing false signals in chop.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_1dADX25_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +23,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (R3, S3) and EMA50 trend filter
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate camarilla levels: R3, S3 from 1d OHLC
+    # Calculate 1d ADX(14) for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # Align camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Volume confirmation: 2.0x 20-period EMA on 12h volume
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nansum(data[1:period])  # Skip index 0 (NaN)
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr_1d = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1d = np.full_like(dx, np.nan)
+    if len(dx) >= 14:
+        # First ADX: simple average of first 14 DX
+        adx_1d[13] = np.nanmean(dx[1:15])  # Skip index 0 (NaN)
+        # Subsequent ADX: Wilder's smoothing
+        for i in range(15, len(dx)):
+            adx_1d[i] = adx_1d[i-1] - (adx_1d[i-1] / 14) + dx[i]
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Donchian(20) on 4h
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Volume confirmation: 1.5x 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -56,40 +98,41 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ema_20[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.5 x 20-period EMA
+        volume_confirmed = volume[i] > (1.5 * vol_ema_20[i])
+        
+        # Trend filter: 1d ADX > 25
+        trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: close breaks above R3 + volume confirmation + price above 1d EMA50 (uptrend)
-            if (close[i] > r3_aligned[i] and volume_confirmed and 
-                close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.25
+            # Long: close breaks above upper Donchian + volume confirmation + trending
+            if (close[i] > highest_high[i] and volume_confirmed and trending):
+                signals[i] = 0.30
                 position = 1
-            # Short: close breaks below S3 + volume confirmation + price below 1d EMA50 (downtrend)
-            elif (close[i] < s3_aligned[i] and volume_confirmed and 
-                  close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.25
+            # Short: close breaks below lower Donchian + volume confirmation + trending
+            elif (close[i] < lowest_low[i] and volume_confirmed and trending):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 (mean reversion) OR below 1d EMA50 (trend change)
-            if close[i] < s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price falls below lower Donchian OR ADX drops below 20 (trend weakening)
+            if close[i] < lowest_low[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price rises above R3 (mean reversion) OR above 1d EMA50 (trend change)
-            if close[i] > r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price rises above upper Donchian OR ADX drops below 20 (trend weakening)
+            if close[i] > highest_high[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
