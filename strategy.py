@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses 4h EMA50 for trend direction and Camarilla pivot levels from 4h for entry/exit
-# Volume confirmation requires 1.8x average volume to ensure strong participation
-# Session filter (08-20 UTC) reduces noise trades outside active market hours
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
-# Uses discrete position sizing (0.20) to minimize fee churn
-# Works in both bull and bear markets by following the 4h trend direction and using Camarilla for structure
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Uses 1w EMA50 for trend direction and 6h Donchian channels for entry/exit
+# Volume confirmation requires 2.0x average volume to ensure strong participation
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 6h timeframe
+# Works in both bull and bear markets by following the 1w trend direction and using Donchian for structure
+# Prioritizes BTC/ETH performance with SOL as secondary
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Trend_Volume_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for Camarilla calculation and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from 4h data (using completed 4h bars)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_for_pivot = df_4h['close'].values
+    # Calculate 6h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot point
-    pivot = (high_4h + low_4h + close_4h_for_pivot) / 3.0
-    range_4h = high_4h - low_4h
-    
-    # Calculate Camarilla levels (R1/S1)
-    camarilla_h3 = pivot + (range_4h * 1.1 / 6)  # R1
-    camarilla_l3 = pivot - (range_4h * 1.1 / 6)  # S1
-    
-    # Align Camarilla levels to 1h timeframe (use previous completed 4h bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)  # R1
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)  # S1
-    
-    # Volume confirmation: 20-period EMA on 1h volume
+    # Volume confirmation: 20-period EMA on 6h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -66,48 +49,41 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
         
-        # Volume spike: current volume > 1.8 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
-        
-        # Camarilla breakout with 4h trend filter
-        # Long: Price breaks above Camarilla H3 (R1) + volume spike + price above 4h EMA50 (uptrend)
-        # Short: Price breaks below Camarilla L3 (S1) + volume spike + price below 4h EMA50 (downtrend)
+        # Donchian breakout with 1w trend filter
+        # Long: Price breaks above Donchian high + volume spike + price above 1w EMA50 (uptrend)
+        # Short: Price breaks below Donchian low + volume spike + price below 1w EMA50 (downtrend)
         if position == 0:
-            if (close[i] > camarilla_h3_aligned[i] and volume_spike and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            if (close[i] > donchian_high[i] and volume_spike and 
+                close[i] > ema_50_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            elif (close[i] < camarilla_l3_aligned[i] and volume_spike and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            elif (close[i] < donchian_low[i] and volume_spike and 
+                  close[i] < ema_50_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below Camarilla L3 (S1) OR price below 4h EMA50 (trend change)
-            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: Price breaks below Donchian low OR price below 1w EMA50 (trend change)
+            if close[i] < donchian_low[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above Camarilla H3 (R1) OR price above 4h EMA50 (trend change)
-            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: Price breaks above Donchian high OR price above 1w EMA50 (trend change)
+            if close[i] > donchian_high[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
