@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Donchian channels provide clear breakout levels that work in both bull and bear markets.
-# 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Volume spike confirms institutional participation in the breakout.
-# Designed for 12-37 trades/year on 12h to minimize fee drag while capturing strong moves.
-# Works in bull markets via long breakouts in uptrend and bear markets via short breakdowns in downtrend.
+# Hypothesis: 1h Camarilla Pivot R3/S3 Breakout with 4h EMA50 Trend Filter and Volume Spike Confirmation
+# Uses 4h for signal direction (EMA50 trend) and 1d for Camarilla pivot levels (institutional S/R).
+# 1h timeframe for precise entry timing with volume confirmation to avoid false breakouts.
+# Designed for 15-37 trades/year on 1h to minimize fee drag while capturing strong trending moves.
+# Works in bull markets via long R3 breakouts in uptrend and bear markets via short S3 breakdowns in downtrend.
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Donchian calculation - ONCE before loop
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for HTF trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (High + Low + Close) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3
+    # Range = High - Low
+    rng = high_1d - low_1d
+    # Camarilla levels
+    r3 = close_1d + rng * 1.2500
+    s3 = close_1d - rng * 1.2500
     
-    # Calculate Donchian(20) channels on 1d
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe (use previous day's levels)
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align Camarilla levels to 1h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,40 +69,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian AND 1d uptrend AND volume spike
-            if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema_34_aligned[i] and  # 1d uptrend
+            # Long conditions: price breaks above R3 AND 4h uptrend AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_50_aligned[i] and  # 4h uptrend
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below lower Donchian AND 1d downtrend AND volume spike
-            elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and  # 1d downtrend
+            # Short conditions: price breaks below S3 AND 4h downtrend AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and  # 4h downtrend
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below lower Donchian OR 1d trend turns down
-            if close[i] < lower_20_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Exit long: price crosses below pivot OR 4h trend turns down
+            pivot_1d = (high_1d + low_1d + close_1d) / 3
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if close[i] < pivot_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above upper Donchian OR 1d trend turns up
-            if close[i] > upper_20_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Exit short: price crosses above pivot OR 4h trend turns up
+            pivot_1d = (high_1d + low_1d + close_1d) / 3
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+            if close[i] > pivot_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
