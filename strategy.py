@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike confirmation
-# Elder Ray measures bull/bear power relative to EMA13. In bull markets, buy when bull power > 0 and rising.
-# In bear markets, sell when bear power < 0 and falling. 1d EMA34 ensures alignment with higher timeframe trend.
+# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions. 1d EMA34 ensures alignment with higher timeframe trend.
 # Volume spike (>2x 20 EMA) confirms institutional participation. Discrete sizing 0.25 limits risk.
 # Works in bull/bear: trend filter prevents counter-trend entries. Target: 50-150 trades over 4 years.
 
-name = "6h_ElderRay_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,17 +31,15 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'])
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 12h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate EMA13 for Elder Ray on 6h timeframe
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams %R(14) on 12h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # Bull power: high minus EMA13
-    bear_power = low - ema13   # Bear power: low minus EMA13
-    
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(williams_r.iloc[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,23 +58,17 @@ def generate_signals(prices):
         volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long conditions: bull power > 0 AND rising AND uptrend + volume spike
-            if (bull_power[i] > 0 and 
-                bull_power[i] > bull_power[i-1] and 
-                close[i] > ema34_aligned[i] and 
-                volume_confirm):
+            # Long conditions: Williams %R oversold (< -80) + uptrend + volume spike
+            if williams_r.iloc[i] < -80 and close[i] > ema34_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bear power < 0 AND falling AND downtrend + volume spike
-            elif (bear_power[i] < 0 and 
-                  bear_power[i] < bear_power[i-1] and 
-                  close[i] < ema34_aligned[i] and 
-                  volume_confirm):
+            # Short conditions: Williams %R overbought (> -20) + downtrend + volume spike
+            elif williams_r.iloc[i] > -20 and close[i] < ema34_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bull power <= 0 OR trend changes OR volume drops
-            if (bull_power[i] <= 0 or 
+            # Exit long: Williams %R returns to -50 OR trend changes OR volume drops
+            if (williams_r.iloc[i] > -50 or 
                 close[i] < ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
@@ -85,8 +76,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bear power >= 0 OR trend changes OR volume drops
-            if (bear_power[i] >= 0 or 
+            # Exit short: Williams %R returns to -50 OR trend changes OR volume drops
+            if (williams_r.iloc[i] < -50 or 
                 close[i] > ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
