@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 4h Donchian(20) for breakout signals, 1d EMA50 for trend direction, and 1.5x volume spike for confirmation
-# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag on 1h timeframe
-# Works in both bull and bear markets by following the 1d trend direction and using Donchian for structure
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions on 6h timeframe
+# 1d EMA50 provides trend filter to avoid counter-trend trades
+# Volume spike (>2.0x average) confirms strong participation at reversal points
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 6h
+# Works in bull markets by taking oversold bounces in uptrend
+# Works in bear markets by taking overbought bounces in downtrend (counter-trend bounces within trend)
 # Prioritizes BTC/ETH performance
 
-name = "1h_Donchian20_1dEMA50_Trend_Volume"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian channel (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate rolling max/min for Donchian channels
-    high_roll_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1h timeframe (use previous completed 4h bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, high_roll_max)  # Upper band
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, low_roll_min)   # Lower band
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -50,63 +36,56 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 20-period EMA on 1h volume
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Williams %R on 6h: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # We'll calculate over 14 periods
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = prices.index.hour
+    # Volume confirmation: 2.0x average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume spike: current volume > 2.0 x 20-period MA (tight to avoid overtrading)
+        volume_spike = volume[i] > (2.0 * vol_ma_20[i])
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume spike: current volume > 1.5 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
-        
-        # Donchian breakout with 1d trend filter
-        # Long: Price breaks above 4h Donchian upper band + volume spike + price above 1d EMA50 (uptrend)
-        # Short: Price breaks below 4h Donchian lower band + volume spike + price below 1d EMA50 (downtrend)
+        # Williams %R mean reversion with 1d trend filter
+        # Long: Williams %R < -80 (oversold) + volume spike + price above 1d EMA50 (uptrend)
+        # Short: Williams %R > -20 (overbought) + volume spike + price below 1d EMA50 (downtrend)
         if position == 0:
-            if (close[i] > donchian_high_aligned[i] and volume_spike and 
+            if (williams_r[i] < -80.0 and volume_spike and 
                 close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            elif (close[i] < donchian_low_aligned[i] and volume_spike and 
+            elif (williams_r[i] > -20.0 and volume_spike and 
                   close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below 4h Donchian lower band OR price below 1d EMA50 (trend change)
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Williams %R > -50 (return from oversold) OR price below 1d EMA50 (trend change)
+            if williams_r[i] > -50.0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above 4h Donchian upper band OR price above 1d EMA50 (trend change)
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Williams %R < -50 (return from overbought) OR price above 1d EMA50 (trend change)
+            if williams_r[i] < -50.0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
