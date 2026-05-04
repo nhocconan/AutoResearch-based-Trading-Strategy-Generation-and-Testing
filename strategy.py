@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter
-# Uses Camarilla pivot levels (R3/S3) from daily chart for structure breakouts,
-# confirmed by 1d volume spike (>1.5x 20-period average) and choppiness regime (CHOP > 61.8 = ranging).
-# In ranging markets (CHOP > 61.8): fade breaks of R3/S3 with mean reversion.
-# In trending markets (CHOP <= 61.8): breakout continuation.
-# Designed for 12-25 trades/year (~50-100 total over 4 years) to minimize fee drag.
-# Works in both bull/bear markets by adapting to volatility regime via choppiness filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter
+# Uses Camarilla pivot levels (R3, S3) from 1d for breakout entries, 1d volume spike for confirmation,
+# and 1d ADX > 25 to filter for trending regimes. Designed for 20-50 trades/year (~80-200 total over 4 years)
+# to minimize fee drag. Camarilla levels provide strong support/resistance, volume spike confirms
+# institutional participation, and ADX ensures we only trade in trending markets to avoid whipsaw.
+# Works in both bull/bear markets by adapting to trend direction via breakouts.
 
-name = "12h_Camarilla_R3S3_1dVolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dVolumeSpike_ADXRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla, volume, and choppiness - ONCE before loop
+    # Get 1d data for Camarilla levels, volume, and ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -35,89 +34,84 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1 / 2
-    # S3 = PP - (H - L) * 1.1 / 2
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = pp_1d + (high_1d - low_1d) * 1.1 / 2.0
-    s3_1d = pp_1d - (high_1d - low_1d) * 1.1 / 2.0
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R4 = Close + 1.5*(High-Low), R3 = Close + 1.125*(High-Low)
+    #           S3 = Close - 1.125*(High-Low), S4 = Close - 1.5*(High-Low)
+    hl_range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.125 * hl_range_1d
+    camarilla_s3 = close_1d - 1.125 * hl_range_1d
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 1d volume spike (>1.5x 20-period average)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (vol_ma_1d * 1.5)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Calculate 1d volume spike (volume > 1.5 * 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
-    # Calculate 1d choppiness index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(TR over n) / (max(HH,n) - min(LL,n))) / log10(n)
-    # Where TR = max(H-L, abs(H-PC), abs(L-PC))
-    tr_1d = np.zeros(len(df_1d))
-    pc_1d = np.roll(close_1d, 1)  # previous close
-    pc_1d[0] = close_1d[0]
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - pc_1d), 
-                                  np.abs(low_1d - pc_1d)))
+    # Calculate 1d ADX (14-period) for trend regime filter
+    # ADX calculation: +DI, -DI, DX, then ADX = smoothed DX
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Shift arrays to align with original indices
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    n_chop = 14
-    tr_sum_1d = pd.Series(tr_1d).rolling(window=n_chop, min_periods=n_chop).sum().values
-    hh_1d = pd.Series(high_1d).rolling(window=n_chop, min_periods=n_chop).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=n_chop, min_periods=n_chop).min().values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])
     
-    # Avoid division by zero
-    denominator = hh_1d - ll_1d
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop_1d = 100 * np.log10(tr_sum_1d / denominator) / np.log10(n_chop)
-    chop_1d = np.where(np.isnan(chop_1d), 50.0, chop_1d)  # neutral if invalid
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP <= 61.8 = trending
-    chop_regime_1d = chop_1d > 61.8  # True = ranging, False = trending
-    chop_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_1d)
+    # Align ADX and volume spike to 4h timeframe
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_regime_1d_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(adx_14_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long conditions: price breaks above R3 with volume spike
-            # In ranging market (CHOP > 61.8): mean reversion -> short at R3
-            # In trending market (CHOP <= 61.8): breakout -> long at R3
-            if close[i] > r3_1d_aligned[i] and volume_spike_1d_aligned[i]:
-                if chop_regime_1d_aligned[i]:  # ranging -> fade (short)
-                    signals[i] = -0.25
-                    position = -1
-                else:  # trending -> breakout (long)
-                    signals[i] = 0.25
-                    position = 1
-            # Short conditions: price breaks below S3 with volume spike
-            elif close[i] < s3_1d_aligned[i] and volume_spike_1d_aligned[i]:
-                if chop_regime_1d_aligned[i]:  # ranging -> fade (long)
-                    signals[i] = 0.25
-                    position = 1
-                else:  # trending -> breakout (short)
-                    signals[i] = -0.25
-                    position = -1
+        # Regime filter: only trade when ADX > 25 (trending market)
+        trending_regime = adx_14_aligned[i] > 25
+        
+        if position == 0 and trending_regime:
+            # Long conditions: price breaks above R3 AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                volume_spike_aligned[i] > 0.5):  # volume_spike is 0 or 1, use 0.5 threshold
+                signals[i] = 0.25
+                position = 1
+            # Short conditions: price breaks below S3 AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  volume_spike_aligned[i] > 0.5):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price re-enters Camarilla range (between S3 and R3) OR volume spike fades
-            if (close[i] >= s3_1d_aligned[i] and close[i] <= r3_1d_aligned[i]) or not volume_spike_1d_aligned[i]:
+            # Exit long: price re-enters Camarilla range (between S3 and R3) OR ADX falls below 20
+            if (close[i] >= camarilla_s3_aligned[i] and close[i] <= camarilla_r3_aligned[i]) or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Camarilla range OR volume spike fades
-            if (close[i] >= s3_1d_aligned[i] and close[i] <= r3_1d_aligned[i]) or not volume_spike_1d_aligned[i]:
+            # Exit short: price re-enters Camarilla range OR ADX falls below 20
+            if (close[i] >= camarilla_s3_aligned[i] and close[i] <= camarilla_r3_aligned[i]) or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
