@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>1.5x 20 EMA)
-# Uses Donchian channels from prior completed 4h bar for structure, 1w EMA50 for higher timeframe trend filter
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation (>1.8x 20 EMA volume)
+# Uses Donchian channels from prior completed 4h bar for structure, 12h EMA50 for higher timeframe trend filter
 # Volume confirmation ensures breakout has strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
 # Target: 75-200 total trades over 4 years = 19-50/year for 4h.
-# 1w EMA50 provides strong trend filter, reducing whipsaw while capturing major moves in both bull and bear markets.
+# 12h EMA50 provides strong trend filter, reducing whipsaw while capturing major moves in both bull and bear markets.
 # Donchian breakouts work well when combined with volume and trend filters.
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike"
+name = "4h_Donchian20_12hEMA50_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,17 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter from prior completed 1w bar
-    close_1w = df_1w['close'].values
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
-    ema_50_1w = pd.Series(close_1w_shifted).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 trend filter from prior completed 12h bar
+    close_12h = df_12h['close'].values
+    close_12h_shifted = np.roll(close_12h, 1)
+    close_12h_shifted[0] = np.nan
+    ema_50_12h = pd.Series(close_12h_shifted).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -54,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ema_20[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ema_20[i]) or 
             np.isnan(upper_channel[i]) or np.isnan(lower_channel[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,26 +62,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian + price above 1w EMA50 + volume spike
-            if close[i] > upper_channel[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Long conditions: price breaks above upper Donchian + price above 12h EMA50 + volume spike
+            if close[i] > upper_channel[i] and close[i] > ema_50_12h_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower Donchian + price below 1w EMA50 + volume spike
-            elif close[i] < lower_channel[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Short conditions: price breaks below lower Donchian + price below 12h EMA50 + volume spike
+            elif close[i] < lower_channel[i] and close[i] < ema_50_12h_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint of Donchian channel OR price crosses below 1w EMA50
+            # Exit long: price returns to midpoint of Donchian channel OR price crosses below 12h EMA50
             midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if not np.isnan(midpoint) and (close[i] < midpoint or close[i] < ema_50_1w_aligned[i]):
+            if not np.isnan(midpoint) and (close[i] < midpoint or close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint of Donchian channel OR price crosses above 1w EMA50
+            # Exit short: price returns to midpoint of Donchian channel OR price crosses above 12h EMA50
             midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if not np.isnan(midpoint) and (close[i] > midpoint or close[i] > ema_50_1w_aligned[i]):
+            if not np.isnan(midpoint) and (close[i] > midpoint or close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
