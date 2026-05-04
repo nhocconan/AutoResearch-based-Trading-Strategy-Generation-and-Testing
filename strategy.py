@@ -4,7 +4,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout provides clear structure, EMA34 filters trend direction, volume confirms momentum
+# Donchian breakout captures momentum, EMA34 filters trend direction, volume confirms strength
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 # Discrete sizing 0.25 targets 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
@@ -36,8 +36,8 @@ def generate_signals(prices):
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
     # Calculate Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -47,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_rolling[i]) or 
+            np.isnan(low_rolling[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,24 +56,24 @@ def generate_signals(prices):
         
         if position == 0:
             # Long conditions: price breaks above Donchian upper AND 1d EMA34 uptrend AND volume spike
-            if close[i] > high_roll[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            if close[i] > high_rolling[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
             # Short conditions: price breaks below Donchian lower AND 1d EMA34 downtrend AND volume spike
-            elif close[i] < low_roll[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            elif close[i] < low_rolling[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian middle OR 1d EMA34 turns down
-            donchian_mid = (high_roll[i] + low_roll[i]) / 2.0
+            # Exit long: price closes below Donchian middle OR EMA34 turns down
+            donchian_mid = (high_rolling[i] + low_rolling[i]) / 2.0
             if close[i] < donchian_mid or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian middle OR 1d EMA34 turns up
-            donchian_mid = (high_roll[i] + low_roll[i]) / 2.0
+            # Exit short: price closes above Donchian middle OR EMA34 turns up
+            donchian_mid = (high_rolling[i] + low_rolling[i]) / 2.0
             if close[i] > donchian_mid or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
