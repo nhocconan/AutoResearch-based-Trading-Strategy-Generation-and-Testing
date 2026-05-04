@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
-# Uses 4h Donchian channel (20-bar high/low) for structure - captures momentum bursts
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
+# Uses 12h Donchian channel (20-bar high/low) for structure - captures momentum bursts
 # 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
 # Volume confirmation filters false breakouts (>1.8x average volume) - stricter to reduce trades
 # Discrete sizing 0.25 minimizes fee churn while maintaining profitability
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
 # Works in bull markets (continuation at upper band) and bear markets (continuation at lower band)
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,7 +42,7 @@ def generate_signals(prices):
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h Donchian(20) channels from prior completed 4h bar
+    # Calculate 12h Donchian(20) channels from prior completed 12h bar
     # Upper band = highest high over past 20 periods
     # Lower band = lowest low over past 20 periods
     high_series = pd.Series(high)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     upper_band = high_series.rolling(window=20, min_periods=20).max().values
     lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Shift by 1 to use only prior completed 4h bar (no look-ahead)
+    # Shift by 1 to use only prior completed 12h bar (no look-ahead)
     upper_band_shifted = np.roll(upper_band, 1)
     lower_band_shifted = np.roll(lower_band, 1)
     upper_band_shifted[0] = np.nan
