@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and volume confirmation
-# In trending markets (4h close > 20 EMA), trade breakouts in trend direction: long on R3 breakout, short on S3 breakdown
-# In ranging markets (4h close near 20 EMA), fade extremes: short near R3, long near S3
-# Volume confirmation (>1.3x 20-period EMA) reduces false signals. Uses 1h timeframe targeting 80-120 trades over 4 years.
-# Discrete position sizing (0.20) minimizes fee churn and manages drawdown in both bull and bear markets.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) + 1w ADX regime + volume confirmation
+# In strong trends (1w ADX>=25), we trade with the trend: long when Bull Power > 0, short when Bear Power < 0.
+# In weak trends/ranging (1w ADX<25), we fade extremes: short when Bull Power > 0 + overbought, long when Bear Power < 0 + oversold.
+# Volume confirmation (>1.3x 20-period EMA) reduces false signals. Designed for 6h timeframe targeting 50-150 total trades over 4 years.
+# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
 
-name = "1h_Camarilla_R3S3_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_1wADX_Regime_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,44 +23,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for ADX and EMA13 (for Elder Ray)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(20) for trend filter
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1w ADX (14-period)
+    plus_dm = pd.Series(df_1w['high']).diff()
+    minus_dm = pd.Series(df_1w['low']).diff().mul(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr1 = pd.Series(df_1w['high']).sub(df_1w['low'])
+    tr2 = pd.Series(df_1w['high']).sub(df_1w['close'].shift(1)).abs()
+    tr3 = pd.Series(df_1w['low']).sub(df_1w['close'].shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Calculate 1h Camarilla levels (based on previous day's OHLC)
-    # Camarilla equations: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We'll use daily OHLC to calculate Camarilla levels for 1h timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 1w EMA13 (for Elder Ray calculations)
+    ema13 = pd.Series(df_1w['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla levels from daily data
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Align 1w indicators to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx.values)
+    ema13_aligned = align_htf_to_ltf(prices, df_1w, ema13)
     
-    camarilla_width = (daily_high - daily_low) * 1.1
-    camarilla_r3 = daily_close + camarilla_width / 4
-    camarilla_s3 = daily_close - camarilla_width / 4
+    # Calculate Elder Ray components on 6h timeframe using aligned 1w EMA13
+    bull_power = high - ema13_aligned  # Bull Power = High - EMA13
+    bear_power = low - ema13_aligned   # Bear Power = Low - EMA13
     
-    # Align Camarilla levels to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: 20-period EMA of volume on 1h timeframe
+    # Volume confirmation: 20-period EMA of volume on 6h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_20_4h[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,42 +73,44 @@ def generate_signals(prices):
         volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            # Determine market state based on 4h EMA
-            # Trending: price significantly above/below EMA
-            # Ranging: price near EMA
-            ema_distance = abs(close[i] - ema_20_4h[i]) / ema_20_4h[i]
-            
-            if ema_distance > 0.015:  # Trending market (>1.5% deviation from EMA)
-                # Trade breakouts in trend direction
-                if close[i] > r3_aligned[i] and volume_confirm:
-                    signals[i] = 0.20
-                    position = 1
-                elif close[i] < s3_aligned[i] and volume_confirm:
-                    signals[i] = -0.20
+            # Determine regime: weak trend/ranging (ADX<25) or strong trend (ADX>=25)
+            if adx_aligned[i] < 25:
+                # Weak trend/ranging market: fade extremes
+                # Short when Bull Power > 0 (overbought) + volume confirmation
+                if bull_power[i] > 0 and volume_confirm:
+                    signals[i] = -0.25
                     position = -1
-            else:  # Ranging market (near EMA)
-                # Fade extremes at Camarilla levels
-                if close[i] <= s3_aligned[i] and volume_confirm:
-                    signals[i] = 0.20
+                # Long when Bear Power < 0 (oversold) + volume confirmation
+                elif bear_power[i] < 0 and volume_confirm:
+                    signals[i] = 0.25
                     position = 1
-                elif close[i] >= r3_aligned[i] and volume_confirm:
-                    signals[i] = -0.20
+            else:
+                # Strong trend market: trade with the trend
+                # Long when Bull Power > 0 (bulls in control)
+                if bull_power[i] > 0 and volume_confirm:
+                    signals[i] = 0.25
+                    position = 1
+                # Short when Bear Power < 0 (bears in control)
+                elif bear_power[i] < 0 and volume_confirm:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price retouches opposite Camarilla level OR volume drops
-            if (close[i] >= r3_aligned[i] or 
+            # Exit long: Bull Power turns negative OR ADX weakening (<20) OR volume drops
+            if (bull_power[i] <= 0 or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retouches opposite Camarilla level OR volume drops
-            if (close[i] <= s3_aligned[i] or 
+            # Exit short: Bear Power turns positive OR ADX weakening (<20) OR volume drops
+            if (bear_power[i] >= 0 or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
