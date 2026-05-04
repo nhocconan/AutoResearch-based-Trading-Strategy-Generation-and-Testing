@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d ATR-based volatility filter and volume confirmation
-# Uses Donchian(20) for structure, 1d ATR(14) for volatility regime filter (low volatility = breakout prone),
-# and volume spike for confirmation. Designed for 20-30 trades/year to minimize fee drag.
-# Works in bull markets via upside breakouts and in bear markets via downside breakdowns.
-# The 1d ATR filter ensures we only trade during low volatility regimes where breakouts are more reliable.
+# Hypothesis: 1d Williams %R mean reversal with 1w EMA50 trend filter and volume spike confirmation
+# Uses Williams %R(14) for oversold/overbought signals, 1w EMA50 for trend alignment,
+# and volume spike for confirmation. Designed for 10-20 trades/year to minimize fee drag.
+# Works in bull markets via buying pullbacks in uptrend and in bear markets via selling rallies in downtrend.
+# The 1w EMA50 provides a strong trend filter that avoids counter-trend trades during major moves.
 
-name = "4h_Donchian20_1dATR14_VolumeSpike_Filter"
-timeframe = "4h"
+name = "1d_WilliamsR14_1wEMA50_VolumeSpike_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,75 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR-based volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR(14) for volatility filter from prior completed 1d bar
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1d_shifted = np.roll(atr14_1d, 1)
-    atr14_1d_shifted[0] = np.nan
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d_shifted)
+    # Calculate 1w EMA50 trend filter from prior completed 1w bar
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_shifted = np.roll(ema50_1w, 1)
+    ema50_1w_shifted[0] = np.nan
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w_shifted)
     
-    # Calculate 20-period ATR percentile rank (20-day lookback) for regime filter
-    atr_percentile = pd.Series(atr14_1d_aligned).rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 20 else np.nan, raw=False
-    ).values
+    # Calculate Williams %R(14) on 1d timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # We'll use 14-period lookback
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Calculate Donchian channels (20-period) on 4h timeframe
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Volume confirmation: 20-period EMA of volume on 1d timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(atr_percentile[i]) or 
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(williams_r[i]) or
             np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when ATR percentile < 0.3 (low volatility environment)
-        low_vol_regime = atr_percentile[i] < 0.3
-        
         if position == 0:
-            # Long conditions: price breaks above Donchian upper band AND low volatility regime AND volume spike
-            if close[i] > highest_20[i] and low_vol_regime and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: Williams %R < -80 (oversold) AND price above 1w EMA50 AND volume spike
+            if williams_r[i] < -80 and close[i] > ema50_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower band AND low volatility regime AND volume spike
-            elif close[i] < lowest_20[i] and low_vol_regime and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: Williams %R > -20 (overbought) AND price below 1w EMA50 AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema50_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian lower band OR volatility regime changes to high
-            if close[i] < lowest_20[i] or atr_percentile[i] > 0.7:
+            # Exit long: Williams %R > -50 (momentum fading) OR price below 1w EMA50
+            if williams_r[i] > -50 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian upper band OR volatility regime changes to high
-            if close[i] > highest_20[i] or atr_percentile[i] > 0.7:
+            # Exit short: Williams %R < -50 (momentum fading) OR price above 1w EMA50
+            if williams_r[i] < -50 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
