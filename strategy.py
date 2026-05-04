@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 resistance AND 12h bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below Camarilla S3 support AND 12h bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 12h EMA50 for trend filter to reduce whipsaw and capture medium-term direction.
-# Volume confirmation (1.5x) and Camarilla levels from prior day provide structure.
-# Target: 20-40 trades/year on 4h timeframe to minimize fee drag while maintaining edge.
-# Works in bull markets via longs in bullish 12h trend regime and bear markets via shorts in bearish 12h trend regime.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 resistance AND 1w bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below Camarilla S3 support AND 1w bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
+# Uses 1w EMA34 for trend filter to reduce whipsaw, targeting 15-25 trades/year on 1d.
+# Volume confirmation (1.5x) reduces noise trades. Camarilla levels provide precise daily structure.
+# Works in bull markets via longs in bullish 1w trend regime and bear markets via shorts in bearish 1w trend regime.
 
-name = "4h_Camarilla_R3S3_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 1w data for HTF trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_12h = close_12h > ema_50_12h
-    trend_bearish_12h = close_12h < ema_50_12h
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_bullish_1w = close_1w > ema_34_1w
+    trend_bearish_1w = close_1w < ema_34_1w
     
-    # Align 12h trend to 4h timeframe
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish_12h.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish_12h.astype(float))
+    # Align 1w trend to 1d timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1w, trend_bullish_1w.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1w, trend_bearish_1w.astype(float))
     
-    # Get 1d data for Camarilla levels (prior day's OHLC)
+    # Calculate Camarilla levels (R3, S3) from previous day's OHLC
+    # Need to get daily OHLC from 1d data itself (since we're on 1d timeframe)
+    # We'll use lagged values to avoid look-ahead
+    high_1d = df_1w['high'].values  # This is wrong, need to get 1d data
+    
+    # Correct approach: get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar using prior day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -57,7 +60,7 @@ def generate_signals(prices):
     camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align prior day's Camarilla levels to 4h timeframe (wait for day to complete)
+    # Align prior day's Camarilla levels to 1d timeframe (wait for day to complete)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
@@ -79,20 +82,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 AND 12h bullish trend AND volume spike
+            # Long conditions: price breaks above Camarilla R3 AND 1w bullish trend AND volume spike
             if (close[i] > camarilla_r3_aligned[i] and 
-                trend_bullish_aligned[i] > 0.5 and  # 12h bullish trend
+                trend_bullish_aligned[i] > 0.5 and  # 1w bullish trend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 AND 12h bearish trend AND volume spike
+            # Short conditions: price breaks below Camarilla S3 AND 1w bearish trend AND volume spike
             elif (close[i] < camarilla_s3_aligned[i] and 
-                  trend_bearish_aligned[i] > 0.5 and  # 12h bearish trend
+                  trend_bearish_aligned[i] > 0.5 and  # 1w bearish trend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Camarilla S3 OR 12h trend turns bearish
+            # Exit long: price closes below Camarilla S3 OR 1w trend turns bearish
             if (close[i] < camarilla_s3_aligned[i] or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
@@ -100,7 +103,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Camarilla R3 OR 12h trend turns bullish
+            # Exit short: price closes above Camarilla R3 OR 1w trend turns bullish
             if (close[i] > camarilla_r3_aligned[i] or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
