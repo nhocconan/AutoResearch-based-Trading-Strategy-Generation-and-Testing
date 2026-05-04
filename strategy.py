@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h EMA crossover for trend direction and 1h RSI extremes for mean reversion entries
-# Long when 4h trend is bullish (EMA20 > EMA50) AND 1h RSI < 30 (oversold) AND volume > 1.2x 20-period average AND within active session (08-20 UTC)
-# Short when 4h trend is bearish (EMA20 < EMA50) AND 1h RSI > 70 (overbought) AND volume > 1.2x 20-period average AND within active session
-# Exits on RSI reversal to 50 or 4h trend change. Uses volume confirmation and session filter to reduce noise trades.
-# Target: 15-37 trades/year on 1h by combining 4h trend filter with 1h mean reversion entries.
-# Works in bull markets via buying dips in uptrends and bear markets via selling rallies in downtrends.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper(20) AND 1w bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below 6h Donchian lower(20) AND 1w bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
+# Uses weekly EMA50 for trend filter to reduce whipsaw and capture major trends, targeting 12-37 trades/year on 6h.
+# Volume confirmation (1.5x) reduces false breakouts. Donchian channels provide clear structure for breakouts.
+# Works in bull markets via longs in bullish weekly trend regime and bear markets via shorts in bearish weekly trend regime.
 
-name = "1h_4hEMA_Cross_RSI_MeanReversion_Volume_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HTF trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for HTF trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA20 and EMA50 for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_4h = ema_20_4h > ema_50_4h
-    trend_bearish_4h = ema_20_4h < ema_50_4h
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_1w = close_1w > ema_50_1w
+    trend_bearish_1w = close_1w < ema_50_1w
     
-    # Align 4h trend to 1h timeframe
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_4h, trend_bullish_4h.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_4h, trend_bearish_4h.astype(float))
+    # Align 1w trend to 6h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1w, trend_bullish_1w.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1w, trend_bearish_1w.astype(float))
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate 6h Donchian channels (20-period)
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.2)  # Volume at least 1.2x average for confirmation
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,47 +57,41 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(volume_spike[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Only trade during active session
-        if not session_filter[i]:
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: 4h bullish trend AND 1h RSI < 30 (oversold) AND volume spike
-            if (trend_bullish_aligned[i] > 0.5 and 
-                rsi_values[i] < 30 and 
+            # Long conditions: price breaks above Donchian upper(20) AND 1w bullish trend AND volume spike
+            if (close[i] > donchian_upper[i] and 
+                trend_bullish_aligned[i] > 0.5 and  # 1w bullish trend
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: 4h bearish trend AND 1h RSI > 70 (overbought) AND volume spike
-            elif (trend_bearish_aligned[i] > 0.5 and 
-                  rsi_values[i] > 70 and 
+            # Short conditions: price breaks below Donchian lower(20) AND 1w bearish trend AND volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  trend_bearish_aligned[i] > 0.5 and  # 1w bearish trend
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) OR 4h trend turns bearish
-            if (rsi_values[i] > 50 or 
+            # Exit long: price closes below Donchian lower(20) OR 1w trend turns bearish
+            if (close[i] < donchian_lower[i] or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) OR 4h trend turns bullish
-            if (rsi_values[i] < 50 or 
+            # Exit short: price closes above Donchian upper(20) OR 1w trend turns bullish
+            if (close[i] > donchian_upper[i] or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
