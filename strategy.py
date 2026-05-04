@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d pivot direction filter and volume confirmation
-# Donchian(20) breakouts capture medium-term trends on 6h timeframe.
-# 1d pivot direction (based on previous day's close vs pivot) filters for institutional bias.
-# Volume spike (>1.8 x 20-period EMA) ensures participation and reduces false breakouts.
-# Designed for 6h timeframe targeting 75-150 total trades over 4 years (19-37/year).
-# Works in bull markets via trend-aligned breakouts and in bear markets via filtered mean-reversion at extremes.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike confirmation
+# Camarilla R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
+# 1w EMA34 provides higher-timeframe trend bias to avoid counter-trend trades in both bull and bear markets.
+# Volume spike (>2.0 x 20-period EMA) ensures institutional participation and reduces whipsaws.
+# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year).
+# Works in bull markets via trend-aligned breakouts and in bear markets via filtered mean-reversion at extreme levels.
 
-name = "6h_Donchian20_1dPivotDirection_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot direction filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Camarilla pivots and EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d pivot point and direction from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Previous day's pivot point: PP = (H + L + C) / 3
-    pp_1d = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
-    # Shift to align with current day: yesterday's PP affects today's bias
-    pp_1d_shifted = np.empty_like(pp_1d)
-    pp_1d_shifted[0] = np.nan  # First day has no yesterday
-    pp_1d_shifted[1:] = pp_1d[:-1]
+    # Calculate 1w Camarilla levels (based on previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
     
-    # Pivot direction: 1 if close > PP (bullish bias), -1 if close < PP (bearish bias)
-    pivot_direction_1d = np.where(close_1d > pp_1d_shifted, 1, -1)
-    pivot_direction_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_direction_1d)
+    # Pivot Point (PP) = (H + L + C) / 3
+    pp = (high_1w + low_1w + close_1w_arr) / 3.0
+    # R3 and S3 levels (more extreme than R1/S1)
+    r3 = pp + (high_1w - low_1w) * 1.1 / 4.0
+    s3 = pp - (high_1w - low_1w) * 1.1 / 4.0
     
-    # Donchian(20) channels on 6h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -58,41 +58,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(pivot_direction_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i]) or np.isnan(pp_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike confirmation: current volume > 1.8 x 20-period EMA
-        volume_spike = volume[i] > (1.8 * vol_ema_20[i])
+        # Volume spike confirmation: current volume > 2.0 x 20-period EMA
+        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        
+        # 1w trend: bullish if close > EMA34, bearish if close < EMA34
+        bullish_trend = close[i] > ema_34_1w_aligned[i]
+        bearish_trend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: Close breaks above Donchian upper + bullish 1d pivot direction + volume spike
-            if (close[i] > highest_high[i] and 
-                pivot_direction_1d_aligned[i] == 1 and 
-                volume_spike):
+            # Long: Close breaks above R3 + volume spike + bullish 1w trend
+            if (close[i] > r3_aligned[i] and volume_spike and bullish_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian lower + bearish 1d pivot direction + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  pivot_direction_1d_aligned[i] == -1 and 
-                  volume_spike):
+            # Short: Close breaks below S3 + volume spike + bearish 1w trend
+            elif (close[i] < s3_aligned[i] and volume_spike and bearish_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close drops below Donchian midpoint OR pivot direction turns bearish
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if (close[i] < midpoint or pivot_direction_1d_aligned[i] == -1):
+            # Exit long: Close drops below PP (pivot point) OR 1w trend turns bearish
+            if (close[i] < pp_aligned[i] or bearish_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close rises above Donchian midpoint OR pivot direction turns bullish
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if (close[i] > midpoint or pivot_direction_1d_aligned[i] == 1):
+            # Exit short: Close rises above PP (pivot point) OR 1w trend turns bullish
+            if (close[i] > pp_aligned[i] or bullish_trend):
                 signals[i] = 0.0
                 position = 0
             else:
