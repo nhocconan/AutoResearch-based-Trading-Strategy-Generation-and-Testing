@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with 1w Supertrend filter and volume spike confirmation
-# KAMA adapts to market noise, reducing whipsaws in ranging markets. Supertrend on 1w
-# provides strong trend filter to avoid counter-trend trades. Volume spike ensures
-# institutional participation. Designed for low trade frequency (12-37/year) with
-# discrete sizing (0.25) to minimize fee drag. Works in bull (trend follow) and bear
-# (avoid false signals via Supertrend) markets.
+# Hypothesis: 4h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
+# In trending markets (1d ADX > 25): breakout above/below 20-period Donchian channel
+# Volume confirmation (>1.3x 20-period EMA) ensures institutional participation
+# Discrete sizing (0.25) minimizes fee churn. Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
+# Works in both bull/bear: ADX filter avoids whipsaws in sideways markets, Donchian captures strong trends.
 
-name = "12h_KAMA_1wSupertrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,91 +18,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Supertrend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w Supertrend (ATR=10, mult=3.0)
-    atr_period = 10
-    multiplier = 3.0
-    
-    # True Range
-    tr1 = pd.Series(df_1w['high']) - df_1w['low']
-    tr2 = abs(pd.Series(df_1w['high']) - df_1w['close'].shift(1))
-    tr3 = abs(pd.Series(df_1w['low']) - df_1w['close'].shift(1))
+    # Calculate 1d ADX (14-period)
+    plus_dm = pd.Series(df_1d['high']).diff()
+    minus_dm = pd.Series(df_1d['low']).diff().mul(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr1 = pd.Series(df_1d['high']).sub(df_1d['low'])
+    tr2 = pd.Series(df_1d['high']).sub(df_1d['close'].shift(1)).abs()
+    tr3 = pd.Series(df_1d['low']).sub(df_1d['close'].shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=atr_period, min_periods=atr_period).mean()
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Basic Upper and Lower Bands
-    hl2 = (df_1w['high'] + df_1w['low']) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
     
-    # Initialize Supertrend
-    supertrend = np.full(len(df_1w), np.nan)
-    direction = np.full(len(df_1w), 1)  # 1 for uptrend, -1 for downtrend
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    for i in range(atr_period, len(df_1w)):
-        # Upper Band
-        if i == atr_period:
-            upper_band[i] = hl2.iloc[i] + (multiplier * atr.iloc[i]) if not np.isnan(atr.iloc[i]) else np.nan
-            lower_band[i] = hl2.iloc[i] - (multiplier * atr.iloc[i]) if not np.isnan(atr.iloc[i]) else np.nan
-        else:
-            upper_band[i] = hl2.iloc[i] + (multiplier * atr.iloc[i]) if not np.isnan(atr.iloc[i]) else upper_band[i-1]
-            lower_band[i] = hl2.iloc[i] - (multiplier * atr.iloc[i]) if not np.isnan(atr.iloc[i]) else lower_band[i-1]
-            
-            # Adjust bands
-            if supertrend[i-1] <= upper_band[i-1]:
-                upper_band[i] = min(upper_band[i], upper_band[i-1])
-            if supertrend[i-1] >= lower_band[i-1]:
-                lower_band[i] = max(lower_band[i], lower_band[i-1])
-        
-        # Trend direction
-        if i == atr_period:
-            direction[i] = 1 if close.iloc[i] > upper_band[i] else -1
-        else:
-            if direction[i-1] == -1 and close.iloc[i] > upper_band[i]:
-                direction[i] = 1
-            elif direction[i-1] == 1 and close.iloc[i] < lower_band[i]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-        
-        # Supertrend value
-        supertrend[i] = lower_band[i] if direction[i] == 1 else upper_band[i]
-    
-    # Align 1w Supertrend and direction to 12h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Calculate KAMA on 12h timeframe
-    # Efficiency Ratio (ER) over 10 periods
-    change = abs(pd.Series(close).diff(10))
-    volatility = pd.Series(close).diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    
-    # Smoothing Constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start with first close
-    for i in range(10, n):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Volume confirmation: 20-period EMA of volume
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -111,43 +58,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(kama[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(direction_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.3 x 20-period EMA
+        volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            # Enter long: price above KAMA, 1w uptrend, volume confirmation
-            if (close[i] > kama[i] and 
-                direction_aligned[i] == 1 and 
-                volume_confirm):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price below KAMA, 1w downtrend, volume confirmation
-            elif (close[i] < kama[i] and 
-                  direction_aligned[i] == -1 and 
-                  volume_confirm):
-                signals[i] = -0.25
-                position = -1
+            # Only trade in trending markets (ADX > 25)
+            if adx_aligned[i] > 25 and volume_confirm:
+                # Long: breakout above upper Donchian channel
+                if close[i] > highest_high[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: breakout below lower Donchian channel
+                elif close[i] < lowest_low[i-1]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price below KAMA OR 1w trend turns down OR volume drops
-            if (close[i] < kama[i] or 
-                direction_aligned[i] == -1 or 
-                volume[i] < vol_ema_20[i]):
+            # Exit long: close below middle of Donchian channel OR ADX weakening (<20)
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < middle or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA OR 1w trend turns up OR volume drops
-            if (close[i] > kama[i] or 
-                direction_aligned[i] == 1 or 
-                volume[i] < vol_ema_20[i]):
+            # Exit short: close above middle of Donchian channel OR ADX weakening (<20)
+            middle = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > middle or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
