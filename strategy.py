@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-# In trending markets (12h HMA rising), we trade breakouts in trend direction: long on upper breakout, short on lower breakout.
-# In ranging markets (12h HMA flat), we fade extremes: short near upper band, long near lower band.
-# Volume confirmation (>1.3x 20-period EMA) reduces false breakouts. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
-# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and volume confirmation
+# In trending markets (4h close > 20 EMA), trade breakouts in trend direction: long on R3 breakout, short on S3 breakdown
+# In ranging markets (4h close near 20 EMA), fade extremes: short near R3, long near S3
+# Volume confirmation (>1.3x 20-period EMA) reduces false signals. Uses 1h timeframe targeting 80-120 trades over 4 years.
+# Discrete position sizing (0.20) minimizes fee churn and manages drawdown in both bull and bear markets.
 
-name = "4h_Donchian20_12hHMA_Trend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,53 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h HMA(21)
-    close_12h = pd.Series(df_12h['close'])
-    wma_half = close_12h.rolling(window=10, min_periods=10).apply(
-        lambda x: np.average(x, weights=np.arange(1, 11)), raw=True
-    )
-    wma_full = close_12h.rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, 22)), raw=True
-    )
-    hma_12h = 2 * wma_half - wma_full
-    hma_12h = hma_12h.rolling(window=5, min_periods=5).apply(
-        lambda x: np.average(x, weights=np.arange(1, 6)), raw=True
-    ).values
+    # Calculate 4h EMA(20) for trend filter
+    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 12h HMA slope (rising/falling/flat)
-    hma_slope = np.diff(hma_12h, prepend=hma_12h[0])
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
-    hma_flat = np.abs(hma_slope) <= 1e-7  # essentially flat
+    # Calculate 1h Camarilla levels (based on previous day's OHLC)
+    # Camarilla equations: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We'll use daily OHLC to calculate Camarilla levels for 1h timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align 12h HMA and slope to 4h timeframe
-    hma_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
-    hma_rising_aligned = align_htf_to_ltf(prices, df_12h, hma_rising.astype(float))
-    hma_falling_aligned = align_htf_to_ltf(prices, df_12h, hma_falling.astype(float))
-    hma_flat_aligned = align_htf_to_ltf(prices, df_12h, hma_flat.astype(float))
+    # Calculate Camarilla levels from daily data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    camarilla_width = (daily_high - daily_low) * 1.1
+    camarilla_r3 = daily_close + camarilla_width / 4
+    camarilla_s3 = daily_close - camarilla_width / 4
     
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Align Camarilla levels to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: 20-period EMA of volume on 1h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any value is NaN
-        if (np.isnan(hma_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_20_4h[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,40 +70,42 @@ def generate_signals(prices):
         volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            # Determine trend: rising (HMA up), falling (HMA down), or flat (HMA flat)
-            if hma_rising_aligned[i] > 0.5:
-                # Uptrend: long on upper breakout
-                if close[i] > donchian_upper[i] and volume_confirm:
-                    signals[i] = 0.25
+            # Determine market state based on 4h EMA
+            # Trending: price significantly above/below EMA
+            # Ranging: price near EMA
+            ema_distance = abs(close[i] - ema_20_4h[i]) / ema_20_4h[i]
+            
+            if ema_distance > 0.015:  # Trending market (>1.5% deviation from EMA)
+                # Trade breakouts in trend direction
+                if close[i] > r3_aligned[i] and volume_confirm:
+                    signals[i] = 0.20
                     position = 1
-            elif hma_falling_aligned[i] > 0.5:
-                # Downtrend: short on lower breakout
-                if close[i] < donchian_lower[i] and volume_confirm:
-                    signals[i] = -0.25
+                elif close[i] < s3_aligned[i] and volume_confirm:
+                    signals[i] = -0.20
                     position = -1
-            else:
-                # Ranging market (HMA flat): fade extremes
-                if close[i] <= donchian_lower[i] and volume_confirm:
-                    signals[i] = 0.25
+            else:  # Ranging market (near EMA)
+                # Fade extremes at Camarilla levels
+                if close[i] <= s3_aligned[i] and volume_confirm:
+                    signals[i] = 0.20
                     position = 1
-                elif close[i] >= donchian_upper[i] and volume_confirm:
-                    signals[i] = -0.25
+                elif close[i] >= r3_aligned[i] and volume_confirm:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Exit long: price retouches midpoint OR trend changes to downtrend
-            if (close[i] <= donchian_mid[i] or 
-                hma_falling_aligned[i] > 0.5):
+            # Exit long: price retouches opposite Camarilla level OR volume drops
+            if (close[i] >= r3_aligned[i] or 
+                volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price retouches midpoint OR trend changes to uptrend
-            if (close[i] >= donchian_mid[i] or 
-                hma_rising_aligned[i] > 0.5):
+            # Exit short: price retouches opposite Camarilla level OR volume drops
+            if (close[i] <= s3_aligned[i] or 
+                volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
