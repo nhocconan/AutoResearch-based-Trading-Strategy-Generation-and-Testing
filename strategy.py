@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation
-# Williams %R measures overbought/oversold: %R = (Highest High - Close)/(Highest High - Lowest Low) * -100
-# Long: %R < -80 (oversold) + 1d EMA34 uptrend + volume spike
-# Short: %R > -20 (overbought) + 1d EMA34 downtrend + volume spike
-# Works in both bull and bear markets by fading extremes in the direction of the 1d trend
-# Discrete sizing 0.25 targets 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
+# Williams Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to identify trends
+# When Lips > Teeth > Jaw = uptrend (green), Lips < Teeth < Jaw = downtrend (red)
+# Strong trend + volume confirmation = entry, opposite Alligator alignment = exit
+# Works in both bull and bear markets by following the Alligator's trend direction
+# Discrete sizing 0.25 targets 12-37 trades/year for 12h timeframe
 
-name = "12h_WilliamsR_1dEMA34_VolumeSpike"
+name = "12h_WilliamsAlligator_1dEMA34_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -37,10 +37,14 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate Williams %R (14-period) on 12h timeframe
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Williams Alligator components (using 12h prices)
+    close_s = pd.Series(close)
+    # Jaw: 13-period SMMA (smoothed moving average) - approx with EMA for simplicity
+    jaw = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Teeth: 8-period SMMA
+    teeth = close_s.ewm(span=8, adjust=False, min_periods=8).mean().values
+    # Lips: 5-period SMMA
+    lips = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -50,32 +54,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R oversold (< -80) AND 1d EMA34 uptrend AND volume spike
-            if williams_r[i] < -80 and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: Lips > Teeth > Jaw (uptrend) AND 1d EMA34 uptrend AND volume spike
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought (> -20) AND 1d EMA34 downtrend AND volume spike
-            elif williams_r[i] > -20 and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: Lips < Teeth < Jaw (downtrend) AND 1d EMA34 downtrend AND volume spike
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R rises above -50 (moving out of oversold) OR price closes below EMA13
-            if williams_r[i] > -50 or close[i] < pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values[i]:
+            # Exit long: Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR price closes below Jaw
+            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or close[i] < jaw[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R falls below -50 (moving out of overbought) OR price closes above EMA13
-            if williams_r[i] < -50 or close[i] > pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values[i]:
+            # Exit short: Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw) OR price closes above Jaw
+            if lips[i] >= teeth[i] or teeth[i] >= jaw[i] or close[i] > jaw[i]:
                 signals[i] = 0.0
                 position = 0
             else:
