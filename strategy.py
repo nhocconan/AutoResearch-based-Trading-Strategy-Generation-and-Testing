@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter
-# In trending markets (1d ADX>=25), trade breakouts in trend direction: long on R3 breakout in uptrend, short on S3 breakdown in downtrend.
-# In ranging markets (1d ADX<25), fade extremes: short near R3, long near S3.
-# Volume confirmation (>2.0x 20-period EMA) reduces false signals. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
-# Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
-# BTC/ETH edge: Camarilla levels derived from 1d candles capture institutional order flow; volume spike confirms participation; ADX regime avoids whipsaws.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX regime filter and volume spike
+# In trending markets (1d ADX >= 25), trade breakouts in trend direction: long on R3 breakout in uptrend, short on S3 breakdown in downtrend.
+# In ranging markets (1d ADX < 25), fade extremes: short near R3, long near S3.
+# Volume confirmation (>2.0x 20-period EMA) reduces false signals. Uses discrete position sizing (0.25) to minimize fee churn.
+# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
+# BTC/ETH edge: Camarilla levels from 1d candles capture institutional order flow; volume spike confirms participation; ADX regime avoids whipsaws.
 
 name = "4h_Camarilla_R3S3_1dADX_Regime_VolumeSpike"
 timeframe = "4h"
