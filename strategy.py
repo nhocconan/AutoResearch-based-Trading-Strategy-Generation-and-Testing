@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses 1h timeframe with 4h HTF for trend alignment to reduce whipsaws.
-# Camarilla R3/S3 from 1d provide institutional support/resistance levels.
-# Volume confirmation (2.0x 20-period EMA) ensures breakout conviction.
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
-# Designed for 1h timeframe targeting 15-37 trades/year (60-150 total) with discrete sizing (0.20).
-# Works in bull markets by buying R3 breakouts in uptrends and bear markets by selling S3 breakdowns in downtrends.
-# The 4h EMA50 trend filter avoids false breakouts during sideways consolidation.
+# Hypothesis: 6h Williams Alligator + Elder Ray Bull/Bear Power with 1d trend filter
+# Uses Williams Alligator (jaw/teeth/lips) to identify trend absence/presence
+# Elder Ray measures bull/bear power relative to 13-period EMA
+# 1d EMA50 provides higher-timeframe trend filter to avoid counter-trend trades
+# Designed for 6h timeframe targeting 12-37 trades/year (50-150 total) with discrete sizing (0.25)
+# Works in bull markets by buying when bull power > 0 and Alligator aligned bullish
+# Works in bear markets by selling when bear power > 0 and Alligator aligned bearish
+# The 1d EMA50 filter ensures we only trade in the direction of the higher-timeframe trend
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1dEMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,90 +25,94 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 1d data for Camarilla levels (R3, S3)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate camarilla levels: R3, S3 from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
+    # Williams Alligator: SMAs of median price (hl2) with different periods
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    hl2 = (high + low) / 2
     
-    # Align camarilla levels to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Smoothed Moving Average (SMMA) - same as RMA/Wilder's MA
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume confirmation: 2.0x 20-period EMA on 1h volume
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    jaw = smma(hl2, 13)
+    teeth = smma(hl2, 8)
+    lips = smma(hl2, 5)
+    
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start from 100 to have valid indicators
+    for i in range(50, n):  # Start from 50 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
+        # Determine Alligator alignment
+        # Bullish alignment: Lips > Teeth > Jaw
+        # Bearish alignment: Jaw > Teeth > Lips
+        bullish_alligator = (lips_aligned[i] > teeth_aligned[i] and 
+                            teeth_aligned[i] > jaw_aligned[i])
+        bearish_alligator = (jaw_aligned[i] > teeth_aligned[i] and 
+                            teeth_aligned[i] > lips_aligned[i])
         
         if position == 0:
-            # Long: close breaks above R3 + volume confirmation + price above 4h EMA50 (uptrend)
-            if (close[i] > r3_aligned[i] and volume_confirmed and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            # Long: Bull power > 0 + Bullish Alligator + price above 1d EMA50 (uptrend)
+            if (bull_power[i] > 0 and bullish_alligator and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: close breaks below S3 + volume confirmation + price below 4h EMA50 (downtrend)
-            elif (close[i] < s3_aligned[i] and volume_confirmed and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: Bear power > 0 + Bearish Alligator + price below 1d EMA50 (downtrend)
+            elif (bear_power[i] > 0 and bearish_alligator and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 (mean reversion) OR below 4h EMA50 (trend change)
-            if close[i] < s3_aligned[i] or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: Bull power <= 0 OR Alligator loses bullish alignment OR price below 1d EMA50
+            if (bull_power[i] <= 0 or not bullish_alligator or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above R3 (mean reversion) OR above 4h EMA50 (trend change)
-            if close[i] > r3_aligned[i] or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: Bear power <= 0 OR Alligator loses bearish alignment OR price above 1d EMA50
+            if (bear_power[i] <= 0 or not bearish_alligator or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
