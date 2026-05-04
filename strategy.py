@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + 1d EMA34 Trend Filter + Volume Spike Confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trending vs ranging markets.
-# Long when Lips > Teeth > Jaw (bullish alignment) with price above Teeth and volume spike.
+# Hypothesis: 12h Williams Alligator + 1d EMA34 Trend Filter + Volume Spike Confirmation
+# Williams Alligator identifies trending vs ranging markets. Long when Lips > Teeth > Jaw (bullish alignment) with price above Teeth and volume spike.
 # Short when Lips < Teeth < Jaw (bearish alignment) with price below Teeth and volume spike.
 # 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Designed for 20-50 trades/year on 4h to minimize fee drag while capturing strong trends.
+# Designed for 12-37 trades/year on 12h to minimize fee drag while capturing strong trends in both bull and bear markets.
 # Works in bull markets via long signals in uptrend and bear markets via short signals in downtrend.
 
-name = "4h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +35,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 4h data
+    # Calculate Williams Alligator on 12h data
     # Jaw: 13-period SMMA, shifted 8 bars forward
     # Teeth: 8-period SMMA, shifted 5 bars forward  
     # Lips: 5-period SMMA, shifted 3 bars forward
@@ -73,7 +72,7 @@ def generate_signals(prices):
                 close[i] > teeth_values[i] and 
                 close[i] > ema_34_aligned[i] and  # 1d uptrend
                 volume_spike[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short conditions: Lips < Teeth < Jaw (bearish alignment) AND price < Teeth AND 1d downtrend AND volume spike
             elif (lips_values[i] < teeth_values[i] and 
@@ -81,7 +80,7 @@ def generate_signals(prices):
                   close[i] < teeth_values[i] and 
                   close[i] < ema_34_aligned[i] and  # 1d downtrend
                   volume_spike[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Alligator alignment breaks OR price closes below Teeth OR 1d trend turns down
@@ -92,7 +91,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: Alligator alignment breaks OR price closes above Teeth OR 1d trend turns up
             if (lips_values[i] >= teeth_values[i] or 
@@ -102,6 +101,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
