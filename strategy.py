@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Uses 1d Donchian channel breakouts for entry signals in the direction of the 1w EMA50 trend.
-# Volume confirmation requires current volume > 1.5x 20-period average volume.
-# Designed for 7-25 trades/year (~30-100 total over 4 years) to minimize fee drag.
-# Works in both bull/bear markets by aligning breakouts with the higher timeframe trend.
+# Hypothesis: 6h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+# Uses Donchian channel breakouts for trend capture, filtered by 1d ADX > 25 to ensure
+# we only trade in strong trending markets (avoiding whipsaw in ranges). Volume confirmation
+# ensures breakouts have conviction. Designed for 12-35 trades/year (~50-140 total over 4 years)
+# to minimize fee drag. Works in bull/bear markets by only trading when ADX confirms strong trend.
 
-name = "1d_Donchian20_1wEMA50_VolumeTrend"
-timeframe = "1d"
+name = "6h_Donchian20_1dADX25_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation - ONCE before loop
+    # Get 1d data for ADX calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align Donchian to 1d timeframe (already aligned, but shift for completed bar)
-    upper_20_aligned = np.roll(upper_20, 1)
-    lower_20_aligned = np.roll(lower_20, 1)
-    upper_20_aligned[0] = np.nan
-    lower_20_aligned[0] = np.nan
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Get 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Smoothed TR, DM+ , DM- (using Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    close_1w = df_1w['close'].values
-    # Calculate 1w EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align 1w EMA50 to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian channels (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: 20-period volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # ADX filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long conditions: price breaks above upper Donchian AND price > 1w EMA50 AND volume confirmation
-            if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema50_1w_aligned[i] and 
-                volume_confirm[i]):
+            # Long breakout: price breaks above Donchian high with volume and strong trend
+            if (close[i] > donchian_high[i] and volume_confirmed and strong_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower Donchian AND price < 1w EMA50 AND volume confirmation
-            elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema50_1w_aligned[i] and 
-                  volume_confirm[i]):
+            # Short breakout: price breaks below Donchian low with volume and strong trend
+            elif (close[i] < donchian_low[i] and volume_confirmed and strong_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Donchian channel OR closes below 1w EMA50
-            if (close[i] < upper_20_aligned[i] and close[i] > lower_20_aligned[i]) or close[i] < ema50_1w_aligned[i]:
+            # Exit long: price breaks below Donchian low OR ADX weakens
+            if (close[i] < donchian_low[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Donchian channel OR closes above 1w EMA50
-            if (close[i] < upper_20_aligned[i] and close[i] > lower_20_aligned[i]) or close[i] > ema50_1w_aligned[i]:
+            # Exit short: price breaks above Donchian high OR ADX weakens
+            if (close[i] > donchian_high[i]) or (adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
