@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
 # Uses 1d Camarilla pivot levels (R3/S3) for structure - tight levels for high-probability breakouts
 # 1d EMA34 ensures we trade with higher timeframe trend to avoid counter-trend whipsaws
 # Volume confirmation requires significant participation (>1.8x average volume) to filter false breakouts
 # Discrete sizing 0.25 balances risk and return while minimizing fee churn
-# Target: 75-150 total trades over 4 years = 19-38/year for 6h timeframe
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
 # Works in both bull (continuation at R4/S4) and bear (continuation at R3/S3) markets
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "6h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,8 +38,8 @@ def generate_signals(prices):
     # Calculate 1d Camarilla pivot points (based on prior completed 1d bar)
     # Pivot = (H + L + C) / 3
     # Range = H - L
-    # R3 = Pivot + Range * 1.1/2
-    # S3 = Pivot - Range * 1.1/2
+    # R3 = Pivot + Range * 1.1 / 2
+    # S3 = Pivot - Range * 1.1 / 2
     # R4 = Pivot + Range * 1.1
     # S4 = Pivot - Range * 1.1
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
@@ -60,7 +60,7 @@ def generate_signals(prices):
     r4_1d_shifted[0] = np.nan
     s4_1d_shifted[0] = np.nan
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d_shifted)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d_shifted)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d_shifted)
