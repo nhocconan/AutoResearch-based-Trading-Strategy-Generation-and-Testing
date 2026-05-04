@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Camarilla R1 resistance AND 1d bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below Camarilla S1 support AND 1d bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA34 for trend filter to reduce whipsaw, targeting 20-50 trades/year on 4h.
-# Volume confirmation (1.5x) reduces noise trades. Camarilla R1/S1 provides tighter structure than R3/S3 for fewer, higher-quality signals.
-# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R1 resistance AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below Camarilla S1 support AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
+# Uses 1d EMA50 for trend filter to reduce whipsaw and capture major market direction
+# Volume confirmation (1.5x) and Camarilla levels provide precise structure
+# Designed for 4h timeframe to target 20-50 trades/year (75-200 total over 4 years)
+# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime
 
-name = "4h_Camarilla_R1S1_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1S1_1dTrend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,11 +31,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_bullish_1d = close_1d > ema_34_1d
-    trend_bearish_1d = close_1d < ema_34_1d
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_1d = close_1d > ema_50_1d
+    trend_bearish_1d = close_1d < ema_50_1d
     
     # Align 1d trend to 4h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
@@ -42,14 +45,10 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels (R1, S1) from previous day's OHLC
     # Camarilla R1 and S1 calculation:
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # R1 = close + 1.1 * (high - low) / 4
+    # S1 = close - 1.1 * (high - low) / 4
+    camarilla_r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 4
     
     # Align prior day's Camarilla levels to 4h timeframe (wait for day to complete)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
