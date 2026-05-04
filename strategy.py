@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R4/S4 breakout with 1d ADX(14)>25 trend filter and volume spike (>1.8x 20 EMA volume)
-# Uses Camarilla levels from prior completed 1d bar for structure (R4/S4 = strong breakout levels)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX(14)>25 trend filter and volume spike (>1.6x 20 EMA volume)
+# Uses Camarilla levels from prior completed 1d bar for structure (R3/S3 = strong breakout levels)
 # 1d ADX filter ensures we only trade in trending markets, reducing whipsaw in ranging conditions
 # Volume confirmation ensures breakout has institutional participation
 # Discrete sizing 0.25 balances risk and return while minimizing fee churn
-# Target: 100-180 total trades over 4 years = 25-45/year for 6h timeframe
-# This avoids the saturated R3/S3 levels by using stronger R4/S4 breakouts which occur less frequently
-# but with higher follow-through, especially when combined with ADX trend filter and volume confirmation.
+# Target: 80-140 total trades over 4 years = 20-35/year for 12h timeframe
+# This strategy focuses on BTC/ETH by using tighter volume confirmation (1.6x) and ADX>25 to avoid choppy markets
+# Exit when price returns to Camarilla midpoint or ADX weakens (<20)
 
-name = "6h_Camarilla_R4S4_1dADX_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dADX_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -80,28 +80,28 @@ def generate_signals(prices):
     adx_shifted[0] = np.nan
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_shifted)
     
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels (R4, S4) from prior completed 1d bar
-    # Camarilla formula: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    # Calculate Camarilla levels (R3, S3) from prior completed 1d bar
+    # Camarilla formula: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_val = df_1d['close'].values
     
     camarilla_range = high_1d - low_1d
-    r4 = close_1d_val + (1.1 * camarilla_range)
-    s4 = close_1d_val - (1.1 * camarilla_range)
+    r3 = close_1d_val + (1.1 * camarilla_range / 2)
+    s3 = close_1d_val - (1.1 * camarilla_range / 2)
     
     # Shift by 1 to use only prior completed 1d bar
-    r4_shifted = np.roll(r4, 1)
-    s4_shifted = np.roll(s4, 1)
-    r4_shifted[0] = np.nan
-    s4_shifted[0] = np.nan
+    r3_shifted = np.roll(r3, 1)
+    s3_shifted = np.roll(s3, 1)
+    r3_shifted[0] = np.nan
+    s3_shifted[0] = np.nan
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_shifted)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_shifted)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -109,24 +109,24 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R4 + ADX > 25 (trending) + volume spike
-            if close[i] > r4_aligned[i] and adx_1d_aligned[i] > 25 and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: price breaks above R3 + ADX > 25 (trending) + volume spike
+            if close[i] > r3_aligned[i] and adx_1d_aligned[i] > 25 and volume[i] > (1.6 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S4 + ADX > 25 (trending) + volume spike
-            elif close[i] < s4_aligned[i] and adx_1d_aligned[i] > 25 and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: price breaks below S3 + ADX > 25 (trending) + volume spike
+            elif close[i] < s3_aligned[i] and adx_1d_aligned[i] > 25 and volume[i] > (1.6 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price returns to midpoint of Camarilla levels OR ADX drops below 20 (trend weakening)
-            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
+            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
             if not np.isnan(midpoint) and (close[i] < midpoint or adx_1d_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
@@ -134,7 +134,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price returns to midpoint of Camarilla levels OR ADX drops below 20 (trend weakening)
-            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
+            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
             if not np.isnan(midpoint) and (close[i] > midpoint or adx_1d_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
