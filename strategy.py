@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-# In ranging markets (1d ADX < 25): Donchian breakout = mean reversion (fade extreme)
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+# In ranging markets (1d ADX < 25): Donchian breakout = mean reversion (fade the breakout)
 # In trending markets (1d ADX >= 25): Donchian breakout = trend continuation
 # Volume confirmation (>1.3x 20-period EMA) ensures participation. Uses discrete sizing (0.25) to minimize fees.
-# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year).
+# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
 # BTC/ETH edge: Donchian captures structure; ADX regime avoids whipsaws; volume confirms institutional interest.
 
-name = "12h_Donchian20_1dADX_Regime_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_Regime_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,14 +44,14 @@ def generate_signals(prices):
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -72,20 +72,20 @@ def generate_signals(prices):
         if position == 0:
             # Determine regime: ranging (ADX<25) or trending (ADX>=25)
             if adx_aligned[i] < 25:
-                # Ranging market: fade Donchian breakout (mean reversion)
+                # Ranging market: fade the Donchian breakout (mean reversion)
                 if close[i] <= lowest_low[i] and volume_confirm:
-                    signals[i] = 0.25
+                    signals[i] = 0.25  # long at lower band
                     position = 1
                 elif close[i] >= highest_high[i] and volume_confirm:
-                    signals[i] = -0.25
+                    signals[i] = -0.25  # short at upper band
                     position = -1
             else:
-                # Trending market: continue Donchian breakout (trend following)
+                # Trending market: continue the Donchian breakout (trend following)
                 if close[i] >= highest_high[i] and volume_confirm:
-                    signals[i] = 0.25
+                    signals[i] = 0.25  # long on upper breakout
                     position = 1
                 elif close[i] <= lowest_low[i] and volume_confirm:
-                    signals[i] = -0.25
+                    signals[i] = -0.25  # short on lower breakout
                     position = -1
         elif position == 1:
             # Exit long: price returns to midpoint of Donchian channel OR ADX weakening (<20) OR volume drops
