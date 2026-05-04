@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Uses Donchian channel breakouts from prior completed 4h for structure, 1w EMA50 for higher timeframe trend filter
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Uses Donchian channel from prior completed 1d for structure, 1w EMA50 for trend filter
 # Volume confirmation (>1.5x 20 EMA) ensures breakout has strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
-# 1w EMA50 provides robust trend filter that works in both bull and bear markets by avoiding counter-trend trades
-# Donchian breakouts capture momentum moves while volume confirmation filters false breakouts
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d.
+# 1w EMA50 provides higher timeframe trend filter, reducing whipsaw while capturing major moves.
+# Donchian breakouts work well in both bull and bear markets when combined with volume and trend filters.
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +25,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get 1d data for Donchian channel
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     # Get 1w data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter from prior completed 1w bar
-    close_1w = df_1w['close'].values
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
+    # Calculate Donchian channel (20-period) from prior completed 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    ema_50_1w = pd.Series(close_1w_shifted).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate prior completed 1d bar (shift by 1)
+    high_1d_shifted = np.roll(high_1d, 1)
+    low_1d_shifted = np.roll(low_1d, 1)
+    high_1d_shifted[0] = np.nan
+    low_1d_shifted[0] = np.nan
+    
+    # Calculate Donchian upper and lower bands
+    donchian_upper = pd.Series(high_1d_shifted).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d_shifted).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1d timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # Get 1w data for EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian(20) channels from prior completed 4h bar
-    high_shifted = np.roll(high, 1)
-    low_shifted = np.roll(low, 1)
-    high_shifted[0] = np.nan
-    low_shifted[0] = np.nan
-    
-    # Calculate rolling max/min for Donchian channels
-    upper_channel = pd.Series(high_shifted).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_shifted).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Volume confirmation: 20-period EMA of volume on 1d timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,34 +66,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper channel + price above 1w EMA50 + volume spike
-            if close[i] > upper_channel[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Long conditions: price breaks above Donchian upper + price above 1w EMA50 + volume spike
+            if close[i] > upper_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower channel + price below 1w EMA50 + volume spike
-            elif close[i] < lower_channel[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Short conditions: price breaks below Donchian lower + price below 1w EMA50 + volume spike
+            elif close[i] < lower_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price returns to Donchian midpoint OR price crosses below 1w EMA50
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if close[i] < midpoint or close[i] < ema_50_1w_aligned[i]:
+            donchian_mid = (upper_aligned[i] + lower_aligned[i]) / 2
+            if not np.isnan(donchian_mid) and (close[i] < donchian_mid or close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price returns to Donchian midpoint OR price crosses above 1w EMA50
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2
-            if close[i] > midpoint or close[i] > ema_50_1w_aligned[i]:
+            donchian_mid = (upper_aligned[i] + lower_aligned[i]) / 2
+            if not np.isnan(donchian_mid) and (close[i] > donchian_mid or close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
