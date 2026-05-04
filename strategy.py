@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d EMA34 for trend direction to capture longer-term momentum with noise reduction
-# Uses 6h volume > 2.0x 20-period EMA for strong confirmation to filter weak breakouts
-# Designed for 6h timeframe targeting 12-37 trades/year with discrete sizing (0.25)
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
+# Uses 12h EMA50 for trend direction to capture longer-term momentum with noise reduction
+# Uses 4h volume > 2.0x 20-period EMA for strong confirmation to filter weak breakouts
+# Designed for 4h timeframe targeting 20-50 trades/year with discrete sizing (0.25)
 # Works in bull markets (breakouts with volume in uptrend) and bear markets (breakouts with volume in downtrend)
-# Camarilla R3/S3 levels provide institutional pivot points with statistical significance
-# 1d timeframe aligns with HTF reference and reduces noise vs lower timeframes
+# Donchian channels provide clear structural breakout points
+# 12h timeframe aligns with HTF reference and reduces noise vs lower timeframes
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeSpike_12hEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,84 +25,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get 1d data for Camarilla pivot calculation
-    if len(df_1d) < 2:
+    # Get 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_channel = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
-    r4 = close_1d + 1.1 * camarilla_range
-    s4 = close_1d - 1.1 * camarilla_range
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Get 6h data for volume EMA
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 4h data for volume EMA
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 6h volume EMA(20) for volume confirmation
-    vol_6h = df_6h['volume'].values
-    vol_ema_20 = pd.Series(vol_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ema_20)
+    # Calculate 4h volume EMA(20) for volume confirmation
+    vol_4h = df_4h['volume'].values
+    vol_ema_20 = pd.Series(vol_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ema_20_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(vol_ema_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 2.0 x 20-period EMA
+        # Volume confirmation: current 4h volume > 2.0 x 20-period EMA
         volume_confirmed = volume[i] > (2.0 * vol_ema_20_aligned[i])
         
         if position == 0:
-            # Long: price breaks above R3 + volume confirmation + 1d EMA > EMA34 (uptrend)
-            if (close[i] > r3_aligned[i] and volume_confirmed and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long: price breaks above upper Donchian + volume confirmation + 12h EMA > EMA50 (uptrend)
+            if (close[i] > upper_aligned[i] and volume_confirmed and 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + volume confirmation + 1d EMA < EMA34 (downtrend)
-            elif (close[i] < s3_aligned[i] and volume_confirmed and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short: price breaks below lower Donchian + volume confirmation + 12h EMA < EMA50 (downtrend)
+            elif (close[i] < lower_aligned[i] and volume_confirmed and 
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 (mean reversion) OR 1d EMA < EMA34 (trend change)
-            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price falls below lower Donchian (mean reversion) OR 12h EMA < EMA50 (trend change)
+            if close[i] < lower_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above R3 (mean reversion) OR 1d EMA > EMA34 (trend change)
-            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price rises above upper Donchian (mean reversion) OR 12h EMA > EMA50 (trend change)
+            if close[i] > upper_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
