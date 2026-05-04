@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 level (1d) with 1d bullish trend (close > EMA34) and volume > 1.8x 20-period volume EMA
-# Short when price breaks below Camarilla S3 level (1d) with 1d bearish trend (close < EMA34) and volume > 1.8x 20-period volume EMA
-# Uses 1d EMA34 for intermediate trend filter to reduce whipsaw, targeting 12-37 trades/year on 6h.
-# Volume spike filter (1.8x) is tight to avoid overtrading. Camarilla R3/S3 provides clear structure.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 2.0x 20-period volume EMA
+# Short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 2.0x 20-period volume EMA
+# Uses 1d EMA34 for major trend filter to reduce whipsaw, targeting 12-37 trades/year on 12h.
+# Volume spike filter (2.0x) is strict to avoid overtrading. Camarilla levels provide clear structure from prior 1d session.
 # Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "6h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,10 +23,11 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # Get 1d data for HTF trend filter and Camarilla levels - ONCE before loop
+    # Get 1d data for HTF trend filter and Camarilla calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -38,23 +39,23 @@ def generate_signals(prices):
     trend_bullish_1d = close_1d > ema_34_1d
     trend_bearish_1d = close_1d < ema_34_1d
     
-    # Calculate Camarilla levels from previous 1d candle
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    # where C = (H+L+Close)/3 (typical price)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    hl_range_1d = high_1d - low_1d
-    camarilla_r3_1d = typical_price_1d + (hl_range_1d * 1.1 / 4.0)
-    camarilla_s3_1d = typical_price_1d - (hl_range_1d * 1.1 / 4.0)
-    
-    # Align 1d indicators to 6h timeframe
+    # Align 1d trend to 12h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Calculate volume spike filter (20-period volume EMA)
+    # Calculate Camarilla levels from prior 1d session
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * camarilla_range
+    camarilla_s3 = close_1d - 1.1 * camarilla_range
+    
+    # Align Camarilla levels to 12h timeframe (using prior 1d close, so already completed)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate volume spike filter (20-period volume EMA from 12h data)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.8)  # Volume at least 1.8x average for confirmation
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2.0x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
