@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
-# Uses 4h EMA50 for higher timeframe trend alignment (reduces whipsaw vs shorter TF)
-# Camarilla R3/S3 from prior 4h session provide institutional breakout levels
+# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
+# Uses 1d EMA50 for higher timeframe trend alignment (reduces whipsaw vs shorter TF)
+# Camarilla R3/S3 from prior 1d session provide institutional breakout levels
 # Volume confirmation (>1.8x 20 EMA) filters low-participation false breakouts
 # Session filter (08-20 UTC) to avoid low-liquidity periods
 # Discrete sizing 0.20 limits risk and reduces fee churn
 # Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 # Works in both bull and bear: trend filter adapts to higher timeframe direction.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike_Session"
+name = "1h_Camarilla_R3S3_1dEMA50_VolumeSpike_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -30,34 +30,34 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 4h data for trend filter and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend direction
-    close_4h = pd.Series(df_4h['close'])
-    ema50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend direction
+    close_1d = pd.Series(df_1d['close'])
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 4h EMA50 to 1h timeframe (completed 4h bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Align 1d EMA50 to 1h timeframe (completed 1d bar only)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from previous 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_vals = df_4h['close'].values
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
     # Typical price for Camarilla calculation
-    typical_4h = (high_4h + low_4h + close_4h_vals) / 3.0
-    range_4h = high_4h - low_4h
+    typical_1d = (high_1d + low_1d + close_1d_vals) / 3.0
+    range_1d = high_1d - low_1d
     
     # Camarilla R3, S3 levels (most significant for breakouts)
-    camarilla_r3 = close_4h_vals + 1.1 * range_4h / 2.0
-    camarilla_s3 = close_4h_vals - 1.1 * range_4h / 2.0
+    camarilla_r3 = close_1d_vals + 1.1 * range_1d / 2.0
+    camarilla_s3 = close_1d_vals - 1.1 * range_1d / 2.0
     
-    # Align Camarilla levels to 1h timeframe (completed 4h bar only)
-    r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Align Camarilla levels to 1h timeframe (completed 1d bar only)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: 20-period EMA of volume on 1h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -95,10 +95,10 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit long: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
-            camarilla_h4 = close_4h_vals + 1.1 * range_4h / 4.0
-            camarilla_l4 = close_4h_vals - 1.1 * range_4h / 4.0
-            h4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l4)
+            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
+            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
+            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
             midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] < midpoint or 
@@ -110,10 +110,10 @@ def generate_signals(prices):
                 signals[i] = 0.20
         elif position == -1:
             # Exit short: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
-            camarilla_h4 = close_4h_vals + 1.1 * range_4h / 4.0
-            camarilla_l4 = close_4h_vals - 1.1 * range_4h / 4.0
-            h4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l4)
+            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
+            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
+            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
             midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] > midpoint or 
