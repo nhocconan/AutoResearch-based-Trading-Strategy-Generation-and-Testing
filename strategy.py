@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter
-# Uses Camarilla pivot levels (R3, S3) from 1d for breakout entries, 1d volume spike for confirmation,
-# and 1d ADX > 25 to filter for trending regimes. Designed for 20-50 trades/year (~80-200 total over 4 years)
-# to minimize fee drag. Camarilla levels provide strong support/resistance, volume spike confirms
-# institutional participation, and ADX ensures we only trade in trending markets to avoid whipsaw.
-# Works in both bull/bear markets by adapting to trend direction via breakouts.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d Volume Spike Confirmation
+# Uses Bollinger Band width percentile to detect low volatility squeezes on 6h chart.
+# Breakouts from squeezes are confirmed by 1d volume spike (volume > 1.5x 20-period EMA).
+# Designed for 12-35 trades/year (~50-140 total over 4 years) to minimize fee drag.
+# Works in both bull/bear markets as volatility expansion precedes significant moves in any direction.
 
-name = "4h_Camarilla_R3S3_1dVolumeSpike_ADXRegime"
-timeframe = "4h"
+name = "6h_BollingerSqueeze_1dVolumeSpike_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,94 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, volume, and ADX - ONCE before loop
+    # Get 1d data for volume spike calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla: R4 = Close + 1.5*(High-Low), R3 = Close + 1.125*(High-Low)
-    #           S3 = Close - 1.125*(High-Low), S4 = Close - 1.5*(High-Low)
-    hl_range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.125 * hl_range_1d
-    camarilla_s3 = close_1d - 1.125 * hl_range_1d
+    # Calculate 1d volume EMA20 for spike detection
+    volume_ema20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate volume spike condition: volume > 1.5x EMA20
+    volume_spike_1d = volume_1d > (1.5 * volume_ema20_1d)
     
-    # Calculate 1d volume spike (volume > 1.5 * 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Align volume spike to 6h timeframe (wait for completed 1d bar)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Calculate 1d ADX (14-period) for trend regime filter
-    # ADX calculation: +DI, -DI, DX, then ADX = smoothed DX
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    # Shift arrays to align with original indices
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate Bollinger Bands on 6h (20, 2.0)
+    bb_period = 20
+    bb_std = 2.0
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])
+    # Middle band (SMA)
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Standard deviation
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
     
-    # Align ADX and volume spike to 4h timeframe
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    # Upper and lower bands
+    upper_band = sma + (bb_std * bb_stddev)
+    lower_band = sma - (bb_std * bb_stddev)
+    
+    # Bollinger Band Width
+    bb_width = (upper_band - lower_band) / sma
+    
+    # Bollinger Band Width percentile (50-period lookback) to detect squeeze
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True).values
+    
+    # Squeeze condition: BB width at or below 20th percentile (low volatility)
+    squeeze_condition = bb_width_percentile <= 0.20
+    
+    # Breakout conditions
+    breakout_up = close > upper_band
+    breakout_down = close < lower_band
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx_14_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(sma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(squeeze_condition[i]) or np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending_regime = adx_14_aligned[i] > 25
-        
-        if position == 0 and trending_regime:
-            # Long conditions: price breaks above R3 AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                volume_spike_aligned[i] > 0.5):  # volume_spike is 0 or 1, use 0.5 threshold
+        if position == 0:
+            # Long entry: squeeze breakout to upside with volume confirmation
+            if squeeze_condition[i-1] and breakout_up[i] and volume_spike_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  volume_spike_aligned[i] > 0.5):
+            # Short entry: squeeze breakout to downside with volume confirmation
+            elif squeeze_condition[i-1] and breakout_down[i] and volume_spike_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Camarilla range (between S3 and R3) OR ADX falls below 20
-            if (close[i] >= camarilla_s3_aligned[i] and close[i] <= camarilla_r3_aligned[i]) or adx_14_aligned[i] < 20:
+            # Exit long: price returns to middle band or volatility expands significantly
+            if close[i] <= sma[i] or bb_width_percentile[i] >= 0.80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Camarilla range OR ADX falls below 20
-            if (close[i] >= camarilla_s3_aligned[i] and close[i] <= camarilla_r3_aligned[i]) or adx_14_aligned[i] < 20:
+            # Exit short: price returns to middle band or volatility expands significantly
+            if close[i] >= sma[i] or bb_width_percentile[i] >= 0.80:
                 signals[i] = 0.0
                 position = 0
             else:
