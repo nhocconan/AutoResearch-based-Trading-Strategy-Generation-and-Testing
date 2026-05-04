@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
-# Uses 4h Donchian channel breakouts for structure - captures strong momentum bursts
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume confirmation filters false breakouts (>1.8x average volume) - tighter threshold reduces trades
+# Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume confirmation
+# Williams %R(14) identifies overbought/oversold conditions for mean reversion entries
+# 1d EMA50 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Volume confirmation (>1.5x 20 EMA volume) filters low-momentum false signals
 # Discrete sizing 0.25 minimizes fee churn while maintaining profitability
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
-# Works in bull markets (continuation at upper channel) and bear markets (continuation at lower channel)
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
+# Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend)
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_v3"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,66 +28,63 @@ def generate_signals(prices):
     
     # Get 1d data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for EMA34 calculation
+    if len(df_1d) < 50:  # Need enough data for EMA50 calculation
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(34) trend filter from prior completed 1d bar
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_shifted = np.roll(ema_34_1d, 1)
-    ema_34_1d_shifted[0] = np.nan
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_shifted)
+    # Calculate 1d EMA(50) trend filter from prior completed 1d bar
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_shifted = np.roll(ema_50_1d, 1)
+    ema_50_1d_shifted[0] = np.nan
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_shifted)
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period) from prior completed 4h bar
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # Calculate Williams %R(14) from prior completed 6h bar
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Upper channel: 20-period high
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    # Lower channel: 20-period low
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
     
-    # Shift by 1 to use only prior completed 4h bar (no look-ahead)
-    upper_channel_shifted = np.roll(upper_channel, 1)
-    lower_channel_shifted = np.roll(lower_channel, 1)
-    upper_channel_shifted[0] = np.nan
-    lower_channel_shifted[0] = np.nan
+    # Shift by 1 to use only prior completed 6h bar (no look-ahead)
+    williams_r_shifted = np.roll(williams_r, 1)
+    williams_r_shifted[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or 
-            np.isnan(upper_channel_shifted[i]) or np.isnan(lower_channel_shifted[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or 
+            np.isnan(williams_r_shifted[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper channel AND price > 1d EMA34 AND volume spike
-            if close[i] > upper_channel_shifted[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: Williams %R oversold (< -80) AND price > 1d EMA50 AND volume spike
+            if williams_r_shifted[i] < -80 and close[i] > ema_50_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower channel AND price < 1d EMA34 AND volume spike
-            elif close[i] < lower_channel_shifted[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: Williams %R overbought (> -20) AND price < 1d EMA50 AND volume spike
+            elif williams_r_shifted[i] > -20 and close[i] < ema_50_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower channel OR price crosses below 1d EMA34
-            if close[i] < lower_channel_shifted[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Williams %R returns to neutral (> -50) OR price crosses below 1d EMA50
+            if williams_r_shifted[i] > -50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper channel OR price crosses above 1d EMA34
-            if close[i] > upper_channel_shifted[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Williams %R returns to neutral (< -50) OR price crosses above 1d EMA50
+            if williams_r_shifted[i] < -50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
