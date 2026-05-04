@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Uses Donchian channel breakouts from 1d for trend capture, 1w EMA34 for primary trend filter (proven edge for BTC/ETH),
-# and volume spike for confirmation. Designed for 7-25 trades/year to minimize fee drag on 1d timeframe.
-# Works in bull markets via upward breakouts and in bear markets via downward breakouts with trend filter.
-# The 1w EMA34 provides a smooth trend filter that avoids whipsaw during sideways periods.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 12h EMA50 trend filter and volume spike confirmation
+# Uses Elder Ray from 6h to measure bull/bear power relative to EMA13, 12h EMA50 for trend filter (proven from top performers),
+# and volume spike for confirmation. Designed for 12-30 trades/year to minimize fee drag.
+# Works in bull markets via strong bull power and in bear markets via strong bear power.
+# The 12h EMA50 provides a smooth trend filter that avoids whipsaw in ranging markets.
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_TrendFilter"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA50_VolumeSpike_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA34 trend filter from prior completed 1w bar
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_shifted = np.roll(ema34_1w, 1)
-    ema34_1w_shifted[0] = np.nan
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w_shifted)
+    # Calculate 12h EMA50 trend filter from prior completed 12h bar
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_shifted = np.roll(ema50_12h, 1)
+    ema50_12h_shifted[0] = np.nan
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h_shifted)
     
-    # Calculate 1d Donchian(20) from prior completed 1d bar
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_upper_shifted = np.roll(donchian_upper, 1)
-    donchian_upper_shifted[0] = np.nan
-    donchian_lower_shifted = np.roll(donchian_lower, 1)
-    donchian_lower_shifted[0] = np.nan
+    # Calculate 6h EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: 20-period EMA of volume on 1d timeframe
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(donchian_upper_shifted[i]) or
-            np.isnan(donchian_lower_shifted[i]) or
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(ema13[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: 20-period EMA of volume on 6h timeframe
+        if i >= 20:
+            vol_ema_20 = np.mean(volume[i-19:i+1])  # Simple mean for volume spike
+            vol_ema_20_prev = np.mean(volume[i-39:i-19]) if i >= 40 else vol_ema_20
+            volume_ratio = vol_ema_20 / vol_ema_20_prev if vol_ema_20_prev > 0 else 1.0
+        else:
+            volume_ratio = 1.0
+        
         if position == 0:
-            # Long conditions: Price breaks above Donchian upper AND price above 1w EMA34 AND volume spike
-            if close[i] > donchian_upper_shifted[i] and close[i] > ema34_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: Bull Power > 0 (strong bullish momentum) AND price above 12h EMA50 AND volume spike
+            if bull_power[i] > 0 and close[i] > ema50_12h_aligned[i] and volume_ratio > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Price breaks below Donchian lower AND price below 1w EMA34 AND volume spike
-            elif close[i] < donchian_lower_shifted[i] and close[i] < ema34_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: Bear Power < 0 (strong bearish momentum) AND price below 12h EMA50 AND volume spike
+            elif bear_power[i] < 0 and close[i] < ema50_12h_aligned[i] and volume_ratio > 1.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price closes below Donchian lower OR price closes below 1w EMA34
-            if close[i] < donchian_lower_shifted[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Bull Power turns negative OR price closes below 12h EMA50
+            if bull_power[i] <= 0 or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price closes above Donchian upper OR price closes above 1w EMA34
-            if close[i] > donchian_upper_shifted[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Bear Power turns positive OR price closes above 12h EMA50
+            if bear_power[i] >= 0 or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
