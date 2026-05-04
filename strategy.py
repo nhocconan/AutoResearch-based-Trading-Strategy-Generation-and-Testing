@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 level with 1d EMA34 uptrend and volume > 2.0x 20-period volume EMA
 # Short when price breaks below Camarilla S3 level with 1d EMA34 downtrend and volume > 2.0x 20-period volume EMA
-# Uses 1d HTF for trend to reduce whipsaw vs shorter HTF, targeting 12-37 trades/year on 12h.
+# Uses 1d HTF for stronger trend filter vs 12h, reducing whipsaw in ranging/choppy markets.
 # Volume spike filter (2.0x) is strict to avoid overtrading. Camarilla levels provide clear pivot structure.
 # Works in bull markets via longs in uptrend and bear markets via shorts in downtrend.
+# Target: 20-40 trades/year on 4h (80-160 total over 4 years) to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,6 +37,7 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
+    # R3 = close + 1.1*(high - low)*1.1/4, S3 = close - 1.1*(high - low)*1.1/4
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_prev = df_1d['close'].values
