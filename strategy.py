@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
-# Uses Donchian channel from prior completed 1w bar for structure (strong trend following)
-# 1w EMA(50) filter ensures we only trade in the direction of the weekly trend
-# Volume confirmation (>1.5x 20 EMA volume) ensures breakout has participation
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# Uses 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure buying/selling pressure
+# 1d ADX regime filter: ADX > 25 = trend (trade Elder Ray extremes), ADX < 20 = range (fade Elder Ray extremes)
+# Volume confirmation: 6h volume > 1.5x 20 EMA volume ensures institutional participation
 # Discrete sizing 0.25 balances risk and return while minimizing fee churn
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe
-# Works in bull markets via breakouts and in bear markets via shorting breakdowns
-# Weekly trend filter prevents counter-trend whipsaws
+# Target: 80-140 total trades over 4 years = 20-35/year for 6h timeframe
+# Elder Ray works in both bull and bear markets by adapting to regime via ADX filter
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_Regime_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter and Donchian calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough data for EMA calculation
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) trend filter from prior completed 1w bar
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift EMA by 1 to use only prior completed 1w bar (no look-ahead)
-    ema_50_1w_shifted = np.roll(ema_50_1w, 1)
-    ema_50_1w_shifted[0] = np.nan
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_shifted)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Calculate Donchian channels (20-period) from prior completed 1w bar
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Upper band: highest high over past 20 weekly bars
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over past 20 weekly bars
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Shift by 1 to use only prior completed 1w bar
-    upper_20_shifted = np.roll(upper_20, 1)
-    lower_20_shifted = np.roll(lower_20, 1)
-    upper_20_shifted[0] = np.nan
-    lower_20_shifted[0] = np.nan
+    period = 14
+    tr_smoothed = wilders_smoothing(tr, period)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
     
-    # Align Donchian levels to 1d timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20_shifted)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20_shifted)
+    # DI+ and DI-
+    plus_di = np.where(tr_smoothed != 0, (plus_dm_smoothed / tr_smoothed) * 100, 0)
+    minus_di = np.where(tr_smoothed != 0, (minus_dm_smoothed / tr_smoothed) * 100, 0)
     
-    # Volume confirmation: 20-period EMA of volume on 1d timeframe
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Shift ADX by 1 to use only prior completed 1d bar
+    adx_shifted = np.roll(adx, 1)
+    adx_shifted[0] = np.nan
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_shifted)
+    
+    # 6h EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # 6h Elder Ray components
+    bull_power = high - ema13   # Buying pressure
+    bear_power = low - ema13    # Selling pressure (negative values)
+    
+    # 6h Volume confirmation: 20 EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,34 +92,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ema_20[i]) or 
-            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian + price > weekly EMA50 (uptrend) + volume spike
-            if close[i] > upper_20_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: price breaks below lower Donchian + price < weekly EMA50 (downtrend) + volume spike
-            elif close[i] < lower_20_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
-                signals[i] = -0.25
-                position = -1
+            # Regime-based entry logic
+            if adx_1d_aligned[i] > 25:  # Trending regime - trade with Elder Ray extremes
+                # Long: strong buying pressure + volume confirmation
+                if bull_power[i] > 0 and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: strong selling pressure + volume confirmation
+                elif bear_power[i] < 0 and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_1d_aligned[i] < 20:  # Range regime - fade Elder Ray extremes
+                # Long: selling exhaustion (bear power weakening) + volume confirmation
+                if bear_power[i] < 0 and bear_power[i] > bear_power[i-1] and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: buying exhaustion (bull power weakening) + volume confirmation
+                elif bull_power[i] > 0 and bull_power[i] < bull_power[i-1] and volume[i] > (1.5 * vol_ema_20[i]):
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price returns to weekly EMA50 OR Donchian middle band
-            middle_band = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
-            if not np.isnan(middle_band) and (close[i] < ema_50_1w_aligned[i] or close[i] < middle_band):
+            # Exit long: Elder Ray weakening OR regime change to ranging
+            if (bull_power[i] < 0) or (adx_1d_aligned[i] < 20 and bear_power[i] > bear_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to weekly EMA50 OR Donchian middle band
-            middle_band = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
-            if not np.isnan(middle_band) and (close[i] > ema_50_1w_aligned[i] or close[i] > middle_band):
+            # Exit short: Elder Ray weakening OR regime change to ranging
+            if (bear_power[i] > 0) or (adx_1d_aligned[i] < 20 and bull_power[i] < bull_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
