@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
 # Donchian breakouts capture strong momentum moves. 1d EMA34 ensures alignment with higher timeframe trend.
 # Volume spike (>2x 20 EMA) confirms institutional participation. Discrete sizing 0.25 limits risk.
-# Works in bull/bear: trend filter prevents counter-trend entries. Target: 75-200 trades over 4 years.
+# Works in bull/bear: trend filter prevents counter-trend entries. Target: 50-150 trades over 4 years.
 
 name = "4h_Donchian20_1dEMA34_VolumeSpike"
 timeframe = "4h"
