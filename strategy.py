@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
-# Donchian breakout captures momentum bursts. 1d EMA34 ensures alignment with daily trend to avoid counter-trend trades.
-# Volume confirmation reduces false breakouts. Designed for 20-50 trades/year on 4h to minimize fee drag.
-# Works in bull markets via upside breakout above daily uptrend and in bear markets via downside breakout below daily downtrend.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+# Donchian breakout captures momentum, 1d EMA50 ensures alignment with higher timeframe trend,
+# volume confirmation reduces false signals. Designed for 20-50 trades/year on 4h to minimize fee drag.
+# Works in bull markets via bullish breakout above 1d EMA50 and in bear markets via bearish breakout below 1d EMA50.
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirmation"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,15 +22,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA filter - ONCE before loop
+    # Get 1d data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate 1d EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 4h Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -46,34 +47,34 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper AND above 1d EMA34 AND volume spike
+            # Long conditions: price breaks above Donchian upper channel AND above 1d EMA50 AND volume spike
             if (close[i] > high_20[i] and 
-                close[i] > ema_34_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower AND below 1d EMA34 AND volume spike
+            # Short conditions: price breaks below Donchian lower channel AND below 1d EMA50 AND volume spike
             elif (close[i] < low_20[i] and 
-                  close[i] < ema_34_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Donchian lower
+            # Exit long: price falls below Donchian lower channel
             if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above Donchian upper
+            # Exit short: price rises above Donchian upper channel
             if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
