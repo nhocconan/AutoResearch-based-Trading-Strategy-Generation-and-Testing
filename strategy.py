@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + choppiness regime filter
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and choppiness regime filter
 # Uses Donchian channel breakouts for trend capture, confirmed by 1d volume spikes
-# and filtered by choppiness index to avoid whipsaw in ranging markets.
-# Designed for 20-50 trades/year (~80-200 total over 4 years) to minimize fee drag.
-# Works in bull markets via breakouts and in bear markets via short breakdowns.
-# Choppiness filter ensures we only trade when market is trending (CHOP < 38.2) or
-# mean-reverting (CHOP > 61.8) depending on Donchian position.
+# and filtered by 1d choppiness index to avoid whipsaw in ranging markets.
+# Designed for 12-35 trades/year (~50-140 total over 4 years) to minimize fee drag.
+# Works in both bull/bear markets by adapting to volatility regimes via choppiness filter.
 
-name = "4h_Donchian20_1dVolumeSpike_ChoppinessFilter"
-timeframe = "4h"
+name = "12h_Donchian20_1dVolumeSpike_ChopFilter_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume spike and choppiness - ONCE before loop
+    # Get 1d data for volume spike and choppiness filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -35,78 +33,72 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume spike: current volume > 2.0 * 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (2.0 * vol_ma_20)
-    
-    # Calculate 1d choppiness index: CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low))
-    # Simplified: CHOP = 100 * log10(sum(tr) / log10(highest_high - lowest_low)) / log10(14)
+    # Calculate 1d ATR(14) for choppiness index
     tr_1d = np.maximum(high_1d - low_1d, 
                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first TR
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+                                  np.absolute(np.roll(close_1d, 1) - low_1d)))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = highest_high_14 - lowest_low_14
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
+    # Calculate 1d Choppiness Index (CHOP) = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
+    atr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.maximum(max_high_1d - min_low_1d, 1e-10)
+    chop_1d = 100 * np.log10(atr_sum_1d / chop_denom) / np.log10(14)
     
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    chopiness_1d = 100 * np.log10(sum_tr_14) / np.log10(chop_denominator) / np.log10(14)
+    # Calculate 1d volume spike: volume > 2.0 * 20-period average volume
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     
-    # Align 1d indicators to 4h timeframe (wait for completed 1d bar)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    chopiness_1d_aligned = align_htf_to_ltf(prices, df_1d, chopiness_1d)
+    # Align 1d indicators to 12h timeframe (wait for completed 1d bar)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chopiness_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high_20[i-1]  # break above previous period high
-        breakout_down = close[i] < lowest_low_20[i-1]   # break below previous period low
-        
-        # Choppiness regime: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
-        chop_value = chopiness_1d_aligned[i]
-        is_trending = chop_value < 38.2
-        is_ranging = chop_value > 61.8
+        # Regime filter: only trade when market is trending (CHOP < 38.2) or ranging (CHOP > 61.8) with volume spike
+        is_trending = chop_1d_aligned[i] < 38.2
+        is_ranging = chop_1d_aligned[i] > 61.8
+        volume_confirmed = volume_spike_1d_aligned[i] > 0.5
         
         if position == 0:
-            # Long: Donchian breakout up + volume spike + trending market
-            if (breakout_up and 
-                volume_spike_aligned[i] > 0.5 and  # aligned as float, threshold at 0.5
-                is_trending):
+            # Long conditions: price breaks above Donchian high AND volume spike AND (trending OR ranging with volume)
+            if (close[i] > donchian_high[i] and 
+                volume_confirmed and 
+                (is_trending or is_ranging)):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + volume spike + trending market
-            elif (breakout_down and 
-                  volume_spike_aligned[i] > 0.5 and
-                  is_trending):
+            # Short conditions: price breaks below Donchian low AND volume spike AND (trending OR ranging with volume)
+            elif (close[i] < donchian_low[i] and 
+                  volume_confirmed and 
+                  (is_trending or is_ranging)):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakdown OR chop indicates ranging market
-            if (close[i] < lowest_low_20[i] or is_ranging):
+            # Exit long: price re-enters Donchian channel OR volume spike disappears
+            if (close[i] <= donchian_high[i] and close[i] >= donchian_low[i]) or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout up OR chop indicates ranging market
-            if (close[i] > highest_high_20[i] or is_ranging):
+            # Exit short: price re-enters Donchian channel OR volume spike disappears
+            if (close[i] <= donchian_high[i] and close[i] >= donchian_low[i]) or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
