@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation (1.5x volume EMA20)
-# Long when price breaks above upper Donchian channel with 1d bullish trend (close > EMA34) and volume spike
-# Short when price breaks below lower Donchian channel with 1d bearish trend (close < EMA34) and volume spike
-# Exit on opposite Donchian break or trend flip
-# Uses discrete position sizing (0.25) to limit fee churn. Target: 75-200 trades over 4 years on 4h.
-# Volume confirmation and 1d trend filter reduce false breakouts in choppy markets.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above upper Donchian channel (20-period high) with 1d bullish trend (close > EMA34) and volume > 1.8x 20-period volume EMA
+# Short when price breaks below lower Donchian channel (20-period low) with 1d bearish trend (close < EMA34) and volume > 1.8x 20-period volume EMA
+# Uses 1d EMA34 for trend filter to reduce whipsaw. Volume spike filter at 1.8x to avoid overtrading.
+# Donchian(20) provides clear structure. Target: 20-50 trades/year on 4h timeframe.
+# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
 name = "4h_Donchian20_1dTrend_VolumeSpike"
 timeframe = "4h"
@@ -48,7 +48,7 @@ def generate_signals(prices):
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
+    volume_spike = volume > (vol_ema_20 * 1.8)  # Volume at least 1.8x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
