@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Uses 1d Camarilla pivot levels (R3/S3) for structure, 1d EMA34 for trend filter,
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses Camarilla pivot levels from 1d for structure, 1d EMA34 for trend filter (proven BTC/ETH edge),
 # and volume spike for confirmation. Designed for 12-37 trades/year to minimize fee drag.
 # Works in bull markets via upside breakouts at R3 and in bear markets via downside breakdowns at S3.
 # The 1d EMA34 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
 
-name = "6h_Camarilla_R3S3_1dEMA34_VolumeSpike_TrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and EMA34
+    # Get 1d data for Camarilla levels and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Calculate 1d EMA34 trend filter from prior completed 1d bar
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -38,12 +38,10 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate 1d Camarilla pivot levels (R3, S3) from prior completed 1d bar
+    # Calculate 1d Camarilla levels (R3, S3) from prior completed 1d bar
     # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_h_l = high_1d - low_1d
-    camarilla_factor = 1.1 * camarilla_h_l / 2.0
-    camarilla_r3 = close_1d + camarilla_factor
-    camarilla_s3 = close_1d - camarilla_factor
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     camarilla_r3_shifted = np.roll(camarilla_r3, 1)
     camarilla_s3_shifted = np.roll(camarilla_s3, 1)
     camarilla_r3_shifted[0] = np.nan
@@ -51,7 +49,7 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_shifted)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_shifted)
     
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
