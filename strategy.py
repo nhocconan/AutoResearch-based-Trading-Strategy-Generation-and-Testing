@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
-# Long when price breaks above Donchian upper band AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below Donchian lower band AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA50 for trend filter to reduce whipsaw, targeting 25-40 trades/year on 4h.
-# Volume confirmation reduces noise trades. Donchian channels provide clear structure.
-# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
+# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
+# Short when Williams %R > -20 (overbought) AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
+# Uses 1d EMA50 for trend filter to align with higher timeframe direction, reducing whipsaw in ranging markets.
+# Volume confirmation filters low-momentum breakouts. Williams %R provides mean reversion edge in both bull and bear regimes.
+# Targets 12-30 trades/year on 6h timeframe with discrete position sizing to minimize fee drag.
 
-name = "4h_Donchian20_1dTrend_VolumeConfirm"
-timeframe = "4h"
+name = "6h_WilliamsR_1dTrend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,7 +26,7 @@ def generate_signals(prices):
     
     # Get 1d data for HTF trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -36,17 +36,17 @@ def generate_signals(prices):
     trend_bullish_1d = close_1d > ema_50_1d
     trend_bearish_1d = close_1d < ema_50_1d
     
-    # Align 1d trend to 4h timeframe
+    # Align 1d trend to 6h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Donchian channels (20-period) on 4h data
-    # Donchian Upper = highest high over last 20 periods
-    # Donchian Lower = lowest low over last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period) on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,40 +55,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian period
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(trend_bullish_aligned[i]) or 
+            np.isnan(trend_bearish_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper AND 1d bullish trend AND volume spike
-            if (close[i] > donchian_upper[i] and 
+            # Long conditions: Williams %R < -80 (oversold) AND 1d bullish trend AND volume spike
+            if (williams_r[i] < -80 and 
                 trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower AND 1d bearish trend AND volume spike
-            elif (close[i] < donchian_lower[i] and 
+            # Short conditions: Williams %R > -20 (overbought) AND 1d bearish trend AND volume spike
+            elif (williams_r[i] > -20 and 
                   trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian lower OR 1d trend turns bearish
-            if (close[i] < donchian_lower[i] or 
+            # Exit long: Williams %R > -20 (overbought) OR 1d trend turns bearish
+            if (williams_r[i] > -20 or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian upper OR 1d trend turns bullish
-            if (close[i] > donchian_upper[i] or 
+            # Exit short: Williams %R < -80 (oversold) OR 1d trend turns bullish
+            if (williams_r[i] < -80 or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
