@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w EMA(50) trend filter and volume spike (>2.0x 20 EMA volume)
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR(14) volatility filter and volume confirmation (>1.5x 20 EMA volume)
 # Uses Donchian channels from prior completed 4h bar for structure (breakout = new 20-period high/low)
-# 1w EMA(50) filter ensures we only trade in the direction of the higher timeframe trend (more stable than 1d)
-# Volume confirmation ensures breakout has sufficient participation (>2.0x average volume)
+# 1d ATR(14) filter ensures we only trade when volatility is elevated (>1.0x ATR median) to avoid choppy markets
+# Volume confirmation ensures breakout has sufficient participation (>1.5x average volume)
 # Discrete sizing 0.25 balances risk and return while minimizing fee churn
 # Target: 75-150 total trades over 4 years = 19-38/year for 4h timeframe
 # Works in both bull (breakouts continuation) and bear (breakdowns continuation) markets
-# Focus on BTC/ETH by requiring 1w trend alignment (avoids SOL-only bias, more robust across regimes)
+# Focus on BTC/ETH by requiring volatility and volume filters (avoids false breakouts in low-vol regimes)
 
-name = "4h_Donchian20_1wEMA50_VolumeSpike"
+name = "4h_Donchian20_VolATR_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,17 +26,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough data for EMA calculation
+    # Get 1d data for ATR(14) volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:  # Need enough data for ATR calculation
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) trend filter from prior completed 1w bar
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_shifted = np.roll(ema_50_1w, 1)
-    ema_50_1w_shifted[0] = np.nan
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_shifted)
+    # Calculate 1d ATR(14) from prior completed 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14_1d = np.full_like(tr, np.nan)
+    for i in range(14, len(tr)):
+        if np.isnan(atr_14_1d[i-1]):
+            atr_14_1d[i] = np.nanmean(tr[i-13:i+1])
+        else:
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
+    
+    # Shift by 1 to use only prior completed 1d bar (no look-ahead)
+    atr_14_1d_shifted = np.roll(atr_14_1d, 1)
+    atr_14_1d_shifted[0] = np.nan
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d_shifted)
+    
+    # Calculate ATR median for volatility regime filter (using prior completed 1d bars)
+    atr_median = np.full_like(atr_14_1d_aligned, np.nan)
+    for i in range(50, len(atr_14_1d_aligned)):  # Need 50 bars for median calculation
+        window = atr_14_1d_aligned[i-49:i+1]
+        valid_vals = window[~np.isnan(window)]
+        if len(valid_vals) >= 10:
+            atr_median[i] = np.median(valid_vals)
     
     # Get 4h data for Donchian channels (prior completed 4h bar)
     df_4h = get_htf_data(prices, '4h')
@@ -80,32 +106,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ema_20[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_median[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility filter: only trade when current ATR > 1.0 * ATR median (elevated volatility)
+        vol_filter = atr_14_1d_aligned[i] > (1.0 * atr_median[i])
+        
         if position == 0:
-            # Long conditions: price breaks above Donchian upper + price > 1w EMA50 + volume spike
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: price breaks above Donchian upper + volume spike + volatility filter
+            if close[i] > donchian_upper_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]) and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower + price < 1w EMA50 + volume spike
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: price breaks below Donchian lower + volume spike + volatility filter
+            elif close[i] < donchian_lower_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]) and vol_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian lower OR price crosses below 1w EMA50
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price returns to Donchian lower
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian upper OR price crosses above 1w EMA50
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price returns to Donchian upper
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
