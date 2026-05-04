@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Donchian breakouts capture momentum. 1d EMA50 ensures alignment with higher timeframe trend.
-# Volume spike (>1.5x 20 EMA) confirms breakout strength. Discrete sizing 0.25 limits risk.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via trend filter.
+# Donchian breakouts capture strong momentum moves. 1d EMA50 ensures alignment with higher timeframe trend.
+# Volume confirmation (>1.5x 20 EMA) filters false breakouts. Discrete sizing 0.25 limits risk.
+# Works in bull/bear: trend filter adapts to higher timeframe direction. Target: 75-200 trades over 4 years.
 
-name = "4h_Donchian20_1dEMA50_Volume"
+name = "4h_Donchian20_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,9 +34,11 @@ def generate_signals(prices):
     # Align 1d EMA50 to 4h timeframe (completed 1d bar only)
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Donchian channels on 4h timeframe
+    # Calculate Donchian(20) channels on 4h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_channel = highest_high.values
+    lower_channel = lowest_low.values
     
     # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -46,8 +48,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema50_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,34 +59,26 @@ def generate_signals(prices):
         volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian + uptrend + volume
-            if (close[i] > highest_high[i] and 
-                close[i] > ema50_aligned[i] and 
-                volume_confirm):
+            # Long conditions: break above upper channel + uptrend + volume spike
+            if close[i] > upper_channel[i] and close[i] > ema50_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower Donchian + downtrend + volume
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema50_aligned[i] and 
-                  volume_confirm):
+            # Short conditions: break below lower channel + downtrend + volume spike
+            elif close[i] < lower_channel[i] and close[i] < ema50_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to mid Donchian OR trend changes OR volume drops
-            mid_channel = (highest_high[i] + lowest_low[i]) / 2
-            if (close[i] < mid_channel or 
-                close[i] < ema50_aligned[i] or 
-                volume[i] < vol_ema_20[i]):
+            # Exit long: price returns to midpoint OR trend changes
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if close[i] < midpoint or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to mid Donchian OR trend changes OR volume drops
-            mid_channel = (highest_high[i] + lowest_low[i]) / 2
-            if (close[i] > mid_channel or 
-                close[i] > ema50_aligned[i] or 
-                volume[i] < vol_ema_20[i]):
+            # Exit short: price returns to midpoint OR trend changes
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if close[i] > midpoint or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
