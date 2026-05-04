@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla Pivot Breakout + 4h EMA50 Trend Filter + Volume Spike + Session Filter (08-20 UTC)
-# Uses Camarilla R3/S3 levels on 1h for precision entries in direction of 4h trend.
-# Volume spike confirms institutional interest. Session filter avoids low-liquidity hours.
-# Designed for 15-30 trades/year on 1h to minimize fee drag while capturing breakouts.
-# Works in bull markets via long breakouts and bear markets via short breakdowns.
+# Hypothesis: 6h Elder Ray + 1d ADX Regime + Volume Spike
+# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength.
+# Long when Bull Power > 0 and rising AND Bear Power < 0 (bullish market structure).
+# Short when Bear Power > 0 and rising AND Bull Power < 0 (bearish market structure).
+# 1d ADX > 25 confirms trending regime to avoid false signals in ranging markets.
+# Volume spike (2x 20-period EMA) ensures participation.
+# Designed for 12-37 trades/year on 6h to minimize fee drag while capturing strong trends.
+# Works in bull markets via long signals in uptrend and bear markets via short signals in downtrend.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_ElderRay_1dADX_Regime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,83 +25,105 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for HTF trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for HTF ADX trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d ADX for trend filter
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - pd.Series(close_1d).shift(1)))
+    tr3 = pd.Series(np.abs(low_1d - pd.Series(close_1d).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Calculate Camarilla levels on 1h using previous bar's range
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # Use previous bar's high/low to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff()
+    up_move = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    down_move = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
     
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Directional Indicators
+    plus_di = 100 * (up_move.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (down_move.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    
+    # ADX
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate Elder Ray on 6h data
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
+    bull_power = high - ema_13.values  # High - EMA13
+    bear_power = ema_13.values - low   # EMA13 - Low
+    
+    # Slope of Bull/Bear Power (3-period EMA of the power)
+    bull_power_slope = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().diff()
+    bear_power_slope = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().diff()
+    
+    bull_power_values = bull_power
+    bear_power_values = bear_power
+    bull_power_slope_values = bull_power_slope.fillna(0).values
+    bear_power_slope_values = bear_power_slope.fillna(0).values
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous bar data
-        # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or np.isnan(volume_spike[i]) or
-            not in_session[i]):
+    for i in range(100, n):
+        # Skip if any value is NaN
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power_values[i]) or 
+            np.isnan(bear_power_values[i]) or np.isnan(bull_power_slope_values[i]) or 
+            np.isnan(bear_power_slope_values[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Close breaks above R3 AND 4h uptrend AND volume spike
-            if (close[i] > camarilla_r3[i] and 
-                close[i] > ema_50_aligned[i] and  # 4h uptrend
+            # Long conditions: Bull Power > 0 and rising AND Bear Power < 0 AND ADX > 25 AND volume spike
+            if (bull_power_values[i] > 0 and 
+                bull_power_slope_values[i] > 0 and 
+                bear_power_values[i] < 0 and 
+                adx_aligned[i] > 25 and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: Close breaks below S3 AND 4h downtrend AND volume spike
-            elif (close[i] < camarilla_s3[i] and 
-                  close[i] < ema_50_aligned[i] and  # 4h downtrend
+            # Short conditions: Bear Power > 0 and rising AND Bull Power < 0 AND ADX > 25 AND volume spike
+            elif (bear_power_values[i] > 0 and 
+                  bear_power_slope_values[i] > 0 and 
+                  bull_power_values[i] < 0 and 
+                  adx_aligned[i] > 25 and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close breaks below R3 OR 4h trend turns down
-            if (close[i] < camarilla_r3[i] or 
-                close[i] < ema_50_aligned[i]):
+            # Exit long: Bull Power <= 0 OR Bear Power >= 0 OR ADX < 20 (regime change)
+            if (bull_power_values[i] <= 0 or 
+                bear_power_values[i] >= 0 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close breaks above S3 OR 4h trend turns up
-            if (close[i] > camarilla_s3[i] or 
-                close[i] > ema_50_aligned[i]):
+            # Exit short: Bear Power <= 0 OR Bull Power >= 0 OR ADX < 20 (regime change)
+            if (bear_power_values[i] <= 0 or 
+                bull_power_values[i] >= 0 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
