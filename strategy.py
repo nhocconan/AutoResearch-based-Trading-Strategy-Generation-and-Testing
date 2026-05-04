@@ -51,6 +51,7 @@ def generate_signals(prices):
     # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # Get 4h data for volume EMA(20) for volume confirmation
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -61,7 +62,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ema_20[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ema_20[i]) or np.isnan(pp_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,8 +86,6 @@ def generate_signals(prices):
                 position = -1
         elif position == 1:
             # Exit long: Close drops below PP (pivot point) OR 1d trend turns bearish
-            # Calculate PP for exit condition
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
             if (close[i] < pp_aligned[i] or bearish_trend):
                 signals[i] = 0.0
                 position = 0
@@ -94,7 +93,6 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: Close rises above PP (pivot point) OR 1d trend turns bullish
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
             if (close[i] > pp_aligned[i] or bullish_trend):
                 signals[i] = 0.0
                 position = 0
