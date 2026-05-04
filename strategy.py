@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from daily chart for structure, 1d EMA34 for trend filter (proven from top performers),
-# and volume spike for confirmation. Designed for 12-37 trades/year to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
+# Uses Donchian channels for price structure, 12h EMA50 for trend filter (proven from top performers),
+# and volume spike for confirmation. Designed for 19-50 trades/year to minimize fee drag.
 # Works in bull markets via breakout continuations and in bear markets via breakdown continuations.
-# The 1d EMA34 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
+# The 12h EMA50 provides a smooth trend filter that adapts to changing regimes while avoiding whipsaw.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike_TrendFilter"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA34 trend filter from prior completed 1d bar
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_shifted = np.roll(ema34_1d, 1)
-    ema34_1d_shifted[0] = np.nan
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
+    # Calculate 12h EMA50 trend filter from prior completed 12h bar
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_shifted = np.roll(ema50_12h, 1)
+    ema50_12h_shifted[0] = np.nan
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h_shifted)
     
-    # Calculate Camarilla pivot levels from prior completed 1d bar
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), S3 = close - 1.125*(high-low)
-    R3_1d = close_1d + 1.125 * (high_1d - low_1d)
-    S3_1d = close_1d - 1.125 * (high_1d - low_1d)
-    R3_1d_shifted = np.roll(R3_1d, 1)
-    S3_1d_shifted = np.roll(S3_1d, 1)
-    R3_1d_shifted[0] = np.nan
-    S3_1d_shifted[0] = np.nan
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d_shifted)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d_shifted)
+    # Calculate Donchian channels (20-period) on 4h timeframe
+    # Upper channel = highest high over past 20 bars
+    # Lower channel = lowest low over past 20 bars
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,9 +52,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(R3_1d_aligned[i]) or
-            np.isnan(S3_1d_aligned[i]) or
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i]) or
             np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,24 +62,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND above 1d EMA34 AND volume spike
-            if close[i] > R3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: price breaks above upper Donchian channel AND above 12h EMA50 AND volume spike
+            if close[i] > upper_channel[i] and close[i] > ema50_12h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND below 1d EMA34 AND volume spike
-            elif close[i] < S3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: price breaks below lower Donchian channel AND below 12h EMA50 AND volume spike
+            elif close[i] < lower_channel[i] and close[i] < ema50_12h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3 OR below 1d EMA34
-            if close[i] < S3_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price closes below lower Donchian channel OR below 12h EMA50
+            if close[i] < lower_channel[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3 OR above 1d EMA34
-            if close[i] > R3_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price closes above upper Donchian channel OR above 12h EMA50
+            if close[i] > upper_channel[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
