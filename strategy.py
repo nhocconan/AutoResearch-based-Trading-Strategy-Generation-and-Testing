@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h ADX trend filter and volume confirmation
-# Long when price breaks above R3 AND 12h ADX > 25 (trending) AND volume > 1.5x 20 EMA
-# Short when price breaks below S3 AND 12h ADX > 25 (trending) AND volume > 1.5x 20 EMA
-# Uses 6h for primary timeframe, 12h for trend strength to avoid choppy markets.
-# Discrete sizing (0.25) to balance return and risk. Target: 12-37 trades/year.
-# Works in bull markets via longs in strong uptrends and bear markets via shorts in strong downtrends.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 20-period high AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below 20-period low AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for structure and trend alignment, reducing false breakouts in choppy markets.
+# Discrete sizing (0.25) to balance risk and reward. Target: 25-40 trades/year.
+# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
-name = "6h_Camarilla_R3S3_12hADX_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,58 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Camarilla levels (based on previous 12h OHLC)
-    # We need 12h OHLC for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate 4h Donchian channels (20-period)
+    # We need at least 20 periods for calculation
+    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Get 1d data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Get 12h OHLC arrays
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 12h period
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 2
-    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 2
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Align 12h Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    
-    # Get 12h data for ADX trend filter - ONCE before loop
-    # Calculate ADX components: +DI, -DI, DX
-    high_12h_series = pd.Series(high_12h)
-    low_12h_series = pd.Series(low_12h)
-    close_12h_series = pd.Series(close_12h)
-    
-    # True Range
-    tr1 = high_12h_series - low_12h_series
-    tr2 = abs(high_12h_series - close_12h_series.shift(1))
-    tr3 = abs(low_12h_series - close_12h_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean()
-    
-    # Directional Movement
-    up_move = high_12h_series.diff()
-    down_move = low_12h_series.shift(1) - low_12h_series
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth DM
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(span=14, adjust=False, min_periods=14).mean()
-    adx_values = adx.values
-    
-    # Align 12h ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_values)
+    # Align 1d trend to 4h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -86,38 +55,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_rolling_max[i]) or np.isnan(low_rolling_min[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND 12h ADX > 25 (trending) AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                adx_aligned[i] > 25 and 
+            # Long conditions: price breaks above 20-period high AND 1d uptrend AND volume spike
+            if (close[i] > high_rolling_max[i] and 
+                uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND 12h ADX > 25 (trending) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  adx_aligned[i] > 25 and 
+            # Short conditions: price breaks below 20-period low AND 1d downtrend AND volume spike
+            elif (close[i] < low_rolling_min[i] and 
+                  downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3 OR 12h ADX < 20 (range/chop)
-            if (close[i] < s3_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price breaks below 20-period low OR 1d trend changes to downtrend
+            if (close[i] < low_rolling_min[i] or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3 OR 12h ADX < 20 (range/chop)
-            if (close[i] > r3_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price breaks above 20-period high OR 1d trend changes to uptrend
+            if (close[i] > high_rolling_max[i] or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
