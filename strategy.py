@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when price breaks above 20-period Donchian high AND 1d bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below 20-period Donchian low AND 1d bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
-# Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year) and avoid fee drag
-# Donchian channels provide clear trend-following structure that works in both bull and bear markets
-# Volume confirmation filters out false breakouts, EMA34 trend filter reduces whipsaw
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (price > EMA50) and volume confirmation
+# Long when price breaks above 20-period Donchian high AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below 20-period Donchian low AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
+# Uses 1d EMA50 for trend filter to reduce whipsaw, targeting 12-37 trades/year on 6h.
+# Volume confirmation (1.5x) reduces noise trades. Donchian channels provide clear structure.
+# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "12h_Donchian20_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,28 +26,25 @@ def generate_signals(prices):
     
     # Get 1d data for HTF trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_bullish_1d = close_1d > ema_34_1d
-    trend_bearish_1d = close_1d < ema_34_1d
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_1d = close_1d > ema_50_1d
+    trend_bearish_1d = close_1d < ema_50_1d
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 6h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate 12h Donchian channels (20-period)
-    # Using rolling window with min_periods to avoid look-ahead
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 6h data
+    # Highest high of last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lowest low of last 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
