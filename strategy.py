@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout captures momentum in both bull and bear markets
-# 1d EMA34 ensures we trade with the higher timeframe trend (avoiding counter-trend whipsaws)
-# Volume confirmation filters out false breakouts
-# Discrete sizing 0.25 targets 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian breakout captures momentum, 1d EMA34 ensures higher-timeframe trend alignment,
+# volume confirmation filters false breakouts. Works in both bull and bear markets:
+# - Bull: long on upper band breakout with uptrend EMA34 and volume spike
+# - Bear: short on lower band breakout with downtrend EMA34 and volume spike
+# Discrete sizing 0.30 targets 20-50 trades/year for 4h timeframe
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,9 +37,9 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 4h data
+    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -48,35 +49,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(high_rolling_max[i]) or 
+            np.isnan(low_rolling_min[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper band AND 1d EMA34 uptrend AND volume spike
-            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.25
+            # Long conditions: price breaks above upper Donchian band AND 1d EMA34 uptrend AND volume spike
+            if close[i] > high_rolling_max[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: price breaks below Donchian lower band AND 1d EMA34 downtrend AND volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.25
+            # Short conditions: price breaks below lower Donchian band AND 1d EMA34 downtrend AND volume spike
+            elif close[i] < low_rolling_min[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian middle (or lower band for tighter stop)
-            if close[i] < lowest_low[i]:
+            # Exit long: price closes below lower Donchian band OR 1d EMA34 turns downtrend
+            if close[i] < low_rolling_min[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price closes above Donchian middle (or upper band for tighter stop)
-            if close[i] > highest_high[i]:
+            # Exit short: price closes above upper Donchian band OR 1d EMA34 turns uptrend
+            if close[i] > high_rolling_max[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
