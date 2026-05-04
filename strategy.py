@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high AND 12h bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below 20-period Donchian low AND 12h bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 12h EMA50 for trend filter to reduce whipsaw and capture medium-term direction.
-# Volume confirmation (1.5x) and Donchian breakouts target clean momentum moves.
-# Works in bull markets via longs in bullish 12h trend regime and bear markets via shorts in bearish 12h trend regime.
-# Target: 12-30 trades/year on 6h timeframe with discrete sizing (0.25) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (close > EMA50) and volume confirmation (1.5x 20-period volume EMA)
+# Long when price breaks above 20-period Donchian high AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below 20-period Donchian low AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
+# Exit on opposite Donchian breakout or trend reversal
+# Uses discrete position sizing (0.25) to limit fee drag. Target: 20-50 trades/year on 4h.
+# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "6h_Donchian20_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 1d data for HTF trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_12h = close_12h > ema_50_12h
-    trend_bearish_12h = close_12h < ema_50_12h
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_1d = close_1d > ema_50_1d
+    trend_bearish_1d = close_1d < ema_50_1d
     
-    # Align 12h trend to 6h timeframe
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish_12h.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish_12h.astype(float))
+    # Align 1d trend to 4h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate 20-period Donchian channels
-    # Donchian high = max(high, lookback=20)
-    # Donchian low = min(low, lookback=20)
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Donchian channels (20-period) on 4h data
+    # We need to calculate rolling max/min on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
@@ -66,20 +67,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high AND 12h bullish trend AND volume spike
+            # Long conditions: price breaks above Donchian high AND 1d bullish trend AND volume spike
             if (close[i] > donchian_high[i] and 
-                trend_bullish_aligned[i] > 0.5 and  # 12h bullish trend
+                trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low AND 12h bearish trend AND volume spike
+            # Short conditions: price breaks below Donchian low AND 1d bearish trend AND volume spike
             elif (close[i] < donchian_low[i] and 
-                  trend_bearish_aligned[i] > 0.5 and  # 12h bearish trend
+                  trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian low OR 12h trend turns bearish
+            # Exit long: price breaks below Donchian low OR 1d trend turns bearish
             if (close[i] < donchian_low[i] or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
@@ -87,7 +88,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian high OR 12h trend turns bullish
+            # Exit short: price breaks above Donchian high OR 1d trend turns bullish
             if (close[i] > donchian_high[i] or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
