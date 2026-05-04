@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for trend direction and Donchian channels from 4h for entry/exit
-# Volume confirmation requires 2.0x average volume to ensure strong participation
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag on 4h timeframe
-# Works in both bull and bear markets by following the 1d trend direction and using Donchian for structure
-# Prioritizes BTC/ETH performance with SOL as secondary
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian upper band AND 12h close > 12h EMA50 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below Donchian lower band AND 12h close < 12h EMA50 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for primary signals, 12h for trend to avoid counter-trend trades.
+# Discrete sizing (0.25) to balance return and fee drag. Target: 20-50 trades/year.
+# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
+name = "4h_Donchian20_12hTrend_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,63 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 4h Donchian(20) channels
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_band = high_rolling.values
+    lower_band = low_rolling.values
+    
+    # Get 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Uptrend when close > EMA50, downtrend when close < EMA50
+    uptrend_12h = close_12h > ema_50_12h
+    downtrend_12h = close_12h < ema_50_12h
     
-    # Volume confirmation: 20-period EMA on 4h volume
-    vol_series = pd.Series(volume)
-    vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align 12h trend to 4h timeframe
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    
+    # Volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start from 100 to have valid indicators
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
-        
-        # Donchian breakout with 1d EMA34 trend filter
-        # Long: Price breaks above Donchian high + volume spike + close above 1d EMA34 (uptrend)
-        # Short: Price breaks below Donchian low + volume spike + close below 1d EMA34 (downtrend)
         if position == 0:
-            if (close[i] > donchian_high[i] and volume_spike and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long conditions: price breaks above upper band AND 12h uptrend AND volume spike
+            if (close[i] > upper_band[i] and 
+                uptrend_12h_aligned[i] > 0.5 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            elif (close[i] < donchian_low[i] and volume_spike and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short conditions: price breaks below lower band AND 12h downtrend AND volume spike
+            elif (close[i] < lower_band[i] and 
+                  downtrend_12h_aligned[i] > 0.5 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below Donchian low (reversal) OR close below 1d EMA34 (trend change)
-            if close[i] < donchian_low[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below lower band OR 12h trend changes to downtrend
+            if (close[i] < lower_band[i] or 
+                downtrend_12h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above Donchian high (reversal) OR close above 1d EMA34 (trend change)
-            if close[i] > donchian_high[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above upper band OR 12h trend changes to uptrend
+            if (close[i] > upper_band[i] or 
+                uptrend_12h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
