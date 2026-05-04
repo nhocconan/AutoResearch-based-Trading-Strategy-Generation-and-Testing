@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX regime filter and volume spike
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX regime filter and volume confirmation
 # In trending markets (1d ADX >= 25), trade breakouts in trend direction: long on R3 breakout in uptrend, short on S3 breakdown in downtrend.
 # In ranging markets (1d ADX < 25), fade extremes: short near R3, long near S3.
 # Volume confirmation (>2.0x 20-period EMA) reduces false signals. Uses discrete position sizing (0.25) to minimize fee churn.
-# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
+# Designed for 12h timeframe targeting 50-150 total trades over 4 years (12-37/year).
 # BTC/ETH edge: Camarilla levels from 1d candles capture institutional order flow; volume spike confirms participation; ADX regime avoids whipsaws.
 
-name = "4h_Camarilla_R3S3_1dADX_Regime_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dADX_Regime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,13 +52,13 @@ def generate_signals(prices):
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     camarilla_mid = (camarilla_r3 + camarilla_s3) / 2
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid.values)
     
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
