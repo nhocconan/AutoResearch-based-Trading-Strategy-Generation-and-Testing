@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot R3/S3 Breakout with 1d Trend Filter and Volume Spike
-# Camarilla pivots identify key intraday support/resistance levels. Breakout above R3 or below S3 with
-# volume confirmation signals strong momentum. 1d EMA34 filter ensures alignment with higher timeframe trend.
-# Designed for 12-37 trades/year on 12h to minimize fee drag. Works in bull markets via bullish breakouts
-# above 1d EMA34 and in bear markets via bearish breakouts below 1d EMA34.
+# Hypothesis: 4h Williams %R reversal with 12h trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. 12h EMA50 ensures trend alignment.
+# Volume confirmation filters weak breakouts. Designed for 20-50 trades/year on 4h to minimize fee drag.
+# Works in bull markets via oversold bounces above 12h EMA50 and in bear markets via overbought rejections below 12h EMA50.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_WilliamsR_Reversal_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +22,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate Williams %R (14-period) on 4h
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    
+    # Volume confirmation: 20-period volume EMA
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Need at least 100 bars of lookback for Camarilla calculation
-        if i < 100:
-            continue
-            
-        # Calculate Camarilla levels for prior day using lookback window
-        # Look back 96 bars (4*24) to get prior day's OHLC for 12h timeframe
-        lookback_start = max(0, i - 96)
-        if lookback_start >= i:
-            continue
-            
-        # Get prior day's OHLC (using 12h bars)
-        prior_high = np.max(high[lookback_start:i])
-        prior_low = np.min(low[lookback_start:i])
-        prior_close = close[i-1]  # Previous bar's close
-        
-        # Calculate Camarilla levels
-        range_val = prior_high - prior_low
-        if range_val <= 0:
-            continue
-            
-        # Camarilla R3 and S3 levels
-        r3 = prior_close + range_val * 1.1 / 4
-        s3 = prior_close - range_val * 1.1 / 4
-        
-        # Volume spike filter (20-period volume EMA)
-        vol_ema_20 = pd.Series(volume[max(0, i-19):i+1]).ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1] if i >= 19 else volume[:i+1].mean()
-        volume_spike = volume[i] > (vol_ema_20 * 1.5)
-        
-        # Skip if HTF data not aligned yet
-        if np.isnan(ema_34_1d_aligned[i]):
+        # Skip if any value is NaN
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND above 1d EMA34 AND volume spike
-            if (close[i] > r3 and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike):
+            # Long: Williams %R oversold (< -80) AND price above 12h EMA50 AND volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND below 1d EMA34 AND volume spike
-            elif (close[i] < s3 and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike):
+            # Short: Williams %R overbought (> -20) AND price below 12h EMA50 AND volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below R3 OR below 1d EMA34
-            if close[i] < r3 or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Williams %R rises above -50 (momentum fading) OR price below 12h EMA50
+            if williams_r[i] > -50 or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above S3 OR above 1d EMA34
-            if close[i] > s3 or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Williams %R falls below -50 (momentum fading) OR price above 12h EMA50
+            if williams_r[i] < -50 or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
