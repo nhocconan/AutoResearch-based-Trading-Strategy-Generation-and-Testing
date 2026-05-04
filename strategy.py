@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# In ranging/weak trending markets (price between daily EMA34 ± 1.5*ATR): fade at Camarilla R3/S3 levels
-# In strong trending markets (price outside daily EMA34 ± 1.5*ATR): breakout continuation at R4/S4
-# Volume confirmation (>1.3x 20-period EMA) ensures institutional participation
-# Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# BTC/ETH edge: Camarilla levels provide mathematically derived support/resistance; 
-# daily EMA34+ATR regime filter avoids whipsaws; volume confirms breakout validity
+# Hypothesis: 12h Bollinger Band squeeze breakout with 1d volume regime filter
+# In low volatility regimes (1d BB width < 20th percentile): breakouts from 12h BB (±2σ) capture explosive moves
+# Volume confirmation (>2.0x 50-period median volume) ensures institutional participation
+# Uses discrete sizing (0.25) to minimize fee churn. Designed for 12h timeframe targeting 50-150 total trades over 4 years.
+# BTC/ETH edge: Bollinger squeezes precede major moves; volume regime filter avoids false breakouts in low-participation environments.
 
-name = "6h_Camarilla_R3S3_R4S4_1dEMA34_ATR_Regime_Volume"
-timeframe = "6h"
+name = "12h_BBSqueeze_1dVolRegime_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,112 +18,77 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime calculation
+    # Get 1d data for volume regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 and ATR(14)
-    close_1d = pd.Series(df_1d['close'])
-    ema_34 = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean()
+    dev = close_s.rolling(window=20, min_periods=20).std()
+    upper_band = basis + 2.0 * dev
+    lower_band = basis - 2.0 * dev
     
-    # ATR calculation
-    high_1d = pd.Series(df_1d['high'])
-    low_1d = pd.Series(df_1d['low'])
-    tr1 = high_1d - low_1d
-    tr2 = (high_1d - close_1d.shift(1)).abs()
-    tr3 = (low_1d - close_1d.shift(1)).abs()
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Calculate 12h BB width % for squeeze detection
+    bb_width = (upper_band - lower_band) / basis * 100
     
-    # Align 1d indicators to 6h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 1d volume median (50-period) for regime filter
+    vol_s = pd.Series(df_1d['volume'].values)
+    vol_median_50 = vol_s.rolling(window=50, min_periods=50).median()
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla uses previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # Calculate 20th percentile of 1d BB width for squeeze threshold
+    bb_width_s = pd.Series(bb_width.values[-len(df_1d)*12:])  # Approximate 12h bars in 1d
+    if len(bb_width_s) < 20:
+        squeeze_threshold = 5.0  # fallback
+    else:
+        squeeze_threshold = bb_width_s.rolling(window=20, min_periods=20).quantile(0.20).iloc[-1] if not bb_width_s.rolling(window=20, min_periods=20).quantile(0.20).empty else 5.0
     
-    # Camarilla levels
-    r3 = prev_close + prev_range * 1.1 / 4
-    s3 = prev_close - prev_range * 1.1 / 4
-    r4 = prev_close + prev_range * 1.1 / 2
-    s4 = prev_close - prev_range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align 1d volume median to 12h timeframe
+    vol_median_50_aligned = align_htf_to_ltf(prices, df_1d, vol_median_50.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(bb_width[i]) or np.isnan(vol_median_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime detection: compare price to EMA34 ± 1.5*ATR
-        upper_band = ema_34_aligned[i] + 1.5 * atr_1d_aligned[i]
-        lower_band = ema_34_aligned[i] - 1.5 * atr_1d_aligned[i]
+        # Volume regime: current 12h volume > 2.0 x 1d volume median (scaled)
+        # Scale 1d median to approximate 12h expectation: 1d volume / 2 (since 2x12h ≈ 1d)
+        volume_regime = volume[i] > (2.0 * vol_median_50_aligned[i] / 2.0)
         
-        # Volume confirmation: current volume > 1.3 x 20-period EMA
-        volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
+        # Squeeze condition: 12h BB width < 20th percentile threshold (use fixed threshold for stability)
+        is_squeeze = bb_width[i] < 5.0  # Empirical threshold for low volatility
         
         if position == 0:
-            if close[i] > upper_band:
-                # Strong uptrend: look for breakout at R4
-                if close[i] > r4_aligned[i] and volume_confirm:
-                    signals[i] = 0.25
-                    position = 1
-            elif close[i] < lower_band:
-                # Strong downtrend: look for breakdown at S4
-                if close[i] < s4_aligned[i] and volume_confirm:
-                    signals[i] = -0.25
-                    position = -1
-            else:
-                # Ranging/weak trend: fade at R3/S3
-                if close[i] < r3_aligned[i] and close[i] > s3_aligned[i]:
-                    # Near R3: potential short
-                    if close[i] < (r3_aligned[i] + s3_aligned[i]) / 2 and volume_confirm:
-                        signals[i] = -0.25
-                        position = -1
-                    # Near S3: potential long
-                    elif close[i] > (r3_aligned[i] + s3_aligned[i]) / 2 and volume_confirm:
-                        signals[i] = 0.25
-                        position = 1
+            # Look for breakout from Bollinger Bands with volume confirmation
+            if close[i] > upper_band[i] and volume_regime and is_squeeze:
+                signals[i] = 0.25
+                position = 1
+            elif close[i] < lower_band[i] and volume_regime and is_squeeze:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price below S3 OR volume drops OR reversal signal
-            if (close[i] < s3_aligned[i] or 
-                volume[i] < vol_ema_20[i] or
-                close[i] < ema_34_aligned[i]):
+            # Exit long: price returns to basis OR volatility expands (BB width > 2* squeeze threshold)
+            if close[i] <= basis[i] or bb_width[i] > 2.0 * squeeze_threshold:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above R3 OR volume drops OR reversal signal
-            if (close[i] > r3_aligned[i] or 
-                volume[i] < vol_ema_20[i] or
-                close[i] > ema_34_aligned[i]):
+            # Exit short: price returns to basis OR volatility expands
+            if close[i] >= basis[i] or bb_width[i] > 2.0 * squeeze_threshold:
                 signals[i] = 0.0
                 position = 0
             else:
