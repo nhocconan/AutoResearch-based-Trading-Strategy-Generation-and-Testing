@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 1.8x 20 EMA
 # Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 1.8x 20 EMA
-# Uses 6h for primary timeframe to reduce trade frequency and fee drag, 1d for trend direction to avoid counter-trend trades.
-# Discrete sizing (0.25) to minimize fee churn. Target: 12-25 trades/year.
+# Uses 12h for primary timeframe (lower trade frequency, less fee drag), 1d for trend to avoid counter-trend trades.
+# Volume spike filter (1.8x) reduces false breakouts. Discrete sizing (0.25) balances return and drawdown.
+# Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
-name = "6h_Camarilla_R3S3_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +42,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align daily Camarilla levels to 6h timeframe
+    # Align daily Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -54,7 +55,7 @@ def generate_signals(prices):
     uptrend_1d = close_1d > ema_34_1d
     downtrend_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 12h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
