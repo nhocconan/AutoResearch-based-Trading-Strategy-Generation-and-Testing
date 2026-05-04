@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels (R3/S3) from 1h chart for precise entry/exit, 4h EMA50 for trend direction,
-# and 1h volume spike (2x 20-period average) to confirm momentum. Designed for 15-35 trades/year
-# (~60-140 total over 4 years) to minimize fee drag. Session filter (08-20 UTC) reduces noise.
-# Works in bull/bear markets by aligning with 4h trend and requiring volume confirmation.
+# Hypothesis: 6h Volume-Weighted RSI + 12h Supertrend combination
+# Uses Volume-Weighted RSI (VW-RSI) on 6h chart to identify overbought/oversold conditions with volume confirmation,
+# combined with 12h Supertrend as trend filter to avoid counter-trend trades.
+# VW-RSI weights price changes by volume, making it more responsive to institutional activity.
+# Supertrend on 12h provides robust trend detection that works in both bull and bear markets.
+# Designed for 12-30 trades/year (~50-120 total over 4 years) to minimize fee drag.
+# Only takes long when VW-RSI < 30 and 12h Supertrend is bullish.
+# Only takes short when VW-RSI > 70 and 12h Supertrend is bearish.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike_SessionFilter"
-timeframe = "1h"
+name = "6h_VolumeWeightedRSI_12hSupertrend_Combo"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,75 +25,99 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC) - already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA50 trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 12h data for Supertrend calculation - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # Calculate 4h EMA50
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align 4h EMA50 to 1h timeframe (wait for completed 4h bar)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1h Camarilla pivots (R3, S3) - using previous bar's H/L/C
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # We need to shift by 1 to use only completed bar data for pivot calculation
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 12h ATR(10) for Supertrend
+    tr12h = np.maximum(np.maximum(high_12h[1:] - low_12h[1:], 
+                                  np.abs(high_12h[1:] - close_12h[:-1])),
+                       np.abs(low_12h[1:] - close_12h[:-1]))
+    tr12h = np.concatenate([[np.nan], tr12h])
+    atr12h = pd.Series(tr12h).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + camarilla_range * 1.1 / 4
-    s3 = prev_close - camarilla_range * 1.1 / 4
+    # Calculate 12h Supertrend
+    hl2_12h = (high_12h + low_12h) / 2
+    upper_band_12h = hl2_12h + 3.0 * atr12h
+    lower_band_12h = hl2_12h - 3.0 * atr12h
     
-    # Calculate 1h volume spike (2x 20-period average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma20)
+    supertrend_12h = np.zeros_like(close_12h)
+    supertrend_12h[:] = np.nan
+    direction_12h = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_12h)):
+        if np.isnan(supertrend_12h[i-1]):
+            supertrend_12h[i] = lower_band_12h[i]
+            direction_12h[i] = 1
+        else:
+            if close_12h[i] > supertrend_12h[i-1]:
+                supertrend_12h[i] = max(lower_band_12h[i], supertrend_12h[i-1])
+                direction_12h[i] = 1
+            else:
+                supertrend_12h[i] = min(upper_band_12h[i], supertrend_12h[i-1])
+                direction_12h[i] = -1
+    
+    # Align Supertrend direction to 6h timeframe (wait for completed 12h bar)
+    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    
+    # Calculate Volume-Weighted RSI on 6h data
+    # VW-RSI = 100 - (100 / (1 + RS)), where RS = Average Gain / Average Loss
+    # Gains and Losses are volume-weighted
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Volume-weight the gains and losses
+    vol_gain = gain * volume
+    vol_loss = loss * volume
+    
+    # Calculate average volume-weighted gain and loss over 14 periods
+    avg_vol_gain = pd.Series(vol_gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_vol_loss = pd.Series(vol_loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_vol_loss != 0, avg_vol_gain / avg_vol_loss, 0)
+    vw_rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN or outside session
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma20[i]) or not in_session[i]):
+        # Skip if any value is NaN
+        if (np.isnan(direction_12h_aligned[i]) or np.isnan(vw_rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3, above 4h EMA50, and volume spike
-            if (close[i] > r3[i] and close[i] > ema50_4h_aligned[i] and volume_spike[i]):
-                signals[i] = 0.20
+            # Long conditions: VW-RSI oversold (<30) AND 12h Supertrend bullish
+            if (vw_rsi[i] < 30 and direction_12h_aligned[i] == 1):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3, below 4h EMA50, and volume spike
-            elif (close[i] < s3[i] and close[i] < ema50_4h_aligned[i] and volume_spike[i]):
-                signals[i] = -0.20
+            # Short conditions: VW-RSI overbought (>70) AND 12h Supertrend bearish
+            elif (vw_rsi[i] > 70 and direction_12h_aligned[i] == -1):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Camarilla H-L range OR breaks below S3
-            if (close[i] <= prev_high[i] and close[i] >= prev_low[i]) or close[i] < s3[i]:
+            # Exit long: VW-RSI overbought (>70) OR 12h Supertrend turns bearish
+            if (vw_rsi[i] > 70 or direction_12h_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Camarilla H-L range OR breaks above R3
-            if (close[i] <= prev_high[i] and close[i] >= prev_low[i]) or close[i] > r3[i]:
+            # Exit short: VW-RSI oversold (<30) OR 12h Supertrend turns bullish
+            if (vw_rsi[i] < 30 or direction_12h_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
