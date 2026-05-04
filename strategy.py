@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 1d EMA50 for higher timeframe trend alignment (reduces whipsaw vs shorter TF)
-# Camarilla R3/S3 from prior 1d session provide institutional breakout levels
-# Volume confirmation (>1.8x 20 EMA) filters low-participation false breakouts
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# Uses 1d ADX > 25 for strong trend alignment (reduces whipsaw in ranging markets)
+# Donchian(20) from prior 4h session provides clear breakout levels
+# Volume confirmation (>2.0x 20 EMA) filters low-participation false breakouts
 # Discrete sizing 0.25 limits risk and reduces fee churn
 # Target: 75-200 total trades over 4 years = 19-50/year for 4h.
-# Works in both bull and bear: trend filter adapts to higher timeframe direction.
+# Works in both bull and bear: ADX filter ensures we only trade strong trends.
 
-name = "4h_Camarilla_R3S3_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_1dADX_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,34 +25,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend direction
-    close_1d = pd.Series(df_1d['close'])
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 4h timeframe (completed 1d bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate Camarilla levels from previous 1d bar
+    # Calculate 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # Typical price for Camarilla calculation
-    typical_1d = (high_1d + low_1d + close_1d_vals) / 3.0
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with 1d index
     
-    # Camarilla R3, S3 levels (most significant for breakouts)
-    camarilla_r3 = close_1d_vals + 1.1 * range_1d / 2.0
-    camarilla_s3 = close_1d_vals - 1.1 * range_1d / 2.0
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1d = wilder_smooth(dx, 14)
+    
+    # Align 1d ADX to 4h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate Donchian(20) channels from prior 4h bar
+    # We need to look back 20 periods excluding current bar
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
     
     # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -62,47 +93,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema50_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 + uptrend + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: price breaks above Donchian upper + strong uptrend (ADX>25) + volume spike
+            if close[i] > highest_20[i] and adx_aligned[i] > 25 and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 + downtrend + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema50_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: price breaks below Donchian lower + strong downtrend (ADX>25) + volume spike
+            elif close[i] < lowest_20[i] and adx_aligned[i] > 25 and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
-            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
-            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
-            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
-            
+            # Exit long: price returns to Donchian midpoint OR trend weakens (ADX<20) OR weak volume
+            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
             if (close[i] < midpoint or 
-                close[i] < ema50_aligned[i] or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
-            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
-            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
-            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
-            
+            # Exit short: price returns to Donchian midpoint OR trend weakens (ADX<20) OR weak volume
+            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
             if (close[i] > midpoint or 
-                close[i] > ema50_aligned[i] or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
