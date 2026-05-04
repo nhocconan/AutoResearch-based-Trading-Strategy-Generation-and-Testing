@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 1.8x 20-period volume EMA
-# Short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 1.8x 20-period volume EMA
-# Uses 1d EMA34 for major trend filter to reduce whipsaw, targeting 12-37 trades/year on 12h.
-# Volume spike filter (1.8x) is strict to avoid overtrading. Camarilla levels from 1d provide institutional structure.
-# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume spike
+# Long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 2x 20-period volume EMA
+# Short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 2x 20-period volume EMA
+# Uses Camarilla levels from 1d for structure, 1d EMA34 for trend filter, volume spike for confirmation
+# Target: 20-50 trades/year on 4h to avoid fee drag. Works in bull markets via longs and bear markets via shorts.
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter and Camarilla levels - ONCE before loop
+    # Get 1d data for HTF calculations - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
     # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_bullish_1d = close_1d > ema_34_1d
     trend_bearish_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of completed 1d bar)
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_shift = df_1d['close'].shift(1).values  # Previous day close
     
-    # Align Camarilla levels to 12h timeframe (use previous completed 1d bar)
+    # Camarilla formula: R3 = Close + (High - Low) * 1.1/4, S3 = Close - (High - Low) * 1.1/4
+    camarilla_r3_1d = close_1d_shift + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3_1d = close_1d_shift - (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (they represent the prior day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Calculate volume spike filter (20-period volume EMA on 12h data)
+    # Calculate volume spike filter (20-period volume EMA on 4h data)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.8)  # Volume at least 1.8x average for confirmation
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
