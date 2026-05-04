@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakout captures strong momentum moves; 1d EMA34 ensures alignment with higher timeframe trend
-# Volume confirmation (>2.0x 20 EMA) filters low-participation false breakouts
-# Discrete sizing 0.25 limits risk and reduces fee churn. Target: 80-150 trades over 4 years.
-# Works in bull via breakouts, in bear via short breakdowns with trend filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Uses 12h timeframe to reduce trade frequency and fee drag (target: 50-150 trades over 4 years)
+# 1d EMA34 provides stable trend direction less prone to whipsaw than shorter MA
+# Camarilla R3/S3 from prior 1d session capture institutional breakout levels
+# Volume confirmation (>1.6x 20 EMA) filters low-participation false breakouts
+# Discrete sizing 0.25 limits risk and reduces fee churn
+# Designed to work in both bull and bear markets via trend filter + regime-adaptive exits
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -32,16 +34,27 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'])
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 12h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period) on 4h timeframe
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_channel = high_roll
-    lower_channel = low_roll
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Typical price for Camarilla calculation
+    typical_1d = (high_1d + low_1d + close_1d_vals) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla R3, S3 levels (most significant for breakouts)
+    camarilla_r3 = close_1d_vals + 1.1 * range_1d / 2.0
+    camarilla_s3 = close_1d_vals - 1.1 * range_1d / 2.0
+    
+    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,28 +62,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA (stricter filter)
-        volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.6 x 20-period EMA (balanced filter)
+        volume_confirm = volume[i] > (1.6 * vol_ema_20[i])
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper + uptrend + volume spike
-            if close[i] > upper_channel[i] and close[i] > ema34_aligned[i] and volume_confirm:
+            # Long conditions: price breaks above Camarilla R3 + uptrend + volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower + downtrend + volume spike
-            elif close[i] < lower_channel[i] and close[i] < ema34_aligned[i] and volume_confirm:
+            # Short conditions: price breaks below Camarilla S3 + downtrend + volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR trend changes OR weak volume
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2.0
+            # Exit long: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
+            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
+            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
+            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] < midpoint or 
                 close[i] < ema34_aligned[i] or 
@@ -80,8 +97,12 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR trend changes OR weak volume
-            midpoint = (upper_channel[i] + lower_channel[i]) / 2.0
+            # Exit short: price returns to Camarilla H4/L4 midpoint OR trend changes OR weak volume
+            camarilla_h4 = close_1d_vals + 1.1 * range_1d / 4.0
+            camarilla_l4 = close_1d_vals - 1.1 * range_1d / 4.0
+            h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+            l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] > midpoint or 
                 close[i] > ema34_aligned[i] or 
