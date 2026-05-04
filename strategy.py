@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and ATR-based stoploss
-# Long when price breaks above Donchian(20) upper band AND 12h bullish trend (close > EMA50)
-# Short when price breaks below Donchian(20) lower band AND 12h bearish trend (close < EMA50)
-# Exit when price reverses to Donchian midpoint OR 12h trend changes
-# Uses ATR(14) for dynamic position sizing (0.20-0.30 range) and stoploss
-# Target: 20-40 trades/year on 4h timeframe to minimize fee drag while capturing strong trends
-# Works in bull markets via longs in bullish 12h trend regime and bear markets via shorts in bearish 12h trend regime
-# Volume confirmation is implicit via breakout strength (price must close outside channel)
+# Hypothesis: 1h Williams %R reversal with 4h trend filter and volume spike
+# Long when Williams %R < -80 (oversold) AND 4h bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA AND within active session (08-20 UTC)
+# Short when Williams %R > -20 (overbought) AND 4h bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA AND within active session
+# Uses 4h EMA50 for trend filter to reduce whipsaw, targeting 15-35 trades/year on 1h.
+# Williams %R provides mean reversion signals within the trend, volume confirmation reduces false breakouts.
+# Works in bull markets via longs on pullbacks in uptrend and bear markets via shorts on rallies in downtrend.
 
-name = "4h_Donchian20_12hTrend_ATRSizing"
-timeframe = "4h"
+name = "1h_WilliamsR_4hTrend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,99 +22,87 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 4h data for HTF trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_12h = close_12h > ema_50_12h
-    trend_bearish_12h = close_12h < ema_50_12h
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_4h = close_4h > ema_50_4h
+    trend_bearish_4h = close_4h < ema_50_4h
     
-    # Align 12h trend to 4h timeframe
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish_12h.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish_12h.astype(float))
+    # Align 4h trend to 1h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_4h, trend_bullish_4h.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_4h, trend_bearish_4h.astype(float))
     
-    # Calculate Donchian(20) channels
-    lookback = 20
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    mid_band = np.full(n, np.nan)
+    # Calculate Williams %R (14-period) on 1h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    for i in range(lookback-1, n):
-        upper_band[i] = np.max(high[i-lookback+1:i+1])
-        lower_band[i] = np.min(low[i-lookback+1:i+1])
-        mid_band[i] = (upper_band[i] + lower_band[i]) / 2
+    # Calculate volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
     
-    # Calculate ATR(14) for position sizing and stoploss
-    atr_period = 14
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    atr = np.zeros(n)
-    for i in range(atr_period-1, n):
-        if i == atr_period-1:
-            atr[i] = np.mean(tr[1:i+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback, atr_period, 60), n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate dynamic position size based on ATR (inverse volatility)
-        # Scale position size: higher ATR = smaller position, lower ATR = larger position
-        atr_ratio = atr[i] / close[i]  # ATR as percentage of price
-        base_size = 0.25
-        # Inverse volatility scaling: normalize to 0.5-2.0 range
-        vol_scalar = np.clip(0.02 / atr_ratio, 0.5, 2.0)  # Target ~2% ATR
-        position_size = base_size * vol_scalar
-        position_size = np.clip(position_size, 0.20, 0.30)  # Keep in 0.20-0.30 range
+        # Only trade during active session
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long conditions: price closes above Donchian upper band AND 12h bullish trend
-            if (close[i] > upper_band[i] and 
-                trend_bullish_aligned[i] > 0.5):  # 12h bullish trend
-                signals[i] = position_size
+            # Long conditions: Williams %R < -80 (oversold) AND 4h bullish trend AND volume spike
+            if (williams_r[i] < -80 and 
+                trend_bullish_aligned[i] > 0.5 and  # 4h bullish trend
+                volume_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price closes below Donchian lower band AND 12h bearish trend
-            elif (close[i] < lower_band[i] and 
-                  trend_bearish_aligned[i] > 0.5):  # 12h bearish trend
-                signals[i] = -position_size
+            # Short conditions: Williams %R > -20 (overbought) AND 4h bearish trend AND volume spike
+            elif (williams_r[i] > -20 and 
+                  trend_bearish_aligned[i] > 0.5 and  # 4h bearish trend
+                  volume_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian mid band OR 12h trend turns bearish
-            if (close[i] < mid_band[i] or 
+            # Exit long: Williams %R > -50 (momentum fading) OR 4h trend turns bearish
+            if (williams_r[i] > -50 or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price closes above Donchian mid band OR 12h trend turns bullish
-            if (close[i] > mid_band[i] or 
+            # Exit short: Williams %R < -50 (momentum fading) OR 4h trend turns bullish
+            if (williams_r[i] < -50 or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.20
     
     return signals
