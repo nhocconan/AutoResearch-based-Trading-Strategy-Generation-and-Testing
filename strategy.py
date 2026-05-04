@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20 EMA volume)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20 EMA volume)
 # Uses 4h Donchian channel breakouts for structure - captures strong momentum bursts
 # 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
-# Volume confirmation filters false breakouts (>1.5x average volume) - balanced to reduce trades
+# Volume confirmation filters false breakouts (>1.8x average volume) - tighter to reduce trades
 # Discrete sizing 0.25 minimizes fee churn while maintaining profitability
 # Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 # Works in bull markets (continuation at upper channel) and bear markets (continuation at lower channel)
@@ -71,11 +71,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long conditions: price breaks above upper channel AND price > 1d EMA34 AND volume spike
-            if close[i] > upper_channel_shifted[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            if close[i] > upper_channel_shifted[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
             # Short conditions: price breaks below lower channel AND price < 1d EMA34 AND volume spike
-            elif close[i] < lower_channel_shifted[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            elif close[i] < lower_channel_shifted[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
