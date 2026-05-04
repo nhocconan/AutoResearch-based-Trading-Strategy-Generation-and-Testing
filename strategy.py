@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Camarilla pivot levels provide high-probability reversal/breakout zones in ranging markets.
-# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend entries.
-# Volume spike (>2x 20-period EMA) confirms institutional participation and reduces false breakouts.
-# Discrete sizing 0.25 manages risk in bear markets like 2022 and 2025.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Camarilla pivot levels identify intraday support/resistance where price often reverses or accelerates.
+# Breakout of R3 (resistance 3) or S3 (support 3) with 1d EMA34 trend alignment and volume confirmation
+# captures strong momentum moves. Works in bull/bear markets: trend filter prevents counter-trend entries.
+# Discrete sizing 0.25 limits risk and reduces fee churn. Target: 75-200 trades over 4 years.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,25 +32,24 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'])
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (completed 1d bar only)
+    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get 1d data for Camarilla pivot calculation (use previous day's OHLC)
-    df_1d_prev = df_1d.copy()
-    # Calculate Camarilla levels using previous day's OHLC
-    high_1d = df_1d_prev['high'].values
-    low_1d = df_1d_prev['low'].values
-    close_1d_prev = df_1d_prev['close'].values
+    # Calculate Camarilla levels for R3 and S3 on 4h timeframe using previous bar's OHLC
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous completed bar to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Camarilla R3, S3 levels: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d_prev + (1.1 * (high_1d - low_1d) / 2)
-    camarilla_s3 = close_1d_prev - (1.1 * (high_1d - low_1d) / 2)
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2.0
+    s3 = prev_close - 1.1 * camarilla_range / 2.0
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_s3)
-    
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,22 +69,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Long conditions: price breaks above Camarilla R3 + uptrend + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm:
+            if close[i] > r3[i] and close[i] > ema34_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
             # Short conditions: price breaks below Camarilla S3 + downtrend + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm:
+            elif close[i] < s3[i] and close[i] < ema34_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Camarilla H4/L4 midpoint OR trend changes OR volume drops
-            # Camarilla H4/L4: H4 = close + 1.1*(high-low)/4, L4 = close - 1.1*(high-low)/4
-            camarilla_h4 = close_1d_prev + (1.1 * (high_1d - low_1d) / 4)
-            camarilla_l4 = close_1d_prev - (1.1 * (high_1d - low_1d) / 4)
-            h4_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_l4)
-            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
-            if (close[i] < midpoint or 
+            # Exit long: price returns to Camarilla pivot point OR trend changes OR volume drops
+            pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3.0
+            if (close[i] < pivot or 
                 close[i] < ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
@@ -94,13 +87,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Camarilla H4/L4 midpoint OR trend changes OR volume drops
-            camarilla_h4 = close_1d_prev + (1.1 * (high_1d - low_1d) / 4)
-            camarilla_l4 = close_1d_prev - (1.1 * (high_1d - low_1d) / 4)
-            h4_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_h4)
-            l4_aligned = align_htf_to_ltf(prices, df_1d_prev, camarilla_l4)
-            midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
-            if (close[i] > midpoint or 
+            # Exit short: price returns to Camarilla pivot point OR trend changes OR volume drops
+            pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3.0
+            if (close[i] > pivot or 
                 close[i] > ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
