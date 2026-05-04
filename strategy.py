@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves; EMA34 filter ensures alignment with daily trend
-# Volume confirmation reduces false breakouts. Works in both bull and bear markets by trading breakouts
-# in the direction of the higher timeframe trend. Discrete sizing 0.25 targets 50-150 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d EMA34 trend filter
+# Long: price breaks above Donchian(20) high + volume spike + price > 1d EMA34
+# Short: price breaks below Donchian(20) low + volume spike + price < 1d EMA34
+# Exit: opposite Donchian breakout or trend reversal
+# Works in bull markets (breakouts with uptrend) and bear markets (breakouts with downtrend)
+# Discrete sizing 0.30 targets ~100-150 total trades over 4 years (25-38/year) for 4h timeframe
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_1dEMA34"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,9 +37,10 @@ def generate_signals(prices):
     ema34_1d_shifted[0] = np.nan
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d_shifted)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,27 +58,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper band AND 1d EMA34 uptrend AND volume spike
-            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.25
+            # Long conditions: price breaks above Donchian high + volume spike + uptrend
+            if close[i] > highest_high[i] and volume[i] > (2.0 * vol_ema_20[i]) and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: price breaks below Donchian lower band AND 1d EMA34 downtrend AND volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.25
+            # Short conditions: price breaks below Donchian low + volume spike + downtrend
+            elif close[i] < lowest_low[i] and volume[i] > (2.0 * vol_ema_20[i]) and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian middle (or lower band for stricter exit)
-            if close[i] < lowest_low[i]:
+            # Exit long: price breaks below Donchian low OR trend reversal
+            if close[i] < lowest_low[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price closes above Donchian middle (or upper band for stricter exit)
-            if close[i] > highest_high[i]:
+            # Exit short: price breaks above Donchian high OR trend reversal
+            if close[i] > highest_high[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
