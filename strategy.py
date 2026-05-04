@@ -64,8 +64,8 @@ def generate_signals(prices):
     
     # Shift by 1 to use only prior completed 4h bar (no look-ahead)
     donchian_upper_shifted = np.roll(donchian_upper, 1)
-    donchian_lower_shifted = np.roll(donchian_lower, 1)
     donchian_upper_shifted[0] = np.nan
+    donchian_lower_shifted = np.roll(donchian_lower, 1)
     donchian_lower_shifted[0] = np.nan
     
     # Align Donchian levels to 4h timeframe
