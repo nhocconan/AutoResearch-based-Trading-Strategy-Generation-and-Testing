@@ -4,10 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 20-period high AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
-# Short when price breaks below 20-period low AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
-# Uses 4h for structure and trend alignment, reducing false breakouts in choppy markets.
-# Discrete sizing (0.25) to balance risk and reward. Target: 25-40 trades/year.
+# Long when price breaks above upper Donchian channel AND 1d close > 1d EMA34 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below lower Donchian channel AND 1d close < 1d EMA34 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for structure and entries, 1d for trend direction to avoid counter-trend trades.
+# Discrete sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
 name = "4h_Donchian20_1dTrend_VolumeConfirm"
@@ -25,13 +25,12 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate 4h Donchian channels (20-period)
-    # We need at least 20 periods for calculation
-    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Get 1d data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -55,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(high_rolling_max[i]) or np.isnan(low_rolling_min[i]) or 
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
             np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -64,29 +63,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above 20-period high AND 1d uptrend AND volume spike
-            if (close[i] > high_rolling_max[i] and 
+            # Long conditions: price breaks above upper Donchian AND 1d uptrend AND volume spike
+            if (close[i] > high_roll[i] and 
                 uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below 20-period low AND 1d downtrend AND volume spike
-            elif (close[i] < low_rolling_min[i] and 
+            # Short conditions: price breaks below lower Donchian AND 1d downtrend AND volume spike
+            elif (close[i] < low_roll[i] and 
                   downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 20-period low OR 1d trend changes to downtrend
-            if (close[i] < low_rolling_min[i] or 
+            # Exit long: price breaks below lower Donchian OR 1d trend changes to downtrend
+            if (close[i] < low_roll[i] or 
                 downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 20-period high OR 1d trend changes to uptrend
-            if (close[i] > high_rolling_max[i] or 
+            # Exit short: price breaks above upper Donchian OR 1d trend changes to uptrend
+            if (close[i] > high_roll[i] or 
                 uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
