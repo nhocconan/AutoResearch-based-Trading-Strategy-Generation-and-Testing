@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Uses Camarilla pivot levels from prior completed 1h for structure, 4h EMA50 for higher timeframe trend filter
+# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 1w EMA50 trend filter and volume confirmation
+# Williams Alligator identifies trend strength and direction via smoothed medians
+# 1w EMA50 provides higher timeframe trend alignment to reduce whipsaw
 # Volume confirmation (>2.0x 20 EMA) ensures breakout has strong participation
-# Session filter (08-20 UTC) reduces noise trades
-# Discrete sizing 0.20 limits risk and reduces fee churn
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-# 4h EMA50 provides stronger trend filter than 1h EMA, reducing whipsaw in both bull and bear markets.
+# Discrete sizing 0.25 limits risk and reduces fee churn
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h.
+# Williams Alligator is effective in both trending and ranging markets when combined with HTF trend filter.
 
-name = "1h_Camarilla_R3S3_4hEMA50_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1wEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,46 +20,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Pre-compute session hours to avoid datetime operations in loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1h data for Camarilla pivot levels (using completed 1h bar)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 2:
-        return np.zeros(n)
+    # Williams Alligator components (using 6h data)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_price = (high + low) / 2.0
     
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    def smma(values, period):
+        """Smoothed Moving Average"""
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        result = np.full_like(values, np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_value) / period
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
     
-    # Calculate Camarilla pivot levels for R3 and S3
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1h + 1.1 * (high_1h - low_1h) / 2.0
-    camarilla_s3 = close_1h - 1.1 * (high_1h - low_1h) / 2.0
+    jaw_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
     
-    # Shift by 1 to use only completed 1h bar (avoid look-ahead)
-    camarilla_r3_shifted = np.roll(camarilla_r3, 1)
-    camarilla_s3_shifted = np.roll(camarilla_s3, 1)
-    camarilla_r3_shifted[0] = np.nan
-    camarilla_s3_shifted[0] = np.nan
+    # Apply shifts (Jaw: 8, Teeth: 5, Lips: 3)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    # Set NaN for shifted values that would look ahead
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_r3_shifted)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1h, camarilla_s3_shifted)
+    # Align Alligator components to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)  # Same timeframe, no alignment needed but use for consistency
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -68,49 +78,40 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Skip if any value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0 and in_session:
-            # Long conditions: price breaks above Camarilla R3 + price above 4h EMA50 + volume spike
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = 0.20
+        if position == 0:
+            # Long conditions: Lips > Teeth > Jaw (bullish alignment) + price above 1w EMA50 + volume spike
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume[i] > (2.0 * vol_ema_20[i])):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 + price below 4h EMA50 + volume spike
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
-                signals[i] = -0.20
+            # Short conditions: Lips < Teeth < Jaw (bearish alignment) + price below 1w EMA50 + volume spike
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume[i] > (2.0 * vol_ema_20[i])):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Camarilla midpoint OR price crosses below 4h EMA50
-            camarilla_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2.0
-            if not np.isnan(camarilla_mid) and (close[i] < camarilla_mid or close[i] < ema_50_4h_aligned[i]):
+            # Exit long: Alligator alignment breaks (Lips < Teeth OR Teeth < Jaw) OR price crosses below 1w EMA50
+            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Camarilla midpoint OR price crosses above 4h EMA50
-            camarilla_mid = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2.0
-            if not np.isnan(camarilla_mid) and (close[i] > camarilla_mid or close[i] > ema_50_4h_aligned[i]):
+            # Exit short: Alligator alignment breaks (Lips > Teeth OR Teeth > Jaw) OR price crosses above 1w EMA50
+            if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
-        else:
-            # Outside session or flat: maintain flat or exit if needed
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
+                signals[i] = -0.25
     
     return signals
