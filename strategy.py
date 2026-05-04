@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Force Index + 12h KAMA trend filter
-# Uses 6h Elder Force Index (EFI = Volume * (Close - Prior Close)) smoothed with EMA(13) to measure buying/selling pressure.
-# Combines with 12h Kaufman Adaptive Moving Average (KAMA) as trend filter: only trade when price is above/below KAMA.
-# EFI provides momentum timing: long when EFI > 0 and rising, short when EFI < 0 and falling.
-# KAMA adapts to market noise, reducing whipsaw in ranging markets while catching trends.
-# Designed for 12-30 trades/year (~50-120 total over 4 years) to minimize fee drag.
-# Works in both bull/bear markets by combining momentum (EFI) with adaptive trend (KAMA).
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ADX regime filter
+# Uses Donchian channel breakouts for trend capture, confirmed by 1d volume spikes
+# and filtered by ADX > 25 to avoid ranging markets. Designed for 20-50 trades/year
+# (~80-200 total over 4 years) to minimize fee drag. Works in bull/bear markets
+# by using ADX regime to only trade when trending conditions exist.
 
-name = "6h_ElderForceIndex_12hKAMA_Trend"
-timeframe = "6h"
+name = "4h_Donchian20_1dVolumeSpike_ADXRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,91 +23,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA calculation - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for volume spike and ADX - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h KAMA ( Kaufman Adaptive Moving Average )
-    # Efficiency Ratio (ER) = |Change| / Sum|Changes| over 10 periods
-    change = np.abs(np.diff(close_12h))
-    abs_change = np.abs(change)
+    # Calculate 1d ADX(14)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(low_1d)
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
+        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
     
-    # Pad arrays for calculation
-    change_padded = np.concatenate([[0], change])
-    abs_change_padded = np.concatenate([[0], abs_change])
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])],
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate ER over 10 periods
-    er = np.zeros_like(close_12h)
-    for i in range(10, len(close_12h)):
-        net_change = abs(close_12h[i] - close_12h[i-10])
-        total_change = np.sum(abs_change_padded[i-9:i+1])
-        if total_change > 0:
-            er[i] = net_change / total_change
-        else:
-            er[i] = 0
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Smoothing constants: fastest EMA(2), slowest EMA(30)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # Calculate 1d volume spike (volume > 2.0 * 20-period average)
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (2.0 * vol_ma)
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_12h)
-    kama[:] = np.nan
-    kama[29] = close_12h[29]  # Start after 30 periods for min_periods
+    # Align 1d indicators to 4h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
-    for i in range(30, len(close_12h)):
-        if not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-        else:
-            kama[i] = close_12h[i]
-    
-    # Align KAMA to 6h timeframe (wait for completed 12h bar)
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    
-    # Calculate 6h Elder Force Index (EFI)
-    # EFI = Volume * (Close - Prior Close)
-    price_change = np.diff(close, prepend=close[0])
-    efi_raw = volume * price_change
-    
-    # Smooth EFI with EMA(13)
-    efi = pd.Series(efi_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(efi[i]) or np.isnan(efi[i-1])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Regime filter: only trade when ADX > 25 (trending market)
+        if adx_aligned[i] <= 25:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation: require volume spike on 1d
+        if volume_spike_aligned[i] < 0.5:  # no spike
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price above 12h KAMA AND EFI positive AND rising
-            if (close[i] > kama_aligned[i] and 
-                efi[i] > 0 and 
-                efi[i] > efi[i-1]):
+            # Long conditions: price breaks above Donchian upper channel
+            if close[i] > highest_high[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below 12h KAMA AND EFI negative AND falling
-            elif (close[i] < kama_aligned[i] and 
-                  efi[i] < 0 and 
-                  efi[i] < efi[i-1]):
+            # Short conditions: price breaks below Donchian lower channel
+            elif close[i] < lowest_low[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 12h KAMA OR EFI turns negative
-            if (close[i] <= kama_aligned[i]) or (efi[i] <= 0):
+            # Exit long: price retouches Donchian middle or breaks lower channel
+            donchian_mid = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < donchian_mid or close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 12h KAMA OR EFI turns positive
-            if (close[i] >= kama_aligned[i]) or (efi[i] >= 0):
+            # Exit short: price retouches Donchian middle or breaks upper channel
+            donchian_mid = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > donchian_mid or close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
