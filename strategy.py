@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
 # Uses discrete position sizing (0.25) to minimize fee churn. Donchian channels provide clear
-# breakout levels, while 1w EMA34 filters for higher-timeframe trend alignment. Volume spike
-# confirmation reduces false breakouts. Target: 10-20 trades/year per symbol, suitable for
+# breakout levels, while 1d EMA34 filters for higher-timeframe trend alignment. Volume spike
+# confirmation reduces false breakouts. Target: 12-37 trades/year per symbol, suitable for
 # both bull and bear markets via trend-following logic.
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_Trend"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,73 +23,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Donchian(20) channels
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Donchian(20) upper and lower bands
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Donchian levels to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Get 12h data for Donchian(20) channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Get 1d data for volume EMA(20) for volume confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ema_20 = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20)
+    # Calculate 12h Donchian(20) upper and lower bands
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    
+    # Get 12h data for volume EMA(20) for volume confirmation
+    vol_12h = df_12h['volume'].values
+    vol_ema_20 = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ema_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5 x 20-period EMA
+        # Volume confirmation: current 12h volume > 1.5 x 20-period EMA
         volume_confirmed = volume[i] > (1.5 * vol_ema_20_aligned[i])
         
-        # 1w trend: bullish if close > EMA34, bearish if close < EMA34
-        bullish_trend = close[i] > ema_34_1w_aligned[i]
-        bearish_trend = close[i] < ema_34_1w_aligned[i]
+        # 1d trend: bullish if close > EMA34, bearish if close < EMA34
+        bullish_trend = close[i] > ema_34_1d_aligned[i]
+        bearish_trend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper + volume confirmation + bullish 1w trend
+            # Long: price breaks above Donchian upper + volume confirmation + bullish 1d trend
             if (close[i] > donchian_upper_aligned[i] and volume_confirmed and bullish_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + volume confirmation + bearish 1w trend
+            # Short: price breaks below Donchian lower + volume confirmation + bearish 1d trend
             elif (close[i] < donchian_lower_aligned[i] and volume_confirmed and bearish_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Donchian lower OR 1w trend turns bearish
+            # Exit long: price falls below Donchian lower OR 1d trend turns bearish
             if close[i] < donchian_lower_aligned[i] or bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above Donchian upper OR 1w trend turns bullish
+            # Exit short: price rises above Donchian upper OR 1d trend turns bullish
             if close[i] > donchian_upper_aligned[i] or bullish_trend:
                 signals[i] = 0.0
                 position = 0
