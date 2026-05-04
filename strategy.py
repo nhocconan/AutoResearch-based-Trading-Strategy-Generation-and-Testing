@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band squeeze breakout with 1d ADX regime filter and volume confirmation
-# In low volatility squeeze (BB Width < 20th percentile): breakout in direction of 1d ADX trend
-# Volume confirmation (>1.5x 20-period EMA) filters false breakouts
-# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 trades over 4 years.
-# Works in bull/bear via ADX regime: ADX>25 = trend follow breakout, ADX<=25 = wait for stronger squeeze
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+# In trending markets (1d ADX > 25): breakout in trend direction
+# In ranging markets (1d ADX <= 25): fade Donchian touches (mean reversion)
+# Volume confirmation (>1.3x 20-period EMA) filters low-quality breakouts
+# Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+# Strategy adapts to bull/bear markets via regime filter and uses 4h primary timeframe.
 
-name = "12h_BBSqueeze_1dADX_Regime_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_Regime_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,23 +50,16 @@ def generate_signals(prices):
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align 1d ADX to 12h timeframe (completed 1d bar only)
+    # Align 1d ADX to 4h timeframe (completed 1d bar only)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
     
-    # Calculate 12h Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    basis = close_s.ewm(span=20, adjust=False, min_periods=20).mean()
-    dev = 2 * close_s.rolling(window=20, min_periods=20).std()
-    upper_band = basis + dev
-    lower_band = basis - dev
-    bb_width = (upper_band - lower_band) / basis
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_up = highest_high.values
+    donchian_low = lowest_low.values
     
-    # Calculate 20th percentile of BB Width for squeeze detection (using expanding window)
-    bb_width_series = pd.Series(bb_width.values)
-    bb_width_percentile = bb_width_series.expanding(min_periods=50).quantile(0.20)
-    squeeze_condition = bb_width < bb_width_percentile.values
-    
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -73,63 +67,60 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vol_ema_20[i]) or
-            np.isnan(squeeze_condition[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_up[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 x 20-period EMA
-        volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.3 x 20-period EMA
+        volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            if squeeze_condition[i] and volume_confirm:
-                # Breakout in direction of 1d ADX trend
-                if adx_aligned[i] > 25:
-                    # Strong trend: breakout in ADX direction
-                    # Use 1d +DI/-DI for trend direction
-                    plus_dm_14 = plus_dm.rolling(window=14, min_periods=14).sum()
-                    minus_dm_14 = minus_dm.rolling(window=14, min_periods=14).sum()
-                    plus_di_14 = 100 * (plus_dm_14 / atr)
-                    minus_di_14 = 100 * (minus_dm_14 / atr)
-                    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di_14.values)
-                    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di_14.values)
-                    
-                    if plus_di_aligned[i] > minus_di_aligned[i]:
-                        # Uptrend: long on break above upper band
-                        if close[i] > upper_band[i]:
-                            signals[i] = 0.25
-                            position = 1
-                    else:
-                        # Downtrend: short on break below lower band
-                        if close[i] < lower_band[i]:
-                            signals[i] = -0.25
-                            position = -1
-                else:
-                    # Weak trend: wait for stronger confirmation (price closes outside bands)
-                    if close[i] > upper_band[i]:
+            if adx_aligned[i] > 25:
+                # Trending market: breakout in trend direction
+                # Determine trend direction using 1d +DI/-DI
+                plus_di_14 = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / atr)
+                minus_di_14 = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / atr)
+                plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di_14.values)
+                minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di_14.values)
+                
+                if plus_di_aligned[i] > minus_di_aligned[i]:
+                    # Uptrend: long on break above Donchian upper
+                    if close[i] > donchian_up[i] and volume_confirm:
                         signals[i] = 0.25
                         position = 1
-                    elif close[i] < lower_band[i]:
+                else:
+                    # Downtrend: short on break below Donchian lower
+                    if close[i] < donchian_low[i] and volume_confirm:
                         signals[i] = -0.25
                         position = -1
+            else:
+                # Ranging market: fade Donchian touches (mean reversion)
+                if close[i] <= donchian_low[i] and volume_confirm:
+                    # Long at lower band
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= donchian_up[i] and volume_confirm:
+                    # Short at upper band
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price returns to basis OR volatility expands (BB Width > 50th percentile) OR volume drops
-            bb_width_percentile_50 = bb_width_series.expanding(min_periods=50).quantile(0.50).iloc[i] if i < len(bb_width_series) else 0.05
-            if (close[i] <= basis[i] or 
-                bb_width[i] > bb_width_percentile_50 or 
+            # Exit long: price returns to midpoint OR ADX weakens (<20) OR volume drops
+            midpoint = (donchian_up[i] + donchian_low[i]) / 2
+            if (close[i] >= midpoint or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to basis OR volatility expands OR volume drops
-            bb_width_percentile_50 = bb_width_series.expanding(min_periods=50).quantile(0.50).iloc[i] if i < len(bb_width_series) else 0.05
-            if (close[i] >= basis[i] or 
-                bb_width[i] > bb_width_percentile_50 or 
+            # Exit short: price returns to midpoint OR ADX weakens (<20) OR volume drops
+            midpoint = (donchian_up[i] + donchian_low[i]) / 2
+            if (close[i] <= midpoint or 
+                adx_aligned[i] < 20 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
