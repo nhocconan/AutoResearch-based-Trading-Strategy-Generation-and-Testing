@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 resistance AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below Camarilla S3 support AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA50 for trend filter to reduce whipsaw, targeting 12-37 trades/year on 12h.
-# Volume confirmation (1.5x) reduces noise trades. Camarilla levels provide precise daily structure.
-# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and ATR-based stoploss
+# Long when price breaks above Donchian(20) upper band AND 12h bullish trend (close > EMA50)
+# Short when price breaks below Donchian(20) lower band AND 12h bearish trend (close < EMA50)
+# Exit when price reverses to Donchian midpoint OR 12h trend changes
+# Uses ATR(14) for dynamic position sizing (0.20-0.30 range) and stoploss
+# Target: 20-40 trades/year on 4h timeframe to minimize fee drag while capturing strong trends
+# Works in bull markets via longs in bullish 12h trend regime and bear markets via shorts in bearish 12h trend regime
+# Volume confirmation is implicit via breakout strength (price must close outside channel)
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_12hTrend_ATRSizing"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,84 +24,99 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for HTF trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_1d = close_1d > ema_50_1d
-    trend_bearish_1d = close_1d < ema_50_1d
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_bullish_12h = close_12h > ema_50_12h
+    trend_bearish_12h = close_12h < ema_50_12h
     
-    # Align 1d trend to 12h timeframe
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
+    # Align 12h trend to 4h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish_12h.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish_12h.astype(float))
     
-    # Calculate Camarilla levels (R3, S3) from previous day's OHLC using 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) channels
+    lookback = 20
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    mid_band = np.full(n, np.nan)
     
-    # Camarilla R3 and S3 calculation:
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
+    for i in range(lookback-1, n):
+        upper_band[i] = np.max(high[i-lookback+1:i+1])
+        lower_band[i] = np.min(low[i-lookback+1:i+1])
+        mid_band[i] = (upper_band[i] + lower_band[i]) / 2
     
-    # Align prior day's Camarilla levels to 12h timeframe (wait for day to complete)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Calculate ATR(14) for position sizing and stoploss
+    atr_period = 14
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
     
-    # Calculate volume spike filter (20-period volume EMA)
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
+    atr = np.zeros(n)
+    for i in range(atr_period-1, n):
+        if i == atr_period-1:
+            atr[i] = np.mean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(max(lookback, atr_period, 60), n):
         # Skip if any value is NaN
-        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate dynamic position size based on ATR (inverse volatility)
+        # Scale position size: higher ATR = smaller position, lower ATR = larger position
+        atr_ratio = atr[i] / close[i]  # ATR as percentage of price
+        base_size = 0.25
+        # Inverse volatility scaling: normalize to 0.5-2.0 range
+        vol_scalar = np.clip(0.02 / atr_ratio, 0.5, 2.0)  # Target ~2% ATR
+        position_size = base_size * vol_scalar
+        position_size = np.clip(position_size, 0.20, 0.30)  # Keep in 0.20-0.30 range
+        
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 AND 1d bullish trend AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
-                volume_spike[i]):
-                signals[i] = 0.25
+            # Long conditions: price closes above Donchian upper band AND 12h bullish trend
+            if (close[i] > upper_band[i] and 
+                trend_bullish_aligned[i] > 0.5):  # 12h bullish trend
+                signals[i] = position_size
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 AND 1d bearish trend AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # Short conditions: price closes below Donchian lower band AND 12h bearish trend
+            elif (close[i] < lower_band[i] and 
+                  trend_bearish_aligned[i] > 0.5):  # 12h bearish trend
+                signals[i] = -position_size
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Camarilla S3 OR 1d trend turns bearish
-            if (close[i] < camarilla_s3_aligned[i] or 
+            # Exit long: price closes below Donchian mid band OR 12h trend turns bearish
+            if (close[i] < mid_band[i] or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Camarilla R3 OR 1d trend turns bullish
-            if (close[i] > camarilla_r3_aligned[i] or 
+            # Exit short: price closes above Donchian mid band OR 12h trend turns bullish
+            if (close[i] > mid_band[i] or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size
     
     return signals
