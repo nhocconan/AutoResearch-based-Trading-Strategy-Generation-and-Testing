@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian channels from prior completed 12h for structure, 1d EMA50 for trend filter
-# Volume confirmation (>1.6x 20 EMA) ensures breakout has participation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Uses Camarilla pivot levels from prior completed 1d for structure, 1d EMA34 for trend filter
+# Volume confirmation (>1.8x 20 EMA) ensures breakout has participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h.
-# 1d EMA50 ensures we only trade with the major trend, reducing whipsaw in ranging markets.
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
+# 1d EMA34 ensures we only trade with the major trend, reducing whipsaw in ranging markets.
 # Works in both bull and bear by following the higher timeframe trend.
 
-name = "12h_Donchian20_1dEMA50_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +25,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate Donchian channels from prior completed 12h bar
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate Camarilla pivot levels from prior completed 1d bar
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    camarilla_r3 = close_1d_arr + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d_arr - (high_1d - low_1d) * 1.1 / 2
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Donchian upper = 20-period high, lower = 20-period low
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,34 +53,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper + price above 1d EMA50 + volume spike
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > (1.6 * vol_ema_20[i]):
+            # Long conditions: price breaks above Camarilla R3 + price above 1d EMA34 + volume spike
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower + price below 1d EMA50 + volume spike
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > (1.6 * vol_ema_20[i]):
+            # Short conditions: price breaks below Camarilla S3 + price below 1d EMA34 + volume spike
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR price crosses below 1d EMA50
-            donchian_mid = (donchian_upper_aligned[i] + donchian_lower_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] < donchian_mid or close[i] < ema_50_aligned[i]):
+            # Exit long: price returns to Camarilla pivot (midpoint) OR price crosses below 1d EMA34
+            camarilla_pivot = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2.0
+            if not np.isnan(camarilla_pivot) and (close[i] < camarilla_pivot or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR price crosses above 1d EMA50
-            donchian_mid = (donchian_upper_aligned[i] + donchian_lower_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] > donchian_mid or close[i] > ema_50_aligned[i]):
+            # Exit short: price returns to Camarilla pivot (midpoint) OR price crosses above 1d EMA34
+            camarilla_pivot = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2.0
+            if not np.isnan(camarilla_pivot) and (close[i] > camarilla_pivot or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
