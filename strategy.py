@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Camarilla R3/S3 levels represent stronger breakout zones than R1/S1, reducing false signals
-# Breakout above R3 with bullish 1d EMA50 trend and volume spike = long
-# Breakdown below S3 with bearish 1d EMA50 trend and volume spike = short
-# Uses tighter entry conditions to target 25-40 trades/year, minimizing fee drag
-# Works in both bull and bear markets due to 1d trend filter + volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
+# Donchian breakouts capture strong momentum moves, EMA50 filters for higher timeframe trend alignment,
+# volume spike confirms institutional participation. Works in both bull and bear markets due to
+# trend filter preventing counter-trend entries and volume confirmation reducing false breakouts.
+# Targets 20-40 trades/year to minimize fee drag while maintaining edge.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,58 +36,42 @@ def generate_signals(prices):
     ema50_1d_shifted[0] = np.nan
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_shifted)
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate Camarilla levels: R3 = Close + 1.1*(High-Low)/6, S3 = Close - 1.1*(High-Low)/6
-    camarilla_range = high_4h - low_4h
-    r3 = close_4h + (1.1 * camarilla_range / 6)
-    s3 = close_4h - (1.1 * camarilla_range / 6)
-    
-    # Align to 4h timeframe (wait for completed 4h bar)
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above R3 AND 1d EMA50 uptrend AND volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: break above Donchian upper AND 1d EMA50 uptrend AND volume spike
+            if close[i] > highest_high[i] and close[i] > ema50_1d_aligned[i] and volume[i] > (2.0 * np.nanmedian(volume[max(0, i-50):i])):
                 signals[i] = 0.30
                 position = 1
-            # Short conditions: break below S3 AND 1d EMA50 downtrend AND volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: break below Donchian lower AND 1d EMA50 downtrend AND volume spike
+            elif close[i] < lowest_low[i] and close[i] < ema50_1d_aligned[i] and volume[i] > (2.0 * np.nanmedian(volume[max(0, i-50):i])):
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price closes below R3 OR below 1d EMA50
-            if close[i] < r3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: price closes below Donchian lower OR below 1d EMA50
+            if close[i] < lowest_low[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit short: price closes above S3 OR above 1d EMA50
-            if close[i] > s3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: price closes above Donchian upper OR above 1d EMA50
+            if close[i] > highest_high[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
