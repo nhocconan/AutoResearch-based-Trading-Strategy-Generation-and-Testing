@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Volume-Weighted Average Price (VWAP) deviation + 1d EMA50 trend filter + ATR-based volatility filter
-# Long when price > VWAP (bullish bias) AND 1d uptrend AND volatility expansion (ATR ratio > 1.0)
-# Short when price < VWAP (bearish bias) AND 1d downtrend AND volatility expansion (ATR ratio > 1.0)
-# VWAP provides dynamic support/resistance; EMA50 filters counter-trend trades; ATR ratio ensures trades occur during volatile regimes
-# Designed for 30-60 trades/year on 4h to minimize fee drag while capturing volatile breakouts in both bull and bear markets
+# Hypothesis: 4h Camarilla R3/S3 Breakout + 1d EMA50 Trend + Volume Spike
+# Long when price breaks above R3 with 1d uptrend and volume spike.
+# Short when price breaks below S3 with 1d downtrend and volume spike.
+# Camarilla levels provide precise support/resistance from prior day.
+# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades.
+# Volume spike confirms institutional participation.
+# Designed for 20-50 trades/year on 4h to minimize fee drag while capturing strong intraday moves.
+# Works in bull markets via long breakouts and bear markets via short breakdowns.
 
-name = "4h_VWAP_Deviation_1dEMA50_ATR_VolFilter"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,67 +37,64 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
+    # Calculate Camarilla levels from prior 1d bar
+    # Camarilla: H' = (H-L)/1.1, then R4=close+1.5*H', R3=close+1.25*H', etc.
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Calculate 4h ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # First bar TR
-    tr2[0] = np.abs(high[0] - close[0])  # First bar TR
-    tr3[0] = np.abs(low[0] - close[0])   # First bar TR
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr / atr_ma_50  # Current ATR vs 50-period average ATR
+    H_prime = (high_1d - low_1d) / 1.1
+    R3 = close_1d_vals + 1.25 * H_prime
+    S3 = close_1d_vals - 1.25 * H_prime
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Calculate volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN or invalid
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(atr_ratio[i]) or vwap_den[i] == 0):
+        # Skip if any value is NaN
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > VWAP (bullish bias) AND 1d uptrend AND volatility expansion
-            if (close[i] > vwap[i] and 
+            # Long conditions: price breaks above R3 AND 1d uptrend AND volume spike
+            if (close[i] > R3_aligned[i] and 
                 close[i] > ema_50_aligned[i] and  # 1d uptrend
-                atr_ratio[i] > 1.0):  # Volatility expansion
-                signals[i] = 0.25
+                volume_spike[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: price < VWAP (bearish bias) AND 1d downtrend AND volatility expansion
-            elif (close[i] < vwap[i] and 
+            # Short conditions: price breaks below S3 AND 1d downtrend AND volume spike
+            elif (close[i] < S3_aligned[i] and 
                   close[i] < ema_50_aligned[i] and  # 1d downtrend
-                  atr_ratio[i] > 1.0):  # Volatility expansion
-                signals[i] = -0.25
+                  volume_spike[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price < VWAP OR 1d trend turns down OR volatility contraction
-            if (close[i] < vwap[i] or 
-                close[i] < ema_50_aligned[i] or 
-                atr_ratio[i] < 0.8):
+            # Exit long: price closes below R3 OR 1d trend turns down
+            if (close[i] < R3_aligned[i] or 
+                close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price > VWAP OR 1d trend turns up OR volatility contraction
-            if (close[i] > vwap[i] or 
-                close[i] > ema_50_aligned[i] or 
-                atr_ratio[i] < 0.8):
+            # Exit short: price closes above S3 OR 1d trend turns up
+            if (close[i] > S3_aligned[i] or 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
