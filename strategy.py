@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses 4h for signal direction (Donchian breakout + EMA50 trend), 1h only for entry timing
-# Volume spike (>1.5x 20 EMA) confirms institutional participation
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Discrete sizing 0.20 limits risk and minimizes fee churn
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike confirmation
+# Elder Ray measures bull/bear power relative to EMA13. Works in bull/bear markets:
+# - Bull market: buy when bull power > 0 and rising, with trend filter
+# - Bear market: sell when bear power < 0 and falling, with trend filter
+# Volume spike (>2x 20 EMA) confirms institutional participation.
+# Discrete sizing 0.25 limits risk. Target: 50-150 trades over 4 years.
 
-name = "1h_Donchian20_1dEMA50_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_ElderRay_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,89 +19,76 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Pre-compute session hours (08-20 UTC) to avoid look-ahead
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels (signal direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian(20) channels
-    high_4h = pd.Series(df_4h['high'])
-    low_4h = pd.Series(df_4h['low'])
-    highest_high_4h = high_4h.rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = low_4h.rolling(window=20, min_periods=20).min().values
-    
-    # Align 4h Donchian to 1h timeframe (completed 4h bar only)
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend direction
+    # Calculate 1d EMA34 for trend direction
     close_1d = pd.Series(df_1d['close'])
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA50 to 1h timeframe (completed 1d bar only)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1d EMA34 to 6h timeframe (completed 1d bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: 20-period EMA of volume on 1h timeframe
+    # Calculate EMA13 for Elder Ray on 6h timeframe
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull power: high minus EMA13
+    bear_power = low - ema13   # Bear power: low minus EMA13
+    
+    # Volume confirmation: 20-period EMA of volume on 6h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN or outside session
-        if (np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or
-            not in_session[i]):
+        # Skip if any value is NaN
+        if (np.isnan(ema34_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 x 20-period EMA
-        volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume confirmation: current volume > 2.0 x 20-period EMA
+        volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long conditions: price breaks above 4h Donchian upper + uptrend + volume spike
-            if close[i] > highest_high_4h_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
-                signals[i] = 0.20
+            # Long conditions: bull power > 0 and rising, with uptrend + volume spike
+            if (bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and 
+                close[i] > ema34_aligned[i] and volume_confirm):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below 4h Donchian lower + downtrend + volume spike
-            elif close[i] < lowest_low_4h_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
-                signals[i] = -0.20
+            # Short conditions: bear power < 0 and falling, with downtrend + volume spike
+            elif (bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and 
+                  close[i] < ema34_aligned[i] and volume_confirm):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to 4h Donchian midpoint OR trend changes OR volume drops
-            midpoint = (highest_high_4h_aligned[i] + lowest_low_4h_aligned[i]) / 2.0
-            if (close[i] < midpoint or 
-                close[i] < ema50_1d_aligned[i] or 
+            # Exit long: bull power turns negative OR trend changes OR volume drops
+            if (bull_power[i] <= 0 or 
+                close[i] < ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to 4h Donchian midpoint OR trend changes OR volume drops
-            midpoint = (highest_high_4h_aligned[i] + lowest_low_4h_aligned[i]) / 2.0
-            if (close[i] > midpoint or 
-                close[i] > ema50_1d_aligned[i] or 
+            # Exit short: bear power turns positive OR trend changes OR volume drops
+            if (bear_power[i] >= 0 or 
+                close[i] > ema34_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
