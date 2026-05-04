@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation
-# Williams %R(14) identifies overbought/oversold conditions on 6h chart
-# 1d ADX > 25 ensures we only trade in trending markets to avoid whipsaws in ranging conditions
-# Volume confirmation (>1.3x 20 EMA volume) filters low-momentum breakouts
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20 EMA volume)
+# Uses Camarilla pivot levels (R3/S3) from 1d for institutional breakout structure
+# 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend whipsaws
+# Volume confirmation filters false breakouts (>1.5x average volume) - balanced to target trade frequency
 # Discrete sizing 0.25 minimizes fee churn while maintaining profitability
-# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
+# Works in bull markets (continuation at R3) and bear markets (continuation at S3)
 # Focus on BTC/ETH by requiring 1d trend alignment (avoids SOL-only bias)
 
-name = "6h_WilliamsR_1dADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm_Balanced_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,75 +26,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation
+    # Get 1d data for Camarilla calculation and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    if len(df_1d) < 34:  # Need enough data for EMA34 calculation
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX(14) with proper smoothing
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = np.abs(high - low)
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-        def wilders_smooth(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            return result
-        
-        atr = wilders_smooth(tr, period)
-        plus_dm_smooth = wilders_smooth(plus_dm, period)
-        minus_dm_smooth = wilders_smooth(minus_dm, period)
-        
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, (plus_dm_smooth / atr) * 100, 0)
-        minus_di = np.where(atr != 0, (minus_dm_smooth / atr) * 100, 0)
-        
-        dx = np.where((plus_di + minus_di) != 0, 
-                      np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-        adx = wilders_smooth(dx, period)
-        return adx
+    # Calculate 1d EMA(34) trend filter from prior completed 1d bar
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_shifted = np.roll(ema_34_1d, 1)
+    ema_34_1d_shifted[0] = np.nan
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_shifted)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_shifted = np.roll(adx_1d, 1)  # Use prior completed 1d bar
-    adx_1d_shifted[0] = np.nan
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_shifted)
+    # Calculate Camarilla levels (R3, S3) from prior completed 1d bar
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_range = high_1d - low_1d
+    r3_level = close_1d + 1.1 * camarilla_range / 2
+    s3_level = close_1d - 1.1 * camarilla_range / 2
     
-    # Calculate Williams %R(14) on 6h
-    def williams_r(high, low, close, period=14):
-        highest_high = np.full_like(high, np.nan)
-        lowest_low = np.full_like(low, np.nan)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        # Williams %R = -100 * (HH - Close) / (HH - LL)
-        wr = np.full_like(close, np.nan)
-        mask = (highest_high != lowest_low) & ~np.isnan(highest_high) & ~np.isnan(lowest_low)
-        wr[mask] = -100 * (highest_high[mask] - close[mask]) / (highest_high[mask] - lowest_low[mask])
-        return wr
+    # Shift to use prior completed 1d bar
+    r3_shifted = np.roll(r3_level, 1)
+    s3_shifted = np.roll(s3_level, 1)
+    r3_shifted[0] = np.nan
+    s3_shifted[0] = np.nan
     
-    wr_6h = williams_r(high, low, close, 14)
+    # Align to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -104,31 +65,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(wr_6h[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R oversold (< -80) AND ADX > 25 (trending) AND volume spike
-            if wr_6h[i] < -80 and adx_1d_aligned[i] > 25 and volume[i] > (1.3 * vol_ema_20[i]):
+            # Long conditions: price breaks above R3 AND price > 1d EMA34 AND volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought (> -20) AND ADX > 25 (trending) AND volume spike
-            elif wr_6h[i] > -20 and adx_1d_aligned[i] > 25 and volume[i] > (1.3 * vol_ema_20[i]):
+            # Short conditions: price breaks below S3 AND price < 1d EMA34 AND volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns above -50 OR ADX weakens (< 20)
-            if wr_6h[i] > -50 or adx_1d_aligned[i] < 20:
+            # Exit long: price returns to S3 OR price crosses below 1d EMA34
+            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns below -50 OR ADX weakens (< 20)
-            if wr_6h[i] < -50 or adx_1d_aligned[i] < 20:
+            # Exit short: price returns to R3 OR price crosses above 1d EMA34
+            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
