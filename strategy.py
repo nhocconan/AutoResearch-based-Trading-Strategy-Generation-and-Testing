@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation (1.5x 20-period EMA)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 resistance AND 1d bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
 # Short when price breaks below Camarilla S3 support AND 1d bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA34 for trend filter to reduce whipsaw, targeting 12-37 trades/year on 6h.
-# Volume confirmation (1.5x) reduces noise trades. Camarilla levels provide precise intraday structure.
+# Uses 1d EMA34 for trend filter to reduce whipsaw, targeting 12-37 trades/year on 12h.
+# Volume confirmation (1.5x) reduces noise trades. Camarilla levels provide precise structure from daily OHLC.
 # Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "6h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,17 +38,15 @@ def generate_signals(prices):
     trend_bullish_1d = close_1d > ema_34_1d
     trend_bearish_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 12h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
     # Calculate Camarilla levels (R3, S3) from prior day's OHLC
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
     camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align prior day's Camarilla levels to 6h timeframe (wait for day to complete)
+    # Align prior day's Camarilla levels to 12h timeframe (wait for day to complete)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
