@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses discrete position sizing (0.25) to minimize fee churn. Combines mean-reversion pivot breaks with
-# higher-timeframe trend filtering for robustness in both bull and bear markets. Target: 20-30 trades/year per symbol.
+# higher-timeframe trend filtering for robustness in both bull and bear markets. Target: 12-37 trades/year per symbol.
 # This strategy focuses on BTC and ETH as primary targets, using 1d trend filter for better generalization.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,19 +47,19 @@ def generate_signals(prices):
     camarilla_r3 = close_1d_prev + 1.1 * (high_1d - low_1d) / 2
     camarilla_s3 = close_1d_prev - 1.1 * (high_1d - low_1d) / 2
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 4h data for volume EMA(20) for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for volume EMA(20) for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h volume EMA(20) for volume confirmation
-    vol_4h = df_4h['volume'].values
-    vol_ema_20 = pd.Series(vol_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ema_20)
+    # Calculate 12h volume EMA(20) for volume confirmation
+    vol_12h = df_12h['volume'].values
+    vol_ema_20 = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,7 +73,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0 x 20-period EMA
+        # Volume confirmation: current 12h volume > 2.0 x 20-period EMA
         volume_confirmed = volume[i] > (2.0 * vol_ema_20_aligned[i])
         
         # 1d trend: bullish if close > EMA34, bearish if close < EMA34
