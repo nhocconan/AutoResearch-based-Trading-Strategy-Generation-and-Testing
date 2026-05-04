@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
 # Camarilla pivot levels (R3/S3) from prior 1d act as strong support/resistance; breakouts with volume
 # indicate institutional participation. 1d EMA34 ensures trend alignment to avoid counter-trend trades.
-# Volume confirmation (2.0x 20-period EMA) filters weak breakouts. Designed for 6h timeframe
+# Volume confirmation (2.0x 20-period EMA) filters weak breakouts. Designed for 12h timeframe
 # to target 12-37 trades/year (50-150 total over 4 years) with discrete sizing (0.25).
 # Works in bull markets by buying breakouts in uptrends and in bear markets by selling
 # breakdowns in downtrends, avoiding range-bound whipsaws.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,20 +35,18 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels for each 6h bar using prior 1d bar's OHLC
+    # Calculate Camarilla levels for each 12h bar using prior 1d bar's OHLC
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
     for i in range(n):
         # Need prior 1d bar data (1d bar must be closed)
-        # 6h bar index: each 6h bar = 4 * 90min? No: 1d = 24h, 6h bar = every 6 hours -> 4 bars per day
-        # So 6h bars per day = 24/6 = 4
-        if i < 4:  # Need at least one full 1d bar before current 6h bar
+        if i < 2:  # Need at least one full 1d bar before current 12h bar (2*12h = 24h)
             continue
             
         # Get index of prior 1d bar in 1d dataframe
-        # 1d bar index = floor(i / 4) - 1 (since we want prior completed 1d bar)
-        idx_1d = (i // 4) - 1
+        # 1d bar index = floor(i / 2) - 1 (since we want prior completed 1d bar)
+        idx_1d = (i // 2) - 1
         if idx_1d < 0 or idx_1d >= len(df_1d):
             continue
             
@@ -60,14 +58,14 @@ def generate_signals(prices):
         camarilla_r3[i] = c_1d + (h_1d - l_1d) * 1.1 / 4
         camarilla_s3[i] = c_1d - (h_1d - l_1d) * 1.1 / 4
     
-    # Volume confirmation: 2.0x 20-period EMA on 6h volume
+    # Volume confirmation: 2.0x 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start from 100 to have valid indicators
+    for i in range(2, n):  # Start from 2 to have valid Camarilla levels
         # Skip if any value is NaN
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
