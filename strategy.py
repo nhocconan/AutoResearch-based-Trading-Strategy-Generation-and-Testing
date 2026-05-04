@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d ATR regime filter and volume spike confirmation
-# In low volatility regimes (1d ATR < 20-period SMA): breakout continuation at R4/S4 levels
-# In high volatility regimes (1d ATR >= 20-period SMA): mean reversion at R3/S3 levels
-# Volume confirmation (>2.0x 20-period EMA) filters low-quality signals
-# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 trades over 4 years.
-# Strategy adapts to changing volatility regimes and avoids whipsaw in choppy markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter
+# In trending markets (1d CHOP < 42): breakout in direction of 1d EMA50 trend
+# In ranging markets (1d CHOP >= 42): mean reversion at Donchian midpoint
+# Volume confirmation (>1.8x 24-period EMA) filters low-quality breakouts
+# Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
+# Strategy adapts to bull/bear markets via regime filter and uses 12h primary timeframe.
 
-name = "6h_Camarilla_R3S3_R4S4_1dATR_Regime_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dChop_Volume_EMA50"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,12 +24,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for regime filter and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR (14-period)
+    # Calculate 1d EMA50 for trend direction
+    close_1d = pd.Series(df_1d['close'])
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate 1d Choppiness Index (CHOP) - 14 period
     high_1d = pd.Series(df_1d['high'])
     low_1d = pd.Series(df_1d['low'])
     close_1d = pd.Series(df_1d['close'])
@@ -40,89 +44,91 @@ def generate_signals(prices):
     tr3 = low_1d.sub(close_1d.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # ATR = smoothed TR (using Wilder's smoothing: alpha = 1/period)
-    atr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Sum of TR over 14 periods
+    tr_sum_14 = tr.rolling(window=14, min_periods=14).sum()
     
-    # Calculate 1d ATR 20-period SMA for regime filter
-    atr_sma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = high_1d.rolling(window=14, min_periods=14).max()
+    ll_14 = low_1d.rolling(window=14, min_periods=14).min()
     
-    # Align 1d indicators to 6h timeframe (completed 1d bar only)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_sma_aligned = align_htf_to_ltf(prices, df_1d, atr_sma_20)
+    # Choppiness Index: CHOP = 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero
+    hh_ll_diff = hh_14 - ll_14
+    chop_1d = np.where(
+        (hh_ll_diff > 0) & (~tr_sum_14.isna()) & (~hh_ll_diff.isna()),
+        100 * np.log10(tr_sum_14 / hh_ll_diff) / np.log10(14),
+        50.0  # neutral when undefined
+    )
     
-    # Calculate 1d Camarilla levels (R3, S3, R4, S4) from previous day
-    # Previous day's OHLC (1d data shifted by 1)
-    prev_close_1d = close_1d.shift(1)
-    prev_high_1d = high_1d.shift(1)
-    prev_low_1d = low_1d.shift(1)
-    prev_range = prev_high_1d - prev_low_1d
+    # Align 1d indicators to 12h timeframe (completed 1d bar only)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Camarilla levels using previous day's data
-    camarilla_r4 = prev_close_1d + 1.5 * prev_range
-    camarilla_r3 = prev_close_1d + 1.0 * prev_range
-    camarilla_s3 = prev_close_1d - 1.0 * prev_range
-    camarilla_s4 = prev_close_1d - 1.5 * prev_range
+    # Calculate 12h Donchian channels (20-period)
+    # Use rolling window on 12h data directly
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: 24-period EMA of volume on 12h timeframe
+    vol_ema_24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(atr_aligned[i]) or np.isnan(atr_sma_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ema_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
-        
-        # Regime determination: low volatility if ATR < SMA, high volatility otherwise
-        low_vol_regime = atr_aligned[i] < atr_sma_aligned[i]
+        # Volume confirmation: current volume > 1.8 x 24-period EMA
+        volume_confirm = volume[i] > (1.8 * vol_ema_24[i])
         
         if position == 0:
-            if low_vol_regime:
-                # Low volatility: breakout continuation at R4/S4
-                if close[i] > r4_aligned[i] and volume_confirm:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < s4_aligned[i] and volume_confirm:
-                    signals[i] = -0.25
-                    position = -1
+            if chop_aligned[i] < 42:
+                # Trending market: breakout in direction of 1d EMA50 trend
+                if close[i] > ema50_aligned[i]:
+                    # Uptrend: long on break above Donchian high
+                    if close[i] > donchian_high[i] and volume_confirm:
+                        signals[i] = 0.25
+                        position = 1
+                else:
+                    # Downtrend: short on break below Donchian low
+                    if close[i] < donchian_low[i] and volume_confirm:
+                        signals[i] = -0.25
+                        position = -1
             else:
-                # High volatility: mean reversion at R3/S3
-                if close[i] <= s3_aligned[i] and volume_confirm:
+                # Ranging market: mean reversion at Donchian midpoint
+                if close[i] <= donchian_low[i] and volume_confirm:
+                    # Long at support
                     signals[i] = 0.25
                     position = 1
-                elif close[i] >= r3_aligned[i] and volume_confirm:
+                elif close[i] >= donchian_high[i] and volume_confirm:
+                    # Short at resistance
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long: price returns to midpoint between R3 and S3 OR volatility regime shifts to high vol
-            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-            if (close[i] >= midpoint or 
-                not low_vol_regime):  # Exit if regime shifts to high volatility
+            # Exit long: price returns to Donchian midpoint OR chop increases (>50) OR volume drops
+            if (close[i] >= donchian_mid[i] or 
+                chop_aligned[i] > 50 or 
+                volume[i] < vol_ema_24[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to midpoint OR volatility regime shifts to high vol
-            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-            if (close[i] <= midpoint or 
-                not low_vol_regime):  # Exit if regime shifts to high volatility
+            # Exit short: price returns to Donchian midpoint OR chop increases (>50) OR volume drops
+            if (close[i] <= donchian_mid[i] or 
+                chop_aligned[i] > 50 or 
+                volume[i] < vol_ema_24[i]):
                 signals[i] = 0.0
                 position = 0
             else:
