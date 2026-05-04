@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Squeeze Breakout + 1d Trend Filter + Volume Spike
-# Bollinger Band squeeze (low volatility) precedes explosive moves. Breakout from squeeze
-# with volume confirmation and 1d trend alignment captures strong moves in both bull and bear markets.
-# Uses discrete position sizing (0.25) to minimize fee drag. Target: 20-50 trades/year on 4h.
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 Trend Filter + Volume Spike Confirmation
+# Long when price breaks above Donchian upper band (20-period high) with volume spike and 1w uptrend
+# Short when price breaks below Donchian lower band (20-period low) with volume spike and 1w downtrend
+# Uses 1w EMA50 to ensure alignment with weekly trend to avoid counter-trend trades
+# Designed for 7-25 trades/year on 1d to minimize fee drag while capturing strong trends
+# Works in bull markets via long signals in uptrend and bear markets via short signals in downtrend
 
-name = "4h_BollingerSqueeze_1dTrend_VolumeBreakout"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +19,70 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for HTF trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Bollinger Bands (20, 2.0) on 4h
-    bb_period = 20
-    bb_std = 2.0
-    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = ma + (bb_std * bb_std_dev)
-    lower_bb = ma - (bb_std * bb_std_dev)
-    bb_width = (upper_bb - lower_bb) / ma  # Normalized bandwidth
+    # Calculate Donchian channels (20-period)
+    # Upper band: 20-period high
+    # Lower band: 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band Squeeze: bandwidth below 20-period average bandwidth
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma
-    
-    # Volume spike: volume > 1.5x 20-period volume EMA
+    # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)
+    volume_spike = volume > (vol_ema_20 * 2.0)  # Volume at least 2x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ma[i]) or 
-            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
-            np.isnan(squeeze_condition[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: squeeze breakout above upper BB + 1d uptrend + volume spike
-            if (close[i] > upper_bb[i] and 
-                squeeze_condition[i-1] and  # Was squeezed before breakout
-                close[i] > ema_50_aligned[i] and  # 1d uptrend
+            # Long conditions: price breaks above Donchian upper band AND 1w uptrend AND volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema_50_aligned[i] and  # 1w uptrend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze breakout below lower BB + 1d downtrend + volume spike
-            elif (close[i] < lower_bb[i] and 
-                  squeeze_condition[i-1] and  # Was squeezed before breakout
-                  close[i] < ema_50_aligned[i] and  # 1d downtrend
+            # Short conditions: price breaks below Donchian lower band AND 1w downtrend AND volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema_50_aligned[i] and  # 1w downtrend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below middle BB OR 1d trend turns down
-            if (close[i] < ma[i] or 
+            # Exit long: price closes below Donchian lower band OR 1w trend turns down
+            if (close[i] < donchian_lower[i] or 
                 close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above middle BB OR 1d trend turns up
-            if (close[i] > ma[i] or 
+            # Exit short: price closes above Donchian upper band OR 1w trend turns up
+            if (close[i] > donchian_upper[i] or 
                 close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
