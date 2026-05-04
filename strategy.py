@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses discrete position sizing (0.25) to minimize fee churn. Combines mean-reversion pivot breaks with
-# higher-timeframe trend filtering for robustness in both bull and bear markets. Target: 20-30 trades/year per symbol.
-# This strategy focuses on BTC and ETH as primary targets, using 1d trend filter for better generalization.
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA200 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion from extremes works.
+# The 1d EMA200 filter ensures we only take mean-reversion trades in the direction of the higher-timeframe trend,
+# avoiding counter-trend moves in strong trends. Volume spike confirms participation. Discrete sizing (0.25) minimizes fee churn.
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Trend"
+name = "4h_WilliamsR_MeanReversion_1dEMA200_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,34 +23,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d EMA200
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Get 1d data for Camarilla pivot levels (based on previous day's OHLC)
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels: based on previous 1d bar's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Camarilla R3 and S3 levels
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    camarilla_r3 = close_1d_prev + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d_prev - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Williams %R on 4h data (period=14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
     # Get 4h data for volume EMA(20) for volume confirmation
     df_4h = get_htf_data(prices, '4h')
@@ -66,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ema_20_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ema_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,29 +64,29 @@ def generate_signals(prices):
         # Volume confirmation: current 4h volume > 2.0 x 20-period EMA
         volume_confirmed = volume[i] > (2.0 * vol_ema_20_aligned[i])
         
-        # 1d trend: bullish if close > EMA34, bearish if close < EMA34
-        bullish_trend = close[i] > ema_34_1d_aligned[i]
-        bearish_trend = close[i] < ema_34_1d_aligned[i]
+        # 1d trend: bullish if close > EMA200, bearish if close < EMA200
+        bullish_trend = close[i] > ema_200_1d_aligned[i]
+        bearish_trend = close[i] < ema_200_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 + volume confirmation + bullish 1d trend
-            if (close[i] > camarilla_r3_aligned[i] and volume_confirmed and bullish_trend):
+            # Long: Williams %R oversold (< -80) + volume confirmation + bullish 1d trend
+            if (williams_r[i] < -80.0 and volume_confirmed and bullish_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 + volume confirmation + bearish 1d trend
-            elif (close[i] < camarilla_s3_aligned[i] and volume_confirmed and bearish_trend):
+            # Short: Williams %R overbought (> -20) + volume confirmation + bearish 1d trend
+            elif (williams_r[i] > -20.0 and volume_confirmed and bearish_trend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below Camarilla S3 OR 1d trend turns bearish
-            if close[i] < camarilla_s3_aligned[i] or bearish_trend:
+            # Exit long: Williams %R rises above -50 (mean reversion complete) OR 1d trend turns bearish
+            if williams_r[i] > -50.0 or bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above Camarilla R3 OR 1d trend turns bullish
-            if close[i] > camarilla_r3_aligned[i] or bullish_trend:
+            # Exit short: Williams %R falls below -50 (mean reversion complete) OR 1d trend turns bullish
+            if williams_r[i] < -50.0 or bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
