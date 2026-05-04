@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Uses 1d EMA34 for higher timeframe trend alignment (more stable than 4h EMA50)
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h Supertrend filter and volume confirmation
+# Uses 4h Supertrend for higher timeframe trend alignment (adaptive to volatility)
 # Camarilla R3/S3 from prior 1d session provide institutional breakout levels
 # Volume confirmation (>1.5x 20 EMA) filters low-participation false breakouts
 # Session filter (08-20 UTC) to avoid low-liquidity periods
 # Discrete sizing 0.20 limits risk and reduces fee churn
 # Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-# Works in both bull and bear: trend filter adapts to higher timeframe direction.
+# Works in both bull and bear: Supertrend adapts to higher timeframe direction and volatility.
 
-name = "1h_Camarilla_R3S3_1dEMA34_VolumeConfirm_Session"
+name = "1h_Camarilla_R3S3_4hSupertrend_VolumeConfirm_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -30,17 +30,15 @@ def generate_signals(prices):
     # Pre-compute session hours for efficiency
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for Camarilla levels (daily session)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend direction
-    close_1d = pd.Series(df_1d['close'])
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d EMA34 to 1h timeframe (completed 1d bar only)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Get 4h data for Supertrend trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
+        return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
@@ -59,6 +57,50 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
+    # Calculate 4h Supertrend (ATR=10, mult=3.0)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    
+    # ATR(10)
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Supertrend calculation
+    hl2 = (high_4h + low_4h) / 2.0
+    upper_band = hl2 + (3.0 * atr_10)
+    lower_band = hl2 - (3.0 * atr_10)
+    
+    supertrend = np.full_like(close_4h, np.nan)
+    direction = np.full_like(close_4h, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_4h)):
+        if np.isnan(atr_10[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+            supertrend[i] = np.nan
+            direction[i] = np.nan
+            continue
+            
+        if i == 1:
+            supertrend[i] = upper_band[i]
+            direction[i] = 1
+            continue
+            
+        if close_4h[i-1] > supertrend[i-1]:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+            direction[i] = -1
+    
+    # Align 4h Supertrend direction to 1h timeframe
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
+    
     # Volume confirmation: 20-period EMA of volume on 1h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -67,8 +109,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema34_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(supertrend_direction_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,12 +127,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 + uptrend + volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Long conditions: price breaks above Camarilla R3 + uptrend (Supertrend=1) + volume spike
+            if close[i] > r3_aligned[i] and supertrend_direction_aligned[i] == 1 and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 + downtrend + volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Short conditions: price breaks below Camarilla S3 + downtrend (Supertrend=-1) + volume spike
+            elif close[i] < s3_aligned[i] and supertrend_direction_aligned[i] == -1 and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.20
                 position = -1
         elif position == 1:
@@ -102,7 +144,7 @@ def generate_signals(prices):
             midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] < midpoint or 
-                close[i] < ema34_aligned[i] or 
+                supertrend_direction_aligned[i] != 1 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
@@ -117,7 +159,7 @@ def generate_signals(prices):
             midpoint = (h4_aligned[i] + l4_aligned[i]) / 2.0
             
             if (close[i] > midpoint or 
-                close[i] > ema34_aligned[i] or 
+                supertrend_direction_aligned[i] != -1 or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
