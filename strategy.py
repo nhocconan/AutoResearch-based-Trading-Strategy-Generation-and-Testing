@@ -5,11 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout + 1d volume spike + choppiness regime filter
 # Uses Donchian channel breakouts for trend capture, confirmed by 1d volume spikes
-# and choppiness regime to avoid whipsaw in ranging markets. Designed for 20-50
-# trades/year (~80-200 total over 4 years) to minimize fee drag. Volume spike
-# ensures institutional participation, chop filter (CHOP > 61.8) enables mean reversion
-# in ranges while breakouts work in trends (CHOP < 38.2). Works in bull/bear by
-# adapting to regime: breakouts in trends, mean reversion at channel extremes in ranges.
+# and filtered by choppiness regime (CHOP > 61.8 = range, avoid breakouts in chop).
+# Designed for 20-50 trades/year (~80-200 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakouts and in bear markets via short breakdowns.
+# Volume spike confirms institutional interest, chop filter avoids false breakouts in ranging markets.
 
 name = "4h_Donchian20_1dVolumeSpike_ChopRegime"
 timeframe = "4h"
@@ -35,27 +34,31 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume ratio (current / 20-period average) for spike detection
+    # Calculate 1d volume spike: current volume > 2.0 * 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_1d = np.where(vol_ma_20 > 0, volume_1d / vol_ma_20, 1.0)
+    volume_spike = volume_1d > (2.0 * vol_ma_20)
     
-    # Calculate 1d choppiness index (CHOP) for regime detection
-    # CHOP = 100 * log10(sum(TR over n) / (HHV(high,n) - LLV(low,n))) / log10(n)
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                  np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First TR
-    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # Calculate 1d choppiness index: CHOP = 100 * log10(sum(TR)/ (HHV - LLV)) / log10(14)
+    # Where TR = max(high-low, abs(high-previous close), abs(low-previous close))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     hhvs = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     llvs = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denom = hhvs - llvs
-    chop_1d = np.where(chop_denom > 0, 
-                       100 * np.log10(atr_14 / chop_denom) / np.log10(14), 
-                       50.0)  # Neutral when range=0
+    
+    # Avoid division by zero
+    chop_raw = 100 * np.log10(atr_14 * 14 / (hhvs - llvs + 1e-10)) / np.log10(14)
+    chop_regime_range = chop_raw > 61.8  # choppy/range market
     
     # Align 1d indicators to 4h timeframe (wait for completed 1d bar)
-    volume_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_range.astype(float))
     
     # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -67,74 +70,42 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime-based logic
-        if chop_1d_aligned[i] < 38.2:  # Trending regime - follow breakouts
-            if position == 0:
-                # Long breakout: price above upper Donchian + volume spike
-                if (close[i] > highest_high[i] and 
-                    volume_ratio_1d_aligned[i] > 2.0):
-                    signals[i] = 0.30
-                    position = 1
-                # Short breakout: price below lower Donchian + volume spike
-                elif (close[i] < lowest_low[i] and 
-                      volume_ratio_1d_aligned[i] > 2.0):
-                    signals[i] = -0.30
-                    position = -1
-            elif position == 1:
-                # Exit long: price re-enters Donchian channel OR volume drops
-                if (close[i] <= highest_high[i] and close[i] >= lowest_low[i]) or \
-                   volume_ratio_1d_aligned[i] < 1.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
-            elif position == -1:
-                # Exit short: price re-enters Donchian channel OR volume drops
-                if (close[i] <= highest_high[i] and close[i] >= lowest_low[i]) or \
-                   volume_ratio_1d_aligned[i] < 1.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
-                    
-        elif chop_1d_aligned[i] > 61.8:  # Ranging regime - mean reversion at extremes
-            if position == 0:
-                # Long mean reversion: price at lower Donchian + volume spike
-                if (close[i] <= lowest_low[i] * 1.001 and  # Allow tiny buffer
-                    volume_ratio_1d_aligned[i] > 2.0):
-                    signals[i] = 0.30
-                    position = 1
-                # Short mean reversion: price at upper Donchian + volume spike
-                elif (close[i] >= highest_high[i] * 0.999 and  # Allow tiny buffer
-                      volume_ratio_1d_aligned[i] > 2.0):
-                    signals[i] = -0.30
-                    position = -1
-            elif position == 1:
-                # Exit long: price reaches midpoint OR volume drops
-                midpoint = (highest_high[i] + lowest_low[i]) / 2
-                if close[i] >= midpoint or volume_ratio_1d_aligned[i] < 1.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
-            elif position == -1:
-                # Exit short: price reaches midpoint OR volume drops
-                midpoint = (highest_high[i] + lowest_low[i]) / 2
-                if close[i] <= midpoint or volume_ratio_1d_aligned[i] < 1.2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
-        else:  # Neutral regime (38.2 <= CHOP <= 61.8) - reduce activity
-            if position != 0:
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above previous period high
+        breakout_down = close[i] < lowest_low[i-1]   # break below previous period low
+        
+        if position == 0:
+            # Long: bullish breakout + volume spike + NOT in choppy regime
+            if (breakout_up and 
+                volume_spike_aligned[i] > 0.5 and 
+                chop_regime_aligned[i] < 0.5):  # not choppy (trending)
+                signals[i] = 0.25
+                position = 1
+            # Short: bearish breakdown + volume spike + NOT in choppy regime
+            elif (breakout_down and 
+                  volume_spike_aligned[i] > 0.5 and 
+                  chop_regime_aligned[i] < 0.5):  # not choppy (trending)
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit long: price re-enters Donchian channel OR opposite breakdown
+            if (close[i] <= highest_high[i] and close[i] >= lowest_low[i]) or breakout_down:
                 signals[i] = 0.0
                 position = 0
-            # Stay flat in neutral regime to avoid whipsaw
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: price re-enters Donchian channel OR opposite breakout
+            if (close[i] <= highest_high[i] and close[i] >= lowest_low[i]) or breakout_up:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
