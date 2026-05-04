@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# Bollinger Band squeeze (low volatility) precedes explosive moves. Breakout direction
-# filtered by 1d EMA34 trend and confirmed by volume spike (>2x 20-period EMA).
-# Works in bull/bear markets: buys breakouts above upper BB in uptrends,
-# sells breakdowns below lower BB in downtrends. Avoids whipsaws in ranging markets
-# by requiring both squeeze breakout and volume confirmation.
-# Target: 12-37 trades/year (50-150 total over 4 years) with discrete sizing (0.25).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
+# Camarilla pivot levels identify key support/resistance. Breakout above R3 or below S3
+# with 1w EMA50 trend alignment and volume confirmation (1.5x 20-period EMA) provides
+# high-probability trend continuation entries. Designed for 12h timeframe to target
+# 12-37 trades/year (50-150 total over 4 years) with discrete sizing (0.25).
+# Works in bull markets by buying breakouts above R3 in uptrends and in bear markets
+# by selling breakdowns below S3 in downtrends, avoiding false breakouts in ranging markets.
 
-name = "6h_BollingerSqueeze_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_bb + (bb_std * std_bb)
-    lower_bb = sma_bb - (bb_std * std_bb)
-    bb_width = (upper_bb - lower_bb) / sma_bb  # Normalized width
+    # Camarilla width
+    camarilla_width = (high_1d - low_1d) * 1.1 / 12
     
-    # Bollinger Band squeeze: width below 20-period EMA of width
-    bb_width_series = pd.Series(bb_width)
-    bb_width_ema = bb_width_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ema
+    # R3 and S3 levels
+    r3 = close_1d + camarilla_width * 1.1
+    s3 = close_1d - camarilla_width * 1.1
     
-    # Volume confirmation: 2.0x 20-period EMA on 6h volume
+    # Align to 12h timeframe (use previous day's levels for current 12h bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: 1.5x 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -58,37 +66,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or
-            np.isnan(squeeze_condition[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.5 x 20-period EMA
+        volume_confirmed = volume[i] > (1.5 * vol_ema_20[i])
         
         if position == 0:
-            # Long: Bollinger squeeze breakout above upper BB + volume confirmation + price above 1d EMA34 (uptrend)
-            if (squeeze_condition[i] and close[i] > upper_bb[i] and volume_confirmed and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long: breakout above R3 + volume confirmation + price above 1w EMA50 (uptrend)
+            if (close[i] > r3_aligned[i] and volume_confirmed and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bollinger squeeze breakout below lower BB + volume confirmation + price below 1d EMA34 (downtrend)
-            elif (squeeze_condition[i] and close[i] < lower_bb[i] and volume_confirmed and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short: breakdown below S3 + volume confirmation + price below 1w EMA50 (downtrend)
+            elif (close[i] < s3_aligned[i] and volume_confirmed and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Bollinger Bands (mean reversion) OR trend change
-            if close[i] < sma_bb[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below 1w EMA50 (trend change) OR close below R3 (failed breakout)
+            if close[i] < ema_50_1w_aligned[i] or close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Bollinger Bands (mean reversion) OR trend change
-            if close[i] > sma_bb[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above 1w EMA50 (trend change) OR close above S3 (failed breakdown)
+            if close[i] > ema_50_1w_aligned[i] or close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
