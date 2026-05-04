@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1w EMA50 trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions with mean reversion tendency.
-# 1w EMA50 ensures alignment with major trend to avoid counter-trend entries.
-# Volume spike (>2x 20 EMA) confirms institutional participation.
-# Works in bull/bear: trend filter prevents counter-trend entries during strong moves.
-# Target: 75-150 trades over 4 years (12-37/year) with discrete sizing 0.25.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via smoothed MAs.
+# Alligator "sleeping" (MA convergence) = range, "awakening" (MA divergence) = trend.
+# In uptrend: Lips > Teeth > Jaw; in downtrend: Lips < Teeth < Jaw.
+# 1d EMA50 ensures alignment with higher timeframe trend.
+# Volume spike (>1.8x 20 EMA) confirms participation.
+# Discrete sizing 0.25 limits risk. Target: 50-150 trades over 4 years (12-37/year).
 
-name = "6h_WilliamsR_1wEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,24 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend direction
-    close_1w = pd.Series(df_1w['close'])
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend direction
+    close_1d = pd.Series(df_1d['close'])
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 6h timeframe (completed 1w bar only)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA50 to 12h timeframe (completed 1d bar only)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Williams %R(14) on 6h timeframe
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Williams Alligator on 12h timeframe
+    # Smoothed with 5-period SMA, then shifted forward
+    def smma(arr, period):
+        """Smoothed Moving Average (SmMA) - similar to Wilder's smoothing"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SmMA = (Prev SmMA * (period-1) + Current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume confirmation: 20-period EMA of volume on 6h timeframe
+    # Alligator components: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = smma(close, 13)
+    jaw = np.roll(jaw, 8)  # Shift forward by 8
+    
+    teeth = smma(close, 8)
+    teeth = np.roll(teeth, 5)  # Shift forward by 5
+    
+    lips = smma(close, 5)
+    lips = np.roll(lips, 3)  # Shift forward by 3
+    
+    # Volume confirmation: 20-period EMA of volume on 12h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,28 +69,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema50_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or 
+            np.isnan(jaw[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 x 20-period EMA
-        volume_confirm = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume confirmation: current volume > 1.8 x 20-period EMA
+        volume_confirm = volume[i] > (1.8 * vol_ema_20[i])
         
         if position == 0:
-            # Long conditions: Williams %R oversold (< -80) + uptrend + volume spike
-            if williams_r[i] < -80 and close[i] > ema50_aligned[i] and volume_confirm:
+            # Long conditions: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought (> -20) + downtrend + volume spike
-            elif williams_r[i] > -20 and close[i] < ema50_aligned[i] and volume_confirm:
+            # Short conditions: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema50_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral OR trend changes OR volume drops
-            if (williams_r[i] > -50 or 
+            # Exit long: Alligator starts sleeping (MA convergence) OR trend changes OR volume drops
+            if (lips[i] <= teeth[i] or  # Lips crossed below Teeth
                 close[i] < ema50_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
@@ -78,8 +98,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral OR trend changes OR volume drops
-            if (williams_r[i] < -50 or 
+            # Exit short: Alligator starts sleeping (MA convergence) OR trend changes OR volume drops
+            if (lips[i] >= teeth[i] or  # Lips crossed above Teeth
                 close[i] > ema50_aligned[i] or 
                 volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
