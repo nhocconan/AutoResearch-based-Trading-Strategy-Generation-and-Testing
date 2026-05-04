@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Elder Ray measures bull/bear power via EMA13. In 6h timeframe, bull power > 0 + price above 1d EMA50 (uptrend)
-# + volume spike (1.5x 20-period EMA) signals long entries; bear power < 0 + price below 1d EMA50 (downtrend)
-# + volume spike signals shorts. Works in bull markets by buying dips in uptrends and in bear markets by selling
-# rallies in downtrends, avoiding trend-following whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla pivot (S3/R3) breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla levels identify key intraday support/resistance. Break of S3 (strong support) or R3 (strong resistance)
+# with 1d EMA34 trend alignment and volume spike (2.0x 20-period EMA) provide high-probability trend continuation entries.
+# Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years) with discrete sizing (0.25).
+# Works in bull markets by buying R3 breakouts in uptrends and in bear markets by selling S3 breakdowns in downtrends.
+# Volume confirmation reduces false breakouts; EMA34 filter ensures alignment with higher timeframe trend.
 
-name = "6h_ElderRay_1dEMA50_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_S3R3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels (S3, R3) based on previous 12h bar
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous bar's high/low/close to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First bar has no previous
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2.0
+    s3 = prev_close - 1.1 * camarilla_range / 2.0
     
-    # Volume confirmation: 1.5x 20-period EMA on 6h volume
+    # Volume confirmation: 2.0x 20-period EMA on 12h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -49,37 +55,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema_20[i]) or 
+            np.isnan(r3[i]) or np.isnan(s3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 x 20-period EMA
-        volume_confirmed = volume[i] > (1.5 * vol_ema_20[i])
+        # Volume confirmation: current volume > 2.0 x 20-period EMA
+        volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: Bull Power > 0 + volume confirmation + price above 1d EMA50 (uptrend)
-            if (bull_power[i] > 0 and volume_confirmed and 
-                close[i] > ema_50_1d_aligned[i]):
+            # Long: Close breaks above R3 + volume confirmation + price above 1d EMA34 (uptrend)
+            if (close[i] > r3[i] and volume_confirmed and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 + volume confirmation + price below 1d EMA50 (downtrend)
-            elif (bear_power[i] < 0 and volume_confirmed and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short: Close breaks below S3 + volume confirmation + price below 1d EMA34 (downtrend)
+            elif (close[i] < s3[i] and volume_confirmed and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 (momentum shift) OR price below 1d EMA50 (trend change)
-            if bull_power[i] <= 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Close falls below previous day's close (trend weakening) OR price below 1d EMA34
+            if close[i] < prev_close[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 (momentum shift) OR price above 1d EMA50 (trend change)
-            if bear_power[i] >= 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Close rises above previous day's close (trend weakening) OR price above 1d EMA34
+            if close[i] > prev_close[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
