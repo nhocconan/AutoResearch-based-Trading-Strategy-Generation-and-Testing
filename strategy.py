@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries
-# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend trades
-# Volume spike (>2.0x 20 EMA) confirms strong participation at reversal points
+# Hypothesis: 1d Williams %R with 1w EMA34 trend filter and volume spike confirmation
+# Uses Williams %R(14) from prior completed 1d for mean reversion signals, 1w EMA34 for trend filter
+# Volume confirmation (>2.0x 20 EMA) ensures signals have strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
-# Williams %R is particularly effective in ranging/ bear markets like 2025+ test period
-# Using 1d EMA34 as trend filter ensures we only take mean revertion trades in direction of higher timeframe trend
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d.
+# Williams %R identifies overbought/oversold conditions, EMA34 filter ensures trades align with weekly trend
+# Works in both bull and bear markets by fading extremes in the direction of the weekly trend
 
-name = "4h_WilliamsR_1dEMA34_VolumeSpike_MR"
-timeframe = "4h"
+name = "1d_WilliamsR_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,34 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and EMA34
+    # Get 1d data for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R on 1d timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate Williams %R(14) on 1d timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate rolling highest high and lowest low for 14 periods
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Williams %R formula
     williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero when high == low
+    # Handle division by zero
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align Williams %R and EMA34 to 4h timeframe
+    # Align Williams %R to 1d timeframe (already aligned, but using for consistency)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA34 trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: 20-period EMA of volume on 1d timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -61,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Williams %R oversold (< -80) + price above 1d EMA34 + volume spike
-            if williams_r_aligned[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: Williams %R oversold (< -80) + price above 1w EMA34 + volume spike
+            if williams_r_aligned[i] < -80 and close[i] > ema_34_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought (> -20) + price below 1d EMA34 + volume spike
-            elif williams_r_aligned[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: Williams %R overbought (> -20) + price below 1w EMA34 + volume spike
+            elif williams_r_aligned[i] > -20 and close[i] < ema_34_1w_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (-50) OR price crosses below 1d EMA34
-            if williams_r_aligned[i] >= -50 or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Williams %R returns to neutral (-50) OR price crosses below 1w EMA34
+            if williams_r_aligned[i] > -50 or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (-50) OR price crosses above 1d EMA34
-            if williams_r_aligned[i] <= -50 or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Williams %R returns to neutral (-50) OR price crosses above 1w EMA34
+            if williams_r_aligned[i] < -50 or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
