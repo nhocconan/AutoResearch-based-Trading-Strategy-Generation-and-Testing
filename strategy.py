@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 resistance AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
 # Short when price breaks below Camarilla S3 support AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA50 for trend filter to reduce whipsaw, targeting 12-37 trades/year on 12h.
-# Volume confirmation (1.5x) reduces noise trades. Camarilla levels provide precise intraday structure.
+# Uses 1d EMA50 for trend filter to reduce whipsaw and capture major moves, targeting 20-50 trades/year on 4h.
+# Volume confirmation (1.5x) reduces false breakouts. Camarilla levels provide precise intraday structure from prior day.
 # Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,12 +36,12 @@ def generate_signals(prices):
     trend_bullish_1d = close_1d > ema_50_1d
     trend_bearish_1d = close_1d < ema_50_1d
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Camarilla levels (R3, S3) from previous day's OHLC
-    # Need to get prior day's OHLC from 1d data
+    # Calculate Camarilla levels (R3, S3) from prior day's OHLC using 1d data
+    # Need prior day's OHLC, so we shift the 1d data by 1 to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -52,7 +52,13 @@ def generate_signals(prices):
     camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align prior day's Camarilla levels to 12h timeframe (wait for day to complete)
+    # Shift by 1 to use prior day's levels (avoid look-ahead)
+    camarilla_r3_1d = np.roll(camarilla_r3_1d, 1)
+    camarilla_s3_1d = np.roll(camarilla_s3_1d, 1)
+    camarilla_r3_1d[0] = np.nan  # First value has no prior day
+    camarilla_s3_1d[0] = np.nan
+    
+    # Align prior day's Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
@@ -63,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after EMA warmup and prior day shift
         # Skip if any value is NaN
         if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
