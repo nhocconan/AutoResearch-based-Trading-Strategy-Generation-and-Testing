@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band Width regime + Donchian(20) breakout with volume confirmation
-# Bollinger Band Width < 0.05 = low volatility squeeze (range regime) → mean reversion at bands
-# Bollinger Band Width > 0.10 = high volatility expansion (trend regime) → breakout continuation
-# In range regime: fade Donchian touches (short upper band, long lower band)
-# In trend regime: breakout Donchian breaks (long upper break, short lower break)
-# Volume confirmation filters false breakouts. Works in both bull/bear via regime adaptation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
+# Camarilla pivot levels provide strong support/resistance; breakout above R3 or below S3 with
+# volume spike and 12h EMA50 trend alignment captures momentum moves. Works in both bull and bear
+# markets by following the higher timeframe trend. Discrete sizing 0.25 targets 75-200 total trades
+# over 4 years (19-50/year) for 4h timeframe.
 
-name = "12h_BBW_Donchian_Regime_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,72 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on primary timeframe
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2.0 * dev
-    lower_band = basis - 2.0 * dev
-    bb_width = (upper_band - lower_band) / basis  # normalized bandwidth
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Donchian channels (20)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA50 trend filter from prior completed 12h bar
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_shifted = np.roll(ema50_12h, 1)
+    ema50_12h_shifted[0] = np.nan
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h_shifted)
+    
+    # Get 1d data for Camarilla pivot levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    
+    for i in range(len(close_1d)):
+        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        rng = high_1d[i] - low_1d[i]
+        camarilla_r3[i] = close_1d[i] + rng * 1.1 / 4
+        camarilla_s3[i] = close_1d[i] - rng * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Regime filter: Bollinger Band Width
-    # Low BW (< 0.05) = squeeze/range regime → mean reversion
-    # High BW (> 0.10) = expansion/trend regime → breakout
-    range_regime = bb_width < 0.05
-    trend_regime = bb_width > 0.10
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(basis[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Range regime: mean reversion at bands
-            if range_regime[i]:
-                if close[i] >= upper_band[i] and volume[i] > vol_ema_20[i]:
-                    signals[i] = -0.25  # short at upper band
-                    position = -1
-                elif close[i] <= lower_band[i] and volume[i] > vol_ema_20[i]:
-                    signals[i] = 0.25   # long at lower band
-                    position = 1
-            # Trend regime: breakout continuation
-            elif trend_regime[i]:
-                if close[i] > donchian_high[i] and volume[i] > (1.5 * vol_ema_20[i]):
-                    signals[i] = 0.25   # long breakout
-                    position = 1
-                elif close[i] < donchian_low[i] and volume[i] > (1.5 * vol_ema_20[i]):
-                    signals[i] = -0.25  # short breakdown
-                    position = -1
+            # Long conditions: price breaks above Camarilla R3 AND 12h EMA50 uptrend AND volume spike
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema50_12h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short conditions: price breaks below Camarilla S3 AND 12h EMA50 downtrend AND volume spike
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema50_12h_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: range regime + price at lower band OR trend regime + donchian low break
-            if range_regime[i] and close[i] <= lower_band[i]:
-                signals[i] = 0.0
-                position = 0
-            elif trend_regime[i] and close[i] < donchian_low[i]:
+            # Exit long: price closes below Camarilla R3 OR below 12h EMA50
+            if close[i] < camarilla_r3_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: range regime + price at upper band OR trend regime + donchian high break
-            if range_regime[i] and close[i] >= upper_band[i]:
-                signals[i] = 0.0
-                position = 0
-            elif trend_regime[i] and close[i] > donchian_high[i]:
+            # Exit short: price closes above Camarilla S3 OR above 12h EMA50
+            if close[i] > camarilla_s3_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
