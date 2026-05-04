@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Trend + Volume Spike
-# Williams Alligator (Jaw=TEETH=LIPS smoothed SMAs) identifies trend absence/presence.
-# Long when price > LIPS and Jaw < TEETH < LIPS (bullish alignment) + 1d EMA50 uptrend + volume > 1.5x 20-period EMA volume.
-# Short when price < LIPS and Jaw > TEETH > LIPS (bearish alignment) + 1d EMA50 downtrend + volume confirmation.
-# Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year).
-# Discrete position sizing (0.25) to minimize fee churn and manage drawdown.
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend + volume confirmation (>1.5x 20 EMA volume)
+# Donchian breakouts capture strong momentum moves, filtered by 12h EMA50 trend to avoid counter-trend trades.
+# Volume confirmation ensures breakouts have conviction. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
+# Uses discrete position sizing (0.30) to balance return and drawdown. Works in both bull (breakouts) and bear (filtered shorts).
 
-name = "12h_WilliamsAlligator_1dEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,35 +21,22 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
-    # Get 12h data for Williams Alligator
+    # Get 12h data for EMA50 trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Williams Alligator: Jaw (SMA13), Teeth (SMA8), Lips (SMA5)
+    # Calculate 12h EMA50 for trend filter
     close_12h = df_12h['close'].values
-    jaw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align Alligator lines to 12h timeframe (wait for completed 12h bar)
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Donchian channels (20-period) on 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,8 +44,10 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,37 +57,33 @@ def generate_signals(prices):
         volume_confirm = volume[i] > (1.5 * vol_ema_20[i])
         
         if position == 0:
-            # Long: price > Lips and Jaw < Teeth < Lips (bullish alignment) + 1d EMA50 uptrend + volume
-            if (close[i] > lips_aligned[i] and 
-                jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i] and
-                close[i] > ema_50_1d_aligned[i] and
-                volume_confirm):
-                signals[i] = 0.25
+            # Long breakout: price closes above upper Donchian + volume + 12h EMA50 uptrend
+            if (close[i] > highest_high[i] and 
+                volume_confirm and 
+                close[i] > ema_50_12h_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price < Lips and Jaw > Teeth > Lips (bearish alignment) + 1d EMA50 downtrend + volume
-            elif (close[i] < lips_aligned[i] and 
-                  jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and
-                  close[i] < ema_50_1d_aligned[i] and
-                  volume_confirm):
-                signals[i] = -0.25
+            # Short breakout: price closes below lower Donchian + volume + 12h EMA50 downtrend
+            elif (close[i] < lowest_low[i] and 
+                  volume_confirm and 
+                  close[i] < ema_50_12h_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price < Lips OR Jaw > Teeth (trend weakness) OR 1d EMA50 turns down
-            if (close[i] < lips_aligned[i] or 
-                jaw_aligned[i] > teeth_aligned[i] or
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit long: price closes below lower Donchian OR 12h EMA50 turns down
+            if (close[i] < lowest_low[i] or 
+                close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price > Lips OR Jaw < Teeth (trend weakness) OR 1d EMA50 turns up
-            if (close[i] > lips_aligned[i] or 
-                jaw_aligned[i] < teeth_aligned[i] or
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit short: price closes above upper Donchian OR 12h EMA50 turns up
+            if (close[i] > highest_high[i] or 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
