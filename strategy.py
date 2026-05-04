@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
-# Uses Donchian channel from prior completed 1d for structure, 1w EMA34 for trend filter
-# Volume confirmation (>1.8x 20 EMA) ensures breakout has strong participation
-# Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d.
-# 1w EMA34 provides stronger trend filter than 1d EMA34, reducing whipsaw in both bull and bear markets.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13, filtering weak moves.
+# Combined with 1d EMA34 for higher-timeframe trend alignment and volume spike (>2.0x 20 EMA) for confirmation.
+# Works in both bull and bear markets by only taking trades in the direction of the 1d trend.
+# Discrete sizing 0.25 limits risk and reduces fee churn.
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h.
 
-name = "1d_Donchian20_1wEMA34_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA34_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,38 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data for Donchian(20) channels
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on completed 1d bars
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Elder Ray components on 6h timeframe
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Shift by 1 to use only completed 1d bar (avoid look-ahead)
-    upper_20_shifted = np.roll(upper_20, 1)
-    lower_20_shifted = np.roll(lower_20, 1)
-    upper_20_shifted[0] = np.nan
-    lower_20_shifted[0] = np.nan
-    
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20_shifted)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20_shifted)
-    
-    # Volume confirmation: 20-period EMA of volume on 1d timeframe
+    # Volume confirmation: 20-period EMA of volume
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -63,34 +48,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian Upper + price above 1w EMA34 + volume spike
-            if close[i] > upper_20_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Long conditions: Bull Power > 0 (strong bullish momentum) + price above 1d EMA34 + volume spike
+            if bull_power[i] > 0 and close[i] > ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian Lower + price below 1w EMA34 + volume spike
-            elif close[i] < lower_20_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume[i] > (1.8 * vol_ema_20[i]):
+            # Short conditions: Bear Power < 0 (strong bearish momentum) + price below 1d EMA34 + volume spike
+            elif bear_power[i] < 0 and close[i] < ema_34_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR price crosses below 1w EMA34
-            donchian_mid = (upper_20_aligned[i] + lower_20_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] < donchian_mid or close[i] < ema_34_1w_aligned[i]):
+            # Exit long: Bull Power turns negative OR price crosses below 1d EMA34
+            if bull_power[i] <= 0 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR price crosses above 1w EMA34
-            donchian_mid = (upper_20_aligned[i] + lower_20_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] > donchian_mid or close[i] > ema_34_1w_aligned[i]):
+            # Exit short: Bear Power turns positive OR price crosses above 1d EMA34
+            if bear_power[i] >= 0 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
