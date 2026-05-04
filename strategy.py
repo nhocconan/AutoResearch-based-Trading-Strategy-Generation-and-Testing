@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Uses 1d HTF for trend alignment and Camarilla levels (institutional support/resistance).
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions for mean reversion entries.
+# 1d EMA50 provides higher-timeframe trend alignment to reduce whipsaws.
 # Volume confirmation (2.0x 20-period EMA) ensures breakout conviction.
-# Designed for 12h timeframe targeting 12-37 trades/year (50-150 total) with discrete sizing (0.30).
-# Works in bull markets by buying R3 breakouts in uptrends and bear markets by selling S3 breakdowns in downtrends.
-# The 1d EMA34 trend filter avoids false breakouts during sideways consolidation.
+# Designed for 4h timeframe targeting 20-50 trades/year (75-200 total) with discrete sizing (0.30).
+# Works in bull markets by buying oversold dips in uptrends and bear markets by selling overbought rallies in downtrends.
+# The 1d EMA50 trend filter avoids counter-trend trades during strong directional moves.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (R3, S3) and EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate camarilla levels: R3, S3 from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Williams %R (14-period) on 4h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
-    
-    # Align camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: 2.0x 20-period EMA on 12h volume
+    # Volume confirmation: 2.0x 20-period EMA on 4h volume
     vol_series = pd.Series(volume)
     vol_ema_20 = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -56,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start from 100 to have valid indicators
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +63,26 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > (2.0 * vol_ema_20[i])
         
         if position == 0:
-            # Long: close breaks above R3 + volume confirmation + price above 1d EMA34 (uptrend)
-            if (close[i] > r3_aligned[i] and volume_confirmed and 
-                close[i] > ema_34_1d_aligned[i]):
+            # Long: Williams %R oversold (< -80) + volume confirmation + price above 1d EMA50 (uptrend)
+            if (williams_r[i] < -80 and volume_confirmed and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.30
                 position = 1
-            # Short: close breaks below S3 + volume confirmation + price below 1d EMA34 (downtrend)
-            elif (close[i] < s3_aligned[i] and volume_confirmed and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # Short: Williams %R overbought (> -20) + volume confirmation + price below 1d EMA50 (downtrend)
+            elif (williams_r[i] > -20 and volume_confirmed and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S3 (mean reversion) OR below 1d EMA34 (trend change)
-            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Williams %R rises above -50 (momentum shift) OR price below 1d EMA50 (trend change)
+            if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # Exit short: price rises above R3 (mean reversion) OR above 1d EMA34 (trend change)
-            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Williams %R falls below -50 (momentum shift) OR price above 1d EMA50 (trend change)
+            if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
