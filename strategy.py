@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Uses Camarilla pivot levels from prior completed 1d for structure, 1d EMA34 for trend filter
 # Volume confirmation (>1.5x 20 EMA) ensures breakout has strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h.
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
 # 1d EMA34 provides higher timeframe trend filter, reducing whipsaw while capturing major moves.
 # Camarilla pivot breakouts work well in both bull and bear markets when combined with volume and trend filters.
 
-name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels (R3, S3) from prior completed 1d bar
+    # Calculate Camarilla pivot levels (R3, S3) from prior completed 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -45,22 +45,18 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels
     range_1d = high_1d_shifted - low_1d_shifted
-    camarilla_r3 = close_1d_shifted + range_1d * 1.1 / 4
-    camarilla_s3 = close_1d_shifted - range_1d * 1.1 / 4
+    camarilla_r3 = close_1d_shifted + (range_1d * 1.1 / 4)
+    camarilla_s3 = close_1d_shifted - (range_1d * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Get 1d data for EMA34 trend filter
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(close_1d_shifted).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 4h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -85,17 +81,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Camarilla midpoint OR price crosses below 1d EMA34
-            camarilla_mid = (r3_aligned[i] + s3_aligned[i]) / 2.0
-            if not np.isnan(camarilla_mid) and (close[i] < camarilla_mid or close[i] < ema_34_1d_aligned[i]):
+            # Exit long: price returns to Camarilla pivot point OR price crosses below 1d EMA34
+            camarilla_pivot = (close_1d_shifted[i] + (high_1d_shifted[i] + low_1d_shifted[i]) / 2) / 2
+            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, 
+                np.full_like(close_1d_shifted, camarilla_pivot))
+            if not np.isnan(camarilla_pivot_aligned[i]) and (close[i] < camarilla_pivot_aligned[i] or close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Camarilla midpoint OR price crosses above 1d EMA34
-            camarilla_mid = (r3_aligned[i] + s3_aligned[i]) / 2.0
-            if not np.isnan(camarilla_mid) and (close[i] > camarilla_mid or close[i] > ema_34_1d_aligned[i]):
+            # Exit short: price returns to Camarilla pivot point OR price crosses above 1d EMA34
+            camarilla_pivot = (close_1d_shifted[i] + (high_1d_shifted[i] + low_1d_shifted[i]) / 2) / 2
+            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, 
+                np.full_like(close_1d_shifted, camarilla_pivot))
+            if not np.isnan(camarilla_pivot_aligned[i]) and (close[i] > camarilla_pivot_aligned[i] or close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
