@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Enters long on breakout above 20-day high with volume spike and 1w EMA50 uptrend.
-# Enters short on breakdown below 20-day low with volume spike and 1w EMA50 downtrend.
-# Uses 1d timeframe with 1w HTF for trend filter to capture medium-term direction.
-# Designed for 7-25 trades/year to minimize fee drag while capturing major trends.
-# Works in bull markets via breakout longs and in bear markets via breakdown shorts.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 12h EMA34 trend filter and volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13. Goes long when Bull Power > 0 and Bear Power < 0
+# with volume spike and 12h EMA34 uptrend. Goes short when Bear Power < 0 and Bull Power < 0
+# with volume spike and 12h EMA34 downtrend. Designed for 12-37 trades/year to minimize fee drag.
+# Works in bull markets via strong bull power and in bear markets via strong bear power.
 
-name = "1d_Donchian20_VolumeSpike_1wEMA50_Trend"
-timeframe = "1d"
+name = "6h_ElderRay_Index_12hEMA34_Trend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Elder Ray and EMA34 - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period) on 1d data
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray on 12h data
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Donchian channels to 1d timeframe (wait for completed 1d bar)
-    highest_high_20_aligned = align_htf_to_ltf(prices, df_1d, highest_high_20)
-    lowest_low_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_20)
+    # Calculate Elder Ray components
+    bull_power_12h = high_12h - ema13_12h  # Bull Power = High - EMA13
+    bear_power_12h = low_12h - ema13_12h   # Bear Power = Low - EMA13
     
-    # Get 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align Elder Ray to 6h timeframe (wait for completed 12h bar)
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
     
-    close_1w = df_1w['close'].values
+    # Get 12h data for EMA34 trend filter - ONCE before loop
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate EMA50 on 1w data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align EMA50 to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align EMA34 to 6h timeframe (wait for completed 12h bar)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     # Calculate volume spike filter (20-period volume MA)
     vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -62,36 +58,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high_20_aligned[i]) or np.isnan(lowest_low_20_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above 20-day high AND volume spike AND 1w EMA50 uptrend
-            if (close[i] > highest_high_20_aligned[i] and 
+            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND volume spike AND 12h EMA34 uptrend
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] < 0 and 
                 volume_spike[i] and 
-                close[i] > ema50_1w_aligned[i]):
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below 20-day low AND volume spike AND 1w EMA50 downtrend
-            elif (close[i] < lowest_low_20_aligned[i] and 
+            # Short conditions: Bear Power < 0 AND Bull Power < 0 AND volume spike AND 12h EMA34 downtrend
+            elif (bear_power_aligned[i] < 0 and 
+                  bull_power_aligned[i] < 0 and 
                   volume_spike[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+                  close[i] < ema34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below 20-day low OR trend reverses
-            if close[i] < lowest_low_20_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: Bear Power >= 0 (bull power fading) OR trend reverses
+            if bear_power_aligned[i] >= 0 or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above 20-day high OR trend reverses
-            if close[i] > highest_high_20_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: Bull Power >= 0 (bear power fading) OR trend reverses
+            if bull_power_aligned[i] >= 0 or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
