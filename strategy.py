@@ -25,6 +25,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # We need daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -46,6 +47,7 @@ def generate_signals(prices):
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Get 1d data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')  # Reuse daily data
     if len(df_1d) < 34:
         return np.zeros(n)
     
