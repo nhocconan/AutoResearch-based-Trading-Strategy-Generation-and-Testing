@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band squeeze breakout + 1w Supertrend filter + volume confirmation
-# In low volatility regimes (BB width < 20th percentile), we wait for breakout with volume confirmation.
-# Supertrend on 1w provides major trend filter: only long in uptrend, short in downtrend.
-# This combines volatility contraction breakout with major trend alignment for high-probability trades.
-# Target: 50-150 trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fees.
+# Hypothesis: 1h strategy using 4h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# In uptrend (price > 1d EMA50), go long on 4h Donchian upper breakout; in downtrend (price < 1d EMA50), go short on 4h Donchian lower breakout.
+# Volume confirmation (>1.3x 20-period EMA) reduces false signals. Designed for 1h timeframe targeting 60-150 total trades over 4 years.
+# Uses discrete position sizing (0.20) to minimize fee churn and manage drawdown. Works in both bull and bear markets via trend filter.
 
-name = "12h_BB_Squeeze_Supertrend_Volume"
-timeframe = "12h"
+name = "1h_Donchian_20_1dEMA50_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,70 +22,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Supertrend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for Donchian channel (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w Supertrend (ATR=10, mult=3.0)
-    hl2 = (df_1w['high'] + df_1w['low']) / 2
-    atr = pd.Series(abs(df_1w['high'] - df_1w['low'])).rolling(window=10, min_periods=10).mean()
+    # Calculate 4h Donchian channel (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Basic upper and lower bands
-    upper_band = hl2 + (3.0 * atr)
-    lower_band = hl2 - (3.0 * atr)
+    # Align 4h Donchian levels to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Initialize Supertrend
-    supertrend = np.full(len(df_1w), np.nan)
-    direction = np.full(len(df_1w), 1)  # 1 for uptrend, -1 for downtrend
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
+        return np.zeros(n)
     
-    for i in range(10, len(df_1w)):
-        if i == 10:
-            supertrend[i] = upper_band.iloc[i] if hasattr(upper_band, 'iloc') else upper_band[i]
-            direction[i] = 1
-        else:
-            prev_close = df_1w['close'].iloc[i-1] if hasattr(df_1w['close'], 'iloc') else df_1w['close'][i-1]
-            prev_supertrend = supertrend[i-1]
-            prev_direction = direction[i-1]
-            
-            if prev_supertrend is None or np.isnan(prev_supertrend):
-                supertrend[i] = upper_band.iloc[i] if hasattr(upper_band, 'iloc') else upper_band[i]
-                direction[i] = 1
-                continue
-            
-            if prev_direction == 1:
-                supertrend[i] = max(lower_band.iloc[i] if hasattr(lower_band, 'iloc') else lower_band[i], prev_supertrend)
-                if df_1w['close'].iloc[i] if hasattr(df_1w['close'], 'iloc') else df_1w['close'][i] <= supertrend[i]:
-                    direction[i] = -1
-                    supertrend[i] = min(upper_band.iloc[i] if hasattr(upper_band, 'iloc') else upper_band[i], prev_supertrend)
-                else:
-                    direction[i] = 1
-            else:
-                supertrend[i] = min(upper_band.iloc[i] if hasattr(upper_band, 'iloc') else upper_band[i], prev_supertrend)
-                if df_1w['close'].iloc[i] if hasattr(df_1w['close'], 'iloc') else df_1w['close'][i] >= supertrend[i]:
-                    direction[i] = 1
-                    supertrend[i] = max(lower_band.iloc[i] if hasattr(lower_band, 'iloc') else lower_band[i], prev_supertrend)
-                else:
-                    direction[i] = -1
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Bollinger Bands (20, 2.0)
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean()
-    bb_std = close_s.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + (2.0 * bb_std)
-    bb_lower = bb_middle - (2.0 * bb_std)
-    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Align 1d EMA50 to 1h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # BB width percentile (20-period lookback for regime)
-    bb_width_series = pd.Series(bb_width.values)
-    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
-    
-    # Align 1w Supertrend direction to 12h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Volume confirmation: 20-period EMA of volume on 12h timeframe
+    # Volume confirmation: 20-period EMA of volume on 1h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -94,47 +57,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(supertrend_direction_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Squeeze condition: BB width below 20th percentile (low volatility)
-        squeeze_condition = bb_width_percentile[i] < 20
-        
         # Volume confirmation: current volume > 1.3 x 20-period EMA
         volume_confirm = volume[i] > (1.3 * vol_ema_20[i])
         
         if position == 0:
-            # Look for breakout with volume confirmation in direction of 1w Supertrend
-            if squeeze_condition and volume_confirm:
-                if close[i] > bb_upper[i] and supertrend_direction_aligned[i] == 1:
-                    # Bullish breakout in uptrend
-                    signals[i] = 0.25
+            # Determine trend: price > 1d EMA50 = uptrend, price < 1d EMA50 = downtrend
+            if close[i] > ema_50_aligned[i]:
+                # Uptrend: long on Donchian upper breakout
+                if close[i] > donchian_high_aligned[i] and volume_confirm:
+                    signals[i] = 0.20
                     position = 1
-                elif close[i] < bb_lower[i] and supertrend_direction_aligned[i] == -1:
-                    # Bearish breakout in downtrend
-                    signals[i] = -0.25
+            else:
+                # Downtrend: short on Donchian lower breakout
+                if close[i] < donchian_low_aligned[i] and volume_confirm:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Exit long: price retouches middle band OR Supertrend flips down OR volume drops significantly
-            if (close[i] <= bb_middle[i] or 
-                supertrend_direction_aligned[i] == -1 or 
-                volume[i] < (0.7 * vol_ema_20[i])):
+            # Exit long: price retouches Donchian midpoint OR trend reverses OR volume drops
+            mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if (close[i] <= mid or 
+                close[i] < ema_50_aligned[i] or 
+                volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price retouches middle band OR Supertrend flips up OR volume drops significantly
-            if (close[i] >= bb_middle[i] or 
-                supertrend_direction_aligned[i] == 1 or 
-                volume[i] < (0.7 * vol_ema_20[i])):
+            # Exit short: price retouches Donchian midpoint OR trend reverses OR volume drops
+            mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if (close[i] >= mid or 
+                close[i] > ema_50_aligned[i] or 
+                volume[i] < vol_ema_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
