@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 12h ADX regime filter
-# Long when Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (trending)
-# Short when Bear Power < 0 AND Bull Power > 0 AND 12h ADX > 25 (trending)
-# Uses 12h ADX to avoid ranging markets where Elder Ray gives false signals.
-# Target: 12-30 trades/year on 6h. Works in bull via longs in strong uptrends and bear via shorts in strong downtrends.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 resistance AND 1d bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
+# Short when price breaks below Camarilla S3 support AND 1d bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
+# Uses 1d EMA34 for trend filter to reduce whipsaw, targeting 20-50 trades/year on 4h.
+# Volume confirmation (1.5x) reduces noise trades. Camarilla levels from 1d provide precise structure.
+# Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "6h_ElderRay_12hADX_Regime"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,96 +24,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF regime filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for HTF trend filter and Camarilla levels - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h EMA13 and EMA26 for ADX
-    ema_13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_26_12h = pd.Series(close_12h).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_bullish_1d = close_1d > ema_34_1d
+    trend_bearish_1d = close_1d < ema_34_1d
     
-    # Calculate 12h ATR13 for ADX
-    tr1_12h = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    atr_12h = pd.Series(tr_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align 1d trend to 4h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate 12h +DM and -DM
-    up_move_12h = high_12h[1:] - high_12h[:-1]
-    down_move_12h = low_12h[:-1] - low_12h[1:]
-    plus_dm_12h = np.where((up_move_12h > down_move_12h) & (up_move_12h > 0), up_move_12h, 0)
-    minus_dm_12h = np.where((down_move_12h > up_move_12h) & (down_move_12h > 0), down_move_12h, 0)
-    plus_dm_12h = np.concatenate([[0], plus_dm_12h])
-    minus_dm_12h = np.concatenate([[0], minus_dm_12h])
+    # Calculate Camarilla R3 and S3 from prior day's OHLC
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Calculate 12h smoothed +DM, -DM, and ATR
-    plus_dm_smooth_12h = pd.Series(plus_dm_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    minus_dm_smooth_12h = pd.Series(minus_dm_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    atr_smooth_12h = pd.Series(tr_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align prior day's Camarilla levels to 4h timeframe (wait for day to complete)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Calculate 12h +DI and -DI
-    plus_di_12h = np.where(atr_smooth_12h != 0, 100 * plus_dm_smooth_12h / atr_smooth_12h, 0)
-    minus_di_12h = np.where(atr_smooth_12h != 0, 100 * minus_dm_smooth_12h / atr_smooth_12h, 0)
-    
-    # Calculate 12h DX and ADX
-    dx_12h = np.where((plus_di_12h + minus_di_12h) != 0, 
-                      100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h), 0)
-    adx_12h = pd.Series(dx_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Align 12h ADX to 6h timeframe (wait for 12h bar to complete)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Calculate Elder Ray components on 6h
-    # Bull Power = High - EMA13(Close)
-    # Bear Power = Low - EMA13(Close)
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13_6h
-    bear_power = low - ema_13_6h
-    
-    # Volume confirmation: 20-period volume EMA
+    # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema_20  # Above average volume
+    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 AND volume filter
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                adx_12h_aligned[i] > 25 and volume_filter[i]):
+            # Long conditions: price breaks above Camarilla R3 AND 1d bullish trend AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power < 0 AND Bull Power > 0 AND ADX > 25 AND volume filter
-            elif (bear_power[i] < 0 and bull_power[i] > 0 and 
-                  adx_12h_aligned[i] > 25 and volume_filter[i]):
+            # Short conditions: price breaks below Camarilla S3 AND 1d bearish trend AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR Bear Power >= 0 OR ADX < 20 (regime change)
-            if (bull_power[i] <= 0 or bear_power[i] >= 0 or adx_12h_aligned[i] < 20):
+            # Exit long: price closes below Camarilla S3 OR 1d trend turns bearish
+            if (close[i] < camarilla_s3_aligned[i] or 
+                trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 OR Bull Power <= 0 OR ADX < 20 (regime change)
-            if (bear_power[i] >= 0 or bull_power[i] <= 0 or adx_12h_aligned[i] < 20):
+            # Exit short: price closes above Camarilla R3 OR 1d trend turns bullish
+            if (close[i] > camarilla_r3_aligned[i] or 
+                trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
