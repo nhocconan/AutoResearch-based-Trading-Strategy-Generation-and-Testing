@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-# Long when price breaks above 20-period Donchian high AND weekly close > weekly open (bullish week) AND volume > 1.5x 20-period volume EMA
-# Short when price breaks below 20-period Donchian low AND weekly close < weekly open (bearish week) AND volume > 1.5x 20-period volume EMA
-# Uses weekly candle direction for major trend filter to reduce whipsaw, targeting 12-37 trades/year on 6h.
-# Volume spike filter (1.5x) is moderate to avoid overtrading. Donchian(20) provides clear breakout levels.
-# Works in bull markets via longs in bullish weekly regime and bear markets via shorts in bearish weekly regime.
+# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish trend) AND volume > 1.3x 20-period volume EMA
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish trend) AND volume > 1.3x 20-period volume EMA
+# Williams %R identifies exhaustion points in ranging/bear markets, filtered by 1d trend to avoid counter-trend trades.
+# Volume confirmation ensures breakout validity. Target: 12-37 trades/year on 12h to stay within fee limits.
 
-name = "6h_Donchian20_1wDirection_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,68 +23,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for HTF trend filter and Williams %R calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly bullish/bearish direction (close > open = bullish)
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_bullish_1d = close_1d > ema_34_1d
+    trend_bearish_1d = close_1d < ema_34_1d
     
-    # Align 1w direction to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align 1d trend to 12h timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Donchian(20) - 20-period high and low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period) on 1d data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)  # Volume at least 1.5x average for confirmation
+    volume_spike = volume > (vol_ema_20 * 1.3)  # Volume at least 1.3x average for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high AND weekly bullish AND volume spike
-            if (close[i] > donchian_high[i] and 
-                weekly_bullish_aligned[i] > 0.5 and  # weekly bullish
+            # Long conditions: Williams %R < -80 (oversold) AND 1d bullish trend AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low AND weekly bearish AND volume spike
-            elif (close[i] < donchian_low[i] and 
-                  weekly_bearish_aligned[i] > 0.5 and  # weekly bearish
+            # Short conditions: Williams %R > -20 (overbought) AND 1d bearish trend AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian low OR weekly turns bearish
-            if (close[i] < donchian_low[i] or 
-                weekly_bearish_aligned[i] > 0.5):
+            # Exit long: Williams %R > -50 (moving out of oversold) OR 1d trend turns bearish
+            if (williams_r_aligned[i] > -50 or 
+                trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian high OR weekly turns bullish
-            if (close[i] > donchian_high[i] or 
-                weekly_bullish_aligned[i] > 0.5):
+            # Exit short: Williams %R < -50 (moving out of overbought) OR 1d trend turns bullish
+            if (williams_r_aligned[i] < -50 or 
+                trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
