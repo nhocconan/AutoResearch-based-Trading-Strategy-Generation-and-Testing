@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>1.5x 20 EMA volume)
-# Uses Donchian channels from prior completed weekly bar for structure (upper/lower bands)
-# 1w EMA50 filter ensures we trade in direction of long-term trend (avoids counter-trend whipsaws)
-# Volume confirmation ensures breakout has sufficient participation (>1.5x average volume)
-# Discrete sizing 0.25 balances risk and return while minimizing fee churn
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe
-# Works in both bull (breakout continuation with trend) and bear (breakdown with trend) markets
-# Focus on BTC/ETH by requiring 1w trend alignment (avoids SOL-only bias, more robust across regimes)
+# Hypothesis: 6h Elder Ray + 1d Williams %R regime filter
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Williams %R(14) from 1d: > -20 = overbought (short bias), < -80 = oversold (long bias)
+# Trade logic: Long when Bull Power > 0 AND Williams %R < -80 (oversold in bearish regime)
+# Short when Bear Power < 0 AND Williams %R > -20 (overbought in bullish regime)
+# Uses discrete sizing 0.25 to minimize fee churn
+# Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies)
+# Volume confirmation (>1.5x 20 EMA volume) ensures institutional participation
+# Target: 80-180 total trades over 4 years = 20-45/year for 6h timeframe
 
-name = "1d_Donchian20_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ElderRay_WilliamsR_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +27,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough data for EMA calculation
+    # Get 1d data for Williams %R regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:  # Need enough data for Williams %R calculation
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA(50) trend filter from prior completed weekly bar
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_shifted = np.roll(ema_50_1w, 1)
-    ema_50_1w_shifted[0] = np.nan
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_shifted)
+    # Calculate Williams %R(14) from 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Shift by 1 to use only prior completed 1d bar (no look-ahead)
+    williams_r_shifted = np.roll(williams_r, 1)
+    williams_r_shifted[0] = np.nan
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_shifted)
     
-    # Calculate Donchian(20) channels from prior completed weekly bar
-    # Upper band = highest high over past 20 weekly bars
-    # Lower band = lowest low over past 20 weekly bars
-    high_max_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Shift by 1 to use only prior completed weekly bar (no look-ahead)
-    high_max_20_shifted = np.roll(high_max_20, 1)
-    low_min_20_shifted = np.roll(low_min_20, 1)
-    high_max_20_shifted[0] = np.nan
-    low_min_20_shifted[0] = np.nan
+    # Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = low - ema_13   # Low - EMA13
     
-    # Align Donchian levels to 1d timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, high_max_20_shifted)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, low_min_20_shifted)
-    
-    # Volume confirmation: 20-period EMA of volume on 1d timeframe
+    # Volume confirmation: 20-period EMA of volume on 6h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,32 +60,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(vol_ema_20[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(williams_r_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper band AND price > 1w EMA50 AND volume spike
-            if close[i] > upper_band_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Long conditions: Bull Power > 0 (bullish momentum) AND Williams %R < -80 (oversold) AND volume spike
+            if bull_power[i] > 0 and williams_r_aligned[i] < -80 and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower band AND price < 1w EMA50 AND volume spike
-            elif close[i] < lower_band_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > (1.5 * vol_ema_20[i]):
+            # Short conditions: Bear Power < 0 (bearish momentum) AND Williams %R > -20 (overbought) AND volume spike
+            elif bear_power[i] < 0 and williams_r_aligned[i] > -20 and volume[i] > (1.5 * vol_ema_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to lower band OR price crosses below 1w EMA50
-            if close[i] < lower_band_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: Bull Power <= 0 OR Williams %R >= -50 (recovering from oversold)
+            if bull_power[i] <= 0 or williams_r_aligned[i] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to upper band OR price crosses above 1w EMA50
-            if close[i] > upper_band_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: Bear Power >= 0 OR Williams %R <= -50 (declining from overbought)
+            if bear_power[i] >= 0 or williams_r_aligned[i] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
