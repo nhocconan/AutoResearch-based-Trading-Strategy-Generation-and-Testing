@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 2.0x 20 EMA
-# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 2.0x 20 EMA
-# Uses 4h for precise entry timing, 1d for trend direction to avoid counter-trend trades.
-# Discrete sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation
+# Long when price breaks above R3 AND 1d close > 1d EMA50 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below S3 AND 1d close < 1d EMA50 (downtrend) AND volume > 1.5x 20 EMA
+# Uses 4h for entries, 1d for trend direction to avoid counter-trend trades and reduce trade frequency.
+# Discrete sizing (0.25) to balance profitability and fee drag. Target: 20-50 trades/year.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
 name = "4h_Camarilla_R3S3_1dTrend_VolumeConfirm"
@@ -24,16 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Get 1d data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get daily OHLC arrays
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Uptrend when close > EMA50, downtrend when close < EMA50
+    uptrend_1d = close_1d > ema_50_1d
+    downtrend_1d = close_1d < ema_50_1d
+    
+    # Align 1d trend to 4h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
+    
+    # Calculate 4h Camarilla levels (based on previous day's OHLC)
+    # We need daily OHLC for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     
     # Calculate Camarilla levels for each day
     # R3 = close + (high - low) * 1.1/2
@@ -45,25 +57,14 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 1d data for trend filter - ONCE before loop
-    close_1d_arr = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d_arr).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Uptrend when close > EMA34, downtrend when close < EMA34
-    uptrend_1d = close_1d_arr > ema_34_1d
-    downtrend_1d = close_1d_arr < ema_34_1d
-    
-    # Align 1d trend to 4h timeframe
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
-    
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
