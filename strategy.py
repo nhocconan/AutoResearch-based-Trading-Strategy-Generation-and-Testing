@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
-# Bull Power = High - EMA13(close); Bear Power = EMA13(close) - Low
-# Long when Bull Power > 0 AND Bear Power < previous Bear Power (strengthening bullish) AND 1d bullish trend (close > EMA50) AND volume > 1.5x 20-period volume EMA
-# Short when Bear Power > 0 AND Bull Power < previous Bull Power (strengthening bearish) AND 1d bearish trend (close < EMA50) AND volume > 1.5x 20-period volume EMA
-# Uses 1d EMA50 for trend filter to reduce whipsaw in bear markets, targeting 12-30 trades/year on 6h.
-# Elder Ray measures bull/bear strength behind price moves; combined with trend filter captures sustainable moves.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+# Long when price > Alligator Jaw (13-period SMA shifted 8) AND 1d bullish trend (close > EMA34) AND volume > 1.5x 20-period volume EMA
+# Short when price < Alligator Lips (8-period SMA shifted 5) AND 1d bearish trend (close < EMA34) AND volume > 1.5x 20-period volume EMA
+# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend absence/presence, reducing whipsaw in ranging markets.
+# Targets 12-37 trades/year on 12h timeframe. Volume confirmation and 1d trend filter reduce noise.
 # Works in bull markets via longs in bullish 1d trend regime and bear markets via shorts in bearish 1d trend regime.
 
-name = "6h_ElderRay_1dTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -32,27 +31,27 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish_1d = close_1d > ema_50_1d
-    trend_bearish_1d = close_1d < ema_50_1d
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_bullish_1d = close_1d > ema_34_1d
+    trend_bearish_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 12h timeframe
     trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish_1d.astype(float))
     trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish_1d.astype(float))
     
-    # Calculate Elder Ray components on 6h data
-    # Bull Power = High - EMA13(close)
-    # Bear Power = EMA13(close) - Low
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    # Calculate Williams Alligator components on 12h data
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    # Using SMA as approximation for SMMA (similar enough for this purpose)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
     
-    # Previous Bear Power and Bull Power for strength confirmation
-    prev_bear_power = np.roll(bear_power, 1)
-    prev_bull_power = np.roll(bull_power, 1)
-    prev_bear_power[0] = np.nan
-    prev_bull_power[0] = np.nan
+    jaw = jaw.values
+    teeth = teeth.values
+    lips = lips.values
     
     # Calculate volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -61,11 +60,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(prev_bull_power[i]) or np.isnan(prev_bear_power[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,31 +71,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 AND Bear Power weakening (decreasing) AND 1d bullish trend AND volume spike
-            if (bull_power[i] > 0 and 
-                bear_power[i] < prev_bear_power[i] and  # Bear Power decreasing = bulls gaining control
+            # Long conditions: price > Jaw AND 1d bullish trend AND volume spike
+            if (close[i] > jaw[i] and 
                 trend_bullish_aligned[i] > 0.5 and  # 1d bullish trend
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power > 0 AND Bull Power weakening (decreasing) AND 1d bearish trend AND volume spike
-            elif (bear_power[i] > 0 and 
-                  bull_power[i] < prev_bull_power[i] and  # Bull Power decreasing = bears gaining control
+            # Short conditions: price < Lips AND 1d bearish trend AND volume spike
+            elif (close[i] < lips[i] and 
                   trend_bearish_aligned[i] > 0.5 and  # 1d bearish trend
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power > 0 (bears taking control) OR 1d trend turns bearish
-            if (bear_power[i] > 0 or 
+            # Exit long: price < Teeth OR 1d trend turns bearish
+            if (close[i] < teeth[i] or 
                 trend_bearish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bull Power > 0 (bulls taking control) OR 1d trend turns bullish
-            if (bull_power[i] > 0 or 
+            # Exit short: price > Teeth OR 1d trend turns bullish
+            if (close[i] > teeth[i] or 
                 trend_bullish_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
