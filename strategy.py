@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian channel from prior completed 4h for structure, 1d EMA50 for trend filter
-# Volume confirmation (>2.0x 20 EMA) ensures breakout has strong participation
+# Hypothesis: 6h Williams Alligator + 1d Elder Ray + volume confirmation
+# Uses Williams Alligator (JAW/TEETH/LIPS) from 6h for trend structure and entry timing
+# 1d Elder Ray (Bull/Bear Power) confirms higher timeframe momentum direction
+# Volume spike (>1.5x 20 EMA) ensures breakout has strong participation
 # Discrete sizing 0.25 limits risk and reduces fee churn
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h.
-# 1d EMA50 ensures we only trade with the major trend, reducing whipsaw in ranging markets.
-# Works in both bull and bear by following the higher timeframe trend.
+# Target: 50-150 total trades over 4 years = 12-37/year for 6h.
+# Works in both bull and bear by following the higher timeframe trend via Elder Ray
+# Alligator provides dynamic support/resistance for entries and exits
 
-name = "4h_Donchian20_1dEMA50_VolumeConfirm"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dElderRay_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +26,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Elder Ray trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
+    # Calculate 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Donchian channel (20) from prior completed 4h bar
-    # We need to look back 20 completed 4h bars, so we use rolling window on 4h data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13
+    bear_power = low_1d - ema_13
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate rolling max/min for Donchian channels
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
+    # Calculate Williams Alligator on 6h timeframe
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars ahead
+    # Teeth (Red): 8-period SMMA, shifted 5 bars ahead
+    # Lips (Green): 5-period SMMA, shifted 3 bars ahead
+    def smma(arr, window):
+        res = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < window:
+            return res
+        # First value is simple SMA
+        res[window-1] = np.mean(arr[:window])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
+        for i in range(window, len(arr)):
+            res[i] = (res[i-1] * (window-1) + arr[i]) / window
         return res
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    donchian_high = rolling_max(high_4h, 20)
-    donchian_low = rolling_min(low_4h, 20)
+    # Shift Alligator lines as per Williams specification
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
-    # Align Donchian levels to 4h timeframe (already aligned, just need to shift for completed bar)
-    # Since we're using completed 4h bars, we shift by 1 to avoid look-ahead
-    donchian_high_shifted = np.roll(donchian_high, 1)
-    donchian_low_shifted = np.roll(donchian_low, 1)
-    donchian_high_shifted[0] = np.nan
-    donchian_low_shifted[0] = np.nan
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_shifted)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_shifted)
-    
-    # Volume confirmation: 20-period EMA of volume on 4h timeframe
+    # Volume confirmation: 20-period EMA of volume on 6h timeframe
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(vol_ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high + price above 1d EMA50 + volume spike
-            if close[i] > donchian_high_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: Lips > Teeth > Jaw (bullish alignment) +
+            # Bull Power > 0 (strong buying pressure) + volume spike
+            if (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] and
+                bull_power_aligned[i] > 0 and
+                volume[i] > (1.5 * vol_ema_20[i])):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low + price below 1d EMA50 + volume spike
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: Lips < Teeth < Jaw (bearish alignment) +
+            # Bear Power < 0 (strong selling pressure) + volume spike
+            elif (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] and
+                  bear_power_aligned[i] < 0 and
+                  volume[i] > (1.5 * vol_ema_20[i])):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR price crosses below 1d EMA50
-            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] < donchian_mid or close[i] < ema_50_aligned[i]):
+            # Exit long: Alligator alignment breaks OR Bull Power turns negative
+            if not (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]) or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR price crosses above 1d EMA50
-            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
-            if not np.isnan(donchian_mid) and (close[i] > donchian_mid or close[i] > ema_50_aligned[i]):
+            # Exit short: Alligator alignment breaks OR Bear Power turns positive
+            if not (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]) or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
