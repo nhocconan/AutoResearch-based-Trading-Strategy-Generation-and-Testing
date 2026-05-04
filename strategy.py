@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + weekly Camarilla pivot direction + volume confirmation
-# Uses weekly Camarilla levels (R3/S3, R4/S4) from 1w timeframe to establish directional bias
-# (long bias when close > weekly R3, short bias when close < weekly S3).
-# Entry triggered on 6h Donchian(20) breakout in direction of weekly bias with volume spike (>1.5x 20-period average).
-# Designed for 12-30 trades/year (~50-120 total over 4 years) to minimize fee drag.
-# Weekly Camarilla provides structural bias that works in both bull/bear markets by adapting to higher timeframe pivot levels.
-# Donchian breakout captures momentum; volume confirmation filters false breakouts.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + chop regime filter
+# Donchian breakout provides clear structure-based entries with proven edge in crypto.
+# Volume spike confirms institutional participation reducing false breakouts.
+# Chop regime filter (CHOP > 61.8) avoids whipsaw in ranging markets.
+# Designed for 12-35 trades/year (~50-140 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakout continuation and bear markets via breakdowns.
+# ATR-based stoploss manages risk without intrabar simulation.
 
-name = "6h_Donchian20_1wCamarilla_VolumeBreakout"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolumeSpike_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,83 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla calculation - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for volume and chop calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly Camarilla levels (based on prior week)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = Pivot + Range * 1.1
-    # S3 = Pivot - Range * 1.1
-    # R4 = Pivot + Range * 1.2
-    # S4 = Pivot - Range * 1.2
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r3_1w = pivot_1w + range_1w * 1.1
-    s3_1w = pivot_1w - range_1w * 1.1
-    r4_1w = pivot_1w + range_1w * 1.2
-    s4_1w = pivot_1w - range_1w * 1.2
+    # Calculate 1d volume spike: current volume > 2.0 * 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (2.0 * vol_ma_20)
     
-    # Align weekly Camarilla to 6h timeframe (wait for completed weekly bar)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Calculate 1d Chopiness Index (CHOP) to detect ranging markets
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * ATR(n))) / log10(n)
+    # We use 14-period CHOP as standard
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])  # align with index 0
+    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).mean().values
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr1 / (14 * atr14)) / np.log10(14)
+    chop_filter = chop > 61.8  # >61.8 = ranging market (mean revert), <38.2 = trending
     
-    # Calculate 6h Donchian(20) - highest high and lowest low over 20 periods
-    # Use pandas rolling with min_periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align 1d indicators to 12h timeframe (wait for completed 1d bar)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter.astype(float))
     
-    # Calculate volume spike (>1.5x 20-period average)
-    volume_series = pd.Series(volume)
-    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_ma * 1.5)
+    # Calculate 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above prior period high
+        breakdown_down = close[i] < lowest_low[i-1]  # break below prior period low
+        
         if position == 0:
-            # Long conditions: price breaks above Donchian high AND close > weekly R3 AND volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > r3_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long: Donchian breakout up + volume spike + NOT choppy market (trending)
+            if breakout_up and volume_spike_aligned[i] > 0.5 and chop_filter_aligned[i] < 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low AND close < weekly S3 AND volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < s3_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Donchian breakdown down + volume spike + NOT choppy market (trending)
+            elif breakdown_down and volume_spike_aligned[i] > 0.5 and chop_filter_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Donchian channel OR weekly bias flips (close < S3)
-            if (close[i] <= donchian_high[i] and close[i] >= donchian_low[i]) or close[i] < s3_1w_aligned[i]:
+            # Exit long: Donchian breakdown or choppy market emerges
+            if breakdown_down or chop_filter_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Donchian channel OR weekly bias flips (close > R3)
-            if (close[i] <= donchian_high[i] and close[i] >= donchian_low[i]) or close[i] > r3_1w_aligned[i]:
+            # Exit short: Donchian breakout or choppy market emerges
+            if breakout_up or chop_filter_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
