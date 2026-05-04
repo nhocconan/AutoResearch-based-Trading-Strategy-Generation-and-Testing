@@ -5,8 +5,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
 # Uses 1d EMA50 for trend direction and Camarilla pivot levels from 1d for entry/exit
-# Volume confirmation requires 2.0x average volume to ensure strong participation and reduce trades
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag on 4h timeframe
+# Volume confirmation requires 1.5x average volume to ensure strong participation
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag on 4h timeframe
 # Works in both bull and bear markets by following the 1d trend direction and using Camarilla for structure
 # Prioritizes BTC/ETH performance with SOL as secondary
 
@@ -71,8 +71,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0 x 20-period EMA (tight to avoid overtrading)
-        volume_spike = volume[i] > (2.0 * vol_ema_20[i])
+        # Volume spike: current volume > 1.5 x 20-period EMA (balanced to avoid overtrading)
+        volume_spike = volume[i] > (1.5 * vol_ema_20[i])
         
         # Camarilla breakout with 1d trend filter
         # Long: Price breaks above Camarilla H3 (R1) + volume spike + price above 1d EMA50 (uptrend)
