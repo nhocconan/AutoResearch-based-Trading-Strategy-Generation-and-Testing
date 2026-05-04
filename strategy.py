@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d ADX > 25 (trending market)
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d ADX > 25 (trending market)
-# Uses 6h timeframe for entries, 1d for regime filtering. Works in bull markets via long signals,
-# and in bear markets via short signals. Target: 12-37 trades/year to minimize fee drag.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ADX regime filter and volume spike
+# Uses Camarilla pivot levels from daily chart to identify key support/resistance levels.
+# Enters long when price breaks above R3 with volume confirmation and 1d ADX > 25 (trending market).
+# Enters short when price breaks below S3 with volume confirmation and 1d ADX > 25 (trending market).
+# In ranging markets (ADX <= 25), uses mean reversion at Camarilla H3/L3 levels.
+# Designed for 12-37 trades/year (~50-150 total over 4 years) to minimize fee drag.
+# Combines breakout in trending regimes with mean reversion in ranging regimes for dual-market effectiveness.
 
-name = "6h_ElderRay_1dADX25_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_ADXRegime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,107 +25,167 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX calculation - ONCE before loop
+    # Get 1d data for Camarilla and ADX calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1d data
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_range = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * camarilla_range
+    s3_1d = close_1d - 1.1 * camarilla_range
+    h3_1d = close_1d + 1.1 * camarilla_range / 2  # H3 = close + 1.1*(high-low)/2
+    l3_1d = close_1d - 1.1 * camarilla_range / 2  # L3 = close - 1.1*(high-low)/2
+    
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Calculate 1d ADX for regime filtering
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(values[:period]) / period
-        # Subsequent values
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
     atr_period = 14
-    tr_smooth = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    alpha = 1.0 / atr_period
     
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    # Initialize smoothed values
+    atr = np.full_like(tr, np.nan)
+    plus_dm_smooth = np.full_like(plus_dm, np.nan)
+    minus_dm_smooth = np.full_like(minus_dm, np.nan)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)
+    # First ATR is simple average of first 'atr_period' TR values
+    if len(tr) >= atr_period + 1:
+        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
+        plus_dm_smooth[atr_period] = np.nanmean(plus_dm[1:atr_period+1])
+        minus_dm_smooth[atr_period] = np.nanmean(minus_dm[1:atr_period+1])
+        
+        # Subsequent values using Wilder's smoothing
+        for i in range(atr_period + 1, len(tr)):
+            atr[i] = atr[i-1] - (atr[i-1] / atr_period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / atr_period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / atr_period) + minus_dm[i]
     
-    # Align ADX to 6h timeframe (wait for completed 1d bar)
+    # Calculate +DI and -DI
+    plus_di = np.full_like(tr, np.nan)
+    minus_di = np.full_like(tr, np.nan)
+    dx = np.full_like(tr, np.nan)
+    
+    valid_atr = ~np.isnan(atr) & (atr != 0)
+    plus_di[valid_atr] = 100 * plus_dm_smooth[valid_atr] / atr[valid_atr]
+    minus_di[valid_atr] = 100 * minus_dm_smooth[valid_atr] / atr[valid_atr]
+    
+    # Calculate DX and ADX
+    di_sum = plus_di + minus_di
+    valid_di = ~np.isnan(di_sum) & (di_sum != 0)
+    dx[valid_di] = 100 * np.abs(plus_di[valid_di] - minus_di[valid_di]) / di_sum[valid_di]
+    
+    # ADX is EMA of DX
+    adx = np.full_like(dx, np.nan)
+    adx_period = 14
+    if len(dx) >= adx_period + 1:
+        # First ADX is simple average of first 'adx_period' DX values
+        adx[adx_period] = np.nanmean(dx[1:adx_period+1])
+        # Subsequent values using EMA
+        for i in range(adx_period + 1, len(dx)):
+            if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
+                adx[i] = (dx[i] - adx[i-1]) * (2.0 / (adx_period + 1)) + adx[i-1]
+            else:
+                adx[i] = adx[i-1]
+    
+    # Align ADX to 12h timeframe (wait for completed 1d bar)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate Elder Ray components on 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Calculate volume spike filter (20-period volume MA)
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 2.0)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when 1d ADX > 25 (trending market)
-        if adx_1d_aligned[i] > 25:
-            if position == 0:
-                # Long conditions: Bull Power > 0 AND Bear Power rising (less negative than previous)
-                if (bull_power[i] > 0 and 
-                    i > 50 and bear_power[i] > bear_power[i-1]):
+        adx_value = adx_1d_aligned[i]
+        is_trending = adx_value > 25
+        
+        if position == 0:
+            if is_trending:
+                # Trending market: breakout strategy
+                # Long conditions: price breaks above R3 AND volume spike
+                if close[i] > r3_1d_aligned[i] and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short conditions: Bear Power < 0 AND Bull Power falling (less positive than previous)
-                elif (bear_power[i] < 0 and 
-                      i > 50 and bull_power[i] < bull_power[i-1]):
+                # Short conditions: price breaks below S3 AND volume spike
+                elif close[i] < s3_1d_aligned[i] and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
-            elif position == 1:
-                # Exit long: Bull Power <= 0 OR Bear Power stops rising
-                if bull_power[i] <= 0 or (i > 50 and bear_power[i] <= bear_power[i-1]):
+            else:
+                # Ranging market: mean reversion at H3/L3
+                # Long conditions: price crosses above L3 AND volume spike
+                if close[i] > l3_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = 0.20
+                    position = 1
+                # Short conditions: price crosses below H3 AND volume spike
+                elif close[i] < h3_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = -0.20
+                    position = -1
+        elif position == 1:
+            # Exit long conditions
+            if is_trending:
+                # In trending market: exit when price re-enters Camarilla range (S3-R3)
+                if close[i] >= s3_1d_aligned[i] and close[i] <= r3_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            elif position == -1:
-                # Exit short: Bear Power >= 0 OR Bull Power stops falling
-                if bear_power[i] >= 0 or (i > 50 and bull_power[i] >= bull_power[i-1]):
+            else:
+                # In ranging market: exit when price reaches opposite H3 level or midpoint
+                if close[i] >= h3_1d_aligned[i] or close[i] <= (h3_1d_aligned[i] + l3_1d_aligned[i]) / 2:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+        elif position == -1:
+            # Exit short conditions
+            if is_trending:
+                # In trending market: exit when price re-enters Camarilla range (S3-R3)
+                if close[i] >= s3_1d_aligned[i] and close[i] <= r3_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = -0.25
-        else:
-            # In ranging market (ADX <= 25), stay flat
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+            else:
+                # In ranging market: exit when price reaches opposite L3 level or midpoint
+                if close[i] <= l3_1d_aligned[i] or close[i] >= (h3_1d_aligned[i] + l3_1d_aligned[i]) / 2:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
