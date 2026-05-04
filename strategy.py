@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and volume confirmation
-# Bull Power = High - EMA(13) measures bull strength; Bear Power = EMA(13) - Low measures bear strength
-# 1d EMA50 provides higher timeframe trend filter to align with dominant trend
-# Volume spike (>2.0x 20-period EMA volume) confirms institutional participation
-# Discrete sizing 0.25 targets 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Works in bull markets (strong Bull Power with uptrend) and bear markets (strong Bear Power with downtrend)
-# 6h timeframe balances trade frequency and fee drag while capturing multi-day momentum moves
+# Hypothesis: 12h TRIX momentum with 1w ADX regime filter and volume confirmation
+# TRIX(12) crossing zero line captures momentum shifts with reduced whipsaw vs MACD
+# 1w ADX > 25 filters for trending markets only, avoiding range-bound losses
+# Volume spike (>1.8x 50-period EMA volume) confirms institutional participation
+# Discrete sizing 0.25 targets 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Works in bull markets (long momentum with uptrend) and bear markets (short momentum with downtrend)
+# 12h timeframe minimizes fee drag while capturing multi-day momentum moves
 
-name = "6h_ElderRay_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_TRIX_1wADX_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,60 +25,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough data for EMA50 calculation
+    # Get 1w data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA(50) trend filter from prior completed 1d bar
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_shifted = np.roll(ema_50_1d, 1)
-    ema_50_1d_shifted[0] = np.nan
+    # Calculate 1w ADX(14) for regime filter
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_close_1w[0] = np.nan
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - prev_close_1w)
+    tr3 = np.abs(low_1w - prev_close_1w)
+    tr_1w = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Align HTF indicators to 6h timeframe (wait for completed 1d bar)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_shifted)
+    # +DM and -DM
+    high_diff = np.diff(high_1w, prepend=np.nan)
+    low_diff = -np.diff(low_1w, prepend=np.nan)
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
-    # Calculate Elder Ray Index components (13-period EMA)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power = High - EMA(13)
-    bear_power = ema_13 - low   # Bear Power = EMA(13) - Low
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] - (result[i-1] / period) + data[i]
+                else:
+                    result[i] = np.nan
+        return result
     
-    # Volume confirmation: 20-period EMA of volume
-    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_1w = wilders_smoothing(tr_1w, 14)
+    plus_di_1w = 100 * wilders_smoothing(plus_dm, 14) / atr_1w
+    minus_di_1w = 100 * wilders_smoothing(minus_dm, 14) / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = wilders_smoothing(dx_1w, 14)
+    
+    # Align HTF ADX to 12h timeframe (wait for completed 1w bar)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate TRIX(12,9,9) from 12h close prices
+    # TRIX = EMA(EMA(EMA(close, 12), 9), 9) - 1 period ago, then / previous value * 100
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    trix[0] = np.nan  # First value undefined
+    
+    # Volume confirmation: 50-period EMA of volume
+    vol_ema_50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ema_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(vol_ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 (bulls in control) AND price > 1d EMA50 AND volume spike
-            if bull_power[i] > 0 and close[i] > ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Long conditions: TRIX > 0 (bullish momentum) AND ADX > 25 (trending) AND volume spike
+            if trix[i] > 0 and adx_1w_aligned[i] > 25 and volume[i] > (1.8 * vol_ema_50[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power > 0 (bears in control) AND price < 1d EMA50 AND volume spike
-            elif bear_power[i] > 0 and close[i] < ema_50_1d_aligned[i] and volume[i] > (2.0 * vol_ema_20[i]):
+            # Short conditions: TRIX < 0 (bearish momentum) AND ADX > 25 (trending) AND volume spike
+            elif trix[i] < 0 and adx_1w_aligned[i] > 25 and volume[i] > (1.8 * vol_ema_50[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 (bulls losing control) OR price crosses below 1d EMA50
-            if bull_power[i] <= 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: TRIX < 0 (momentum turns bearish) OR ADX < 20 (trend weakens)
+            if trix[i] < 0 or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power <= 0 (bears losing control) OR price crosses above 1d EMA50
-            if bear_power[i] <= 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: TRIX > 0 (momentum turns bullish) OR ADX < 20 (trend weakens)
+            if trix[i] > 0 or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
