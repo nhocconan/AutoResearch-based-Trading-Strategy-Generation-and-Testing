@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
 # Uses Donchian channels for structure, 1d EMA34 for trend filter (proven from top performers),
 # and volume spike for confirmation. Designed for 20-40 trades/year to minimize fee drag.
 # Works in bull markets via breakout continuations and in bear markets via breakdown continuations.
@@ -15,7 +15,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -56,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
         if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(donchian_upper_aligned[i]) or
