@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-# Uses 1d Donchian channels for breakout signals, filtered by 1w EMA50 trend to avoid counter-trend trades,
-# and confirmed by 1d volume spike (1.5x 20-period average). Designed for 30-100 total trades over 4 years
-# (7-25/year) to minimize fee drag. Works in bull markets via breakouts and in bear markets via
-# trend-filtered short breakouts. All indicators calculated once before loop with proper alignment.
+# Hypothesis: 6h Volume-Weighted RSI + 1d Weekly Trend Filter
+# Uses 6h VW-RSI(14) for mean reversion signals in ranging markets, filtered by 1d weekly EMA(34) trend direction.
+# VW-RSI reduces false signals during low-volume periods and improves signal quality.
+# Weekly trend filter ensures we only take mean-reversion trades in the direction of the higher timeframe trend,
+# reducing whipsaw during strong trends. Designed for 12-30 trades/year (~50-120 total over 4 years).
+# Works in bull/bear markets by adapting to weekly trend: long VW-RSI oversold in uptrend, short VW-RSI overbought in downtrend.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_VolWeightedRSI_1dWeeklyEMA_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +24,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and volume - ONCE before loop
+    # Get 1d data for weekly trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper channel = highest high over past 20 periods
-    # Lower channel = lowest low over past 20 periods
-    high_roll = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 (weekly trend proxy - ~1.5 months)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d volume spike confirmation (1.5x 20-period average)
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (vol_ma * 1.5)
+    # Align weekly trend to 6h timeframe (wait for completed 1d bar)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align 1d indicators to 1d timeframe (already aligned, but shift for completed bar)
-    donchian_upper_aligned = np.roll(high_roll, 1)
-    donchian_lower_aligned = np.roll(low_roll, 1)
-    volume_spike_aligned = np.roll(volume_spike, 1)
-    donchian_upper_aligned[0] = np.nan
-    donchian_lower_aligned[0] = np.nan
-    volume_spike_aligned[0] = False
+    # Calculate 6h Volume-Weighted RSI
+    # Typical Price = (H+L+C)/3
+    typical_price = (high + low + close) / 3.0
+    # Volume-weighted typical price change
+    vwtp = typical_price * volume
+    # Price change
+    price_change = np.diff(typical_price, prepend=typical_price[0])
+    # Volume-weighted price change
+    vw_price_change = price_change * volume
     
-    # Get 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Separate gains and losses
+    gains = np.where(vw_price_change > 0, vw_price_change, 0)
+    losses = np.where(vw_price_change < 0, -vw_price_change, 0)
     
-    close_1w = df_1w['close'].values
+    # Calculate smoothed averages using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First average is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current_value) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 1w EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    avg_gains = wilders_smoothing(gains, 14)
+    avg_losses = wilders_smoothing(losses, 14)
     
-    # Align 1w EMA50 to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate RS and RSI
+    rs = np.divide(avg_gains, avg_losses, out=np.full_like(avg_gains, np.nan), where=avg_losses!=0)
+    vw_rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(vw_rsi[i]) or np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Weekly trend direction: price above/below EMA34
+        weekly_uptrend = close_1d[-1] > ema34_1d_aligned[i] if len(close_1d) > 0 else False  # Use current 1d close for trend
+        # More robust: compare current 1d close to its EMA (need to get current 1d close properly)
+        # Simpler approach: use the aligned EMA value and compare to 1d close series
+        
+        # Get current 1d close for trend comparison (last completed 1d bar)
+        # Since we're in 6h loop, we need to find the corresponding 1d bar
+        # Use the fact that align_htf_to_ltf gives us the value from the last completed 1d bar
+        # We'll use a simpler trend filter: 6h price vs 6h EMA50 for additional confirmation
+        
+        # Calculate 6h EMA50 for additional trend filter
+        if i >= 50:
+            ema50_6h = pd.Series(close[:i+1]).ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
+        else:
+            ema50_6h = np.nan
+        
+        # Skip if EMA50 not ready
+        if np.isnan(ema50_6h):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # 6h trend filter: price above/below EMA50
+        uptrend_6h = close[i] > ema50_6h
+        downtrend_6h = close[i] < ema50_6h
+        
         if position == 0:
-            # Long conditions: price breaks above Donchian upper channel AND volume spike AND price > 1w EMA50 (uptrend)
-            if (close[i] > donchian_upper_aligned[i] and 
-                volume_spike_aligned[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # Long conditions: VW-RSI oversold (<30) AND weekly uptrend AND 6h uptrend
+            if (vw_rsi[i] < 30 and 
+                close[i] > ema34_1d_aligned[i] and  # Weekly trend filter: price above weekly EMA
+                uptrend_6h):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower channel AND volume spike AND price < 1w EMA50 (downtrend)
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  volume_spike_aligned[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # Short conditions: VW-RSI overbought (>70) AND weekly downtrend AND 6h downtrend
+            elif (vw_rsi[i] > 70 and 
+                  close[i] < ema34_1d_aligned[i] and  # Weekly trend filter: price below weekly EMA
+                  downtrend_6h):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Donchian channel OR volume drops
-            if (close[i] <= donchian_upper_aligned[i] and close[i] >= donchian_lower_aligned[i]) or not volume_spike_aligned[i]:
+            # Exit long: VW-RSI returns to neutral (50) or weekly trend turns down
+            if (vw_rsi[i] >= 50 or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Donchian channel OR volume drops
-            if (close[i] <= donchian_upper_aligned[i] and close[i] >= donchian_lower_aligned[i]) or not volume_spike_aligned[i]:
+            # Exit short: VW-RSI returns to neutral (50) or weekly trend turns up
+            if (vw_rsi[i] <= 50 or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
