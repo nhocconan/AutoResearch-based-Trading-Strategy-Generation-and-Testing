@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1d Donchian channel breakout with weekly EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 1d Donchian upper channel (20) AND price > weekly EMA34 AND volume > 1.8 * avg_volume(20)
-# Short when price breaks below 1d Donchian lower channel (20) AND price < weekly EMA34 AND volume > 1.8 * avg_volume(20)
-# Exit when price crosses back below/above 1d Donchian middle line OR volume drops below average
+# Hypothesis: 12h strategy using 1d Camarilla pivot breakout with 1d HMA21 trend filter and volume spike confirmation
+# Long when price breaks above 1d Camarilla R3 level AND price > 1d HMA21 AND volume > 2.0 * avg_volume(20) on 12h
+# Short when price breaks below 1d Camarilla S3 level AND price < 1d HMA21 AND volume > 2.0 * avg_volume(20) on 12h
+# Exit when price crosses back below/above 1d Camarilla pivot point OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-80 total trades over 4 years (7-20/year) for 1d timeframe
-# Donchian provides clear breakout levels with built-in stop via middle line
-# Weekly EMA34 filters primary trend to avoid counter-trend trades in choppy markets
-# Volume confirmation ensures breakout strength and reduces false signals
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Camarilla provides robust support/resistance from higher timeframe
+# 1d HMA21 filters primary trend to avoid counter-trend trades
+# Volume spike confirms breakout strength and reduces false signals
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "1d_Donchian20_Weekly_EMA34_VolumeSpike"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dHMA21_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,38 +28,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # Need enough for weekly EMA34
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA34
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get 1d data ONCE before loop for Donchian channels
+    # Get 1d data ONCE before loop for Camarilla levels and HMA21
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for Donchian(20)
+    if len(df_1d) < 21:  # Need at least one completed 1d bar and enough for HMA21
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_channel = (upper_channel + lower_channel) / 2.0
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R3 = Pivot + Range * 1.1/2, S3 = Pivot - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r3_1d = pivot_1d + (range_1d * 1.1 / 2.0)
+    camarilla_s3_1d = pivot_1d - (range_1d * 1.1 / 2.0)
+    camarilla_pivot_1d = pivot_1d  # PP level for exit
     
-    # Align 1d Donchian channels to 1d timeframe (no additional delay needed)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    middle_channel_aligned = align_htf_to_ltf(prices, df_1d, middle_channel)
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume
+    # Calculate 1d HMA21
+    # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
+    
+    def hma(values, window):
+        half_window = window // 2
+        sqrt_window = int(np.sqrt(window))
+        wma_half = wma(values, half_window)
+        wma_full = wma(values, window)
+        raw_hma = 2 * wma_half - wma_full
+        return wma(raw_hma, sqrt_window)
+    
+    # Pad arrays for WMA calculation
+    def pad_for_wma(arr, window):
+        if len(arr) < window:
+            return np.full(len(arr), np.nan)
+        result = np.full(len(arr), np.nan)
+        for i in range(window - 1, len(arr)):
+            result[i] = wma(arr[i - window + 1:i + 1], window)
+        return result
+    
+    hma21_1d = hma(close_1d, 21)
+    hma21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma21_1d)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -70,8 +89,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(middle_channel_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(hma21_1d_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -79,24 +98,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above 1d Donchian upper channel, above weekly EMA34, volume confirmation, in session
-            if close[i] > upper_channel_aligned[i] and close[i] > ema34_1w_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above 1d Camarilla R3, above 1d HMA21, volume confirmation, in session
+            if close[i] > camarilla_r3_aligned[i] and close[i] > hma21_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 1d Donchian lower channel, below weekly EMA34, volume confirmation, in session
-            elif close[i] < lower_channel_aligned[i] and close[i] < ema34_1w_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below 1d Camarilla S3, below 1d HMA21, volume confirmation, in session
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < hma21_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below 1d Donchian middle channel OR volume drops below average
-            if close[i] < middle_channel_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below 1d Camarilla pivot OR volume drops below average
+            if close[i] < camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above 1d Donchian middle channel OR volume drops below average
-            if close[i] > middle_channel_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above 1d Camarilla pivot OR volume drops below average
+            if close[i] > camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
