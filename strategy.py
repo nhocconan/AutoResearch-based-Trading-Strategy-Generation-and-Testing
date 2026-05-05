@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Donchian upper AND 12h close > 12h EMA50 (uptrend) AND volume > 2.0x 20 EMA
-# Short when price breaks below Donchian lower AND 12h close < 12h EMA50 (downtrend) AND volume > 2.0x 20 EMA
-# Uses discrete sizing (0.25) to limit fee drag. Target: 20-50 trades/year per symbol.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h/1d trend alignment and volume confirmation
+# Long when price breaks above R3 AND 4h close > 4h EMA20 (uptrend) AND 1d close > 1d EMA50 (strong uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below S3 AND 4h close < 4h EMA20 (downtrend) AND 1d close < 1d EMA50 (strong downtrend) AND volume > 1.5x 20 EMA
+# Uses discrete sizing (0.20) to limit fee drag. Target: 15-30 trades/year per symbol.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 12h for HTF trend to avoid counter-trend trades and 4h for entry timing.
+# Uses 4h for intermediate trend and 1d for strong trend filter to avoid counter-trend trades.
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA20_1dEMA50_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +24,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Get 12h OHLC arrays
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Donchian channels (20-period) for 12h timeframe
-    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 12h Donchian channels to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    
-    # Get 12h data for trend filter
-    if len(df_12h) < 50:
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_12h = close_12h > ema_50_12h
-    downtrend_12h = close_12h < ema_50_12h
+    # Calculate 4h OHLC arrays
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Align 12h trend to 4h timeframe
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    # Calculate 1d OHLC arrays
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 4h bar (using 4h data)
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_r3_4h = close_4h + (high_4h - low_4h) * 1.1 / 4
+    camarilla_s3_4h = close_4h - (high_4h - low_4h) * 1.1 / 4
+    
+    # Align 4h Camarilla levels to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3_4h)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3_4h)
+    
+    # Get 4h data for trend filter
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Uptrend when close > EMA20, downtrend when close < EMA20
+    uptrend_4h = close_4h > ema_20_4h
+    downtrend_4h = close_4h < ema_20_4h
+    
+    # Align 4h trend to 1h timeframe
+    uptrend_4h_aligned = align_htf_to_ltf(prices, df_4h, uptrend_4h.astype(float))
+    downtrend_4h_aligned = align_htf_to_ltf(prices, df_4h, downtrend_4h.astype(float))
+    
+    # Get 1d data for strong trend filter
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for strong trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Strong uptrend when close > EMA50, strong downtrend when close < EMA50
+    strong_uptrend_1d = close_1d > ema_50_1d
+    strong_downtrend_1d = close_1d < ema_50_1d
+    
+    # Align 1d strong trend to 1h timeframe
+    strong_uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, strong_uptrend_1d.astype(float))
+    strong_downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, strong_downtrend_1d.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(uptrend_4h_aligned[i]) or np.isnan(downtrend_4h_aligned[i]) or
+            np.isnan(strong_uptrend_1d_aligned[i]) or np.isnan(strong_downtrend_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,33 +101,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper AND 12h uptrend AND volume spike
-            if (close[i] > upper_aligned[i] and 
-                uptrend_12h_aligned[i] > 0.5 and 
+            # Long conditions: price breaks above R3 AND 4h uptrend AND 1d strong uptrend AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                uptrend_4h_aligned[i] > 0.5 and 
+                strong_uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below lower AND 12h downtrend AND volume spike
-            elif (close[i] < lower_aligned[i] and 
-                  downtrend_12h_aligned[i] > 0.5 and 
+            # Short conditions: price breaks below S3 AND 4h downtrend AND 1d strong downtrend AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  downtrend_4h_aligned[i] > 0.5 and 
+                  strong_downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower OR 12h trend changes to downtrend
-            if (close[i] < lower_aligned[i] or 
-                downtrend_12h_aligned[i] > 0.5):
+            # Exit long: price breaks below S3 OR 4h trend changes to downtrend OR 1d strong trend changes to downtrend
+            if (close[i] < s3_aligned[i] or 
+                downtrend_4h_aligned[i] > 0.5 or 
+                strong_downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above upper OR 12h trend changes to uptrend
-            if (close[i] > upper_aligned[i] or 
-                uptrend_12h_aligned[i] > 0.5):
+            # Exit short: price breaks above R3 OR 4h trend changes to uptrend OR 1d strong trend changes to uptrend
+            if (close[i] > r3_aligned[i] or 
+                uptrend_4h_aligned[i] > 0.5 or 
+                strong_uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
