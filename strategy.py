@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d ATR-based volatility regime filter + Donchian(20) breakout with volume confirmation
-# Long when price breaks above Donchian(20) high AND ATR(14) > ATR(50) (high volatility regime) AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below Donchian(20) low AND ATR(14) > ATR(50) (high volatility regime) AND volume > 1.5 * avg_volume(20)
-# Exit when price crosses Donchian(20) midpoint OR ATR(14) < ATR(50) (low volatility regime)
+# Hypothesis: 4h strategy using daily Camarilla pivot breakout with 4h EMA21 trend filter and volume spike confirmation
+# Long when price breaks above daily Camarilla R3 level AND price > 4h EMA21 AND volume > 1.8 * avg_volume(20) on 4h
+# Short when price breaks below daily Camarilla S3 level AND price < 4h EMA21 AND volume > 1.8 * avg_volume(20) on 4h
+# Exit when price crosses back below/above daily Camarilla pivot point OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# ATR regime filter ensures we only trade in high volatility environments where breakouts are more reliable
-# Volume confirmation reduces false breakouts
-# Works in bull markets (strong breakouts with volume) and bear markets (strong breakdowns with volume)
+# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
+# Daily Camarilla provides robust support/resistance from higher timeframe
+# 4h EMA21 filters primary trend to avoid counter-trend trades
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "4h_ATR_Regime_Donchian20_Breakout_Volume"
+name = "4h_Camarilla_R3S3_Breakout_4hEMA21_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,33 +28,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR regime filter
+    # Get daily data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for ATR(50)
+    if len(df_1d) < 5:  # Need at least one completed daily bar
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) and ATR(50)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
-    high_vol_regime = atr14_1d_aligned > atr50_1d_aligned  # High volatility when short ATR > long ATR
+    # Calculate daily Camarilla levels (based on previous daily bar)
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R3 = Pivot + Range * 1.1/2, S3 = Pivot - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r3 = pivot_1d + (range_1d * 1.1 / 2.0)
+    camarilla_s3 = pivot_1d - (range_1d * 1.1 / 2.0)
+    camarilla_pivot = pivot_1d  # PP level for exit
     
-    # Calculate Donchian(20) on 4h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    midpoint_20 = (highest_20 + lowest_20) / 2.0
+    # Align daily Camarilla levels to 4h timeframe (wait for completed daily bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
+    # Get 4h data ONCE before loop for EMA21 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:  # Need enough for EMA21
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA21
+    close_4h_series = pd.Series(close_4h)
+    ema21_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    
+    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (1.8 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -64,8 +74,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(midpoint_20[i]) or 
-            np.isnan(atr14_1d_aligned[i]) or np.isnan(atr50_1d_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -73,24 +83,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian(20) high, high volatility regime, volume confirmation, in session
-            if close[i] > highest_20[i] and high_vol_regime[i] and volume_confirm[i]:
+            # Long: Price breaks above daily Camarilla R3, above 4h EMA21, volume confirmation, in session
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema21_4h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian(20) low, high volatility regime, volume confirmation, in session
-            elif close[i] < lowest_20[i] and high_vol_regime[i] and volume_confirm[i]:
+            # Short: Price breaks below daily Camarilla S3, below 4h EMA21, volume confirmation, in session
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema21_4h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Donchian(20) midpoint OR low volatility regime
-            if close[i] < midpoint_20[i] or not high_vol_regime[i]:
+            # Exit long: Price crosses below daily Camarilla pivot OR volume drops below average
+            if close[i] < camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Donchian(20) midpoint OR low volatility regime
-            if close[i] > midpoint_20[i] or not high_vol_regime[i]:
+            # Exit short: Price crosses above daily Camarilla pivot OR volume drops below average
+            if close[i] > camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
