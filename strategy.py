@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 Breakout with 12h EMA50 trend filter and volume confirmation (2.0x)
-# Long when price breaks above R3 AND price > 12h EMA50 AND volume > 2.0x 20-period average
-# Short when price breaks below S3 AND price < 12h EMA50 AND volume > 2.0x 20-period average
-# Exit when price reverts to Camarilla pivot point (PP)
-# Uses 4h timeframe with 12h HTF for robust trend filtering (target: 75-200 total over 4 years)
-# Camarilla levels provide precise intraday structure from 12h candles
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (1.8x)
+# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 1.8x 20-day average volume
+# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 1.8x 20-day average volume
+# Exit when price reverts to 10-day EMA (adaptive stop)
+# Uses 1d timeframe with 1w HTF for robust trend filtering (target: 30-100 total over 4 years)
+# Donchian channels provide clear breakout structure proven to work on SOLUSDT
 # Volume confirmation reduces false breakouts
-# 12h EMA50 offers strong trend filter effective in both bull and bear markets
+# 1w EMA50 offers strong trend filter effective in both bull and bear markets
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_2.0x"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_1.8x"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,38 +27,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Camarilla and EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1w data ONCE before loop for EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous 12h bar
-    camarilla_high = np.roll(high_12h, 1)  # previous 12h bar high
-    camarilla_low = np.roll(low_12h, 1)    # previous 12h bar low
-    camarilla_close = np.roll(close_12h, 1) # previous 12h bar close
+    # Calculate Donchian channels (20-period) on 1d data
+    if len(high) >= 20:
+        high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    else:
+        high_roll_max = np.full(n, np.nan)
+        low_roll_min = np.full(n, np.nan)
     
-    # Calculate Camarilla levels
-    camarilla_range = camarilla_high - camarilla_low
-    r3 = camarilla_close + 1.1 * camarilla_range
-    s3 = camarilla_close - 1.1 * camarilla_range
-    pp = (camarilla_high + camarilla_low + camarilla_close) / 3.0
+    # Calculate 1w EMA(50)
+    if len(close_1w) >= 50:
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1w = np.full(len(close_1w), np.nan)
     
-    # Calculate 12h EMA(50)
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align HTF indicators to 1d timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align HTF indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation on 4h (threshold: 2.0x for optimal frequency)
+    # Volume confirmation on 1d (threshold: 1.8x for optimal frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)
+        volume_spike = volume > (1.8 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
@@ -67,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,30 +71,38 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND price > EMA50 AND volume spike
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above 20-day high AND price > EMA50 AND volume spike
+            if (close[i] > high_roll_max[i] and 
                 close[i] > ema_50_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND price < EMA50 AND volume spike
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below 20-day low AND price < EMA50 AND volume spike
+            elif (close[i] < low_roll_min[i] and 
                   close[i] < ema_50_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverts to PP
-            if close[i] < pp_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit long: price reverts to 10-day EMA (adaptive stop)
+            if len(close) >= 10:
+                ema_10 = pd.Series(close[:i+1]).ewm(span=10, adjust=False, min_periods=10).mean().iloc[-1]
+                if close[i] < ema_10:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverts to PP
-            if close[i] > pp_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit short: price reverts to 10-day EMA (adaptive stop)
+            if len(close) >= 10:
+                ema_10 = pd.Series(close[:i+1]).ewm(span=10, adjust=False, min_periods=10).mean().iloc[-1]
+                if close[i] > ema_10:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
