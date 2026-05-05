@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Camarilla pivot breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above weekly Camarilla R3 level AND price > 1w EMA50 AND volume > 2.0 * avg_volume(20) on 1d
-# Short when price breaks below weekly Camarilla S3 level AND price < 1w EMA50 AND volume > 2.0 * avg_volume(20) on 1d
-# Exit when price returns to weekly Camarilla R2/S2 levels (mean reversion) OR volume drops below average
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Weekly Camarilla provides structural support/resistance levels from higher timeframe
-# 1w EMA50 filters for primary trend alignment to avoid counter-trend trades
-# Volume spike confirms breakout strength and reduces false signals
-# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
+# Hypothesis: 6h strategy using Ichimoku Cloud from 1d timeframe for trend filter,
+# combined with 6h Tenkan-Kijun cross for entry timing and volume confirmation.
+# Long when price > 1d Ichimoku Cloud (bullish trend) AND 6h Tenkan crosses above Kijun
+# AND volume > 1.5 * 20-period average volume on 6h.
+# Short when price < 1d Ichimoku Cloud (bearish trend) AND 6h Tenkan crosses below Kijun
+# AND volume confirmation.
+# Exit when price crosses opposite cloud boundary or Tenkan-Kijun cross reverses.
+# Uses discrete sizing 0.25 to manage risk in volatile 6h timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Ichimoku Cloud provides strong trend identification that works in both bull and bear markets.
+# Tenkan-Kijun cross gives timely entries with trend alignment.
+# Volume confirmation reduces false signals during low-participation periods.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_IchimokuCloud_1dTrend_TKCross_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,39 +30,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:  # Need at least one completed weekly bar
+    # Get 1d data ONCE before loop for Ichimoku Cloud calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need enough for Ichimoku (26*2)
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla levels (based on previous week's OHLC)
-    # Camarilla R3 = close + (high - low) * 1.1/2
-    # Camarilla S3 = close - (high - low) * 1.1/2
-    # Camarilla R2 = close + (high - low) * 1.1/4
-    # Camarilla S2 = close - (high - low) * 1.1/4
-    hl_range_1w = high_1w - low_1w
-    camarilla_r3 = close_1w + hl_range_1w * 1.1 / 2
-    camarilla_s3 = close_1w - hl_range_1w * 1.1 / 2
-    camarilla_r2 = close_1w + hl_range_1w * 1.1 / 4
-    camarilla_s2 = close_1w - hl_range_1w * 1.1 / 4
+    # Calculate Ichimoku Components on daily timeframe
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align weekly Camarilla levels to daily timeframe (wait for completed weekly bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r2)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s2)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 6h timeframe (wait for completed daily bar)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Calculate 6h Tenkan-Kijun for entry timing
+    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen_6h = (period9_high_6h + period9_low_6h) / 2
+    
+    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen_6h = (period26_high_6h + period26_low_6h) / 2
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -71,34 +85,42 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud boundaries (Senkou Span A and B form the cloud)
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Long: price breaks above weekly Camarilla R3, above 1w EMA50, volume confirmation, in session
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema50_1w_aligned[i] and volume_confirm[i]):
+            # Long: Price above cloud (bullish trend) AND Tenkan crosses above Kijun on 6h AND volume confirmation
+            if (close[i] > upper_cloud and 
+                tenkan_sen_6h[i] > kijun_sen_6h[i] and tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1] and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Camarilla S3, below 1w EMA50, volume confirmation, in session
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema50_1w_aligned[i] and volume_confirm[i]):
+            # Short: Price below cloud (bearish trend) AND Tenkan crosses below Kijun on 6h AND volume confirmation
+            elif (close[i] < lower_cloud and 
+                  tenkan_sen_6h[i] < kijun_sen_6h[i] and tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1] and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to weekly Camarilla R2 (mean reversion) OR volume drops below average
-            if close[i] < camarilla_r2_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below cloud OR Tenkan crosses below Kijun
+            if close[i] < lower_cloud or (tenkan_sen_6h[i] < kijun_sen_6h[i] and tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to weekly Camarilla S2 (mean reversion) OR volume drops below average
-            if close[i] > camarilla_s2_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above cloud OR Tenkan crosses above Kijun
+            if close[i] > upper_cloud or (tenkan_sen_6h[i] > kijun_sen_6h[i] and tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
