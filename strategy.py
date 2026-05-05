@@ -4,12 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above upper Donchian(20) AND close > EMA50(1d) AND volume > 1.5x 20-period average
-# Short when price breaks below lower Donchian(20) AND close < EMA50(1d) AND volume > 1.5x 20-period average
-# Exit when price crosses back to the opposite Donchian(20) level OR EMA50(1d) trend flips
-# Donchian(20) provides price channel structure, EMA50(1d) filters trend direction, volume confirms breakout strength
+# Long when price breaks above Donchian upper band AND close > EMA50(1d) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower band AND close < EMA50(1d) AND volume > 1.5x 20-period average
+# Exit when price crosses back to Donchian mid-band OR EMA50(1d) trend flips
+# Donchian provides clear structure, 1d EMA50 filters counter-trend moves, volume reduces false breakouts
 # Target: 20-50 trades/year per symbol (80-200 total over 4 years) for 4h timeframe
-# Discrete sizing (0.25) to limit fee drag, works in both bull (breakouts) and bear (mean reversion via trend filter)
+# Discrete sizing (0.25) to limit fee drag
 
 name = "4h_Donchian20_1dEMA50_Trend_Volume"
 timeframe = "4h"
@@ -34,13 +34,16 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian(20) channels on 4h data
-    if len(high) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels on 4h data
+    lookback = 20
+    if len(high) >= lookback:
+        highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+        lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+        mid_band = (highest_high + lowest_low) / 2
     else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
+        highest_high = np.full(n, np.nan)
+        lowest_low = np.full(n, np.nan)
+        mid_band = np.full(n, np.nan)
     
     # Volume confirmation: volume > 1.5x 20-period average
     if len(volume) >= 20:
@@ -54,8 +57,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(mid_band[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
@@ -64,29 +68,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper Donchian AND close > EMA50(1d) AND volume spike
-            if (close[i] > donchian_high[i] and 
+            # Long conditions: price breaks above upper band AND close > EMA50(1d) AND volume spike
+            if (close[i] > highest_high[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower Donchian AND close < EMA50(1d) AND volume spike
-            elif (close[i] < donchian_low[i] and 
+            # Short conditions: price breaks below lower band AND close < EMA50(1d) AND volume spike
+            elif (close[i] < lowest_low[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below lower Donchian OR close < EMA50(1d) (trend flip)
-            if (close[i] < donchian_low[i] or 
+            # Exit long: price crosses below mid-band OR close < EMA50(1d) (trend flip)
+            if (close[i] < mid_band[i] or 
                 close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above upper Donchian OR close > EMA50(1d) (trend flip)
-            if (close[i] > donchian_high[i] or 
+            # Exit short: price crosses above mid-band OR close > EMA50(1d) (trend flip)
+            if (close[i] > mid_band[i] or 
                 close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
