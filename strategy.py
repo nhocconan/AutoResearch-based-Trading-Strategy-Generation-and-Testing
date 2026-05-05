@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation
-# Long when: price breaks above Donchian(20) high, 1w HMA(21) trending up, volume > 1.5x 20-period MA
-# Short when: price breaks below Donchian(20) low, 1w HMA(21) trending down, volume > 1.5x 20-period MA
-# Exit when: price retouches Donchian(20) midpoint or HMA trend reverses
-# Uses Donchian for structure, 1w HMA for HTF trend, volume for conviction
-# Timeframe: 1d, HTF: 1w. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Hypothesis: 6h Fisher Transform + 1d ADX regime + volume confirmation
+# Fisher Transform catches reversals in ranging markets (common in 2025 bear/range)
+# 1d ADX > 25 filters for trending regimes to avoid whipsaws
+# Volume confirmation ensures conviction on signals
+# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1d_Donchian20_Breakout_1wHMA21_VolumeConfirm"
-timeframe = "1d"
+name = "6h_FisherTransform_1dADX_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,94 +23,137 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 1d using 20-period MA
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume confirmation: 24-period MA (equivalent to 1d lookback in 6h)
+    if len(volume) >= 24:
+        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+        volume_filter = volume > (1.5 * vol_ma_24)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for HMA calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data ONCE before loop for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for ADX
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 21-period HMA on 1w timeframe
-    if len(close_1w) >= 21:
-        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-        half_n = 21 // 2
-        sqrt_n = int(np.sqrt(21))
+    # Calculate ADX on 1d timeframe (standard 14-period)
+    if len(high_1d) >= 14 and len(low_1d) >= 14 and len(close_1d) >= 14:
+        # True Range
+        tr1 = np.abs(high_1d[1:] - low_1d[1:])
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        tr = np.concatenate([[np.nan], tr])  # Align with original arrays
         
-        def wma(values, window):
-            if len(values) < window:
-                return np.full_like(values, np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights / weights.sum(), mode='valid')
+        # Directional Movement
+        up_move = high_1d[1:] - high_1d[:-1]
+        down_move = low_1d[:-1] - low_1d[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
         
-        wma_half = wma(close_1w, half_n)
-        wma_full = wma(close_1w, 21)
-        if len(wma_half) >= half_n and len(wma_full) >= 21:
-            raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
-            hma_21 = wma(raw_hma, sqrt_n)
-            # Pad to match original length
-            hma_21_padded = np.full(len(close_1w), np.nan)
-            hma_21_padded[half_n + sqrt_n - 1:] = hma_21
-            hma_21 = hma_21_padded
+        # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+        def wilders_smoothing(data, period):
+            if len(data) < period:
+                return np.full(len(data), np.nan)
+            result = np.full(len(data), np.nan)
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        atr = wilders_smoothing(tr, 14)
+        plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+        minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = wilders_smoothing(dx, 14)
+    else:
+        adx = np.full(len(close_1d), np.nan)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Fisher Transform on 6h timeframe (period=10)
+    if len(close) >= 10:
+        # Median price
+        median_price = (high + low) / 2
+        
+        # Normalize median price to [-1, 1] range over lookback period
+        def normalize(series, period):
+            if len(series) < period:
+                return np.full(len(series), np.nan)
+            result = np.full(len(series), np.nan)
+            for i in range(period-1, len(series)):
+                min_val = np.nanmin(series[i-period+1:i+1])
+                max_val = np.nanmax(series[i-period+1:i+1])
+                if max_val - min_val != 0:
+                    result[i] = 2 * ((series[i] - min_val) / (max_val - min_val)) - 1
+                else:
+                    result[i] = 0
+            return result
+        
+        normalized = normalize(median_price, 10)
+        
+        # Avoid extreme values for ln calculation
+        normalized = np.clip(normalized, -0.999, 0.999)
+        
+        # Fisher Transform formula: 0.5 * ln((1+X)/(1-X))
+        fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
+        
+        # Signal line: 3-period EMA of Fisher
+        if len(fisher) >= 3:
+            fisher_signal = pd.Series(fisher).ewm(span=3, adjust=False, min_periods=3).mean().values
         else:
-            hma_21 = np.full(len(close_1w), np.nan)
+            fisher_signal = np.full(len(fisher), np.nan)
     else:
-        hma_21 = np.full(len(close_1w), np.nan)
-    
-    # Align 1w HMA to 1d timeframe
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
-    
-    # Calculate Donchian(20) channels on 1d timeframe
-    if len(high) >= 20 and len(low) >= 20:
-        donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donch_mid = (donch_high + donch_low) / 2
-    else:
-        donch_high = np.full(n, np.nan)
-        donch_low = np.full(n, np.nan)
-        donch_mid = np.full(n, np.nan)
+        fisher = np.full(n, np.nan)
+        fisher_signal = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(fisher[i]) or np.isnan(fisher_signal[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high + HMA trending up + volume filter
-            if (close[i] > donch_high[i] and 
-                hma_21_aligned[i] > hma_21_aligned[i-1] and  # HMA trending up
+            # Long: Fisher crosses above signal line + ADX > 25 (trending) + volume filter
+            if (fisher[i] > fisher_signal[i] and 
+                fisher[i-1] <= fisher_signal[i-1] and  # Cross above
+                adx_aligned[i] > 25 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low + HMA trending down + volume filter
-            elif (close[i] < donch_low[i] and 
-                  hma_21_aligned[i] < hma_21_aligned[i-1] and  # HMA trending down
+            # Short: Fisher crosses below signal line + ADX > 25 (trending) + volume filter
+            elif (fisher[i] < fisher_signal[i] and 
+                  fisher[i-1] >= fisher_signal[i-1] and  # Cross below
+                  adx_aligned[i] > 25 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retouches Donchian midpoint OR HMA trend turns down
-            if (close[i] <= donch_mid[i] or hma_21_aligned[i] < hma_21_aligned[i-1]):
+            # Exit long: Fisher crosses below signal line OR ADX drops below 20 (losing trend)
+            if (fisher[i] < fisher_signal[i] and 
+                fisher[i-1] >= fisher_signal[i-1]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retouches Donchian midpoint OR HMA trend turns up
-            if (close[i] >= donch_mid[i] or hma_21_aligned[i] > hma_21_aligned[i-1]):
+            # Exit short: Fisher crosses above signal line OR ADX drops below 20
+            if (fisher[i] > fisher_signal[i] and 
+                fisher[i-1] <= fisher_signal[i-1]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
