@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above Donchian upper (20-period high) AND price > EMA34(1d) AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian lower (20-period low) AND price < EMA34(1d) AND volume > 2.0x 20-period average
-# Exit when price crosses back below/above Donchian mid-line (10-period average) OR trend flips (price crosses EMA34(1d))
-# Donchian channel provides clear structure for breakouts in both bull and bear markets
-# 1d EMA34 ensures we only trade in the direction of the higher timeframe trend
+# Long when price breaks above Donchian upper channel AND price > EMA34(1d) AND volume > 2.0x 20-period average
+# Short when price breaks below Donchian lower channel AND price < EMA34(1d) AND volume > 2.0x 20-period average
+# Exit when price crosses back below/above Donchian middle (mean reversion) OR trend flips (price crosses EMA34(1d))
+# Donchian channels provide clear structure with proven edge in both bull/bear markets
+# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend whipsaws
 # Volume spike confirms institutional participation and reduces false breakouts
 # Target: 19-50 trades/year per symbol (75-200 total over 4 years) for 4h timeframe
 # Discrete sizing (0.25) to limit fee drag
@@ -39,11 +39,11 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channel (20-period) on 4h data
+    # Calculate Donchian channels (20-period) on 4h data
     if len(high) >= 20:
         donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
         donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_middle = (donchian_upper + donchian_lower) / 2.0
+        donchian_middle = (donchian_upper + donchian_lower) / 2
     else:
         donchian_upper = np.full(n, np.nan)
         donchian_lower = np.full(n, np.nan)
@@ -64,7 +64,6 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
