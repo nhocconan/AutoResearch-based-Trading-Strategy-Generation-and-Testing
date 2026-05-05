@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Bollinger Band squeeze breakout with daily EMA50 trend filter and volume confirmation
-# Long when price breaks above upper BB(20,2) AND daily EMA50 up AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below lower BB(20,2) AND daily EMA50 down AND volume > 1.5 * avg_volume(20)
-# Exit when price crosses back through daily EMA50 OR Bollinger Band width expands above 50th percentile
+# Hypothesis: 6h strategy using 12h ATR-based volatility breakout with 1d EMA50 trend filter
+# Long when price breaks above 6h Donchian(20) high AND 12h ATR(14) > 1.5 * 12h ATR(50) AND close > 1d EMA50
+# Short when price breaks below 6h Donchian(20) low AND 12h ATR(14) > 1.5 * 12h ATR(50) AND close < 1d EMA50
+# Exit when price crosses 6h EMA20 in opposite direction
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Bollinger Band squeeze identifies low volatility periods primed for breakout
-# Daily EMA50 filters for primary trend alignment to avoid counter-trend trades
-# Volume confirmation ensures breakout legitimacy
-# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# ATR expansion identifies genuine breakouts while filtering low-volatility false signals
+# 1d EMA50 ensures alignment with higher timeframe trend to avoid counter-trend trades
+# Donchian channels provide objective breakout levels with clear risk definition
 
-name = "1d_BB_Squeeze_Breakout_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ATR_VolatilityBreakout_12h_ATR_Ratio_1dEMA50"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,35 +25,28 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Bollinger Bands calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for BB
+    # Get 12h data ONCE before loop for ATR calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need enough for ATR(50)
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Bollinger Bands(20,2) on weekly timeframe
-    close_1w_series = pd.Series(close_1w)
-    bb_middle = close_1w_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_1w_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate True Range for 12h
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align Bollinger Bands to 1d timeframe (wait for completed weekly bar)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
+    # Calculate ATR(14) and ATR(50) for 12h
+    atr14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr50_12h = pd.Series(tr_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Bollinger Band width for regime filter (squeeze detection)
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width)
-    
-    # Calculate 20-period percentile rank of BB width (squeeze = low percentile)
-    bb_width_series = pd.Series(bb_width_aligned)
-    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    # Align ATR ratios to 6h timeframe (wait for completed 12h bar)
+    atr_ratio_12h = atr14_12h / atr50_12h
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
     
     # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -67,49 +59,52 @@ def generate_signals(prices):
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA50 slope for trend direction (up/down)
-    ema50_slope = np.diff(ema50_1d_aligned, prepend=ema50_1d_aligned[0])
-    ema50_up = ema50_slope > 0
-    ema50_down = ema50_slope < 0
+    # Calculate 6h Donchian(20) channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # Calculate 6h EMA20 for exit
+    close_series = pd.Series(close)
+    ema20_6h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
-        # Skip if any value is NaN
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
-            np.isnan(avg_volume_20[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(ema20_6h[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper BB AND BB width percentile < 30 (squeeze) AND EMA50 up AND volume confirmation
-            if (close[i] > bb_upper_aligned[i] and bb_width_percentile[i] < 0.3 and 
-                ema50_up[i] and volume_confirm[i]):
+            # Long: Donchian breakout above, ATR expansion, above 1d EMA50
+            if (close[i] > highest_high_20[i] and atr_ratio_aligned[i] > 1.5 and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower BB AND BB width percentile < 30 (squeeze) AND EMA50 down AND volume confirmation
-            elif (close[i] < bb_lower_aligned[i] and bb_width_percentile[i] < 0.3 and 
-                  ema50_down[i] and volume_confirm[i]):
+            # Short: Donchian breakdown below, ATR expansion, below 1d EMA50
+            elif (close[i] < lowest_low_20[i] and atr_ratio_aligned[i] > 1.5 and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below EMA50 OR BB width percentile > 70 (expansion)
-            if close[i] < ema50_1d_aligned[i] or bb_width_percentile[i] > 0.7:
+            # Exit long: price crosses below 6h EMA20
+            if close[i] < ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above EMA50 OR BB width percentile > 70 (expansion)
-            if close[i] > ema50_1d_aligned[i] or bb_width_percentile[i] > 0.7:
+            # Exit short: price crosses above 6h EMA20
+            if close[i] > ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
