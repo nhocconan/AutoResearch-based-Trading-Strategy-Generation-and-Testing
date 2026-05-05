@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Ichimoku cloud (Senkou Span A) AND 1d close > 1d EMA50 AND volume > 1.5 * avg volume
-# Short when price breaks below Ichimoku cloud (Senkou Span B) AND 1d close < 1d EMA50 AND volume > 1.5 * avg volume
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-30 trades/year per symbol.
-# Ichimoku cloud acts as dynamic support/resistance; EMA50 filters trend; volume confirms breakout strength.
-# Works in bull markets via longs above cloud and bear markets via shorts below cloud.
+# Hypothesis: 12h Williams %R extreme with 1d EMA34 trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 AND volume > 1.5 * 20-period average volume
+# Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 AND volume > 1.5 * 20-period average volume
+# Williams %R identifies exhaustion points; EMA34 filters trend direction; volume confirms participation.
+# Works in bull markets via longs on pullbacks and bear markets via shorts on rallies.
+# 12h timeframe reduces trade frequency to minimize fee drag while capturing medium-term reversals.
 
-name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,101 +24,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data ONCE before loop for Ichimoku calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:  # Need 26*2 for Ichimoku
+    # Get 12h data ONCE before loop for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Calculate 12h Williams %R (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Oversold: Williams %R < -80, Overbought: Williams %R > -20
+    oversold = williams_r < -80
+    overbought = williams_r > -20
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Shift Senkou Spans forward by 26 periods (cloud is plotted ahead)
-    senkou_span_a = np.roll(senkou_span_a, 26)
-    senkou_span_b = np.roll(senkou_span_b, 26)
-    senkou_span_a[:26] = np.nan
-    senkou_span_b[:26] = np.nan
-    
-    # Align Ichimoku cloud to 6h timeframe (actually already 6h, but for consistency)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
+    # Align Williams %R signals to prices timeframe
+    oversold_aligned = align_htf_to_ltf(prices, df_12h, oversold.astype(float))
+    overbought_aligned = align_htf_to_ltf(prices, df_12h, overbought.astype(float))
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_1d = close_1d > ema_50_1d
-    downtrend_1d = close_1d < ema_50_1d
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 12h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
-    # Calculate average volume for volume confirmation
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # ~6 days of 6h bars
-    volume_filter = volume > (1.5 * avg_volume)
+    # Calculate 20-period average volume for volume confirmation
+    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 1.5 * 20-period average volume
+    vol_filter = volume > (1.5 * avg_vol_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+        if (np.isnan(oversold_aligned[i]) or np.isnan(overbought_aligned[i]) or 
             np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Senkou Span A (top of cloud) AND 1d uptrend AND high volume
-            if (close[i] > senkou_span_a_aligned[i] and 
+            # Long conditions: Williams %R oversold AND 1d uptrend AND high volume
+            if (oversold_aligned[i] > 0.5 and 
                 uptrend_1d_aligned[i] > 0.5 and 
-                volume_filter[i]):
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Senkou Span B (bottom of cloud) AND 1d downtrend AND high volume
-            elif (close[i] < senkou_span_b_aligned[i] and 
+            # Short conditions: Williams %R overbought AND 1d downtrend AND high volume
+            elif (overbought_aligned[i] > 0.5 and 
                   downtrend_1d_aligned[i] > 0.5 and 
-                  volume_filter[i]):
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Senkou Span B (bottom of cloud) OR 1d trend changes to downtrend
-            if (close[i] < senkou_span_b_aligned[i] or 
+            # Exit long: Williams %R > -50 (neutral) OR 1d trend changes to downtrend
+            if (overbought_aligned[i] > 0.5 or 
                 downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Senkou Span A (top of cloud) OR 1d trend changes to uptrend
-            if (close[i] > senkou_span_a_aligned[i] or 
+            # Exit short: Williams %R < -50 (neutral) OR 1d trend changes to uptrend
+            if (oversold_aligned[i] > 0.5 or 
                 uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
