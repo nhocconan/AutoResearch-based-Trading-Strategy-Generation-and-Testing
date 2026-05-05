@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme levels with 4h EMA34 trend filter and volume spike confirmation
-# Long when Williams %R(14) < -80 (oversold) AND price > 4h EMA34 AND volume > 1.5 * avg_volume(20) on 4h
-# Short when Williams %R(14) > -20 (overbought) AND price < 4h EMA34 AND volume > 1.5 * avg_volume(20) on 4h
-# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
-# Uses discrete sizing 0.25 to balance return and risk
-# Williams %R captures momentum exhaustion; EMA34 filters trend; volume confirms strength
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with 1d HMA21 trend filter and volume spike confirmation
+# Long when price breaks above weekly Donchian upper (20) AND price > 1d HMA21 AND volume > 1.5 * avg_volume(20) on 1d
+# Short when price breaks below weekly Donchian lower (20) AND price < 1d HMA21 AND volume > 1.5 * avg_volume(20) on 1d
+# Exit when price crosses back below/above weekly Donchian midpoint OR volume drops below average
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 50-120 total trades over 4 years (12-30/year) for 1d timeframe
+# Weekly Donchian provides robust structure from higher timeframe
+# 1d HMA21 filters primary trend with reduced lag vs EMA/SMA
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "4h_WilliamsR_Extreme_4hEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_HMA21_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +28,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need enough for Williams %R
+    # Get weekly data ONCE before loop for Donchian levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need at least 20 completed weekly bars
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Donchian channel (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20), Mid = (Upper + Lower)/2
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_20
+    donchian_lower = low_20
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
+    # Align weekly Donchian levels to 1d timeframe (wait for completed weekly bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    
+    # Get 1d data ONCE before loop for HMA21 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:  # Need enough for HMA21
+        return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate 1d HMA21 (Hull Moving Average)
+    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Align 1d Williams %R to 4h timeframe (wait for completed 1d bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    n_half = 21 // 2
+    n_sqrt = int(np.sqrt(21))
     
-    # Get 4h data ONCE before loop for EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:  # Need enough for EMA34
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
+    wma_half = np.array([np.nan] * len(close_1d))
+    wma_full = np.array([np.nan] * len(close_1d))
     
-    # Calculate 4h EMA34
-    close_4h_series = pd.Series(close_4h)
-    ema34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    for i in range(n_half, len(close_1d)):
+        wma_half[i] = wma(close_1d[i-n_half+1:i+1], n_half)
+    for i in range(21, len(close_1d)):
+        wma_full[i] = wma(close_1d[i-21+1:i+1], 21)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    raw_hma = 2 * wma_half - wma_full
+    hma21_1d = np.array([np.nan] * len(close_1d))
+    for i in range(n_sqrt, len(raw_hma)):
+        if not np.isnan(raw_hma[i]):
+            hma21_1d[i] = wma(raw_hma[i-n_sqrt+1:i+1], n_sqrt)
+    
+    hma21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma21_1d)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -66,7 +93,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_4h_aligned[i]) or 
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(hma21_1d_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -74,27 +102,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80), above EMA34, volume confirmation, in session
-            if williams_r_aligned[i] < -80 and close[i] > ema34_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above weekly Donchian upper, above 1d HMA21, volume confirmation, in session
+            if close[i] > donchian_upper_aligned[i] and close[i] > hma21_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R overbought (> -20), below EMA34, volume confirmation, in session
-            elif williams_r_aligned[i] > -20 and close[i] < ema34_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below weekly Donchian lower, below 1d HMA21, volume confirmation, in session
+            elif close[i] < donchian_lower_aligned[i] and close[i] < hma21_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (momentum fading)
-            if williams_r_aligned[i] > -50:
+            # Exit long: Price crosses below weekly Donchian midpoint OR volume drops below average
+            if close[i] < donchian_mid_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (momentum fading)
-            if williams_r_aligned[i] < -50:
+            # Exit short: Price crosses above weekly Donchian midpoint OR volume drops below average
+            if close[i] > donchian_mid_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
