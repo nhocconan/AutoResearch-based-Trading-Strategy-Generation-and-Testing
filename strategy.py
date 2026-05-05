@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike filter and 1w EMA200 trend filter
-# Long when price breaks above 12h Camarilla R3 level AND 1d volume > 2.0x 20-period average AND close > 1w EMA200
-# Short when price breaks below 12h Camarilla S3 level AND 1d volume > 2.0x 20-period average AND close < 1w EMA200
-# Exit when price crosses 12h Camarilla pivot point (mean reversion)
-# Uses 12h primary timeframe with 1d HTF for volume confirmation and 1w HTF for trend filter
-# Volume confirmation ensures breakouts have conviction, weekly EMA200 filters for major trend
+# Hypothesis: 4h Williams Alligator with 1d volume spike filter and chop regime avoidance
+# Long when Alligator jaws (13) < teeth (8) < lips (5) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging)
+# Short when Alligator jaws (13) > teeth (8) > lips (5) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging)
+# Exit when Alligator lines cross (jaws-teeth or teeth-lips)
+# Uses 4h primary timeframe with 1d HTF for volume confirmation and chop filter
+# Williams Alligator catches trends early with smoothed moving averages
+# Volume confirmation ensures breakouts have conviction
+# Chop regime filter avoids whipsaws in strong trends
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolume_1wEMA200"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dVolume_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +28,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for volume confirmation
+    # Get 1d data ONCE before loop for volume confirmation and chop filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -39,78 +41,107 @@ def generate_signals(prices):
     else:
         volume_filter_1d = np.zeros(len(df_1d), dtype=bool)
     
-    # Align 1d volume filter to 12h timeframe
+    # Calculate 1d chop filter (Choppiness Index)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    if len(high_1d) >= 14:
+        atr_1d = []
+        for i in range(1, len(high_1d)):
+            tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+            atr_1d.append(tr)
+        atr_1d = np.array(atr_1d)
+        atr_sum_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+        max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+        chop_denom = np.log10(max_high_14[13:] - min_low_14[13:]) * np.sqrt(14) * np.log10(100)
+        chop_num = np.log10(atr_sum_14[13:]) * np.sqrt(14) * np.log10(100)
+        chop_1d = np.full(len(high_1d), np.nan)
+        chop_1d[13:] = 100 * chop_num / chop_denom
+        chop_filter_1d = chop_1d > 61.8  # Chop > 61.8 = ranging market
+    else:
+        chop_filter_1d = np.zeros(len(df_1d), dtype=bool)
+    
+    # Align 1d filters to 4h timeframe
     volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    chop_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_filter_1d)
     
-    # Get 1w data ONCE before loop for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 210:
+    # Get 4h data ONCE before loop for Williams Alligator
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA200
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 4h Williams Alligator (Smoothed Moving Average)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    median_price_4h = (high_4h + low_4h) / 2  # Williams uses median price
     
-    # Align 1w EMA200 to 12h timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Smoothed Moving Average (SMA with smoothing)
+    def sma(arr, period):
+        return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
     
-    # Get 12h data ONCE before loop for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    def smma(arr, period):
+        sma_vals = sma(arr, period)
+        smma_vals = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) >= period:
+            smma_vals[period-1] = sma_vals[period-1]
+            for i in range(period, len(arr)):
+                if not np.isnan(smma_vals[i-1]) and not np.isnan(arr[i]):
+                    smma_vals[i] = (smma_vals[i-1] * (period-1) + arr[i]) / period
+        return smma_vals
     
-    # Calculate 12h Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    jaws = smma(median_price_4h, 13)  # Blue line (13-period)
+    teeth = smma(median_price_4h, 8)   # Red line (8-period)
+    lips = smma(median_price_4h, 5)    # Green line (5-period)
     
-    camarilla_r3 = close_12h + (1.1 * (high_12h - low_12h) / 2)
-    camarilla_s3 = close_12h - (1.1 * (high_12h - low_12h) / 2)
-    camarilla_pivot = (high_12h + low_12h + close_12h) / 3  # Standard pivot point
-    
-    # Align Camarilla levels to 12h timeframe (same df_12h)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
+    # Align Alligator lines to 4h timeframe (same df_4h)
+    jaws_aligned = align_htf_to_ltf(prices, df_4h, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or 
+        if (np.isnan(jaws_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
             np.isnan(volume_filter_1d_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+            np.isnan(chop_filter_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 AND volume spike AND above 1w EMA200
-            if (close[i] > camarilla_r3_aligned[i] and 
+            # Long conditions: Alligator aligned up (jaws < teeth < lips) AND volume spike AND chop > 61.8 (ranging)
+            if (jaws_aligned[i] < teeth_aligned[i] and 
+                teeth_aligned[i] < lips_aligned[i] and 
                 volume_filter_1d_aligned[i] and 
-                close[i] > ema_200_1w_aligned[i]):
+                chop_filter_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 AND volume spike AND below 1w EMA200
-            elif (close[i] < camarilla_s3_aligned[i] and 
+            # Short conditions: Alligator aligned down (jaws > teeth > lips) AND volume spike AND chop > 61.8 (ranging)
+            elif (jaws_aligned[i] > teeth_aligned[i] and 
+                  teeth_aligned[i] > lips_aligned[i] and 
                   volume_filter_1d_aligned[i] and 
-                  close[i] < ema_200_1w_aligned[i]):
+                  chop_filter_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla pivot (mean reversion)
-            if close[i] < camarilla_pivot_aligned[i]:
+            # Exit long: Alligator lines cross (jaws-teeth or teeth-lips)
+            if (jaws_aligned[i] > teeth_aligned[i] or 
+                teeth_aligned[i] > lips_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla pivot (mean reversion)
-            if close[i] > camarilla_pivot_aligned[i]:
+            # Exit short: Alligator lines cross (jaws-teeth or teeth-lips)
+            if (jaws_aligned[i] < teeth_aligned[i] or 
+                teeth_aligned[i] < lips_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
