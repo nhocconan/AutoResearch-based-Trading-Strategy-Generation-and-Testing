@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 12h Donchian upper(20) AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below 12h Donchian lower(20) AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Exit when price crosses 12h Donchian midpoint OR volume < avg_volume(20)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 4h Donchian upper(20) AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 4h Donchian lower(20) AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 4h Donchian midpoint OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
-# Donchian channels from 12h provide robust support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
+# Target: 75-200 total trades over 4 years (19-50/year)
+# Donchian channels from 4h provide robust support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
 # Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
