@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR(14) volatility filter
-# Long when price breaks above Donchian(20) high AND 1d close > 1d EMA50 AND ATR(14) < 0.03 * close
-# Short when price breaks below Donchian(20) low AND 1d close < 1d EMA50 AND ATR(14) < 0.03 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 15-25 trades/year per symbol.
-# Donchian provides price channel structure; EMA50 filters trend; ATR filter avoids high volatility chop.
-# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# 4h timeframe balances trade frequency and signal quality to minimize fee drag.
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Ichimoku cloud (Senkou Span A) AND 1d close > 1d EMA50 AND volume > 1.5 * avg volume
+# Short when price breaks below Ichimoku cloud (Senkou Span B) AND 1d close < 1d EMA50 AND volume > 1.5 * avg volume
+# Uses discrete sizing (0.25) to limit fee drag. Target: 12-30 trades/year per symbol.
+# Ichimoku cloud acts as dynamic support/resistance; EMA50 filters trend; volume confirms breakout strength.
+# Works in bull markets via longs above cloud and bear markets via shorts below cloud.
 
-name = "4h_Donchian20_1dEMA50_ATR_Filter"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,12 +24,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) on primary timeframe (4h)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Get 6h data ONCE before loop for Ichimoku calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 52:  # Need 26*2 for Ichimoku
+        return np.zeros(n)
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Calculate Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Shift Senkou Spans forward by 26 periods (cloud is plotted ahead)
+    senkou_span_a = np.roll(senkou_span_a, 26)
+    senkou_span_b = np.roll(senkou_span_b, 26)
+    senkou_span_a[:26] = np.nan
+    senkou_span_b[:26] = np.nan
+    
+    # Align Ichimoku cloud to 6h timeframe (actually already 6h, but for consistency)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -42,59 +74,51 @@ def generate_signals(prices):
     uptrend_1d = close_1d > ema_50_1d
     downtrend_1d = close_1d < ema_50_1d
     
-    # Align 1d trend to 4h timeframe
+    # Align 1d trend to 6h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 3% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.03 * close)
+    # Calculate average volume for volume confirmation
+    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # ~6 days of 6h bars
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
             np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
-            np.isnan(vol_filter[i])):
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Donchian high AND 1d uptrend AND low volatility
-            if (close[i] > highest_high[i] and 
+            # Long conditions: price > Senkou Span A (top of cloud) AND 1d uptrend AND high volume
+            if (close[i] > senkou_span_a_aligned[i] and 
                 uptrend_1d_aligned[i] > 0.5 and 
-                vol_filter[i]):
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Donchian low AND 1d downtrend AND low volatility
-            elif (close[i] < lowest_low[i] and 
+            # Short conditions: price < Senkou Span B (bottom of cloud) AND 1d downtrend AND high volume
+            elif (close[i] < senkou_span_b_aligned[i] and 
                   downtrend_1d_aligned[i] > 0.5 and 
-                  vol_filter[i]):
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian low OR 1d trend changes to downtrend
-            if (close[i] < lowest_low[i] or 
+            # Exit long: price < Senkou Span B (bottom of cloud) OR 1d trend changes to downtrend
+            if (close[i] < senkou_span_b_aligned[i] or 
                 downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Donchian high OR 1d trend changes to uptrend
-            if (close[i] > highest_high[i] or 
+            # Exit short: price > Senkou Span A (top of cloud) OR 1d trend changes to uptrend
+            if (close[i] > senkou_span_a_aligned[i] or 
                 uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
