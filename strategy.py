@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R + 1w EMA trend filter + volume confirmation
-# Williams %R: momentum oscillator identifying overbought/oversold conditions
-# Long when: %R crosses above -80 (oversold bounce) AND 1w EMA(50) > EMA(200) (bullish trend) AND volume > 1.5x 20-period MA
-# Short when: %R crosses below -20 (overbought reversal) AND 1w EMA(50) < EMA(200) (bearish trend) AND volume > 1.5x 20-period MA
-# Exit when: %R crosses -50 (mean reversion) OR volume < 1.2x 20-period MA (loss of conviction)
-# Uses Williams %R for momentum timing, 1w EMA cross for regime filter, volume for conviction
-# Timeframe: 1d, HTF: 1w for EMA trend. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Hypothesis: 6h Bollinger Band Width Regime + 1d Donchian Breakout + Volume Spike
+# BB Width < 0.03 = low volatility squeeze (regime filter)
+# Long when: price breaks above 1d Donchian(20) high AND volume > 2x 20-period MA AND BB Width < 0.03
+# Short when: price breaks below 1d Donchian(20) low AND volume > 2x 20-period MA AND BB Width < 0.03
+# Exit when: price returns to 6h EMA(20) OR BB Width > 0.06 (volatility expansion)
+# Uses volatility regime to filter breakouts, Donchian for structure, volume for confirmation
+# Timeframe: 6h, HTF: 1d for Donchian channels. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "1d_WilliamsR_1wEMA_VolumeConfirm"
-timeframe = "1d"
+name = "6h_BBWidth_Donchian_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +25,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R(14) on 1d
-    if len(high) >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-        # Handle division by zero when highest_high == lowest_low
-        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Bollinger Bands on 6h for volatility regime
+    if len(close) >= 20:
+        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        upper_bb = sma_20 + (2 * std_20)
+        lower_bb = sma_20 - (2 * std_20)
+        bb_width = (upper_bb - lower_bb) / sma_20  # normalized width
     else:
-        williams_r = np.full(n, np.nan)
+        sma_20 = np.full(n, np.nan)
+        bb_width = np.full(n, np.nan)
     
-    # Williams %R signals: cross above -80 (long), cross below -20 (short)
-    williams_long_signal = (williams_r > -80) & (np.roll(williams_r, 1) <= -80)
-    williams_short_signal = (williams_r < -20) & (np.roll(williams_r, 1) >= -20)
-    williams_exit_signal = (williams_r > -50) & (np.roll(williams_r, 1) <= -50)  # exit long
-    williams_exit_signal_short = (williams_r < -50) & (np.roll(williams_r, 1) >= -50)  # exit short
+    # EMA(20) for exit condition on 6h
+    if len(close) >= 20:
+        ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    else:
+        ema_20 = np.full(n, np.nan)
     
-    # Volume confirmation on 1d
+    # Volume confirmation on 6h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-        volume_weak = volume < (1.2 * vol_ma_20)  # for exit condition
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
-        volume_weak = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for EMA trend calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # need sufficient data for EMA
+    # Get 1d data ONCE before loop for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # need sufficient data for Donchian
         return np.zeros(n)
     
-    # Calculate EMA(50) and EMA(200) on 1w
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 200:
-        ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_200 = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_bullish = ema_50 > ema_200  # bullish trend
-        ema_bearish = ema_50 < ema_200  # bearish trend
-    else:
-        ema_bullish = np.zeros(len(df_1w), dtype=bool)
-        ema_bearish = np.zeros(len(df_1w), dtype=bool)
+    # Calculate Donchian(20) channels on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align 1w EMA trend to 1d timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish.astype(float))
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish.astype(float))
+    if len(high_1d) >= 20:
+        # Donchian high: highest high of last 20 periods
+        donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+        # Donchian low: lowest low of last 20 periods
+        donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    else:
+        donch_high = np.full(len(df_1d), np.nan)
+        donch_low = np.full(len(df_1d), np.nan)
+    
+    # Align 1d Donchian channels to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_long_signal[i]) or np.isnan(williams_short_signal[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_bullish_aligned[i]) or 
-            np.isnan(ema_bearish_aligned[i])):
+        if (np.isnan(bb_width[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R bullish cross + bullish trend + volume filter
-            if (williams_long_signal[i] and 
-                ema_bullish_aligned[i] == 1.0 and 
-                volume_filter[i]):
+            # Long conditions: price above 1d Donchian high + volume filter + low volatility squeeze
+            if (close[i] > donch_high_aligned[i] and 
+                volume_filter[i] and 
+                bb_width[i] < 0.03):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R bearish cross + bearish trend + volume filter
-            elif (williams_short_signal[i] and 
-                  ema_bearish_aligned[i] == 1.0 and 
-                  volume_filter[i]):
+            # Short conditions: price below 1d Donchian low + volume filter + low volatility squeeze
+            elif (close[i] < donch_low_aligned[i] and 
+                  volume_filter[i] and 
+                  bb_width[i] < 0.03):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses -50 OR weak volume
-            if (williams_exit_signal[i] or volume_weak[i]):
+            # Exit long: price returns to 6h EMA(20) OR volatility expands (BB Width > 0.06)
+            if (close[i] <= ema_20[i] or bb_width[i] > 0.06):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses -50 OR weak volume
-            if (williams_exit_signal_short[i] or volume_weak[i]):
+            # Exit short: price returns to 6h EMA(20) OR volatility expands (BB Width > 0.06)
+            if (close[i] >= ema_20[i] or bb_width[i] > 0.06):
                 signals[i] = 0.0
                 position = 0
             else:
