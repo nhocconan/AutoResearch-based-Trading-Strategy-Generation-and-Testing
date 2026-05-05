@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extremes for mean reversion entries, filtered by 1w EMA50 trend and volume spike confirmation
-# Long when Williams %R(14) crosses above -80 (oversold) AND price > 1w EMA50 (uptrend) AND volume > 1.8 * avg_volume(20) on 12h
-# Short when Williams %R(14) crosses below -20 (overbought) AND price < 1w EMA50 (downtrend) AND volume > 1.8 * avg_volume(20) on 12h
-# Exit when Williams %R crosses back through -50 (mean reversion midpoint)
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Williams %R provides timely reversal signals in ranging markets
-# 1w EMA50 filters for primary weekly trend alignment to avoid counter-trend trades
-# Volume spike confirms reversal strength and reduces false signals
-# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
+# Hypothesis: 1d strategy using weekly Camarilla pivot (R3/S3) breakout with 1w EMA20 trend filter and volume spike confirmation
+# Long when price breaks above weekly R3 AND price > 1w EMA20 AND volume > 2.0 * avg_volume(20) on 1d
+# Short when price breaks below weekly S3 AND price < 1w EMA20 AND volume > 2.0 * avg_volume(20) on 1d
+# Exit when price returns to weekly pivot point (PP) OR volume drops below average
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Weekly Camarilla provides strong support/resistance levels that work in ranging and trending markets
+# 1w EMA20 filters for primary trend alignment to avoid counter-trend trades
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
 
-name = "12h_WilliamsR_EXT_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_R3S3_1wEMA20_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,37 +28,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Williams %R calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least one completed daily bar for Williams %R
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Williams %R(14) on daily timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100
-    
-    # Align Williams %R to 12h timeframe (wait for completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Get 1w data ONCE before loop for EMA50 trend filter
+    # Get 1w data ONCE before loop for Camarilla pivot calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA50
+    if len(df_1w) < 1:  # Need at least one completed weekly bar
         return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate weekly Camarilla pivot levels
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Range = High - Low
+    range_1w = high_1w - low_1w
+    # Resistance levels: R1 = PP + (Range * 1.1/12), R2 = PP + (Range * 1.1/6), R3 = PP + (Range * 1.1/4)
+    # Support levels: S1 = PP - (Range * 1.1/12), S2 = PP - (Range * 1.1/6), S3 = PP - (Range * 1.1/4)
+    r3_1w = pp_1w + (range_1w * 1.1 / 4.0)
+    s3_1w = pp_1w - (range_1w * 1.1 / 4.0)
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 12h
+    # Get 1w data ONCE before loop for EMA20 trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -69,37 +66,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold), above 1w EMA50 (uptrend), volume confirmation, in session
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
-                close[i] > ema50_1w_aligned[i] and volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: price breaks above weekly R3, above 1w EMA20, volume confirmation, in session
+            if (close[i] > r3_1w_aligned[i] and close[i-1] <= r3_1w_aligned[i-1] and 
+                close[i] > ema20_1w_aligned[i] and volume_confirm[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought), below 1w EMA50 (downtrend), volume confirmation, in session
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
-                  close[i] < ema50_1w_aligned[i] and volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: price breaks below weekly S3, below 1w EMA20, volume confirmation, in session
+            elif (close[i] < s3_1w_aligned[i] and close[i-1] >= s3_1w_aligned[i-1] and 
+                  close[i] < ema20_1w_aligned[i] and volume_confirm[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion)
-            if williams_r_aligned[i] > -50:
+            # Exit long: price returns to weekly pivot point OR volume drops below average
+            if close[i] <= pp_1w_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion)
-            if williams_r_aligned[i] < -50:
+            # Exit short: price returns to weekly pivot point OR volume drops below average
+            if close[i] >= pp_1w_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
