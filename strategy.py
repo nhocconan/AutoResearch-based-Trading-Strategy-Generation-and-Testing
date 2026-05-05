@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1h Supertrend for trend direction, 4h Donchian(20) breakout for entry, and volume confirmation.
-# Long when price breaks above Donchian upper band AND Supertrend is bullish AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below Donchian lower band AND Supertrend is bearish AND volume > 1.5 * avg_volume(20)
-# Exit when price touches Donchian midpoint (average of upper and lower bands)
+# Hypothesis: 6h strategy using 1d Williams %R extremes with 1w EMA50 trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND 1w EMA50 > previous 1w EMA50 (uptrend) AND volume > 1.5 * avg_volume(20) on 6h
+# Short when Williams %R > -20 (overbought) AND 1w EMA50 < previous 1w EMA50 (downtrend) AND volume > 1.5 * avg_volume(20) on 6h
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Supertrend on 1h provides timely trend direction with less lag than higher timeframes
-# Donchian breakouts capture strong momentum moves
-# Volume confirmation validates breakout strength and reduces false signals
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Williams %R identifies extreme reversals that work in both bull and bear markets
+# 1w EMA50 filter ensures we trade with the higher timeframe trend, reducing whipsaw
+# Volume confirmation (1.5x) validates reversal strength and reduces false signals
 
-name = "4h_1hSupertrend_Donchian20_Volume"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1wEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,54 +27,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data ONCE before loop for Supertrend calculation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 10:  # Need sufficient data for ATR and Supertrend
+    # Get 1d data ONCE before loop for Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:  # Need at least 14 completed daily bars for Williams %R
         return np.zeros(n)
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR for Supertrend (period=10)
-    tr1 = np.maximum(high_1h[1:] - low_1h[1:], np.abs(high_1h[1:] - close_1h[:-1]))
-    tr2 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.max([high_1h[0] - low_1h[0], np.abs(high_1h[0] - close_1h[0]), np.abs(low_1h[0] - close_1h[0])])], np.maximum(tr1, tr2)])
-    atr_period = 10
-    atr_1h = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Calculate 1d Williams %R: (highest_high - close) / (highest_high - lowest_low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate Supertrend
-    factor = 3.0
-    hl2 = (high_1h + low_1h) / 2
-    upper_band = hl2 + (factor * atr_1h)
-    lower_band = hl2 - (factor * atr_1h)
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need at least 50 completed weekly bars for EMA50
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    supertrend = np.zeros_like(close_1h)
-    direction = np.ones_like(close_1h)  # 1 for uptrend, -1 for downtrend
+    # Calculate 1w EMA50
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    supertrend[0] = hl2[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1h)):
-        if close_1h[i-1] > supertrend[i-1]:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-        
-        if close_1h[i] > supertrend[i]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-    
-    # Align 1h Supertrend direction to 4h timeframe (wait for completed 1h bar)
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1h, direction)
-    
-    # Calculate Donchian channels on 4h (period=20)
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -87,36 +64,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(supertrend_dir_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band, Supertrend bullish (direction=1), volume confirmation, in session
-            if (close[i] > highest_high[i] and 
-                supertrend_dir_aligned[i] == 1 and 
+            # Long: Williams %R < -80 (oversold), 1w EMA50 rising (uptrend), volume confirmation, in session
+            if (williams_r_aligned[i] < -80 and 
+                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band, Supertrend bearish (direction=-1), volume confirmation, in session
-            elif (close[i] < lowest_low[i] and 
-                  supertrend_dir_aligned[i] == -1 and 
+            # Short: Williams %R > -20 (overbought), 1w EMA50 falling (downtrend), volume confirmation, in session
+            elif (williams_r_aligned[i] > -20 and 
+                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches Donchian midpoint
-            if close[i] >= donchian_mid[i]:
+            # Exit long: Williams %R crosses back above -50
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches Donchian midpoint
-            if close[i] <= donchian_mid[i]:
+            # Exit short: Williams %R crosses back below -50
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
