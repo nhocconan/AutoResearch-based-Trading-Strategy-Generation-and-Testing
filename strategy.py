@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 12h Donchian channel direction and volume confirmation
-# Long when: BB width < 20th percentile (squeeze) AND price breaks above upper BB AND price > 12h Donchian(20) high AND volume > 2x 20-period average
-# Short when: BB width < 20th percentile (squeeze) AND price breaks below lower BB AND price < 12h Donchian(20) low AND volume > 2x 20-period average
-# Exit when: price returns to BB middle (20-period SMA) OR BB width expands above 50th percentile (squeeze ends)
-# Uses 6h primary timeframe with 12h HTF for trend structure to capture explosive moves after low volatility periods
-# Bollinger squeeze identifies coiled price; Donchian breakout confirms directional momentum; volume validates participation
-# Discrete sizing (0.25) limits fee drag; squeeze breakouts occur infrequently (target: 12-37 trades/year)
-# Works in bull markets (breakouts continue trends) and bear markets (breakdowns accelerate declines)
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
+# Long when price breaks above Donchian upper channel AND close > 1d EMA50 AND volume > 1.8x 20-period average
+# Short when price breaks below Donchian lower channel AND close < 1d EMA50 AND volume > 1.8x 20-period average
+# Exit when price touches Donchian midpoint OR trend filter reverses
+# Uses 4h primary timeframe with 1d HTF for trend filter to capture multi-day moves with controlled frequency
+# Discrete sizing (0.30) to limit fee drag and manage drawdown in both bull and bear markets
+# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag
+# Donchian channels provide clear breakout levels; EMA50 filters for higher-timeframe trend; volume confirms participation validity
 
-name = "6h_BB_Squeeze_Donchian_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,38 +21,34 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Donchian trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channel (20-period)
-    donch_high = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # Calculate EMA50 on 1d close for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Bollinger Bands on 6h (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Donchian Channel (20-period) on 4h data
+    if len(high) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2.0
+    else:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # BB width percentiles for squeeze detection (using 50-period lookback)
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True).values
-    squeeze_condition = bb_width_pct < 0.20  # BB width < 20th percentile
-    expansion_condition = bb_width_pct > 0.50  # BB width > 50th percentile (exit squeeze)
-    
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.8 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -61,41 +57,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(bb_width_pct[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: BB squeeze AND price breaks above upper BB AND price > 12h Donchian high AND volume spike
-            if (squeeze_condition[i] and 
-                close[i] > upper_bb[i] and 
-                close[i] > donch_high_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # Long conditions: break above upper channel AND trend filter bullish AND volume spike
+            if close[i] > donchian_high[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: BB squeeze AND price breaks below lower BB AND price < 12h Donchian low AND volume spike
-            elif (squeeze_condition[i] and 
-                  close[i] < lower_bb[i] and 
-                  close[i] < donch_low_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # Short conditions: break below lower channel AND trend filter bearish AND volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price returns to BB middle OR BB expansion (squeeze ends)
-            if close[i] < sma_20[i] or expansion_condition[i]:
+            # Exit long: price touches midpoint OR trend filter turns bearish
+            if close[i] <= donchian_mid[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price returns to BB middle OR BB expansion (squeeze ends)
-            if close[i] > sma_20[i] or expansion_condition[i]:
+            # Exit short: price touches midpoint OR trend filter turns bullish
+            if close[i] >= donchian_mid[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
