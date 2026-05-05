@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d Camarilla R3/S3 level touch + volume confirmation
-# Long when: price touches 1d Camarilla S3 (support) AND breaks above 4h Donchian(20) high AND volume > 1.5x 20-period MA
-# Short when: price touches 1d Camarilla R3 (resistance) AND breaks below 4h Donchian(20) low AND volume > 1.5x 20-period MA
-# Exit when: price reaches 4h Donchian(20) midpoint OR opposite Camarilla level is touched with breakout
-# Uses Camarilla for institutional levels, Donchian for structure, volume for conviction
-# Timeframe: 4h, HTF: 1d. Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when: price breaks above 12h Camarilla R3 AND 1d close > EMA34 AND volume > 1.5x 20-period MA
+# Short when: price breaks below 12h Camarilla S3 AND 1d close < EMA34 AND volume > 1.5x 20-period MA
+# Exit when: price returns to 12h Camarilla pivot point (PP) OR opposite breakout occurs
+# Uses Camarilla for structure, 1d EMA for trend bias, volume for conviction
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_Donchian20_1dCamarilla_R3S3_Touch_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +24,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 4h using 20-period MA
+    # Calculate volume confirmation on 12h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Calculate Donchian(20) on 4h
-    if len(high) >= 20 and len(low) >= 20:
-        highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (highest_high + lowest_low) / 2.0
-    else:
-        highest_high = np.full(n, np.nan)
-        lowest_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
-    
-    # Donchian breakout signals
-    donchian_breakout_up = (close > highest_high) & (np.roll(close, 1) <= np.roll(highest_high, 1))
-    donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
-    donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
-    
-    # Get 1d data ONCE before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # need sufficient data for Camarilla calculation
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels for 1d timeframe using prior day's OHLC
-    if len(df_1d) >= 2:
-        # Prior day's high, low, close
-        prior_high = df_1d['high'].shift(1).values
-        prior_low = df_1d['low'].shift(1).values
-        prior_close = df_1d['close'].shift(1).values
-        
-        # Calculate Camarilla levels
-        # Camarilla: R3 = close + ((high-low) * 1.1/4), S3 = close - ((high-low) * 1.1/4)
+    # Calculate 12h Camarilla levels from prior 12h bar's OHLC (using rolling window of 2 for prior bar)
+    if len(high) >= 2 and len(low) >= 2 and len(close) >= 2:
+        # Prior bar's OHLC for Camarilla calculation
+        prior_high = np.roll(high, 1)
+        prior_low = np.roll(low, 1)
+        prior_close = np.roll(close, 1)
         prior_range = prior_high - prior_low
+        
+        # Camarilla levels: R3 = prior_close + (prior_range * 1.1/4), S3 = prior_close - (prior_range * 1.1/4)
         camarilla_r3 = prior_close + (prior_range * 1.1 / 4)
         camarilla_s3 = prior_close - (prior_range * 1.1 / 4)
-        
-        # Price touching Camarilla levels (within 0.2% tolerance)
-        touch_r3 = np.abs(close - camarilla_r3) < (0.002 * close)
-        touch_s3 = np.abs(close - camarilla_s3) < (0.002 * close)
+        camarilla_pp = (prior_high + prior_low + prior_close) / 3.0  # Pivot point
     else:
-        touch_r3 = np.zeros(n, dtype=bool)
-        touch_s3 = np.zeros(n, dtype=bool)
         camarilla_r3 = np.full(n, np.nan)
         camarilla_s3 = np.full(n, np.nan)
+        camarilla_pp = np.full(n, np.nan)
     
-    # Align 1d Camarilla touch signals to 4h timeframe
-    touch_r3_aligned = align_htf_to_ltf(prices, df_1d, touch_r3.astype(float))
-    touch_s3_aligned = align_htf_to_ltf(prices, df_1d, touch_s3.astype(float))
+    # Camarilla breakout signals
+    camarilla_breakout_up = (close > camarilla_r3) & (np.roll(close, 1) <= np.roll(camarilla_r3, 1))
+    camarilla_breakout_down = (close < camarilla_s3) & (np.roll(close, 1) >= np.roll(camarilla_s3, 1))
+    camarilla_revert_pp = np.abs(close - camarilla_pp) < 0.001 * close  # approximate pivot point return
+    
+    # Get 1d data ONCE before loop for EMA34 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # need enough for EMA34
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Bullish bias: 1d close > EMA34, Bearish bias: 1d close < EMA34
+    daily_bullish = close_1d > ema_34
+    daily_bearish = close_1d < ema_34
+    
+    # Align 1d EMA34 bias to 12h timeframe
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(touch_r3_aligned[i]) or np.isnan(touch_s3_aligned[i]) or 
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(camarilla_pp[i]) or 
+            np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,30 +85,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: touch S3 + Donchian breakout up + volume filter
-            if (touch_s3_aligned[i] == 1.0 and 
-                donchian_breakout_up[i] and 
+            # Long conditions: Camarilla breakout up + daily bullish + volume filter
+            if (camarilla_breakout_up[i] and 
+                daily_bullish_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: touch R3 + Donchian breakout down + volume filter
-            elif (touch_r3_aligned[i] == 1.0 and 
-                  donchian_breakout_down[i] and 
+            # Short conditions: Camarilla breakout down + daily bearish + volume filter
+            elif (camarilla_breakout_down[i] and 
+                  daily_bearish_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR touch R3 with breakout down
-            if (donchian_revert_mid[i] or 
-                (touch_r3_aligned[i] == 1.0 and donchian_breakout_down[i])):
+            # Exit long: price returns to Camarilla pivot point OR short breakout occurs
+            if (camarilla_revert_pp[i] or camarilla_breakout_down[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR touch S3 with breakout up
-            if (donchian_revert_mid[i] or 
-                (touch_s3_aligned[i] == 1.0 and donchian_breakout_up[i])):
+            # Exit short: price returns to Camarilla pivot point OR long breakout occurs
+            if (camarilla_revert_pp[i] or camarilla_breakout_up[i]):
                 signals[i] = 0.0
                 position = 0
             else:
