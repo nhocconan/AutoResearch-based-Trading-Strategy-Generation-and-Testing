@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
-# Donchian breakout identifies trend via price channels
-# Long when: price > upper Donchian(20) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Short when: price < lower Donchian(20) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Exit when: price crosses middle Donchian(20) (mean reversion) OR ADX drops below 20
-# Uses Donchian for trend structure, ADX for trend strength, volume for conviction
-# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Donchian breakout + 12h HMA trend filter + volume confirmation
+# Long when: price breaks above Donchian(20) high AND 12h HMA(21) rising AND volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian(20) low AND 12h HMA(21) falling AND volume > 1.5x 20-period MA
+# Exit when: price touches Donchian(20) midpoint OR volume drops below average
+# Uses Donchian for structure, 12h HMA for HTF trend, volume for conviction
+# Timeframe: 4h, HTF: 12h. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "12h_Donchian20_1dADX_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian_12hHMA_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,120 +24,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels on 12h
+    # Calculate Donchian channels on 4h
     if len(high) >= 20:
-        upper_donch = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        lower_donch = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        middle_donch = (upper_donch + lower_donch) / 2.0
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2
     else:
-        upper_donch = np.full(n, np.nan)
-        lower_donch = np.full(n, np.nan)
-        middle_donch = np.full(n, np.nan)
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Get 1d data ONCE before loop for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for ADX
+    # Get 12h data ONCE before loop for HMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # need sufficient data for HMA
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    if len(high_1d) >= 14:
-        # True Range
-        tr1 = np.abs(high_1d[1:] - low_1d[1:])
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr = np.maximum(np.maximum(tr1, tr2), tr3)
-        tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
+    # Calculate HMA(21) on 12h
+    close_12h = df_12h['close'].values
+    if len(close_12h) >= 21:
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        # Directional Movement
-        up_move = high_1d[1:] - high_1d[:-1]
-        down_move = low_1d[:-1] - low_1d[1:]
+        def wma(arr, window):
+            if len(arr) < window:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(arr, weights/weights.sum(), mode='valid')
         
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
+        wma_half = wma(close_12h, half)
+        wma_full = wma(close_12h, 21)
+        wma_2x_half = 2 * wma_half
         
-        # Smoothed TR, +DM, -DM
-        tr_period = 14
-        atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
-        plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
-        minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
+        # Align lengths
+        min_len = min(len(wma_2x_half), len(wma_full))
+        diff = wma_2x_half[:min_len] - wma_full[:min_len]
+        hma = wma(diff, sqrt_n)
         
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+        # Pad to original length
+        hma_padded = np.full(len(close_12h), np.nan)
+        start_idx = len(close_12h) - len(hma)
+        hma_padded[start_idx:] = hma
+        hma_12h = hma_padded
     else:
-        adx = np.full(len(high_1d), np.nan)
+        hma_12h = np.full(len(close_12h), np.nan)
     
-    # ADX trend strength
-    adx_strong = np.zeros(len(adx), dtype=bool)
-    adx_weak = np.zeros(len(adx), dtype=bool)
-    for i in range(len(adx)):
-        if not np.isnan(adx[i]):
-            adx_strong[i] = adx[i] > 25
-            adx_weak[i] = adx[i] < 20
+    # HMA slope (rising/falling)
+    hma_rising = np.zeros(len(hma_12h), dtype=bool)
+    hma_falling = np.zeros(len(hma_12h), dtype=bool)
+    for i in range(1, len(hma_12h)):
+        if not np.isnan(hma_12h[i]) and not np.isnan(hma_12h[i-1]):
+            hma_rising[i] = hma_12h[i] > hma_12h[i-1]
+            hma_falling[i] = hma_12h[i] < hma_12h[i-1]
     
-    # Align 1d ADX to 12h timeframe
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
+    # Align 12h HMA to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_12h, hma_rising.astype(float))
+    hma_falling_aligned = align_htf_to_ltf(prices, df_12h, hma_falling.astype(float))
     
-    # Donchian breakout signals
-    breakout_up = close > upper_donch
-    breakout_down = close < lower_donch
-    middle_cross = (close > middle_donch) & (np.roll(close, 1) <= np.roll(middle_donch, 1)) | \
-                   (close < middle_donch) & (np.roll(close, 1) >= np.roll(middle_donch, 1))
-    
-    # Volume confirmation on 12h
+    # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
+        volume_average = volume < (0.5 * vol_ma_20)  # for exit
     else:
         volume_filter = np.zeros(n, dtype=bool)
+        volume_average = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_donch[i]) or np.isnan(lower_donch[i]) or np.isnan(middle_donch[i]) or 
-            np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Donchian breakout up + strong ADX + volume filter
-            if (breakout_up[i] and 
-                adx_strong_aligned[i] == 1.0 and 
+            # Long conditions: break above Donchian high + rising 12h HMA + volume filter
+            if (close[i] > donchian_high[i] and 
+                hma_rising_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + strong ADX + volume filter
-            elif (breakout_down[i] and 
-                  adx_strong_aligned[i] == 1.0 and 
+            # Short conditions: break below Donchian low + falling 12h HMA + volume filter
+            elif (close[i] < donchian_low[i] and 
+                  hma_falling_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses middle Donchian OR weak ADX
-            if (middle_cross[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: price touches Donchian midpoint OR low volume
+            if (close[i] <= donchian_mid[i] or volume_average[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses middle Donchian OR weak ADX
-            if (middle_cross[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: price touches Donchian midpoint OR low volume
+            if (close[i] >= donchian_mid[i] or volume_average[i]):
                 signals[i] = 0.0
                 position = 0
             else:
