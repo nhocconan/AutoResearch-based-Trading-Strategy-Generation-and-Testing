@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Donchian upper AND 1w close > 1w EMA50 (uptrend) AND volume > 2.0x 20 EMA
-# Short when price breaks below Donchian lower AND 1w close < 1w EMA50 (downtrend) AND volume > 2.0x 20 EMA
-# Uses discrete sizing (0.25) to limit fee drag. Target: 7-25 trades/year per symbol.
+# Hypothesis: 6h Camarilla R4/S4 breakout with 12h EMA50 trend filter and volume confirmation
+# Long when price breaks above R4 AND 12h close > 12h EMA50 (uptrend) AND volume > 1.5x 20 EMA
+# Short when price breaks below S4 AND 12h close < 12h EMA50 (downtrend) AND volume > 1.5x 20 EMA
+# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 1w for HTF trend to avoid counter-trend trades and 1d for entry timing.
+# Uses 12h for HTF trend to avoid counter-trend trades and 6h for entry timing.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Camarilla_R4S4_12hEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +24,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Get weekly OHLC arrays
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h OHLC arrays
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
     
-    # Calculate 1w EMA50 for trend filter
-    if len(df_1w) < 50:
+    # Calculate Camarilla levels for each 12h day
+    # R4 = close + (high - low) * 1.1/2
+    # S4 = close - (high - low) * 1.1/2
+    camarilla_r4 = close_12h + (high_12h - low_12h) * 1.1 / 2
+    camarilla_s4 = close_12h - (high_12h - low_12h) * 1.1 / 2
+    
+    # Align 12h Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    
+    # Get 12h data for trend filter
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_1w = close_1w > ema_50_1w
-    downtrend_1w = close_1w < ema_50_1w
+    uptrend_12h = close_12h > ema_50_12h
+    downtrend_12h = close_12h < ema_50_12h
     
-    # Align 1w trend to 1d timeframe
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
-    
-    # Calculate Donchian channels (20-period) on 1d
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(lookback-1, n):
-        upper[i] = np.max(high[i-lookback+1:i+1])
-        lower[i] = np.min(low[i-lookback+1:i+1])
+    # Align 12h trend to 6h timeframe
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 2.0)
+    volume_spike = volume > (vol_ema_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,30 +77,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper AND 1w uptrend AND volume spike
-            if (close[i] > upper[i] and 
-                uptrend_1w_aligned[i] > 0.5 and 
+            # Long conditions: price breaks above R4 AND 12h uptrend AND volume spike
+            if (close[i] > r4_aligned[i] and 
+                uptrend_12h_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower AND 1w downtrend AND volume spike
-            elif (close[i] < lower[i] and 
-                  downtrend_1w_aligned[i] > 0.5 and 
+            # Short conditions: price breaks below S4 AND 12h downtrend AND volume spike
+            elif (close[i] < s4_aligned[i] and 
+                  downtrend_12h_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below lower OR 1w trend changes to downtrend
-            if (close[i] < lower[i] or 
-                downtrend_1w_aligned[i] > 0.5):
+            # Exit long: price breaks below S4 OR 12h trend changes to downtrend
+            if (close[i] < s4_aligned[i] or 
+                downtrend_12h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above upper OR 1w trend changes to uptrend
-            if (close[i] > upper[i] or 
-                uptrend_1w_aligned[i] > 0.5):
+            # Exit short: price breaks above R4 OR 12h trend changes to uptrend
+            if (close[i] > r4_aligned[i] or 
+                uptrend_12h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
