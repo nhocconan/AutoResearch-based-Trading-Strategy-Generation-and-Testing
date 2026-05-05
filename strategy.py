@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
-# Long when price breaks above Donchian upper band AND ADX(1d) > 25 AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian lower band AND ADX(1d) > 25 AND volume > 2.0x 20-period average
-# Exit when price crosses back to midline OR ADX(1d) < 20 (trend weakening)
-# Uses 6h primary timeframe for lower trade frequency (target: 12-37 trades/year)
-# Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Adding 1d HTF for stable trend alignment in both bull and bear markets
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Long when price breaks above R3 AND close > EMA50(1w) AND volume > 2.0x 20-period average
+# Short when price breaks below S3 AND close < EMA50(1w) AND volume > 2.0x 20-period average
+# Exit when price crosses back to R4/S4 level OR EMA50(1w) trend flips
+# Uses 12h primary timeframe for low trade frequency (target: 12-37 trades/year) to minimize fee drag
+# Discrete sizing (0.25) to limit fee churn and manage drawdown
+# 1w HTF provides stable trend alignment to avoid whipsaw in sideways/bear markets
 
-name = "6h_Donchian20_1dADX25_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,77 +25,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data ONCE before loop for EMA50 trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d data for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 1w close for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value is NaN
+    # Calculate 1w Camarilla pivot levels from prior bar
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Prior bar's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    def wilders_smoothing(values, alpha):
-        smoothed = np.full_like(values, np.nan)
-        # Find first valid index
-        first_valid = ~np.isnan(values)
-        if not np.any(first_valid):
-            return smoothed
-        first_idx = np.where(first_valid)[0][0]
-        smoothed[first_idx] = values[first_idx]
-        for i in range(first_idx + 1, len(values)):
-            if np.isnan(values[i]):
-                smoothed[i] = smoothed[i-1]
-            else:
-                smoothed[i] = alpha * values[i] + (1 - alpha) * smoothed[i-1]
-        return smoothed
+    # Align 1w indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    tr_smoothed = wilders_smoothing(tr, alpha)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, alpha)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, alpha)
-    
-    # Plus and Minus Directional Indicators
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    
-    # Directional Index (DX) and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    
-    # ADX is Wilder's smoothing of DX
-    adx = wilders_smoothing(dx, alpha)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h Donchian channels (20-period)
-    if len(high) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (donchian_high + donchian_low) / 2
-    else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (balanced to reduce trades)
+    # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (2.0 * vol_ma_20)
@@ -105,12 +69,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(adx_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -118,30 +83,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper band AND ADX > 25 AND volume spike
-            if (close[i] > donchian_high[i] and 
-                adx_aligned[i] > 25 and 
+            # Long conditions: price breaks above R3 AND close > EMA50(1w) AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower band AND ADX > 25 AND volume spike
-            elif (close[i] < donchian_low[i] and 
-                  adx_aligned[i] > 25 and 
+            # Short conditions: price breaks below S3 AND close < EMA50(1w) AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below midline OR ADX < 20 (trend weakening)
-            if (close[i] < donchian_mid[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price crosses below R4 OR close < EMA50(1w) (trend flip)
+            if (close[i] < camarilla_r4_aligned[i] or 
+                close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above midline OR ADX < 20 (trend weakening)
-            if (close[i] > donchian_mid[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price crosses above S4 OR close > EMA50(1w) (trend flip)
+            if (close[i] > camarilla_s4_aligned[i] or 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
