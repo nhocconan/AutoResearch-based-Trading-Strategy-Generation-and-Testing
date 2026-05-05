@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 6h Camarilla R3 AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below 6h Camarilla S3 AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Exit when price crosses 6h Camarilla H3/L3 OR volume < avg_volume(20)
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 12h Camarilla R3 AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 12h Camarilla S3 AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 12h Camarilla midpoint (R3/S3 midpoint) OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
 # Target: 50-150 total trades over 4 years (12-37/year)
-# Camarilla levels from 6h provide intraday support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
+# Camarilla levels from 12h provide intraday support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
 # Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,36 +21,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Camarilla levels (based on previous bar's OHLC)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    #          S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    #          H3 = C + (H-L)*1.1/6, L3 = C - (H-L)*1.1/6
-    #          H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
-    #          H5 = C + (H-L)*1.1/4, L5 = C - (H-L)*1.1/4
-    #          H6 = C + (H-L)*1.1/12, L6 = C - (H-L)*1.1/12
-    # We'll use R3, S3 for breakout and H3, L3 for exit
-    
-    # Shift OHLC by 1 to use previous bar's levels (no look-ahead)
+    # Calculate 12h Camarilla levels (based on previous bar's high/low/close)
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    #          S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    #          Mid = (R3 + S3)/2
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First bar has no previous
+    prev_high[0] = prev_low[0] = prev_close[0] = 0  # first bar invalid
     
-    # Calculate Camarilla levels
     camarilla_range = prev_high - prev_low
-    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4
-    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4
-    camarilla_h3 = prev_close + camarilla_range * 1.1 / 6
-    camarilla_l3 = prev_close - camarilla_range * 1.1 / 6
+    camarilla_r3 = prev_close + 1.1 * camarilla_range * 1.1 / 4
+    camarilla_s3 = prev_close - 1.1 * camarilla_range * 1.1 / 4
+    camarilla_mid = (camarilla_r3 + camarilla_s3) / 2
     
     # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
@@ -69,7 +61,6 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
             np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -86,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Camarilla H3 OR volume drops below average
-            if close[i] < camarilla_h3[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below Camarilla midpoint OR volume drops below average
+            if close[i] < camarilla_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Camarilla L3 OR volume drops below average
-            if close[i] > camarilla_l3[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above Camarilla midpoint OR volume drops below average
+            if close[i] > camarilla_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
