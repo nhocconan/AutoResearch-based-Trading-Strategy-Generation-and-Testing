@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
-# Long when: Tenkan-sen crosses above Kijun-sen AND price above 1d EMA50 AND volume > 1.5x 20-period MA AND price above Kumo cloud
-# Short when: Tenkan-sen crosses below Kijun-sen AND price below 1d EMA50 AND volume > 1.5x 20-period MA AND price below Kumo cloud
-# Exit when: Tenkan-sen/Kijun-sen cross reverses OR price crosses Kumo cloud in opposite direction
-# Uses Ichimoku for momentum/trend structure, 1d EMA for higher timeframe trend, volume for conviction
-# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1d chop regime filter (CHOP > 61.8 = range)
+# Long when: price breaks above 20-period Donchian high AND 1d volume > 1.5x 20-period MA AND 1d CHOP > 61.8
+# Short when: price breaks below 20-period Donchian low AND 1d volume > 1.5x 20-period MA AND 1d CHOP > 61.8
+# Exit when: price returns to 10-period Donchian midpoint OR volume drops below average
+# Uses Donchian for structure, volume for conviction, chop for ranging markets (mean reversion in chop)
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_Ichimoku_Cloud_1dEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolumeChop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,118 +24,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 6h using 20-period MA
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+    # Calculate Donchian channels on 12h (20-period)
+    if len(high) >= 20 and len(low) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2.0
     else:
-        volume_filter = np.zeros(n, dtype=bool)
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Calculate Ichimoku components on 6h (9, 26, 52 periods)
-    if len(high) >= 52 and len(low) >= 52 and len(close) >= 52:
-        # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-        tenkan_sen = (period9_high + period9_low) / 2
-        
-        # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-        period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-        kijun_sen = (period26_high + period26_low) / 2
-        
-        # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-        senkou_span_a = (tenkan_sen + kijun_sen) / 2
-        
-        # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-        period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-        period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-        senkou_span_b = (period52_high + period52_low) / 2
-        
-        # Kumo cloud boundaries
-        upper_kumo = np.maximum(senkou_span_a, senkou_span_b)
-        lower_kumo = np.minimum(senkou_span_a, senkou_span_b)
-        
-        # Tenkan/Kijun cross signals
-        tenkan_prev = np.roll(tenkan_sen, 1)
-        tenkan_prev[0] = np.nan
-        kijun_prev = np.roll(kijun_sen, 1)
-        kijun_prev[0] = np.nan
-        tk_cross_above = (tenkan_prev <= kijun_prev) & (tenkan_sen > kijun_sen)
-        tk_cross_below = (tenkan_prev >= kijun_prev) & (tenkan_sen < kijun_sen)
-        
-        # Price relative to cloud
-        price_above_kumo = close > upper_kumo
-        price_below_kumo = close < lower_kumo
-    else:
-        tenkan_sen = np.full(n, np.nan)
-        kijun_sen = np.full(n, np.nan)
-        senkou_span_a = np.full(n, np.nan)
-        senkou_span_b = np.full(n, np.nan)
-        upper_kumo = np.full(n, np.nan)
-        lower_kumo = np.full(n, np.nan)
-        tk_cross_above = np.zeros(n, dtype=bool)
-        tk_cross_below = np.zeros(n, dtype=bool)
-        price_above_kumo = np.zeros(n, dtype=bool)
-        price_below_kumo = np.zeros(n, dtype=bool)
+    # Donchian breakout signals
+    donchian_break_above = (close > donchian_high) & (np.roll(close, 1) <= np.roll(donchian_high, 1))
+    donchian_break_below = (close < donchian_low) & (np.roll(close, 1) >= np.roll(donchian_low, 1))
+    donchian_reenter = (close > donchian_mid) & (np.roll(close, 1) <= np.roll(donchian_mid, 1)) | \
+                       (close < donchian_mid) & (np.roll(close, 1) >= np.roll(donchian_mid, 1))
     
-    # Get 1d data ONCE before loop for EMA calculation
+    # Get 1d data ONCE before loop for volume and chop calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 50-period EMA on 1d timeframe
-    if len(close_1d) >= 50:
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-        ema_above = close_1d > ema_50_1d
-        ema_below = close_1d < ema_50_1d
+    # Calculate 1d volume filter: volume > 1.5x 20-period MA
+    if len(volume_1d) >= 20:
+        vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume_1d > (1.5 * vol_ma_20)
     else:
-        ema_above = np.full(len(close_1d), False)
-        ema_below = np.full(len(close_1d), False)
+        volume_filter = np.full(len(volume_1d), False)
     
-    # Align 1d EMA trend to 6h timeframe
-    ema_above_aligned = align_htf_to_ltf(prices, df_1d, ema_above.astype(float))
-    ema_below_aligned = align_htf_to_ltf(prices, df_1d, ema_below.astype(float))
+    # Calculate 1d Chopiness Index (CHOP) - 14 period
+    # CHOP = 100 * log10(sum(ATR(1)) / (max(high,n) - min(low,n))) / log10(n)
+    if len(high_1d) >= 14 and len(low_1d) >= 14 and len(close_1d) >= 14:
+        # True Range
+        tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+        tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+        tr1 = np.concatenate([[np.nan], tr1])  # align with index
+        
+        # Sum of TR over 14 periods
+        sum_tr = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+        
+        # Max high and min low over 14 periods
+        max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+        
+        # Avoid division by zero
+        denominator = max_high - min_low
+        chop_raw = np.where(denominator != 0, 
+                           100 * np.log10(sum_tr / denominator) / np.log10(14),
+                           50)  # neutral when no range
+        
+        # CHOP > 61.8 = ranging market (good for mean reversion)
+        chop_filter = chop_raw > 61.8
+    else:
+        chop_filter = np.full(len(high_1d), False)
+    
+    # Align 1d indicators to 12h timeframe
+    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter.astype(float))
+    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(upper_kumo[i]) or 
-            np.isnan(lower_kumo[i]) or np.isnan(ema_above_aligned[i]) or np.isnan(ema_below_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(volume_filter_aligned[i]) or np.isnan(chop_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: TK cross above + price above 1d EMA50 + volume filter + price above Kumo
-            if (tk_cross_above[i] and 
-                ema_above_aligned[i] == 1.0 and 
-                volume_filter[i] and 
-                price_above_kumo[i]):
+            # Long conditions: Donchian breakout above + 1d volume spike + 1d chop regime (ranging)
+            if (donchian_break_above[i] and 
+                volume_filter_aligned[i] == 1.0 and 
+                chop_filter_aligned[i] == 1.0):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: TK cross below + price below 1d EMA50 + volume filter + price below Kumo
-            elif (tk_cross_below[i] and 
-                  ema_below_aligned[i] == 1.0 and 
-                  volume_filter[i] and 
-                  price_below_kumo[i]):
+            # Short conditions: Donchian breakout below + 1d volume spike + 1d chop regime (ranging)
+            elif (donchian_break_below[i] and 
+                  volume_filter_aligned[i] == 1.0 and 
+                  chop_filter_aligned[i] == 1.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TK cross below OR price crosses below Kumo
-            if (tk_cross_below[i] or (close[i] < lower_kumo[i])):
+            # Exit long: price re-enters Donchian channel OR volume drops OR chop breaks down (trending)
+            if (donchian_reenter[i] or 
+                volume_filter_aligned[i] == 0.0 or 
+                chop_filter_aligned[i] == 0.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TK cross above OR price crosses above Kumo
-            if (tk_cross_above[i] or (close[i] > upper_kumo[i])):
+            # Exit short: price re-enters Donchian channel OR volume drops OR chop breaks down (trending)
+            if (donchian_reenter[i] or 
+                volume_filter_aligned[i] == 0.0 or 
+                chop_filter_aligned[i] == 0.0):
                 signals[i] = 0.0
                 position = 0
             else:
