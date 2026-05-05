@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above R3 AND close > EMA34(1d) AND volume > 2.0x 20-period average
-# Short when price breaks below S3 AND close < EMA34(1d) AND volume > 2.0x 20-period average
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above R3 AND close > EMA34(1d) AND volume > 1.8x 20-period average
+# Short when price breaks below S3 AND close < EMA34(1d) AND volume > 1.8x 20-period average
 # Exit when price crosses back to R4/S4 level OR EMA34(1d) trend flips
-# Uses 12h primary timeframe for lower trade frequency (target: 12-37 trades/year)
+# Uses 4h primary timeframe for optimal trade frequency (target: 20-50 trades/year)
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Using 1d HTF for better alignment with primary timeframe vs 4h (reduces lag in trend signal)
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,16 +52,16 @@ def generate_signals(prices):
     camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume confirmation: volume > 2.0x 20-period average (balanced to reduce trades)
+    # Volume confirmation: volume > 1.8x 20-period average (balanced to reduce trades)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.8 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
