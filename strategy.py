@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h session-filtered (08-20 UTC) mean reversion using Bollinger Bands(20,2) with volume confirmation.
-# Long when price touches lower BB AND volume > 1.5x 20-bar average AND RSI(14) < 30 (oversold).
-# Short when price touches upper BB AND volume > 1.5x 20-bar average AND RSI(14) > 70 (overbought).
-# Exit when price crosses BB middle band OR RSI returns to neutral (40-60).
-# Uses 1h timeframe with session filter to reduce noise, targeting 60-150 trades over 4 years.
-# Bollinger Bands provide dynamic support/resistance, volume confirms conviction, RSI avoids extreme overextension.
+# Hypothesis: 6h Williams %R Extreme Reversal with 1d EMA34 trend filter and volume spike (1.8x)
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume > 1.8x 20-period average
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume > 1.8x 20-period average
+# Exit when Williams %R crosses above -50 (for long) or below -50 (for short)
+# Williams %R identifies exhaustion points in both bull and bear markets
+# 6h timeframe balances trade frequency and signal quality
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Uses discrete position sizing (0.25) to reduce churn
 
-name = "1h_BollingerMeanReversion_VolumeRSI_Session"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_Reversal_1dEMA34_VolumeSpike_1.8x"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,72 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC) ONCE before loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1d data ONCE before loop for EMA34 and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands(20,2) on 1h close
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
+    # Calculate 1d EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral RSI when undefined
+    # Calculate Williams %R(14) on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Volume confirmation: >1.5x 20-bar average
+    # Align HTF indicators to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Volume confirmation on 6h (threshold: 1.8x for balanced frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (1.5 * vol_ma_20)
+        volume_spike = volume > (1.8 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after BB/RSI warmup
-        # Skip if any value is NaN or outside session
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(rsi[i]) or not in_session[i]):
+    for i in range(50, n):
+        # Skip if any value is NaN
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price at/below lower BB AND volume spike AND RSI oversold (<30)
-            if (close[i] <= bb_lower[i] and 
-                volume_spike[i] and 
-                rsi[i] < 30):
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold) AND price > EMA34 (uptrend) AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_34_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price at/above upper BB AND volume spike AND RSI overbought (>70)
-            elif (close[i] >= bb_upper[i] and 
-                  volume_spike[i] and 
-                  rsi[i] > 70):
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) AND price < EMA34 (downtrend) AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above middle BB OR RSI returns to neutral (>40)
-            if close[i] > bb_middle[i] or rsi[i] > 40:
+            # Exit long: Williams %R crosses above -50 (exhaustion ending)
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses below middle BB OR RSI returns to neutral (<60)
-            if close[i] < bb_middle[i] or rsi[i] < 60:
+            # Exit short: Williams %R crosses below -50 (exhaustion ending)
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
