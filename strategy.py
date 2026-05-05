@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d Elder Ray Power filter and volume confirmation
-# Long when: Alligator bullish alignment (jaw < teeth < lips) AND Bear Power > 0 AND volume > 1.5x 20 EMA
-# Short when: Alligator bearish alignment (jaw > teeth > lips) AND Bull Power < 0 AND volume > 1.5x 20 EMA
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND volume > 2.0x 20 EMA
+# Short when price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND volume > 2.0x 20 EMA
+# Uses discrete sizing (0.25) to limit fee drag. Target: 25-50 trades/year per symbol.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 1d for HTF Elder Ray to avoid counter-trend trades and 6h for Alligator timing.
+# Uses 1d for HTF trend to avoid counter-trend trades and 4h for Camarilla timing.
+# Based on proven winning pattern: Camarilla breakout + volume + trend filter.
 
-name = "6h_WilliamsAlligator_1dElderRay_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +25,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data ONCE before loop for Alligator
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 13:
+    # Get 4h data ONCE before loop for Camarilla calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 5:
         return np.zeros(n)
     
-    # Calculate 6h Williams Alligator (13,8,5 SMAs shifted)
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate 4h Camarilla levels (R3, S3) from previous day's OHLC
+    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    # Using previous 4h bar's OHLC for current bar's levels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Jaw (13-period SMA of median price, shifted 8 bars)
-    median_6h = (high_6h + low_6h) / 2
-    jaw_raw = pd.Series(median_6h).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
-    jaw[:8] = np.nan  # first 8 values invalid after shift
+    # Previous bar's values for Camarilla calculation
+    prev_close_4h = np.roll(close_4h, 1)
+    prev_high_4h = np.roll(high_4h, 1)
+    prev_low_4h = np.roll(low_4h, 1)
+    # First bar has no previous, so set to NaN
+    prev_close_4h[0] = np.nan
+    prev_high_4h[0] = np.nan
+    prev_low_4h[0] = np.nan
     
-    # Teeth (8-period SMA of median price, shifted 5 bars)
-    teeth_raw = pd.Series(median_6h).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
-    teeth[:5] = np.nan  # first 5 values invalid after shift
+    # Camarilla R3 and S3
+    camarilla_r3 = prev_close_4h + (prev_high_4h - prev_low_4h) * 1.1 / 4
+    camarilla_s3 = prev_close_4h - (prev_high_4h - prev_low_4h) * 1.1 / 4
     
-    # Lips (5-period SMA of median price, shifted 3 bars)
-    lips_raw = pd.Series(median_6h).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
-    lips[:3] = np.nan  # first 3 values invalid after shift
+    # Align 4h Camarilla to prices timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
-    # Align 6h Alligator to 6h timeframe (no alignment needed as primary TF)
-    jaw_aligned = jaw
-    teeth_aligned = teeth
-    lips_aligned = lips
-    
-    # Get 1d data for Elder Ray Power
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Elder Ray Power (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema_13_1d  # Bull Power
-    bear_power = low_1d - ema_13_1d   # Bear Power
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Align 1d Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align 1d trend to 4h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
     # Volume spike filter (20-period volume EMA)
     vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > (vol_ema_20 * 1.5)
+    volume_spike = volume > (vol_ema_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,30 +88,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Alligator bullish AND Bear Power > 0 AND volume spike
-            if (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i] and 
-                bear_power_aligned[i] > 0 and 
+            # Long conditions: price > Camarilla R3 AND 1d uptrend AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                uptrend_1d_aligned[i] > 0.5 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Alligator bearish AND Bull Power < 0 AND volume spike
-            elif (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and 
-                  bull_power_aligned[i] < 0 and 
+            # Short conditions: price < Camarilla S3 AND 1d downtrend AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  downtrend_1d_aligned[i] > 0.5 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Bear Power <= 0
-            if (not (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i]) or 
-                bear_power_aligned[i] <= 0):
+            # Exit long: price < Camarilla S3 OR 1d trend changes to downtrend
+            if (close[i] < camarilla_s3_aligned[i] or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Bull Power >= 0
-            if (not (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]) or 
-                bull_power_aligned[i] >= 0):
+            # Exit short: price > Camarilla R3 OR 1d trend changes to uptrend
+            if (close[i] > camarilla_r3_aligned[i] or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
