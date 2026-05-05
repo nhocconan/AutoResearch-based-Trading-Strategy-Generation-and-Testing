@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d RSI(14) mean reversion filter and volume confirmation
-# Long when price breaks above 12h Camarilla R3 level AND 1d RSI < 30 (oversold) AND volume > 1.5x 20-period average
-# Short when price breaks below 12h Camarilla S3 level AND 1d RSI > 70 (overbought) AND volume > 1.5x 20-period average
-# Exit when price crosses 12h Camarilla pivot point (mean reversion) OR 1d RSI returns to neutral zone (40-60)
-# Uses 12h primary timeframe with 1d HTF for RSI filter to catch extreme sentiment
-# Camarilla levels provide clear breakout zones based on previous day's range
-# RSI filter ensures we only trade when market is overextended, reducing false breakouts
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper channel AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# Short when price breaks below 4h Donchian lower channel AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# Exit when price crosses 4h Donchian midpoint (mean reversion) OR 1d ADX < 20 (trend weakening)
+# Uses 4h primary timeframe with 1d HTF for ADX trend filter (proven edge in BTC/ETH)
+# Donchian channels provide clear breakout zones based on recent price action
+# ADX filter ensures we only trade in trending markets, reducing whipsaw in ranges
 # Volume confirmation filters low-momentum breakouts
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1dRSI_MeanRev_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dADX_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,18 +28,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for RSI mean reversion filter
+    # Get 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14) for mean reversion filter
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing for RSI
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Wilder's smoothing function
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -52,31 +66,30 @@ def generate_signals(prices):
                 result[i] = np.nan
         return result
     
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
+    tr_smooth = wilder_smooth(tr, 14)
+    plus_dm_smooth = wilder_smooth(plus_dm, 14)
+    minus_dm_smooth = wilder_smooth(minus_dm, 14)
     
-    # Avoid division by zero
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])  # Align with original length
+    # DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
+    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
     
-    # Align RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
+    adx = wilder_smooth(dx, 14)
     
-    # Get 1d data ONCE before loop for Camarilla levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Camarilla R3 and S3 levels: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
-    camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3  # Standard pivot point
-    
-    # Align to 12h timeframe (using previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Donchian(20) channels on 4h data
+    if len(high) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2
+    else:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
     # Volume confirmation: volume > 1.5x 20-period average
     if len(volume) >= 20:
@@ -90,10 +103,10 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or 
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -101,28 +114,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Camarilla R3 AND RSI < 30 (oversold) AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                rsi_1d_aligned[i] < 30 and 
+            # Long conditions: price breaks above Donchian upper channel AND ADX > 25 AND volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_1d_aligned[i] > 25 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S3 AND RSI > 70 (overbought) AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  rsi_1d_aligned[i] > 70 and 
+            # Short conditions: price breaks below Donchian lower channel AND ADX > 25 AND volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_1d_aligned[i] > 25 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla pivot (mean reversion) OR RSI > 50 (return to neutral)
-            if close[i] < camarilla_pivot_aligned[i] or rsi_1d_aligned[i] > 50:
+            # Exit long: price crosses below Donchian midpoint (mean reversion) OR ADX < 20 (trend weakening)
+            if close[i] < donchian_mid[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla pivot (mean reversion) OR RSI < 50 (return to neutral)
-            if close[i] > camarilla_pivot_aligned[i] or rsi_1d_aligned[i] < 50:
+            # Exit short: price crosses above Donchian midpoint (mean reversion) OR ADX < 20 (trend weakening)
+            if close[i] > donchian_mid[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
