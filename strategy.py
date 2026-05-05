@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 4h Donchian upper(20) AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below 4h Donchian lower(20) AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
-# Exit when price crosses 4h Donchian midpoint OR volume < avg_volume(20)
+# Hypothesis: 1d Camarilla pivot (R3/S3) breakout with 1w EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 1d Camarilla R3 AND price > 1w EMA34 AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below 1d Camarilla S3 AND price < 1w EMA34 AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses 1d Camarilla pivot point (PP) OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
-# Target: 75-200 total trades over 4 years (19-50/year)
-# Donchian channels from 4h provide robust support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
+# Target: 30-100 total trades over 4 years (7-25/year)
+# Camarilla levels provide precise intraday support/resistance; 1w EMA34 filters primary trend; volume confirms strength
 # Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,59 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # We need to shift by 1 to use previous day's levels (no look-ahead)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First bar has no previous
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    pivot_point = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 2.0)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 2.0)
+    
+    # Get 1w data ONCE before loop for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need enough for EMA34
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1w EMA34
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume_20[i])):
+        if (np.isnan(pivot_point[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper, above 1d EMA34, volume confirmation
-            if close[i] > donchian_upper[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above Camarilla R3, above 1w EMA34, volume confirmation
+            if close[i] > camarilla_r3[i] and close[i] > ema34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower, below 1d EMA34, volume confirmation
-            elif close[i] < donchian_lower[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below Camarilla S3, below 1w EMA34, volume confirmation
+            elif close[i] < camarilla_s3[i] and close[i] < ema34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Donchian midpoint OR volume drops below average
-            if close[i] < donchian_mid[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below pivot point OR volume drops below average
+            if close[i] < pivot_point[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Donchian midpoint OR volume drops below average
-            if close[i] > donchian_mid[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above pivot point OR volume drops below average
+            if close[i] > pivot_point[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
