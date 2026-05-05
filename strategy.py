@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band breakout with 1w trend filter and volume confirmation
-# Long when: price breaks above upper BB(20,2) + 1w close > 1w EMA50 + volume > 2.0x 24-period MA
-# Short when: price breaks below lower BB(20,2) + 1w close < 1w EMA50 + volume > 2.0x 24-period MA
-# Exit when: price returns to middle BB(20) or volume drops below average
-# Uses Bollinger Bands for volatility breakouts, weekly EMA for trend filter, volume for conviction
-# Timeframe: 6h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 12h Donchian breakout + 1d HMA trend + volume confirmation
+# Long when: price breaks above Donchian(20) upper + 1d HMA(21) upward + volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian(20) lower + 1d HMA(21) downward + volume > 1.5x 20-period MA
+# Exit when: price crosses Donchian midpoint OR volume drops below average
+# Uses Donchian for structure, 1d HMA for HTF trend filter, volume for conviction
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_BollingerBreakout_1wTrend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dHMA21_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,90 +24,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands on 6h (20-period, 2 std dev)
-    if len(close) >= 20:
-        bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-        bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-        bb_upper = bb_middle + 2 * bb_std
-        bb_lower = bb_middle - 2 * bb_std
+    # Calculate Donchian channels on 12h
+    if len(high) >= 20:
+        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_upper + donchian_lower) / 2
     else:
-        bb_middle = np.full(n, np.nan)
-        bb_upper = np.full(n, np.nan)
-        bb_lower = np.full(n, np.nan)
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Volume confirmation: 24-period MA (equivalent to 1d lookback in 6h)
-    if len(volume) >= 24:
-        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-        volume_filter = volume > (2.0 * vol_ma_24)
+    # Calculate volume confirmation on 12h using 20-period MA
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data ONCE before loop for HMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 1w for trend filter
-    if len(close_1w) >= 50:
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-        # 1w trend: close > EMA50 = uptrend, close < EMA50 = downtrend
-        trend_up = close_1w > ema_50_1w
-        trend_down = close_1w < ema_50_1w
+    # Calculate HMA(21) on 1d timeframe
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    if len(close_1d) >= 21:
+        # WMA helper function
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        # Calculate WMAs
+        wma_half = wma(close_1d, half_len)
+        wma_full = wma(close_1d, 21)
+        
+        # 2*WMA(n/2) - WMA(n)
+        diff = 2 * wma_half - wma_full
+        
+        # WMA of the diff with sqrt(n) period
+        if len(diff) >= sqrt_len:
+            hma_values = wma(diff, sqrt_len)
+            # Pad to match original length
+            hma_1d = np.full(len(close_1d), np.nan)
+            hma_1d[half_len - 1:half_len - 1 + len(hma_values)] = hma_values
+        else:
+            hma_1d = np.full(len(close_1d), np.nan)
     else:
-        trend_up = np.zeros(len(close_1w), dtype=bool)
-        trend_down = np.zeros(len(close_1w), dtype=bool)
-        ema_50_1w = np.full(len(close_1w), np.nan)
+        hma_1d = np.full(len(close_1d), np.nan)
     
-    # Align 1w trend to 6h timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1w, trend_down)
+    # Calculate HMA slope for trend direction
+    hma_slope = np.diff(hma_1d, prepend=np.nan)
+    
+    # Align 1d HMA and slope to 12h timeframe
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_slope)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(volume_filter[i]) or 
-            (i < len(trend_up_aligned) and (np.isnan(trend_up_aligned[i]) if hasattr(trend_up_aligned[i], '__iter__') else False)) or
-            (i < len(trend_down_aligned) and (np.isnan(trend_down_aligned[i]) if hasattr(trend_down_aligned[i], '__iter__') else False))):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(hma_1d_aligned[i]) or 
+            np.isnan(hma_slope_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Ensure we don't go out of bounds on aligned arrays
-        if i >= len(trend_up_aligned) or i >= len(trend_down_aligned):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         if position == 0:
-            # Long conditions: price breaks above upper BB + 1w uptrend + volume filter
-            if (close[i] > bb_upper[i] and 
-                trend_up_aligned[i] and 
+            # Long conditions: price breaks above Donchian upper + HMA upward + volume filter
+            if (close[i] > donchian_upper[i] and 
+                hma_slope_aligned[i] > 0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower BB + 1w downtrend + volume filter
-            elif (close[i] < bb_lower[i] and 
-                  trend_down_aligned[i] and 
+            # Short conditions: price breaks below Donchian lower + HMA downward + volume filter
+            elif (close[i] < donchian_lower[i] and 
+                  hma_slope_aligned[i] < 0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB or volume drops below average
-            if (close[i] < bb_middle[i] or not volume_filter[i]):
+            # Exit long: price crosses below Donchian midpoint OR volume drops below average
+            if (close[i] < donchian_mid[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB or volume drops below average
-            if (close[i] > bb_middle[i] or not volume_filter[i]):
+            # Exit short: price crosses above Donchian midpoint OR volume drops below average
+            if (close[i] > donchian_mid[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
