@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot levels (R3/S3) breakout with volume confirmation and 1d EMA50 trend filter
-# Long when price breaks above 1w Camarilla R3 AND 1d EMA50 > previous 1d EMA50 (uptrend) AND volume > 2.0 * avg_volume(20) on 12h
-# Short when price breaks below 1w Camarilla S3 AND 1d EMA50 < previous 1d EMA50 (downtrend) AND volume > 2.0 * avg_volume(20) on 12h
+# Hypothesis: 1d strategy using weekly Camarilla pivot levels (R3/S3) breakout with volume confirmation and 1d EMA50 trend filter
+# Long when price breaks above 1w Camarilla R3 AND 1d EMA50 > previous 1d EMA50 (uptrend) AND volume > 2.0 * avg_volume(20) on 1d
+# Short when price breaks below 1w Camarilla S3 AND 1d EMA50 < previous 1d EMA50 (downtrend) AND volume > 2.0 * avg_volume(20) on 1d
 # Exit when price crosses back through the 1w Camarilla midpoint (R3/S3 average)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 # Camarilla levels from 1w provide weekly structure that works in both bull and bear markets
 # 1d EMA50 filter ensures we trade with the higher timeframe trend, reducing whipsaw
 # Extreme volume confirmation (2.0x) validates breakout strength and reduces false signals
 
-name = "12h_1wCamarillaR3S3_1dEMA50_VolumeSpike"
-timeframe = "12h"
+name = "1d_1wCamarillaR3S3_1dEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_s3 = close_1w - 1.1 * high_low_1w * 1.1 / 4.0
     camarilla_mid = (camarilla_r3 + camarilla_s3) / 2.0
     
-    # Align 1w Camarilla to 12h timeframe (wait for completed 1w bar)
+    # Align 1w Camarilla to 1d timeframe (wait for completed 1w bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     camarilla_mid_aligned = align_htf_to_ltf(prices, df_1w, camarilla_mid)
@@ -59,7 +59,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 1d
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
