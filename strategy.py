@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Hypothesis: 1d Camarilla R4/S4 breakout with 1w EMA50 trend filter and volume spike confirmation
 # Long when price breaks above 1w Camarilla R4 AND volume > 2.0x 20-period average AND close > 1w EMA50
 # Short when price breaks below 1w Camarilla S4 AND volume > 2.0x 20-period average AND close < 1w EMA50
 # Exit when price crosses 1w Camarilla pivot point (mean reversion to weekly equilibrium)
-# Uses weekly timeframe for stronger trend filter and fewer, higher-quality breaks
-# Target: 75-150 total trades over 4 years (19-37/year) for 4h timeframe
+# Uses R4/S4 (wider bands) for fewer, higher-quality breaks vs R3/S3 to reduce overtrading
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Works in BOTH bull AND bear markets: trend filter (1w EMA50) ensures alignment with higher timeframe direction,
+# volume confirmation avoids false breakouts, Camarilla pivot exit provides mean-reversion in ranging conditions.
 
-name = "4h_Camarilla_R4S4_Breakout_1wEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R4S4_Breakout_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume spike filter on 4h (no HTF needed for volume)
+    # Calculate volume spike filter on 1d (no HTF needed for volume)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (2.0 * vol_ma_20)
@@ -33,7 +35,7 @@ def generate_signals(prices):
     
     # Get 1w data ONCE before loop for Camarilla levels and EMA trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 40:
         return np.zeros(n)
     
     # Calculate 1w Camarilla pivot levels
@@ -49,7 +51,7 @@ def generate_signals(prices):
     camarilla_s4 = close_1w - (range_1w * 1.1)
     camarilla_pivot = pivot_1w  # Use standard pivot as exit level
     
-    # Align 1w indicators to 4h timeframe
+    # Align 1w indicators to 1d timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
