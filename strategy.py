@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout + 1w EMA34 trend + volume confirmation
-# Long when: price breaks above R3, 1w close > EMA34, volume > 1.5x 24-period MA (12h equivalent)
-# Short when: price breaks below S3, 1w close < EMA34, volume > 1.5x 24-period MA
-# Exit when: price retouches the 1d pivot point (PP) or volume drops below average
-# Uses Camarilla levels for precise entry, 1w EMA for major trend filter, volume for conviction
-# Timeframe: 12h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation
+# Long when: price breaks above Donchian(20) high, 1w HMA(21) trending up, volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian(20) low, 1w HMA(21) trending down, volume > 1.5x 20-period MA
+# Exit when: price retouches Donchian(20) midpoint or HMA trend reverses
+# Uses Donchian for structure, 1w HMA for HTF trend, volume for conviction
+# Timeframe: 1d, HTF: 1w. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wHMA21_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +24,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 12h using 24-period MA (equivalent to 1d lookback)
-    if len(volume) >= 24:
-        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-        volume_filter = volume > (1.5 * vol_ma_24)
+    # Calculate volume confirmation on 1d using 20-period MA
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
+    # Get 1w data ONCE before loop for HMA calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 21:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate 34-period EMA for 1w trend filter
-    if len(close_1w) >= 34:
-        ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    else:
-        ema_34_1w = np.full(len(close_1w), np.nan)
-    
-    # Align 1w EMA34 to 12h timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get 1d data ONCE before loop for Camarilla levels calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    camarilla_pp = np.full(len(df_1d), np.nan)
-    
-    for i in range(len(df_1d)):
-        if i == 0:  # Skip first bar as we need previous day
-            continue
-        # Use previous day's OHLC to calculate today's Camarilla levels
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
+    # Calculate 21-period HMA on 1w timeframe
+    if len(close_1w) >= 21:
+        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+        half_n = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        # Camarilla calculations
-        range_val = phigh - plow
-        camarilla_pp[i] = (phigh + plow + pclose) / 3
-        camarilla_r3[i] = camarilla_pp[i] + range_val * 1.1 / 4
-        camarilla_s3[i] = camarilla_pp[i] - range_val * 1.1 / 4
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights / weights.sum(), mode='valid')
+        
+        wma_half = wma(close_1w, half_n)
+        wma_full = wma(close_1w, 21)
+        if len(wma_half) >= half_n and len(wma_full) >= 21:
+            raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
+            hma_21 = wma(raw_hma, sqrt_n)
+            # Pad to match original length
+            hma_21_padded = np.full(len(close_1w), np.nan)
+            hma_21_padded[half_n + sqrt_n - 1:] = hma_21
+            hma_21 = hma_21_padded
+        else:
+            hma_21 = np.full(len(close_1w), np.nan)
+    else:
+        hma_21 = np.full(len(close_1w), np.nan)
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    # Align 1w HMA to 1d timeframe
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    
+    # Calculate Donchian(20) channels on 1d timeframe
+    if len(high) >= 20 and len(low) >= 20:
+        donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donch_mid = (donch_high + donch_low) / 2
+    else:
+        donch_high = np.full(n, np.nan)
+        donch_low = np.full(n, np.nan)
+        donch_mid = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
+            np.isnan(hma_21_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3, 1w bullish trend, volume confirmation
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1w_aligned[i] and  # Price above 1w EMA34
+            # Long conditions: price breaks above Donchian high + HMA trending up + volume filter
+            if (close[i] > donch_high[i] and 
+                hma_21_aligned[i] > hma_21_aligned[i-1] and  # HMA trending up
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3, 1w bearish trend, volume confirmation
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1w_aligned[i] and  # Price below 1w EMA34
+            # Short conditions: price breaks below Donchian low + HMA trending down + volume filter
+            elif (close[i] < donch_low[i] and 
+                  hma_21_aligned[i] < hma_21_aligned[i-1] and  # HMA trending down
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price retouches pivot point or volume drops
-            if (close[i] <= pp_aligned[i] or not volume_filter[i]):
+            # Exit long: price retouches Donchian midpoint OR HMA trend turns down
+            if (close[i] <= donch_mid[i] or hma_21_aligned[i] < hma_21_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price retouches pivot point or volume drops
-            if (close[i] >= pp_aligned[i] or not volume_filter[i]):
+            # Exit short: price retouches Donchian midpoint OR HMA trend turns up
+            if (close[i] >= donch_mid[i] or hma_21_aligned[i] > hma_21_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
