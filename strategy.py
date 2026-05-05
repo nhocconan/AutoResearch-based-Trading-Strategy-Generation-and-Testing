@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
 # Long when price breaks above 1d Camarilla R3 level AND 1d close > 1d EMA34 AND volume > 2.0x 20-period average
 # Short when price breaks below 1d Camarilla S3 level AND 1d close < 1d EMA34 AND volume > 2.0x 20-period average
 # Exit when price crosses 1d EMA34 (trend reversal) OR price retouches the 1d Camarilla pivot point (mean reversion)
-# Uses 12h primary timeframe with 1d HTF for Camarilla levels and trend filter
-# Camarilla R3/S3 levels provide stronger breakout confirmation than R1/S1 with fewer false signals
-# Volume spike confirmation reduces false breakouts in low volatility periods
+# Uses 4h primary timeframe with 1d HTF for all indicators (Camarilla levels, EMA34)
+# Camarilla R3/S3 levels provide stronger breakout confirmation than R1/S1, reducing false signals
+# Volume spike confirmation filters low-momentum breakouts
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-150 total trades over 4 years (19-37/year) for 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla levels and trend filter
+    # Get 1d data ONCE before loop for all indicators
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -37,16 +37,6 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla levels: 
-    # R4 = close + ((high - low) * 1.1/2)
-    # R3 = close + ((high - low) * 1.1/4)
-    # R2 = close + ((high - low) * 1.1/6)
-    # R1 = close + ((high - low) * 1.1/12)
-    # PP = (high + low + close) / 3
-    # S1 = close - ((high - low) * 1.1/12)
-    # S2 = close - ((high - low) * 1.1/6)
-    # S3 = close - ((high - low) * 1.1/4)
-    # S4 = close - ((high - low) * 1.1/2)
     if len(df_1d) >= 2:
         # Use previous day's OHLC to calculate today's Camarilla levels (no look-ahead)
         prev_high = df_1d['high'].shift(1).values
@@ -58,7 +48,7 @@ def generate_signals(prices):
         camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
         camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
         
-        # Align to 12h timeframe
+        # Align to 4h timeframe
         camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
         camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
         camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
