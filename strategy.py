@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d ATR-based volatility breakout with 6h trend filter and volume spike confirmation
-# Long when price breaks above upper ATR band (close > upper_band) AND price > 6h EMA50 AND volume > 2.0 * avg_volume(20) on 6h
-# Short when price breaks below lower ATR band (close < lower_band) AND price < 6h EMA50 AND volume > 2.0 * avg_volume(20) on 6h
-# Exit when price crosses back through 6h EMA50 OR volume drops below average
+# Hypothesis: 12h strategy using 1d Williams %R extreme reversal with 12h EMA34 trend and volume confirmation
+# Long when Williams %R(14) crosses above -80 (oversold) AND price > 12h EMA34 AND volume > 1.8 * avg_volume(20) on 12h
+# Short when Williams %R(14) crosses below -20 (overbought) AND price < 12h EMA34 AND volume > 1.8 * avg_volume(20) on 12h
+# Exit when Williams %R crosses back through -50 (mean reversion midpoint) OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# ATR bands capture volatility expansion breakouts that work in both bull and bear markets
-# 6h EMA50 filters for primary trend alignment to avoid counter-trend trades
-# Volume spike confirms breakout strength and reduces false signals
-# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Williams %R provides timely reversal signals in ranging markets
+# 12h EMA34 filters for primary trend alignment to avoid counter-trend trades
+# Volume spike confirms reversal strength and reduces false signals
+# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
 
-name = "6h_ATRBreakout_6hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_EXT_12hEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,44 +28,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR calculation
+    # Get 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least 14 daily bars for ATR14
+    if len(df_1d) < 14:  # Need at least one completed daily bar for Williams %R
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR(14) on daily timeframe
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Williams %R(14) on daily timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100
     
-    # Calculate ATR bands: upper = close + 2*ATR, lower = close - 2*ATR
-    upper_band_1d = close_1d + (2.0 * atr_14)
-    lower_band_1d = close_1d - (2.0 * atr_14)
+    # Align Williams %R to 12h timeframe (wait for completed daily bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align ATR bands to 6h timeframe (wait for completed daily bar)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band_1d)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band_1d)
-    
-    # Get 6h data ONCE before loop for EMA50 trend filter
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:  # Need enough for EMA50
+    # Get 12h data ONCE before loop for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:  # Need enough for EMA34
         return np.zeros(n)
-    close_6h = df_6h['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 6h EMA50
-    close_6h_series = pd.Series(close_6h)
-    ema50_6h = close_6h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h_aligned = align_htf_to_ltf(prices, df_6h, ema50_6h)
+    # Calculate 12h EMA34
+    close_12h_series = pd.Series(close_12h)
+    ema34_12h = close_12h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
+    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.8 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -76,34 +69,34 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema50_6h_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper ATR band, above 6h EMA50, volume confirmation, in session
-            if (close[i] > upper_band_aligned[i] and 
-                close[i] > ema50_6h_aligned[i] and volume_confirm[i]):
+            # Long: Williams %R crosses above -80 (oversold), above 12h EMA34, volume confirmation, in session
+            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
+                close[i] > ema34_12h_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower ATR band, below 6h EMA50, volume confirmation, in session
-            elif (close[i] < lower_band_aligned[i] and 
-                  close[i] < ema50_6h_aligned[i] and volume_confirm[i]):
+            # Short: Williams %R crosses below -20 (overbought), below 12h EMA34, volume confirmation, in session
+            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
+                  close[i] < ema34_12h_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below 6h EMA50 OR volume drops below average
-            if close[i] < ema50_6h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Williams %R crosses back above -50 (mean reversion) OR volume drops below average
+            if williams_r_aligned[i] > -50 or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above 6h EMA50 OR volume drops below average
-            if close[i] > ema50_6h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Williams %R crosses back below -50 (mean reversion) OR volume drops below average
+            if williams_r_aligned[i] < -50 or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
