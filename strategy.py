@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using Williams %R extreme levels with 1d EMA50 trend filter and volume spike confirmation
-# Long when Williams %R crosses above -20 (from below) AND price > 1d EMA50 AND volume > 1.8 * avg_volume(24) on 6h
-# Short when Williams %R crosses below -80 (from above) AND price < 1d EMA50 AND volume > 1.8 * avg_volume(24) on 6h
-# Exit when Williams %R crosses opposite extreme (-80 for long, -20 for short) OR volume drops below average
+# Hypothesis: 12h strategy using daily Williams Fractal breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above the most recent daily bullish fractal AND price > 1d EMA34 AND volume > 1.8 * avg_volume(20) on 12h
+# Short when price breaks below the most recent daily bearish fractal AND price < 1d EMA34 AND volume > 1.8 * avg_volume(20) on 12h
+# Exit when price crosses back below/above the 1d EMA34 OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 60-120 total trades over 4 years (15-30/year) for 6h timeframe
-# Williams %R identifies overbought/oversold conditions for mean reversion in ranging markets
-# 1d EMA50 filters primary trend to avoid counter-trend trades during strong trends
-# Volume spike confirms reversal strength and reduces false signals
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
+# Target: 60-120 total trades over 4 years (15-30/year) for 12h timeframe
+# Daily Williams Fractals provide robust swing high/low levels from higher timeframe
+# 1d EMA34 filters primary trend to avoid counter-trend trades
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "6h_WilliamsR_Extreme_Reversal_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsFractal_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,28 +28,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    # Get daily data ONCE before loop for Williams Fractals and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50
+    if len(df_1d) < 5:  # Need at least one completed daily bar
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50
+    # Calculate Williams Fractals (5-bar: bar is fractal if highest/lowest of 5)
+    # Bearish fractal: high[n-2] > high[n-3] and high[n-2] > high[n-1] and high[n-2] > high[n] and high[n-2] > high[n+1]
+    # Bullish fractal: low[n-2] < low[n-3] and low[n-2] < low[n-1] and low[n-2] < low[n] and low[n-2] < low[n+1]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align daily Williams Fractals to 12h timeframe (wait for completed daily bar + 2 extra bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Calculate 1d EMA34
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Williams %R (14-period) on 6h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate volume confirmation: volume > 1.8 * 24-period average volume on 6h
-    avg_volume_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_24)
+    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 12h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -60,32 +72,32 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(avg_volume_24[i]) or not in_session[i]):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -20 (from below), price > 1d EMA50, volume confirmation, in session
-            if williams_r[i] > -20 and williams_r[i-1] <= -20 and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above most recent daily bullish fractal, above 1d EMA34, volume confirmation, in session
+            if close[i] > bullish_fractal_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -80 (from above), price < 1d EMA50, volume confirmation, in session
-            elif williams_r[i] < -80 and williams_r[i-1] >= -80 and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below most recent daily bearish fractal, below 1d EMA34, volume confirmation, in session
+            elif close[i] < bearish_fractal_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses below -80 OR volume drops below average
-            if williams_r[i] < -80 and williams_r[i-1] >= -80 or volume[i] < avg_volume_24[i]:
+            # Exit long: Price crosses below 1d EMA34 OR volume drops below average
+            if close[i] < ema34_1d_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses above -20 OR volume drops below average
-            if williams_r[i] > -20 and williams_r[i-1] <= -20 or volume[i] < avg_volume_24[i]:
+            # Exit short: Price crosses above 1d EMA34 OR volume drops below average
+            if close[i] > ema34_1d_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
