@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d EMA50 trend filter and volume confirmation
-# Williams %R measures overbought/oversold levels: > -20 = overbought, < -80 = oversold
-# Long when Williams %R crosses above -80 from below AND price > EMA50(1d) AND volume > 1.5x 20-period average
-# Short when Williams %R crosses below -20 from above AND price < EMA50(1d) AND volume > 1.5x 20-period average
-# Exit when Williams %R crosses opposite extreme (-20 for longs, -80 for shorts) OR trend flips
-# Williams %R is effective in ranging markets and catches reversals at extremes
-# 1d EMA50 provides higher timeframe trend filter to avoid counter-trend trades
-# Volume confirmation ensures institutional participation
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) for 6h timeframe
+# Hypothesis: 12h KAMA trend + RSI(14) mean reversion + 1d volume spike filter
+# Long when KAMA direction is up AND RSI < 30 (oversold) AND 1d volume > 1.5x 20-day average
+# Short when KAMA direction is down AND RSI > 70 (overbought) AND 1d volume > 1.5x 20-day average
+# Exit when RSI crosses back to neutral (40-60 range) OR KAMA direction flips
+# KAMA adapts to market noise, reducing whipsaws in choppy markets
+# RSI extremes provide mean reversion entries in both bull and bear markets
+# Volume spike confirms institutional participation at turning points
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) for 12h timeframe
 # Discrete sizing (0.25) to limit fee drag
 
-name = "6h_WilliamsR_EXTREME_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_KAMA_RSI_MeanReversion_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +22,105 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    # Get 1d data ONCE before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d volume 20-period average for spike filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = vol_1d > (1.5 * vol_ma_20_1d)
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d volume spike to 12h timeframe
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Williams %R calculation (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate KAMA (adaptive moving average) on 12h close
+    # Efficiency ratio: ER = |close - close[10]| / sum(|close - close[1]| over 10 periods)
+    change = np.abs(np.subtract(close[10:], close[:-10]))  # |close - close[10]|
+    volatility = np.abs(np.subtract(close[1:], close[:-1]))  # |close - close[1]|
+    
+    # Pad arrays for rolling sum
+    change_padded = np.concatenate([np.full(10, np.nan), change])
+    volatility_padded = np.concatenate([np.full(1, np.nan), volatility])
+    
+    # Calculate 10-period rolling sums
+    change_sum = pd.Series(change_padded).rolling(window=10, min_periods=10).sum().values[10:]
+    volatility_sum = pd.Series(volatility_padded).rolling(window=10, min_periods=10).sum().values
     
     # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    williams_r = np.where(hl_range != 0, ((highest_high - close) / hl_range) * -100, -50)
+    er = np.divide(change_sum, volatility_sum, out=np.full_like(change_sum, 0.1), where=volatility_sum!=0)
+    er = np.concatenate([np.full(10, 0.1), er])  # Pad beginning
     
-    # Volume confirmation: volume > 1.5x 20-period average (spike filter)
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # KAMA direction: 1 if rising, -1 if falling
+    kama_dir = np.diff(kama, prepend=kama[0])
+    kama_dir = np.where(kama_dir > 0, 1, np.where(kama_dir < 0, -1, 0))
+    
+    # Calculate RSI(14) on 12h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    # Avoid division by zero
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)  # Handle all gains case
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(kama_dir[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Williams %R crosses above -80 from below AND price > EMA50(1d) AND volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_filter[i]):
+            # Long conditions: KAMA up AND RSI < 30 (oversold) AND volume spike
+            if (kama_dir[i] > 0 and 
+                rsi[i] < 30 and 
+                volume_spike_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R crosses below -20 from above AND price < EMA50(1d) AND volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_filter[i]):
+            # Short conditions: KAMA down AND RSI > 70 (overbought) AND volume spike
+            elif (kama_dir[i] < 0 and 
+                  rsi[i] > 70 and 
+                  volume_spike_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought) OR price < EMA50(1d) (trend flip)
-            if (williams_r[i] > -20 and williams_r[i-1] <= -20) or \
-               (close[i] < ema_50_1d_aligned[i]):
+            # Exit long: RSI crosses back to neutral (>=40) OR KAMA direction flips down
+            if (rsi[i] >= 40 or 
+                kama_dir[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold) OR price > EMA50(1d) (trend flip)
-            if (williams_r[i] < -80 and williams_r[i-1] >= -80) or \
-               (close[i] > ema_50_1d_aligned[i]):
+            # Exit short: RSI crosses back to neutral (<=60) OR KAMA direction flips up
+            if (rsi[i] <= 60 or 
+                kama_dir[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
