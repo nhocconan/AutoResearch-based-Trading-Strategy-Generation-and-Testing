@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation
-# Long when close > upper Donchian(20) AND close > EMA50(1w) AND volume > 2.0x 20-period average
-# Short when close < lower Donchian(20) AND close < EMA50(1w) AND volume > 2.0x 20-period average
-# Exit when close crosses EMA50(1w) (trend filter flip)
-# Uses 1d primary timeframe with 1w HTF for trend filter to reduce whipsaw
+# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume spike confirmation
+# Long when Williams %R < -80 (oversold) AND close > EMA34(1d) AND volume > 2.0x 20-period average
+# Short when Williams %R > -20 (overbought) AND close < EMA34(1d) AND volume > 2.0x 20-period average
+# Exit when Williams %R crosses above -50 (for long) or below -50 (for short)
+# Uses 6h primary timeframe with 1d HTF for trend filter to reduce whipsaw
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Works in both bull and bear markets by adapting to trend via EMA filter
+# Williams %R is effective in ranging markets and captures mean reversion during pullbacks in trends
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,24 +25,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop for EMA34 trend filter and Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1w close for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate EMA34 on 1d close for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on 1d data
-    if len(high) >= 20:
-        # Upper channel: highest high over past 20 periods
-        upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        # Lower channel: lowest low over past 20 periods
-        lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    else:
-        upper_channel = np.full(n, np.nan)
-        lower_channel = np.full(n, np.nan)
+    # Calculate Williams %R on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback as standard
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align 1d indicators to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
     if len(volume) >= 20:
@@ -56,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,28 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: close > upper Donchian AND close > EMA50(1w) AND volume spike
-            if (close[i] > upper_channel[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long conditions: Williams %R < -80 (oversold) AND close > EMA34(1d) AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: close < lower Donchian AND close < EMA50(1w) AND volume spike
-            elif (close[i] < lower_channel[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short conditions: Williams %R > -20 (overbought) AND close < EMA34(1d) AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: close < EMA50(1w) (trend filter flip)
-            if close[i] < ema_50_1w_aligned[i]:
+            # Exit long: Williams %R crosses above -50 (momentum fading)
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: close > EMA50(1w) (trend filter flip)
-            if close[i] > ema_50_1w_aligned[i]:
+            # Exit short: Williams %R crosses below -50 (momentum fading)
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
