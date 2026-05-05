@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + 1d ADX trend filter + volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via aligned SMAs
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Short when: Jaw > Teeth > Lips (bearish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Exit when: Alligator lines cross (trend weakening) OR ADX drops below 20
-# Uses Alligator for trend structure, ADX for trend strength, volume for conviction
-# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
+# Donchian breakout captures price channel structure, ADX ensures trend strength, volume confirms conviction
+# Long when: price > upper Donchian(20) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Short when: price < lower Donchian(20) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Exit when: price crosses middle of Donchian channel OR ADX drops below 20
+# Uses Donchian for breakout structure, ADX for trend filter, volume for confirmation
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_WilliamsAlligator_1dADX_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,15 +25,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator on 6h
-    if len(high) >= 13:
-        jaw = pd.Series(high).rolling(window=13, min_periods=13).mean().values  # Jaw (13)
-        teeth = pd.Series(high).rolling(window=8, min_periods=8).mean().values   # Teeth (8)
-        lips = pd.Series(high).rolling(window=5, min_periods=5).mean().values    # Lips (5)
+    # Calculate Donchian Channel on 12h
+    if len(high) >= 20:
+        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_middle = (donchian_upper + donchian_lower) / 2
     else:
-        jaw = np.full(n, np.nan)
-        teeth = np.full(n, np.nan)
-        lips = np.full(n, np.nan)
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_middle = np.full(n, np.nan)
     
     # Get 1d data ONCE before loop for ADX calculation
     df_1d = get_htf_data(prices, '1d')
@@ -86,20 +86,11 @@ def generate_signals(prices):
             adx_strong[i] = adx[i] > 25
             adx_weak[i] = adx[i] < 20
     
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
     adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
     
-    # Williams Alligator alignment signals
-    lips_above_teeth = lips > teeth
-    teeth_above_jaw = teeth > jaw
-    jaw_above_teeth = jaw > teeth
-    teeth_above_lips = teeth > lips
-    
-    bullish_alignment = lips_above_teeth & teeth_above_jaw
-    bearish_alignment = jaw_above_teeth & teeth_above_lips
-    
-    # Volume confirmation on 6h
+    # Volume confirmation on 12h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
@@ -111,7 +102,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
             np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
@@ -120,28 +111,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: bullish Alligator alignment + strong ADX + volume filter
-            if (bullish_alignment[i] and 
+            # Long conditions: price > upper Donchian + strong ADX + volume filter
+            if (close[i] > donchian_upper[i] and 
                 adx_strong_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish Alligator alignment + strong ADX + volume filter
-            elif (bearish_alignment[i] and 
+            # Short conditions: price < lower Donchian + strong ADX + volume filter
+            elif (close[i] < donchian_lower[i] and 
                   adx_strong_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish Alligator alignment OR weak ADX
-            if (bearish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: price < middle Donchian OR weak ADX
+            if (close[i] < donchian_middle[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish Alligator alignment OR weak ADX
-            if (bullish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: price > middle Donchian OR weak ADX
+            if (close[i] > donchian_middle[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
