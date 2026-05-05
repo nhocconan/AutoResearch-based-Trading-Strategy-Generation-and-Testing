@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot breakout with 4h EMA50 trend filter and volume spike confirmation
-# Long when price breaks above 1d Camarilla R3 level AND price > 4h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
-# Short when price breaks below 1d Camarilla S3 level AND price < 4h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
-# Exit when price crosses back below/above 1d Camarilla pivot point OR volume drops below average
+# Hypothesis: 4h strategy using daily Camarilla pivot breakout with 4h EMA50 trend filter and volume spike confirmation
+# Long when price breaks above daily Camarilla R3 level AND price > 4h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
+# Short when price breaks below daily Camarilla S3 level AND price < 4h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
+# Exit when price crosses back below/above daily Camarilla pivot point OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# 1d Camarilla provides robust support/resistance from higher timeframe
+# Daily Camarilla provides robust support/resistance from higher timeframe
 # 4h EMA50 filters primary trend to avoid counter-trend trades
 # Volume spike confirms breakout strength and reduces false signals
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
@@ -28,7 +28,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla levels
+    # Get daily data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:  # Need at least one completed daily bar
         return np.zeros(n)
@@ -36,7 +36,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (based on previous daily bar)
+    # Calculate daily Camarilla levels (based on previous daily bar)
     # Camarilla: Pivot = (H+L+C)/3, Range = H-L
     # R3 = Pivot + Range * 1.1/2, S3 = Pivot - Range * 1.1/2
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
@@ -45,7 +45,7 @@ def generate_signals(prices):
     camarilla_s3 = pivot_1d - (range_1d * 1.1 / 2.0)
     camarilla_pivot = pivot_1d  # PP level for exit
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for completed daily bar)
+    # Align daily Camarilla levels to 4h timeframe (wait for completed daily bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
@@ -83,23 +83,23 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla R3, above 4h EMA50, volume confirmation, in session
+            # Long: Price breaks above daily Camarilla R3, above 4h EMA50, volume confirmation, in session
             if close[i] > camarilla_r3_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 1d Camarilla S3, below 4h EMA50, volume confirmation, in session
+            # Short: Price breaks below daily Camarilla S3, below 4h EMA50, volume confirmation, in session
             elif close[i] < camarilla_s3_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below 1d Camarilla pivot OR volume drops below average
+            # Exit long: Price crosses below daily Camarilla pivot OR volume drops below average
             if close[i] < camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above 1d Camarilla pivot OR volume drops below average
+            # Exit short: Price crosses above daily Camarilla pivot OR volume drops below average
             if close[i] > camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
