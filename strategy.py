@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d Camarilla pivot (R3/S3) touch + volume confirmation
-# Long when: price touches 1d Camarilla S3 AND breaks above 12h Donchian(20) high AND volume > 1.5x 20-period MA
-# Short when: price touches 1d Camarilla R3 AND breaks below 12h Donchian(20) low AND volume > 1.5x 20-period MA
-# Exit when: price reaches 12h Donchian midpoint OR opposite breakout occurs
-# Uses Camarilla for mean reversion bias, Donchian for breakout structure, volume for conviction
-# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and 1d volatility regime
+# Long when: 1h RSI(2) < 10 AND 4h close > 4h EMA(50) AND 1d ATR ratio < 0.8 (low volatility)
+# Short when: 1h RSI(2) > 90 AND 4h close < 4h EMA(50) AND 1d ATR ratio < 0.8 (low volatility)
+# Exit when: 1h RSI(2) crosses 50 (mean reversion complete) OR opposite signal occurs
+# Uses RSI(2) for extreme mean reversion, 4h EMA for trend alignment, 1d ATR for regime filter
+# Timeframe: 1h, HTF: 4h/1d. Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag.
+# Session filter: 08-20 UTC to reduce noise trades.
 
-name = "12h_Donchian20_1dCamarilla_R3S3_Touch_VolumeConfirm"
-timeframe = "12h"
+name = "1h_RSI2_4hEMA50_1dATRRegime_VolatilityFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,103 +20,96 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate volume confirmation on 12h using 20-period MA
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+    # Calculate 1h RSI(2) - extreme mean reversion
+    if len(close) >= 3:
+        delta = pd.Series(close).diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+        avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi_2 = 100 - (100 / (1 + rs))
+        rsi_2 = rsi_2.fillna(50).values  # neutral when undefined
     else:
-        volume_filter = np.zeros(n, dtype=bool)
+        rsi_2 = np.full(n, 50)
     
-    # Calculate Donchian(20) on 12h
-    if len(high) >= 20 and len(low) >= 20:
-        highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (highest_high + lowest_low) / 2.0
-    else:
-        highest_high = np.full(n, np.nan)
-        lowest_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
-    
-    # Donchian breakout signals
-    donchian_breakout_up = (close > highest_high) & (np.roll(close, 1) <= np.roll(highest_high, 1))
-    donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
-    donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
-    
-    # Get 1d data ONCE before loop for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # need sufficient data for Camarilla
+    # Get 4h data ONCE before loop for EMA(50) trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from prior day's OHLC
-    if len(df_1d) >= 2:
-        # Get prior day's OHLC (yesterday's high, low, close)
-        daily_high = df_1d['high'].shift(1).values
-        daily_low = df_1d['low'].shift(1).values
-        daily_close = df_1d['close'].shift(1).values
-        
-        # Calculate Camarilla levels for daily timeframe
-        # Camarilla: R3 = close + ((high-low) * 1.1/4), S3 = close - ((high-low) * 1.1/4)
-        daily_range = daily_high - daily_low
-        camarilla_r3 = daily_close + (daily_range * 1.1 / 4)
-        camarilla_s3 = daily_close - (daily_range * 1.1 / 4)
-        
-        # Bullish bias: close <= S3 (touch or below), Bearish bias: close >= R3 (touch or above)
-        daily_bullish = df_1d['close'].values <= camarilla_s3
-        daily_bearish = df_1d['close'].values >= camarilla_r3
-    else:
-        daily_bullish = np.full(len(df_1d), False)
-        daily_bearish = np.full(len(df_1d), False)
-        camarilla_r3 = np.full(len(df_1d), np.nan)
-        camarilla_s3 = np.full(len(df_1d), np.nan)
+    # Calculate 4h EMA(50)
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 1d Camarilla touch bias to 12h timeframe
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
+    # Get 1d data ONCE before loop for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate 1d ATR(14) and ATR ratio (current/20-period MA) for volatility regime
+    if len(df_1d) >= 14:
+        tr1 = pd.Series(df_1d['high']).values - pd.Series(df_1d['low']).values
+        tr2 = np.abs(pd.Series(df_1d['high']).values - pd.Series(df_1d['close']).shift(1).values)
+        tr3 = np.abs(pd.Series(df_1d['low']).values - pd.Series(df_1d['close']).shift(1).values)
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+        atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+        atr_ratio = atr_14 / atr_ma_20.replace(0, np.nan)
+        atr_ratio = np.nan_to_num(atr_ratio, nan=1.0)  # default to normal volatility
+    else:
+        atr_ratio = np.full(len(df_1d), 1.0)
+    
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Session filter: 08-20 UTC (reduce noise trades)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(rsi_2[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price touches S3 + Donchian breakout up + volume filter
-            if (daily_bullish_aligned[i] == 1.0 and 
-                donchian_breakout_up[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # Long conditions: RSI(2) < 10 (extreme oversold) + 4h close > EMA(50) (uptrend) + low volatility
+            if (rsi_2[i] < 10 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                atr_ratio_aligned[i] < 0.8):
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price touches R3 + Donchian breakout down + volume filter
-            elif (daily_bearish_aligned[i] == 1.0 and 
-                  donchian_breakout_down[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # Short conditions: RSI(2) > 90 (extreme overbought) + 4h close < EMA(50) (downtrend) + low volatility
+            elif (rsi_2[i] > 90 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  atr_ratio_aligned[i] < 0.8):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR short breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_down[i]):
+            # Exit long: RSI(2) crosses above 50 (mean reversion complete) OR short signal
+            if (rsi_2[i] > 50 or 
+                (rsi_2[i] > 90 and close[i] < ema_50_4h_aligned[i] and atr_ratio_aligned[i] < 0.8)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR long breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_up[i]):
+            # Exit short: RSI(2) crosses below 50 (mean reversion complete) OR long signal
+            if (rsi_2[i] < 50 or 
+                (rsi_2[i] < 10 and close[i] > ema_50_4h_aligned[i] and atr_ratio_aligned[i] < 0.8)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
