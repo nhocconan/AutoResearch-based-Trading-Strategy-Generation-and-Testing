@@ -4,12 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX25 trend filter
-# Long when price breaks above R3 AND volume > 1.5x 20-period average AND 1d ADX > 25 (trending)
-# Short when price breaks below S3 AND volume > 1.5x 20-period average AND 1d ADX > 25 (trending)
-# Exit when price crosses back to H3/L3 level OR 1d ADX < 20 (range regime)
-# Uses discrete sizing (0.30) to limit fee drag. Target: 20-40 trades/year per symbol.
+# Long when price breaks above R3 AND volume > 2.0x 20-period average AND 1d ADX > 25 (trending market)
+# Short when price breaks below S3 AND volume > 2.0x 20-period average AND 1d ADX > 25 (trending market)
+# Exit when price crosses back to H3/L3 level OR 1d ADX drops below 20 (range market)
+# Uses discrete sizing (0.25) to limit fee drag. Target: 20-50 trades/year per symbol.
 # Camarilla levels provide intraday support/resistance, volume spike confirms institutional interest,
-# 1d ADX filters for trending markets to avoid counter-trend whipsaws in ranging markets.
+# 1d ADX filter avoids whipsaws in ranging markets while capturing strong trends.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 
 name = "4h_Camarilla_R3S3_Breakout_1dADX25_Trend_VolumeSpike"
@@ -48,49 +48,58 @@ def generate_signals(prices):
     h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate 1d ADX for trend filter
-    # ADX calculation requires: +DM, -DM, TR
+    # Calculate ADX on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[np.nan], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[np.nan], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
     # Directional Movement
-    up_move = high_1d - np.concatenate([[np.nan], high_1d[:-1]])
-    down_move = np.concatenate([[np.nan], low_1d[:-1]]) - low_1d
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
+    plus_dm = np.concatenate([[0], plus_dm])  # Align with original arrays
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    def wilders_smoothing(values, period):
+        """Wilder's smoothing: first value is SMA, then recursive EMA"""
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
             return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period]) / period
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1]/period) + data[i]
+        # First value: simple average
+        result[period-1] = np.nanmean(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            if not np.isnan(result[i-1]) and not np.isnan(values[i]):
+                result[i] = result[i-1] + (values[i] - result[i-1]) / period
+            else:
+                result[i] = np.nan
         return result
     
-    period = 14
-    tr_smooth = wilder_smooth(tr, period)
-    plus_dm_smooth = wilder_smooth(plus_dm, period)
-    minus_dm_smooth = wilder_smooth(minus_dm, period)
+    tr_smoothed = wilders_smoothing(tr, period)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
     
-    # Calculate +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # DI values
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
     
-    # Calculate DX and ADX
+    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, period)
+    adx = wilders_smoothing(dx, period)
     
     # Trend filter: ADX > 25 indicates trending market
     trending = adx > 25
@@ -101,10 +110,10 @@ def generate_signals(prices):
     trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
     ranging_aligned = align_htf_to_ltf(prices, df_1d, ranging.astype(float))
     
-    # Volume confirmation: volume > 1.5x 20-period average (spike filter)
+    # Volume confirmation: volume > 2.0x 20-period average (spike filter)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -126,17 +135,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above H3 AND volume spike AND trending market (ADX > 25)
+            # Long conditions: price breaks above H3 AND volume spike AND trending market
             if (close[i] > h3_aligned[i] and 
                 volume_filter[i] and 
                 trending_aligned[i] > 0.5):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND volume spike AND trending market (ADX > 25)
+            # Short conditions: price breaks below L3 AND volume spike AND trending market
             elif (close[i] < l3_aligned[i] and 
                   volume_filter[i] and 
                   trending_aligned[i] > 0.5):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price crosses back to L3 OR market becomes ranging (ADX < 20)
@@ -145,7 +154,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: price crosses back to H3 OR market becomes ranging (ADX < 20)
             if (close[i] > h3_aligned[i] or 
@@ -153,6 +162,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
