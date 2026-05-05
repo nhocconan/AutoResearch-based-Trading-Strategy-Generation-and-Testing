@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w EMA34 trend filter + volume spike confirmation
-# Long when: price breaks above 12h Donchian(20) high AND 1w EMA34 is rising AND volume > 1.5x 20-period MA
-# Short when: price breaks below 12h Donchian(20) low AND 1w EMA34 is falling AND volume > 1.5x 20-period MA
-# Exit when: price returns to 12h Donchian(20) midpoint
-# Uses Donchian for structure, weekly EMA for trend bias, volume for conviction
-# Timeframe: 12h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR regime filter (trending when ATR7/ATR30 > 0.8) + volume spike confirmation
+# Long when: price breaks above 4h Donchian(20) high AND 1d ATR regime indicates trending (ATR7/ATR30 > 0.8) AND volume > 1.5x 20-period MA
+# Short when: price breaks below 4h Donchian(20) low AND 1d ATR regime indicates trending (ATR7/ATR30 > 0.8) AND volume > 1.5x 20-period MA
+# Exit when: price returns to 4h Donchian(20) midpoint OR opposite breakout occurs
+# Uses Donchian for structure, ATR regime for trend detection (works in bull/bear), volume for conviction
+# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "12h_Donchian20_1wEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dATRRegime_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 12h using 20-period MA
+    # Calculate volume confirmation on 4h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Calculate Donchian(20) on 12h
+    # Calculate Donchian(20) on 4h
     if len(high) >= 20 and len(low) >= 20:
         highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
         lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -46,23 +46,38 @@ def generate_signals(prices):
     donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
     donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # need at least 34 weeks for EMA34
+    # Get 1d data ONCE before loop for ATR regime calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # need sufficient data for ATR30
         return np.zeros(n)
     
-    # Calculate EMA34 on weekly close
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_34 = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Trend filter: EMA rising (current > previous) for long, falling for short
-    ema_34_rising = np.zeros(len(ema_34), dtype=bool)
-    ema_34_falling = np.zeros(len(ema_34), dtype=bool)
-    ema_34_rising[1:] = ema_34[1:] > ema_34[:-1]
-    ema_34_falling[1:] = ema_34[1:] < ema_34[:-1]
+    # Calculate ATR on 1d timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA34 trend to 12h timeframe
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_34_rising.astype(float))
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_34_falling.astype(float))
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Handle first bar
+    tr[0] = tr1[0]
+    
+    # ATR(7) and ATR(30)
+    if len(tr) >= 30:
+        atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+        atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+        # Avoid division by zero
+        atr_ratio = np.where(atr_30 != 0, atr_7 / atr_30, 0)
+        # Trending regime: ATR7/ATR30 > 0.8 indicates strong trending conditions
+        atr_regime_trending = atr_ratio > 0.8
+    else:
+        atr_ratio = np.zeros(len(df_1d))
+        atr_regime_trending = np.zeros(len(df_1d), dtype=bool)
+    
+    # Align 1d ATR regime to 4h timeframe
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime_trending.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,36 +85,35 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+            np.isnan(atr_regime_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Donchian breakout up + EMA34 rising + volume filter
+            # Long conditions: Donchian breakout up + ATR regime trending + volume filter
             if (donchian_breakout_up[i] and 
-                ema_34_rising_aligned[i] == 1.0 and 
+                atr_regime_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + EMA34 falling + volume filter
+            # Short conditions: Donchian breakout down + ATR regime trending + volume filter
             elif (donchian_breakout_down[i] and 
-                  ema_34_falling_aligned[i] == 1.0 and 
+                  atr_regime_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint
-            if donchian_revert_mid[i]:
+            # Exit long: price returns to Donchian midpoint OR short breakout occurs
+            if (donchian_revert_mid[i] or donchian_breakout_down[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint
-            if donchian_revert_mid[i]:
+            # Exit short: price returns to Donchian midpoint OR long breakout occurs
+            if (donchian_revert_mid[i] or donchian_breakout_up[i]):
                 signals[i] = 0.0
                 position = 0
             else:
