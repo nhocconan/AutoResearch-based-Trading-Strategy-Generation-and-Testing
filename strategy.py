@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
 # Long when price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND volume > 2.0x 20 EMA
 # Short when price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND volume > 2.0x 20 EMA
 # Uses discrete sizing (0.25) to limit fee drag. Target: 25-50 trades/year per symbol.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
 # Uses 1d for HTF trend to avoid counter-trend trades and 4h for Camarilla timing.
-# Based on proven winning pattern: Camarilla breakout + volume + trend filter.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,26 +30,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 4h Camarilla levels (R3, S3) from previous day's OHLC
-    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    # Using previous 4h bar's OHLC for current bar's levels
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Previous bar's values for Camarilla calculation
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    # First bar has no previous, so set to NaN
-    prev_close_4h[0] = np.nan
-    prev_high_4h[0] = np.nan
-    prev_low_4h[0] = np.nan
+    # Calculate pivot and ranges from previous 4h bar
+    piv_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
     
-    # Camarilla R3 and S3
-    camarilla_r3 = prev_close_4h + (prev_high_4h - prev_low_4h) * 1.1 / 4
-    camarilla_s3 = prev_close_4h - (prev_high_4h - prev_low_4h) * 1.1 / 4
+    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    camarilla_r3 = close_4h + (range_4h * 1.1 / 4.0)
+    camarilla_s3 = close_4h - (range_4h * 1.1 / 4.0)
     
-    # Align 4h Camarilla to prices timeframe
+    # Align 4h Camarilla to 4h timeframe (no shift needed as we use previous bar's levels)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
