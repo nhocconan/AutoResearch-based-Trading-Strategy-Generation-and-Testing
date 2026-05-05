@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR regime filter + volume spike confirmation
-# Long when: price breaks above 4h Donchian(20) high AND 1d ATR(14) > 1.5 * ATR(50) (high vol regime) AND volume > 1.8x 20-period MA
-# Short when: price breaks below 4h Donchian(20) low AND 1d ATR(14) > 1.5 * ATR(50) AND volume > 1.8x 20-period MA
-# Exit when: price returns to 4h Donchian(20) midpoint OR opposite breakout occurs
-# Uses Donchian for structure, ATR regime for volatility filtering (avoids low-volume whipsaws), volume for conviction
-# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-# Works in both bull and bear: ATR regime ensures we only trade during sufficient volatility, Donchian captures breakouts in any direction.
+# Hypothesis: 4h Donchian(20) breakout + 1d Camarilla R3/S3 level touch + volume confirmation
+# Long when: price touches 1d Camarilla S3 (support) AND breaks above 4h Donchian(20) high AND volume > 1.5x 20-period MA
+# Short when: price touches 1d Camarilla R3 (resistance) AND breaks below 4h Donchian(20) low AND volume > 1.5x 20-period MA
+# Exit when: price reaches 4h Donchian(20) midpoint OR opposite Camarilla level is touched with breakout
+# Uses Camarilla for institutional levels, Donchian for structure, volume for conviction
+# Timeframe: 4h, HTF: 1d. Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
 
-name = "4h_Donchian20_1dATRRegime_VolumeConfirm"
+name = "4h_Donchian20_1dCamarilla_R3S3_Touch_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,7 +27,7 @@ def generate_signals(prices):
     # Calculate volume confirmation on 4h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.8 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -47,32 +46,36 @@ def generate_signals(prices):
     donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
     donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
     
-    # Get 1d data ONCE before loop for ATR regime
+    # Get 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # need sufficient data for ATR(50)
+    if len(df_1d) < 5:  # need sufficient data for Camarilla calculation
         return np.zeros(n)
     
-    # Calculate ATR(14) and ATR(50) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels for 1d timeframe using prior day's OHLC
+    if len(df_1d) >= 2:
+        # Prior day's high, low, close
+        prior_high = df_1d['high'].shift(1).values
+        prior_low = df_1d['low'].shift(1).values
+        prior_close = df_1d['close'].shift(1).values
+        
+        # Calculate Camarilla levels
+        # Camarilla: R3 = close + ((high-low) * 1.1/4), S3 = close - ((high-low) * 1.1/4)
+        prior_range = prior_high - prior_low
+        camarilla_r3 = prior_close + (prior_range * 1.1 / 4)
+        camarilla_s3 = prior_close - (prior_range * 1.1 / 4)
+        
+        # Price touching Camarilla levels (within 0.2% tolerance)
+        touch_r3 = np.abs(close - camarilla_r3) < (0.002 * close)
+        touch_s3 = np.abs(close - camarilla_s3) < (0.002 * close)
+    else:
+        touch_r3 = np.zeros(n, dtype=bool)
+        touch_s3 = np.zeros(n, dtype=bool)
+        camarilla_r3 = np.full(n, np.nan)
+        camarilla_s3 = np.full(n, np.nan)
     
-    # True Range calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr3 = np.abs(low_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    # ATR(14) and ATR(50)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # ATR regime: ATR(14) > 1.5 * ATR(50) indicates high volatility regime
-    atr_regime = atr_14 > (1.5 * atr_50)
-    
-    # Align 1d ATR regime to 4h timeframe
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
+    # Align 1d Camarilla touch signals to 4h timeframe
+    touch_r3_aligned = align_htf_to_ltf(prices, df_1d, touch_r3.astype(float))
+    touch_s3_aligned = align_htf_to_ltf(prices, df_1d, touch_s3.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,35 +83,38 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_regime_aligned[i]) or np.isnan(volume_filter[i])):
+            np.isnan(touch_r3_aligned[i]) or np.isnan(touch_s3_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Donchian breakout up + ATR regime + volume filter
-            if (donchian_breakout_up[i] and 
-                atr_regime_aligned[i] == 1.0 and 
+            # Long conditions: touch S3 + Donchian breakout up + volume filter
+            if (touch_s3_aligned[i] == 1.0 and 
+                donchian_breakout_up[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + ATR regime + volume filter
-            elif (donchian_breakout_down[i] and 
-                  atr_regime_aligned[i] == 1.0 and 
+            # Short conditions: touch R3 + Donchian breakout down + volume filter
+            elif (touch_r3_aligned[i] == 1.0 and 
+                  donchian_breakout_down[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR short breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_down[i]):
+            # Exit long: price returns to Donchian midpoint OR touch R3 with breakout down
+            if (donchian_revert_mid[i] or 
+                (touch_r3_aligned[i] == 1.0 and donchian_breakout_down[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR long breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_up[i]):
+            # Exit short: price returns to Donchian midpoint OR touch S3 with breakout up
+            if (donchian_revert_mid[i] or 
+                (touch_s3_aligned[i] == 1.0 and donchian_breakout_up[i])):
                 signals[i] = 0.0
                 position = 0
             else:
