@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation
 # Long when price breaks above R3 AND 1w close > 1w EMA50 (uptrend) AND volume > 2.0x 20 EMA
 # Short when price breaks below S3 AND 1w close < 1w EMA50 (downtrend) AND volume > 2.0x 20 EMA
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol.
+# Uses discrete sizing (0.25) to limit fee drag. Target: 20-50 trades/year per symbol.
+# Weekly trend filter avoids counter-trend trades and provides stronger regime filter than daily.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 1w for HTF trend to avoid counter-trend trades and 12h for entry timing.
 
-name = "12h_Camarilla_R3S3_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1wEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1w + (high_1w - low_1w) * 1.1 / 4
     camarilla_s3 = close_1w - (high_1w - low_1w) * 1.1 / 4
     
-    # Align weekly Camarilla levels to 12h timeframe
+    # Align weekly Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     uptrend_1w = close_1w > ema_50_1w
     downtrend_1w = close_1w < ema_50_1w
     
-    # Align 1w trend to 12h timeframe
+    # Align 1w trend to 4h timeframe
     uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
     downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
     
