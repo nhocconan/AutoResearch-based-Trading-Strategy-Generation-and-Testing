@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w trend filter (HMA21) + volume confirmation
-# Long when: price breaks above Donchian upper (20) AND 1w HMA21 rising AND volume > 1.5x 24-period MA
-# Short when: price breaks below Donchian lower (20) AND 1w HMA21 falling AND volume > 1.5x 24-period MA
-# Exit when: price returns to Donchian midpoint OR trend reverses
-# Uses Donchian for structure, 1w HMA for major trend filter, volume for conviction
+# Hypothesis: 12h Camarilla R3/S3 breakout + 1w trend filter (HMA21) + volume confirmation
+# Long when: price breaks above Camarilla R3 AND 1w HMA21 rising AND volume > 1.5x 24-period MA
+# Short when: price breaks below Camarilla S3 AND 1w HMA21 falling AND volume > 1.5x 24-period MA
+# Exit when: price returns to Camarilla H3/L3 OR trend reverses
+# Uses Camarilla for structure, 1w HMA for major trend filter, volume for conviction
 # Timeframe: 12h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "12h_Donchian20_1wHMA21_VolumeConfirm"
+name = "12h_Camarilla_R3S3_1wHMA21_VolumeConfirm"
 timeframe = "12h"
 leverage = 1.0
 
@@ -37,6 +37,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
     # Calculate 21-period HMA on 1w timeframe
     if len(close_1w) >= 21:
@@ -82,23 +84,29 @@ def generate_signals(prices):
     hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising.astype(float))
     hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling.astype(float))
     
-    # Calculate Donchian channels on 12h (20-period)
-    if len(high) >= 20 and len(low) >= 20:
-        donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donch_mid = (donch_high + donch_low) / 2
-    else:
-        donch_high = np.full(n, np.nan)
-        donch_low = np.full(n, np.nan)
-        donch_mid = np.full(n, np.nan)
+    # Calculate Camarilla levels on 12h (based on previous bar's range)
+    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    
+    if len(high) >= 2 and len(low) >= 2 and len(close) >= 2:
+        for i in range(1, n):
+            h_l_diff = high[i-1] - low[i-1]
+            camarilla_r3[i] = close[i-1] + (h_l_diff * 1.1 / 4)
+            camarilla_s3[i] = close[i-1] - (h_l_diff * 1.1 / 4)
+            camarilla_h3[i] = close[i-1] + (h_l_diff * 1.1 / 2)
+            camarilla_l3[i] = close[i-1] - (h_l_diff * 1.1 / 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
-            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or 
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -106,28 +114,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper + 1w HMA rising + volume filter
-            if (close[i] > donch_high[i] and 
+            # Long conditions: price breaks above Camarilla R3 + 1w HMA rising + volume filter
+            if (close[i] > camarilla_r3[i] and 
                 hma_rising_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower + 1w HMA falling + volume filter
-            elif (close[i] < donch_low[i] and 
+            # Short conditions: price breaks below Camarilla S3 + 1w HMA falling + volume filter
+            elif (close[i] < camarilla_s3[i] and 
                   hma_falling_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR 1w HMA turns falling
-            if (close[i] <= donch_mid[i] or hma_falling_aligned[i] == 1.0):
+            # Exit long: price returns to Camarilla H3 OR 1w HMA turns falling
+            if (close[i] >= camarilla_h3[i] or hma_falling_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR 1w HMA turns rising
-            if (close[i] >= donch_mid[i] or hma_rising_aligned[i] == 1.0):
+            # Exit short: price returns to Camarilla L3 OR 1w HMA turns rising
+            if (close[i] <= camarilla_l3[i] or hma_rising_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
