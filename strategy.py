@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme Reversal with 1w EMA50 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 1w EMA50 AND volume > 1.5x 20-period average
-# Short when Williams %R > -20 (overbought) AND price < 1w EMA50 AND volume > 1.5x 20-period average
-# Exit when Williams %R crosses above -50 (for long) or below -50 (for short)
-# Williams %R identifies exhaustion points in both bull and bear markets
-# 1w EMA50 provides robust long-term trend filter effective through 2022 crash and 2025 range
-# Volume confirmation reduces false signals during low-participation moves
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Timeframe: 12h (primary), HTF: 1w
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (2.0x)
+# Long when price breaks above Donchian upper AND price > 1d EMA50 AND volume > 2.0x 20-period average
+# Short when price breaks below Donchian lower AND price < 1d EMA50 AND volume > 2.0x 20-period average
+# Exit when price reverts to Donchian midpoint OR 1d EMA50 filter reverses
+# Uses Donchian channels for structure + volume confirmation to reduce false signals
+# 1d EMA50 provides higher timeframe trend filter effective in both bull and bear markets
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Timeframe: 4h (primary), HTF: 1d
 
-name = "12h_WilliamsR_Extreme_Reversal_1wEMA50_VolumeSpike_1.5x"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_2.0x"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,33 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Williams %R and EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data ONCE before loop for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on weekly data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1w) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian channels (20-period) on 4h
+    if len(high) >= 20:
+        upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        midpoint = (upper + lower) / 2.0
+    else:
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
+        midpoint = np.full(n, np.nan)
     
-    # Calculate 1w EMA(50)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA(50)
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1d = np.full(len(close_1d), np.nan)
     
-    # Align HTF indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align HTF indicators to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation on 12h (threshold: 1.5x for optimal frequency)
+    # Volume confirmation on 4h (threshold: 2.0x for lower frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (1.5 * vol_ma_20)
+        volume_spike = volume > (2.0 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
@@ -62,7 +63,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(midpoint[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price > EMA50 AND volume spike
-            if (williams_r_aligned[i] < -80 and 
+            # Long: price breaks above upper AND price > EMA50 AND volume spike
+            if (close[i] > upper[i] and 
                 close[i] > ema_50_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price < EMA50 AND volume spike
-            elif (williams_r_aligned[i] > -20 and 
+            # Short: price breaks below lower AND price < EMA50 AND volume spike
+            elif (close[i] < lower[i] and 
                   close[i] < ema_50_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (momentum fading)
-            if williams_r_aligned[i] > -50:
+            # Exit long: price reverts to midpoint OR price < EMA50 (trend weakening)
+            if close[i] < midpoint[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (momentum fading)
-            if williams_r_aligned[i] < -50:
+            # Exit short: price reverts to midpoint OR price > EMA50 (trend weakening)
+            if close[i] > midpoint[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
