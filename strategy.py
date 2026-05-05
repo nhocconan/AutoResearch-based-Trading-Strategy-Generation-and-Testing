@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using Williams %R extreme readings combined with 1d EMA34 trend filter and volume spike confirmation
-# Long when Williams %R(14) < -80 (oversold) AND price > 1d EMA34 AND volume > 1.5 * avg_volume(20) on 6h
-# Short when Williams %R(14) > -20 (overbought) AND price < 1d EMA34 AND volume > 1.5 * avg_volume(20) on 6h
-# Exit when Williams %R returns to neutral range (-50) OR volume drops below average
+# Hypothesis: 12h strategy using daily Williams Alligator for trend direction + daily ATR breakout for entry timing + volume confirmation
+# Long when price > Alligator Jaw (blue line) AND price breaks above ATR(14) upper band AND volume > 1.5 * avg_volume(20)
+# Short when price < Alligator Jaw (blue line) AND price breaks below ATR(14) lower band AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses back below/above Alligator Jaw OR ATR ratio < 1.0 (low volatility)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 60-120 total trades over 4 years (15-30/year) for 6h timeframe
-# Williams %R identifies exhaustion points in both bull and bear markets
-# 1d EMA34 filters for higher timeframe trend alignment to avoid counter-trend trades
-# Volume confirmation ensures breakout/rebound strength and reduces false signals
-# Works in bull markets (oversold bounces in uptrend) and bear markets (overbought reversals in downtrend)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Williams Alligator (SMAs smoothed) provides robust trend filter that whipsaws less in ranging markets
+# ATR breakout captures momentum expansion after consolidation
+# Volume confirmation ensures breakout authenticity
+# Works in bull markets (trend + breakout) and bear markets (trend + breakdown)
 
-name = "6h_WilliamsR_Extreme_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_ATR_Breakout_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,23 +28,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get daily data ONCE before loop for Williams Alligator and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    if len(df_1d) < 50:  # Need enough for Alligator and ATR
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
+    # Calculate Williams Alligator (using SMAs with smoothing)
+    # Jaw (blue line): 13-period SMA smoothed by 8 periods
     close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    sma13 = close_1d_series.rolling(window=13, min_periods=13).mean()
+    jaw = sma13.rolling(window=8, min_periods=8).mean().values  # Smoothed SMA
     
-    # Calculate Williams %R(14) on 6h
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Calculate ATR(14) for volatility bands
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
+    # Calculate ATR bands (upper/lower) - using close as base
+    atr_upper = close_1d + (atr * 1.0)  # 1*ATR above close
+    atr_lower = close_1d - (atr * 1.0)  # 1*ATR below close
+    
+    # Align daily indicators to 12h timeframe (wait for completed daily bar)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    atr_upper_aligned = align_htf_to_ltf(prices, df_1d, atr_upper)
+    atr_lower_aligned = align_htf_to_ltf(prices, df_1d, atr_lower)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -57,32 +71,33 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(atr_upper_aligned[i]) or 
+            np.isnan(atr_lower_aligned[i]) or np.isnan(avg_volume_20[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80), price above 1d EMA34, volume confirmation, in session
-            if williams_r[i] < -80.0 and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price > Alligator Jaw AND breaks above ATR upper band AND volume confirmation, in session
+            if close[i] > jaw_aligned[i] and close[i] > atr_upper_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20), price below 1d EMA34, volume confirmation, in session
-            elif williams_r[i] > -20.0 and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price < Alligator Jaw AND breaks below ATR lower band AND volume confirmation, in session
+            elif close[i] < jaw_aligned[i] and close[i] < atr_lower_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) OR volume drops below average
-            if williams_r[i] > -50.0 or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below Alligator Jaw OR ATR ratio < 1.0 (low volatility)
+            if close[i] < jaw_aligned[i] or (atr[i] / np.mean(atr[max(0, i-19):i+1]) < 1.0 if i >= 20 else False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) OR volume drops below average
-            if williams_r[i] < -50.0 or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above Alligator Jaw OR ATR ratio < 1.0 (low volatility)
+            if close[i] > jaw_aligned[i] or (atr[i] / np.mean(atr[max(0, i-19):i+1]) < 1.0 if i >= 20 else False):
                 signals[i] = 0.0
                 position = 0
             else:
