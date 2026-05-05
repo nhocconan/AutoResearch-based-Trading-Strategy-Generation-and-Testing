@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND volume > 2.0x 20 EMA
-# Short when price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND volume > 2.0x 20 EMA
-# Uses discrete sizing (0.25) to limit fee drag. Target: 25-50 trades/year per symbol.
+# Hypothesis: 12h Camarilla pivot (R3/S3) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla R3 AND 1d close > 1d EMA34 AND volume > 2.0x 20 EMA
+# Short when price breaks below 1d Camarilla S3 AND 1d close < 1d EMA34 AND volume > 2.0x 20 EMA
+# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 1d for HTF trend to avoid counter-trend trades and 4h for Camarilla timing.
+# Uses 1d for HTF trend to avoid counter-trend trades and 12h for Camarilla timing.
 
-name = "4h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,27 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    # Get 12h data ONCE before loop for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (R3, S3) from previous day's OHLC
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 12h Camarilla levels (based on prior day's OHLC)
+    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # where C, H, L are from previous 12h bar
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate pivot and ranges from previous 4h bar
-    piv_4h = (high_4h + low_4h + close_4h) / 3.0
-    range_4h = high_4h - low_4h
+    # Shift to get previous bar's OHLC for current bar's levels
+    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close[0] = np.nan  # first bar has no previous
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
-    camarilla_r3 = close_4h + (range_4h * 1.1 / 4.0)
-    camarilla_s3 = close_4h - (range_4h * 1.1 / 4.0)
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align 4h Camarilla to 4h timeframe (no shift needed as we use previous bar's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Align 12h Camarilla to 12h timeframe (no alignment needed as primary TF)
+    camarilla_r3_aligned = camarilla_r3
+    camarilla_s3_aligned = camarilla_s3
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -58,7 +63,7 @@ def generate_signals(prices):
     uptrend_1d = close_1d > ema_34_1d
     downtrend_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 4h timeframe
+    # Align 1d trend to 12h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
