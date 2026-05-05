@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA34 trend filter
-# Long when: price breaks above R3, volume > 2.0x 50-period average (1w equivalent), and close > 1w EMA34
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA34 trend filter
+# Long when: price breaks above R3, volume > 2.0x 50-period average (1d equivalent), and close > 1w EMA34
 # Short when: price breaks below S3, volume > 2.0x 50-period average, and close < 1w EMA34
 # Exit when price returns to Camarilla R3/S3 level (mean reversion)
-# Uses Camarilla levels from 1d for structure, 1w EMA34 for major trend filter, and 1d volume spike for confirmation.
-# Designed to work in both bull (breakout continuation) and bear (mean reversion via exits) markets.
-# Timeframe: 4h, HTF: 1d/1w. Target: 75-200 total trades over 4 years (19-50/year).
+# Uses Camarilla levels from 1d for structure, effective in both bull (breakout continuation) and bear (mean reversion via exits) markets.
+# Timeframe: 12h, HTF: 1d/1w. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA34_1dVolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA34_1dVolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +25,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Calculate volume confirmation on 4h using 50-period MA (equivalent to 1w lookback)
+    # Calculate volume confirmation on 12h using 50-period MA (equivalent to ~1d lookback)
     if len(volume) >= 50:
         vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
         volume_filter = volume > (2.0 * vol_ma_50)
@@ -41,17 +40,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate Camarilla levels from previous 1d bar
     if len(high_1d) >= 2:
@@ -69,9 +57,18 @@ def generate_signals(prices):
         camarilla_r3 = np.full(len(close_1d), np.nan)
         camarilla_s3 = np.full(len(close_1d), np.nan)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
