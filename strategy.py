@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending market)
-# Short when Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 (trending market)
-# Exit when 1d ADX < 20 (range market) OR power values converge (|Bull Power| + |Bear Power| < threshold)
-# Uses 6h primary timeframe with 1d HTF for ADX regime and Elder Ray calculation
-# Elder Ray measures bull/bear power relative to EMA13, effective in both bull and bear markets
-# ADX regime filter ensures we only trade in trending conditions, avoiding whipsaws in ranging markets
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX25 trend filter and volume confirmation
+# Long when price breaks above 20-period Donchian high AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# Short when price breaks below 20-period Donchian low AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# Exit when price crosses the 20-period Donchian midpoint (mean reversion) OR ATR-based stoploss (2x ATR)
+# Uses 12h primary timeframe with 1d HTF for ADX trend filter and volume confirmation
+# Donchian channels provide clear breakout levels with defined exit at midpoint
+# ADX filter ensures we only trade in trending markets, reducing false breakouts in ranging conditions
+# Volume confirmation reduces false breakouts from low participation moves
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_ElderRay_1dADX25_Trend"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dADX25_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,116 +26,100 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ADX regime filter and Elder Ray calculation
+    # Get 1d data ONCE before loop for ADX trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate 1d ADX for regime filter (ADX > 25 = trending)
-    if len(df_1d) >= 14:
-        # True Range
-        tr1 = np.abs(df_1d['high'].values - df_1d['low'].values)
-        tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-        tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
+    # Calculate 1d ADX for trend filter
+    if len(df_1d) >= 30:
+        # Calculate True Range
+        tr1 = pd.Series(df_1d['high']).diff().abs()
+        tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift(1))).abs()
+        tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift(1))).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         
-        # Directional Movement
-        dm_plus = np.where((df_1d['high'].values - np.roll(df_1d['high'].values, 1)) > 
-                          (np.roll(df_1d['low'].values, 1) - df_1d['low'].values),
-                          np.maximum(df_1d['high'].values - np.roll(df_1d['high'].values, 1), 0), 0)
-        dm_minus = np.where((np.roll(df_1d['low'].values, 1) - df_1d['low'].values) > 
-                           (df_1d['high'].values - np.roll(df_1d['high'].values, 1)),
-                          np.maximum(np.roll(df_1d['low'].values, 1) - df_1d['low'].values, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
+        # Calculate Directional Movement
+        dm_plus = pd.Series(df_1d['high']).diff()
+        dm_minus = -pd.Series(df_1d['low']).diff()
+        dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+        dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
         
-        # Smoothed TR, DM+, DM-
-        tr_period = 14
-        tr_smooth = np.zeros_like(tr)
-        dm_plus_smooth = np.zeros_like(dm_plus)
-        dm_minus_smooth = np.zeros_like(dm_minus)
+        # Smoothed values
+        atr = tr.rolling(window=14, min_periods=14).mean()
+        dm_plus_smooth = dm_plus.rolling(window=14, min_periods=14).mean()
+        dm_minus_smooth = dm_minus.rolling(window=14, min_periods=14).mean()
         
-        tr_smooth[tr_period-1] = np.sum(tr[:tr_period])
-        dm_plus_smooth[tr_period-1] = np.sum(dm_plus[:tr_period])
-        dm_minus_smooth[tr_period-1] = np.sum(dm_minus[:tr_period])
-        
-        for i in range(tr_period, len(tr)):
-            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
-            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / tr_period) + dm_plus[i]
-            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / tr_period) + dm_minus[i]
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_smooth / tr_smooth
-        di_minus = 100 * dm_minus_smooth / tr_smooth
+        # DI+ and DI-
+        di_plus = 100 * (dm_plus_smooth / atr)
+        di_minus = 100 * (dm_minus_smooth / atr)
         
         # DX and ADX
-        dx = np.zeros_like(di_plus)
-        mask = (di_plus + di_minus) != 0
-        dx[mask] = 100 * np.abs(di_plus[mask] - di_minus[mask]) / (di_plus[mask] + di_minus[mask])
-        
-        adx_period = 14
-        adx = np.zeros_like(dx)
-        if len(dx) >= 2*adx_period-1:
-            adx[2*adx_period-2] = np.sum(dx[adx_period-1:2*adx_period-1]) / adx_period
-            for i in range(2*adx_period-1, len(dx)):
-                adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+        dx = 100 * ((di_plus - di_minus).abs() / (di_plus + di_minus))
+        adx = dx.rolling(window=14, min_periods=14).mean()
+        adx_1d = adx.values
     else:
-        adx = np.full(len(df_1d), np.nan)
+        adx_1d = np.full(len(df_1d), np.nan)
     
-    # Align 1d indicators to 6h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    # We need 6h EMA13 for Elder Ray calculation
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13_6h
-    bear_power = low - ema_13_6h
+    # Volume confirmation: volume > 1.5x 20-period average
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
+    
+    # Calculate 12h Donchian channels
+    if len(high) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2
+    else:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_13_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending up)
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                adx_aligned[i] > 25):
+            # Long conditions: price breaks above Donchian high AND 1d ADX > 25 AND volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_1d_aligned[i] > 25 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 (trending down)
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] > 0 and 
-                  adx_aligned[i] > 25):
+            # Short conditions: price breaks below Donchian low AND 1d ADX > 25 AND volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 1d ADX < 20 (range market) OR power values converge (weakening trend)
-            if (adx_aligned[i] < 20 or 
-                (abs(bull_power[i]) + abs(bear_power[i])) < 0.001 * close[i]):
+            # Exit long: price crosses below Donchian midpoint (mean reversion)
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: 1d ADX < 20 (range market) OR power values converge (weakening trend)
-            if (adx_aligned[i] < 20 or 
-                (abs(bull_power[i]) + abs(bear_power[i])) < 0.001 * close[i]):
+            # Exit short: price crosses above Donchian midpoint (mean reversion)
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
