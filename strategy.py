@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
-# Long when: Price breaks above Donchian upper (20) AND 12h EMA(50) > 12h EMA(100) (uptrend) AND volume > 1.5x 20-period average volume
-# Short when: Price breaks below Donchian lower (20) AND 12h EMA(50) < 12h EMA(100) (downtrend) AND volume > 1.5x 20-period average volume
-# Exit when price returns to Donchian middle (mean of upper/lower) or opposite breakout occurs
-# Donchian breakout captures sustained momentum after consolidation
-# 12h EMA filter ensures we trade with the higher timeframe trend
-# Volume confirmation filters weak breakouts
-# Works in both bull and bear markets by aligning with 12h trend direction
-# Target: 100-180 total trades over 4 years (25-45/year) with discrete sizing 0.25
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when: Price breaks above 20-day high AND 1w EMA50 is rising AND volume > 1.5x 20-day avg volume
+# Short when: Price breaks below 20-day low AND 1w EMA50 is falling AND volume > 1.5x 20-day avg volume
+# Exit when price returns to 20-day midpoint (mean reversion)
+# Donchian breakout captures volatility expansion after consolidation
+# 1w EMA50 filter ensures we trade in direction of higher timeframe trend
+# Volume confirmation reduces false breakouts
+# Works in both bull and bear markets by trading breakouts in direction of weekly trend
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25
 
-name = "4h_DonchianBreakout_12hEMATrend_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,63 +27,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 100:  # Need enough for EMA(100)
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough for EMA(50)
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMAs
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_100_12h = pd.Series(close_12h).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_100_aligned = align_htf_to_ltf(prices, df_12h, ema_100_12h)
+    # Calculate 1w EMA(50)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels (20) on 4h
+    # Calculate 1w EMA50 slope (rising/falling)
+    ema_50_slope = np.diff(ema_50_1w_aligned, prepend=ema_50_1w_aligned[0])
+    ema_50_rising = ema_50_slope > 0
+    ema_50_falling = ema_50_slope < 0
+    
+    # Calculate Donchian channels (20) on 1d
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_donchian = highest_20
-    lower_donchian = lowest_20
-    middle_donchian = (upper_donchian + lower_donchian) / 2
+    donchian_mid = (highest_20 + lowest_20) / 2
     
-    # Calculate 20-period average volume
+    # Calculate 20-day average volume for confirmation
     avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_vol_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_100_aligned[i]) or 
-            np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(avg_vol_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(avg_vol_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * avg_vol_20[i]
-        
         if position == 0:
-            # Long: Break above upper Donchian in uptrend with volume confirmation
-            if close[i] > upper_donchian[i] and ema_50_aligned[i] > ema_100_aligned[i] and volume_confirmed:
+            # Long: Break above 20-day high AND weekly EMA50 rising AND volume spike
+            if close[i] > highest_20[i] and ema_50_rising[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian in downtrend with volume confirmation
-            elif close[i] < lower_donchian[i] and ema_50_aligned[i] < ema_100_aligned[i] and volume_confirmed:
+            # Short: Break below 20-day low AND weekly EMA50 falling AND volume spike
+            elif close[i] < lowest_20[i] and ema_50_falling[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to middle Donchian or reverse breakout
-            if close[i] < middle_donchian[i] or close[i] < lower_donchian[i]:
+            # Exit long: return to Donchian midpoint (mean reversion)
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to middle Donchian or reverse breakout
-            if close[i] > middle_donchian[i] or close[i] > upper_donchian[i]:
+            # Exit short: return to Donchian midpoint (mean reversion)
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
