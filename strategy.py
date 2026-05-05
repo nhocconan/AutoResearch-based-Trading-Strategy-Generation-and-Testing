@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (2.0x)
-# Long when price breaks above Donchian upper AND price > 1d EMA50 AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian lower AND price < 1d EMA50 AND volume > 2.0x 20-period average
-# Exit when price reverts to Donchian midpoint OR 1d EMA50 filter reverses
-# Uses Donchian channels for structure + volume confirmation to reduce false signals
-# 1d EMA50 provides higher timeframe trend filter effective in both bull and bear markets
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-# Timeframe: 4h (primary), HTF: 1d
+# Hypothesis: 6h Elder Ray + 12h ADX Regime Filter
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (trending market)
+# Short when Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (trending market)
+# Exit when Elder Ray signals weaken OR ADX < 20 (range market)
+# Uses 1d EMA13 for Elder Ray calculation (more stable than 6h)
+# 12h ADX filters for trending conditions only, reducing whipsaws in ranging markets
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Timeframe: 6h (primary), HTF: 1d for EMA13, 12h for ADX
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_2.0x"
-timeframe = "4h"
+name = "6h_ElderRay_12hADX_Regime_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,76 +25,101 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA50
+    # Get 1d data ONCE before loop for EMA13 (Elder Ray)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    if len(high) >= 20:
-        upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        midpoint = (upper + lower) / 2.0
-    else:
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
-        midpoint = np.full(n, np.nan)
+    # Get 12h data ONCE before loop for ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA(50)
-    if len(close_1d) >= 50:
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema_50_1d = np.full(len(close_1d), np.nan)
+    # Calculate 1d EMA(13) for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align HTF indicators to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Elder Ray components from 1d data
+    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA(13)
+    bear_power_1d = ema_13_1d - low_1d   # Bear Power = EMA(13) - Low
     
-    # Volume confirmation on 4h (threshold: 2.0x for lower frequency)
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)
-    else:
-        volume_spike = np.zeros(n, dtype=bool)
+    # Calculate 12h ADX
+    # TR = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    
+    # +DM = max(high - previous_high, 0) but only if > previous_low - low
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(values, period):
+        result = np.zeros_like(values)
+        result[period-1] = np.nansum(values[:period])  # first value is simple average
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    period = 14
+    atr_12h = wilders_smoothing(tr, period)
+    plus_di_12h = 100 * wilders_smoothing(plus_dm, period) / atr_12h
+    minus_di_12h = 100 * wilders_smoothing(minus_dm, period) / atr_12h
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
+    adx_12h = wilders_smoothing(dx_12h, period)
+    
+    # Align HTF indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(midpoint[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper AND price > EMA50 AND volume spike
-            if (close[i] > upper[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_spike[i]):
+            # Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong trend)
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] < 0 and 
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower AND price < EMA50 AND volume spike
-            elif (close[i] < lower[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (strong trend)
+            elif (bear_power_aligned[i] > 0 and 
+                  bull_power_aligned[i] < 0 and 
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverts to midpoint OR price < EMA50 (trend weakening)
-            if close[i] < midpoint[i] or close[i] < ema_50_aligned[i]:
+            # Exit long: Elder Ray weakens OR ADX < 20 (losing trend/moving to range)
+            if (bull_power_aligned[i] <= 0 or bear_power_aligned[i] >= 0 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverts to midpoint OR price > EMA50 (trend weakening)
-            if close[i] > midpoint[i] or close[i] > ema_50_aligned[i]:
+            # Exit short: Elder Ray weakens OR ADX < 20 (losing trend/moving to range)
+            if (bear_power_aligned[i] <= 0 or bull_power_aligned[i] >= 0 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
