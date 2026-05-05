@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX Regime Filter and Volume Confirmation
-# Long when Bull Power > 0 (close > EMA13) AND ADX > 25 (trending) AND volume spike
-# Short when Bear Power < 0 (close < EMA13) AND ADX > 25 (trending) AND volume spike
-# Elder Ray measures trend strength via price-EMA deviation; ADX filters for trending markets only
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+# Long when price breaks above Donchian upper channel AND ADX > 25 (trending) AND volume spike
+# Short when price breaks below Donchian lower channel AND ADX > 25 (trending) AND volume spike
+# Donchian channels provide clear structure-based breakouts; ADX filters for trending markets only
 # Volume spike (2.0x 20-bar MA) confirms institutional participation
-# Works in bull (strong uptrend + buying pressure) and bear (strong downtrend + selling pressure)
-# Timeframe: 6h (primary timeframe as required)
-# Target: 60-120 total trades over 4 years (15-30/year) to balance signal quality and fee drag
+# Works in bull (strong uptrend breakouts) and bear (strong downtrend breakouts)
+# Timeframe: 12h (primary timeframe as required)
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "6h_ElderRay_1dADX_Regime_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_Regime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -76,20 +76,26 @@ def generate_signals(prices):
                   np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
     adx_1d = wilders_smoothing(dx, 14)
     
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 6h EMA13 for Elder Ray
-    if len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 12h Donchian channels (20-period)
+    if len(high) >= 20 and len(low) >= 20:
+        # Upper channel: highest high over past 20 bars
+        upper_channel = np.full(n, np.nan)
+        lower_channel = np.full(n, np.nan)
+        for i in range(20, n):
+            upper_channel[i] = np.max(high[i-20:i])
+            lower_channel[i] = np.min(low[i-20:i])
+        # For first 20 bars, use available data
+        for i in range(20):
+            upper_channel[i] = np.max(high[:i+1]) if i >= 0 else np.nan
+            lower_channel[i] = np.min(low[:i+1]) if i >= 0 else np.nan
     else:
-        ema_13 = np.full(n, np.nan)
+        upper_channel = np.full(n, np.nan)
+        lower_channel = np.full(n, np.nan)
     
-    # Elder Ray: Bull Power = Close - EMA13, Bear Power = EMA13 - Close
-    bull_power = close - ema_13
-    bear_power = ema_13 - close
-    
-    # Volume confirmation on 6h (threshold: 2.0x)
+    # Volume confirmation on 12h (threshold: 2.0x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)
@@ -101,36 +107,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 AND ADX > 25 (trending) AND volume spike
-            if (bull_power[i] > 0 and 
+            # Long: Close > upper Donchian channel AND ADX > 25 (trending) AND volume spike
+            if (close[i] > upper_channel[i] and 
                 adx_1d_aligned[i] > 25 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 AND ADX > 25 (trending) AND volume spike
-            elif (bear_power[i] > 0 and 
+            # Short: Close < lower Donchian channel AND ADX > 25 (trending) AND volume spike
+            elif (close[i] < lower_channel[i] and 
                   adx_1d_aligned[i] > 25 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR ADX <= 25 (trend weakening)
-            if bull_power[i] <= 0 or adx_1d_aligned[i] <= 25:
+            # Exit long: Close < lower Donchian channel (mean reversion) OR ADX <= 25 (trend weakening)
+            if close[i] < lower_channel[i] or adx_1d_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power <= 0 OR ADX <= 25 (trend weakening)
-            if bear_power[i] <= 0 or adx_1d_aligned[i] <= 25:
+            # Exit short: Close > upper Donchian channel (mean reversion) OR ADX <= 25 (trend weakening)
+            if close[i] > upper_channel[i] or adx_1d_aligned[i] <= 25:
                 signals[i] = 0.0
                 position = 0
             else:
