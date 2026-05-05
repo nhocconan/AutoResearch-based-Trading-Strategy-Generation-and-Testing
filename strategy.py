@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Camarilla R3/S3 breakout with 1d volume spike and 6h EMA20 trend filter
-# Long when price breaks above weekly Camarilla R3 AND volume > 2.0 * avg_volume(20) on 6h AND close > EMA20(6h)
-# Short when price breaks below weekly Camarilla S3 AND volume > 2.0 * avg_volume(20) on 6h AND close < EMA20(6h)
-# Exit when price crosses back through the weekly Camarilla midpoint (R3/S3 average)
+# Hypothesis: 12h strategy using 1d Camarilla H3/L3 breakout with 12h ADX20 trend filter and volume confirmation
+# Long when price breaks above 1d Camarilla H3 AND 12h ADX > 20 (trending regime) AND volume > 1.5 * avg_volume(20) on 12h
+# Short when price breaks below 1d Camarilla L3 AND 12h ADX > 20 (trending regime) AND volume > 1.5 * avg_volume(20) on 12h
+# Exit when price crosses back through the 1d Camarilla midpoint (H3/L3 average)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 80-160 total trades over 4 years (20-40/year) for 6h timeframe
-# Weekly Camarilla R3/S3 provides robust breakout levels that reduce whipsaw
-# Volume confirmation validates breakout strength
-# 6h EMA20 filter ensures alignment with intermediate-term trend
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Camarilla H3/L3 levels provide moderate breakout structure that works in both bull and bear markets
+# 12h ADX > 20 filter ensures we only trade during trending regimes, reducing false breakouts in chop
+# Volume confirmation (1.5x) validates breakout strength while avoiding overtrading
 
-name = "6h_weeklyCamarillaR3S3_1dVolumeSpike_6hEMA20"
-timeframe = "6h"
+name = "12h_1dCamarillaH3L3_12hADX20_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,39 +27,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:  # Need at least one completed weekly bar
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Camarilla levels (R3, S3, midpoint)
-    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
-    high_low_1w = high_1w - low_1w
-    camarilla_r3_1w = close_1w + 1.1 * high_low_1w * 1.1 / 4.0
-    camarilla_s3_1w = close_1w - 1.1 * high_low_1w * 1.1 / 4.0
-    camarilla_mid_1w = (camarilla_r3_1w + camarilla_s3_1w) / 2.0
-    
-    # Align weekly Camarilla to 6h timeframe (wait for completed weekly bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1w, camarilla_mid_1w)
-    
-    # Get 1d data ONCE before loop for volume spike calculation (using 1d volume for confirmation)
+    # Get 1d data ONCE before loop for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need at least 20 completed daily bars for volume average
+    if len(df_1d) < 2:  # Need at least one completed daily bar
         return np.zeros(n)
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d average volume (20-period) for spike detection
-    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Calculate 1d Camarilla levels (H3, L3, midpoint)
+    # Camarilla: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
+    high_low_1d = high_1d - low_1d
+    camarilla_h3_1d = close_1d + 1.1 * high_low_1d * 1.1 / 4.0
+    camarilla_l3_1d = close_1d - 1.1 * high_low_1d * 1.1 / 4.0
+    camarilla_mid_1d = (camarilla_h3_1d + camarilla_l3_1d) / 2.0
     
-    # Calculate 6h EMA20 for trend filter
-    ema_20_6h = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Align 1d Camarilla to 12h timeframe (wait for completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid_1d)
+    
+    # Get 12h data ONCE before loop for ADX20 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:  # Need at least 14 completed 12h bars for ADX
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period])  # Skip first NaN in tr
+        # Wilder's smoothing: previous * (period-1)/period + current/period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] * (period-1)/period + data[i]/period
+        return result
+    
+    atr_12h = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_12h != 0, 100 * dm_plus_smooth / atr_12h, 0)
+    di_minus = np.where(atr_12h != 0, 100 * dm_minus_smooth / atr_12h, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_12h = wilders_smoothing(dx, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -70,35 +110,35 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_20_6h[i]) or np.isnan(volume_spike_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(adx_12h_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Camarilla R3, volume spike on 1d, price above 6h EMA20, in session
-            if (close[i] > camarilla_r3_aligned[i] and 
-                volume_spike_1d_aligned[i] and 
-                close[i] > ema_20_6h[i]):
+            # Long: price breaks above 1d Camarilla H3, 12h ADX > 20 (trending regime), volume confirmation, in session
+            if (close[i] > camarilla_h3_aligned[i] and 
+                adx_12h_aligned[i] > 20.0 and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Camarilla S3, volume spike on 1d, price below 6h EMA20, in session
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  volume_spike_1d_aligned[i] and 
-                  close[i] < ema_20_6h[i]):
+            # Short: price breaks below 1d Camarilla L3, 12h ADX > 20 (trending regime), volume confirmation, in session
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  adx_12h_aligned[i] > 20.0 and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below weekly Camarilla midpoint
+            # Exit long: price crosses back below 1d Camarilla midpoint
             if close[i] < camarilla_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above weekly Camarilla midpoint
+            # Exit short: price crosses back above 1d Camarilla midpoint
             if close[i] > camarilla_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
