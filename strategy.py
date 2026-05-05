@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when: price breaks above R3 (Camarilla resistance) AND 1d EMA34 uptrend (price > EMA34) AND volume > 2x 20-period MA
-# Short when: price breaks below S3 (Camarilla support) AND 1d EMA34 downtrend (price < EMA34) AND volume > 2x 20-period MA
-# Exit when: price reverts to Camarilla pivot point (PP) OR volume drops below average
-# Uses Camarilla for intraday structure, 1d EMA for regime filter, volume for conviction
-# Timeframe: 6h, HTF: 1d for EMA34. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
+# Long when: close > Donchian_high(20) AND price > 1d EMA34 AND volume > 1.5x 20-period MA
+# Short when: close < Donchian_low(20) AND price < 1d EMA34 AND volume > 1.5x 20-period MA
+# Exit when: price crosses Donchian midpoint OR volume drops below average
+# Uses Donchian for structure, 1d EMA for higher-timeframe trend, volume for conviction
+# Timeframe: 4h, HTF: 1d for EMA. Target: 100-200 total trades over 4 years (25-50/year).
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,78 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels using previous day's OHLC (1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla pivot point
-    pp = (prev_high + prev_low + prev_close) / 3
-    # Camarilla R3 and S3 levels
-    r3 = pp + (prev_high - prev_low) * 1.1 / 4
-    s3 = pp - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align 1d Camarilla levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 1d EMA34 for trend filter
-    if len(df_1d) >= 34:
-        ema_34 = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    # Donchian Channel (20) on 4h
+    if len(high) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2
     else:
-        ema_34 = np.full(len(df_1d), np.nan)
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Align 1d EMA34 to 6h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume confirmation on 6h
+    # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
+    
+    # Get 1d data ONCE before loop for EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate EMA(34) on 1d
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND 1d EMA34 uptrend AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+            # Long conditions: breakout above Donchian high + uptrend + volume
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND 1d EMA34 downtrend AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
+            # Short conditions: breakout below Donchian low + downtrend + volume
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverts to pivot point OR volume drops below average
-            if (close[i] <= pp_aligned[i] or not volume_filter[i]):
+            # Exit long: price crosses Donchian midpoint OR volume drops
+            if (close[i] < donchian_mid[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverts to pivot point OR volume drops below average
-            if (close[i] >= pp_aligned[i] or not volume_filter[i]):
+            # Exit short: price crosses Donchian midpoint OR volume drops
+            if (close[i] > donchian_mid[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
