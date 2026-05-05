@@ -4,12 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above Camarilla R3 AND 1d close > 1d EMA50 AND volume > 1.5x 20-period average
-# Short when price breaks below Camarilla S3 AND 1d close < 1d EMA50 AND volume > 1.5x 20-period average
+# Long when price breaks above Camarilla R3 AND 1d close > 1d EMA50 AND volume > 2.0x 20-period average
+# Short when price breaks below Camarilla S3 AND 1d close < 1d EMA50 AND volume > 2.0x 20-period average
 # Exit when price crosses 1d EMA50 (trend reversal)
 # Uses 4h primary timeframe with 1d HTF for trend filter and Camarilla structure
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 80-160 total trades over 4 years (20-40/year) to avoid fee drag
+# Target: 75-150 total trades over 4 years (19-38/year) to avoid fee drag
 # Camarilla levels provide intraday support/resistance; 1d EMA50 filters for higher-timeframe trend; volume confirms participation
 # Session filter (08-20 UTC) reduces noise and focuses on active trading hours
 
@@ -57,10 +57,10 @@ def generate_signals(prices):
     camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
