@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
-# Long when: 6h Williams %R < -80 (oversold) AND 1d close > 1d EMA34 (bullish trend) AND volume > 1.5x 20-period MA
-# Short when: 6h Williams %R > -20 (overbought) AND 1d close < 1d EMA34 (bearish trend) AND volume > 1.5x 20-period MA
-# Exit when: Williams %R returns to -50 (mean reversion midpoint) OR opposite extreme reached
-# Uses Williams %R for mean reversion timing, 1d EMA for trend filter, volume for conviction
-# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 12h Donchian(20) breakout + 1d Camarilla pivot (R3/S3) touch + volume confirmation
+# Long when: price touches 1d Camarilla S3 AND breaks above 12h Donchian(20) high AND volume > 1.5x 20-period MA
+# Short when: price touches 1d Camarilla R3 AND breaks below 12h Donchian(20) low AND volume > 1.5x 20-period MA
+# Exit when: price reaches 12h Donchian midpoint OR opposite breakout occurs
+# Uses Camarilla for mean reversion bias, Donchian for breakout structure, volume for conviction
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_WilliamsR_1dEMA34_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1dCamarilla_R3S3_Touch_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,48 +24,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R on 6h (14-period)
-    if len(high) >= 14 and len(low) >= 14 and len(close) >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-        # Handle division by zero when high == low
-        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    else:
-        williams_r = np.full(n, np.nan)
-    
-    # Volume confirmation on 6h
+    # Calculate volume confirmation on 12h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1d data ONCE before loop for EMA34
+    # Calculate Donchian(20) on 12h
+    if len(high) >= 20 and len(low) >= 20:
+        highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (highest_high + lowest_low) / 2.0
+    else:
+        highest_high = np.full(n, np.nan)
+        lowest_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
+    
+    # Donchian breakout signals
+    donchian_breakout_up = (close > highest_high) & (np.roll(close, 1) <= np.roll(highest_high, 1))
+    donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
+    donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
+    
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # need sufficient data for EMA34
+    if len(df_1d) < 5:  # need sufficient data for Camarilla
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily Camarilla pivot levels from prior day's OHLC
+    if len(df_1d) >= 2:
+        # Get prior day's OHLC (yesterday's high, low, close)
+        daily_high = df_1d['high'].shift(1).values
+        daily_low = df_1d['low'].shift(1).values
+        daily_close = df_1d['close'].shift(1).values
+        
+        # Calculate Camarilla levels for daily timeframe
+        # Camarilla: R3 = close + ((high-low) * 1.1/4), S3 = close - ((high-low) * 1.1/4)
+        daily_range = daily_high - daily_low
+        camarilla_r3 = daily_close + (daily_range * 1.1 / 4)
+        camarilla_s3 = daily_close - (daily_range * 1.1 / 4)
+        
+        # Bullish bias: close <= S3 (touch or below), Bearish bias: close >= R3 (touch or above)
+        daily_bullish = df_1d['close'].values <= camarilla_s3
+        daily_bearish = df_1d['close'].values >= camarilla_r3
+    else:
+        daily_bullish = np.full(len(df_1d), False)
+        daily_bearish = np.full(len(df_1d), False)
+        camarilla_r3 = np.full(len(df_1d), np.nan)
+        camarilla_s3 = np.full(len(df_1d), np.nan)
     
-    # Bullish bias: close > EMA34, Bearish bias: close < EMA34
-    bullish_bias = df_1d['close'].values > ema_34_1d
-    bearish_bias = df_1d['close'].values < ema_34_1d
-    
-    # Align 1d EMA bias to 6h timeframe
-    bullish_bias_aligned = align_htf_to_ltf(prices, df_1d, bullish_bias.astype(float))
-    bearish_bias_aligned = align_htf_to_ltf(prices, df_1d, bearish_bias.astype(float))
+    # Align 1d Camarilla touch bias to 12h timeframe
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(bullish_bias_aligned[i]) or 
-            np.isnan(bearish_bias_aligned[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,30 +91,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Williams %R oversold + bullish bias + volume filter
-            if (williams_r[i] < -80 and 
-                bullish_bias_aligned[i] == 1.0 and 
+            # Long conditions: price touches S3 + Donchian breakout up + volume filter
+            if (daily_bullish_aligned[i] == 1.0 and 
+                donchian_breakout_up[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought + bearish bias + volume filter
-            elif (williams_r[i] > -20 and 
-                  bearish_bias_aligned[i] == 1.0 and 
+            # Short conditions: price touches R3 + Donchian breakout down + volume filter
+            elif (daily_bearish_aligned[i] == 1.0 and 
+                  donchian_breakout_down[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to midpoint (-50) OR short entry signal
-            if (williams_r[i] >= -50 or 
-                (williams_r[i] > -20 and bearish_bias_aligned[i] == 1.0 and volume_filter[i])):
+            # Exit long: price returns to Donchian midpoint OR short breakout occurs
+            if (donchian_revert_mid[i] or donchian_breakout_down[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to midpoint (-50) OR long entry signal
-            if (williams_r[i] <= -50 or 
-                (williams_r[i] < -80 and bullish_bias_aligned[i] == 1.0 and volume_filter[i])):
+            # Exit short: price returns to Donchian midpoint OR long breakout occurs
+            if (donchian_revert_mid[i] or donchian_breakout_up[i]):
                 signals[i] = 0.0
                 position = 0
             else:
