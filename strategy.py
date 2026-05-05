@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period 12h Donchian upper band AND price > 1w EMA50 AND volume > 1.8 * avg_volume(20)
-# Short when price breaks below 20-period 12h Donchian lower band AND price < 1w EMA50 AND volume > 1.8 * avg_volume(20)
-# Exit when price crosses the 12-period 12h Donchian midpoint OR volume < 1.2 * avg_volume(20)
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla H3 AND price > 1d EMA50 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below Camarilla L3 AND price < 1d EMA50 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses Camarilla L4/H4 (extreme) OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
-# Target: 50-150 total trades over 4 years (12-37/year)
-# 12h timeframe reduces noise; 1w EMA50 filters primary trend; volume confirms breakout momentum
-# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
+# Target: 75-200 total trades over 4 years (19-50/year)
+# Camarilla levels from 1d provide robust daily support/resistance; 1d EMA50 filters intermediate trend; volume spike confirms breakout strength
+# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "12h_Donchian20_1wEMA50_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,74 +26,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA50
+    # Get 1d data ONCE before loop for Camarilla levels and EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need enough for EMA50 calculation
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1 * (high - low) / 4  (R3)
+    # L3 = close - 1.1 * (high - low) / 4  (S3)
+    # H4 = close + 1.1 * (high - low) / 2  (R4)
+    # L4 = close - 1.1 * (high - low) / 2  (S4)
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * range_1d / 4  # H3
+    camarilla_l3 = close_1d - 1.1 * range_1d / 4  # L3
+    camarilla_h4 = close_1d + 1.1 * range_1d / 2  # H4
+    camarilla_l4 = close_1d - 1.1 * range_1d / 2  # L4
     
-    # Get 12h data ONCE before loop for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need enough for Donchian
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Align Camarilla levels to 4h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate 12h Donchian(20) - upper, lower, and midpoint
-    high_12h_series = pd.Series(high_12h)
-    low_12h_series = pd.Series(low_12h)
-    donchian_upper = high_12h_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_12h_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0  # 12-period midpoint for exit
+    # Calculate 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Donchian levels to 12h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
-    
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
-    volume_exit = volume < (1.2 * avg_volume_20)  # Volume drop exit condition
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(avg_volume_20[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper, above 1w EMA50, volume confirmation
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above Camarilla H3, above 1d EMA50, volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower, below 1w EMA50, volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below Camarilla L3, below 1d EMA50, volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Donchian midpoint OR volume drops significantly
-            if close[i] < donchian_mid_aligned[i] or volume_exit[i]:
+            # Exit long: Price crosses below Camarilla L4 (extreme support) OR volume drops below average
+            if close[i] < camarilla_l4_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Donchian midpoint OR volume drops significantly
-            if close[i] > donchian_mid_aligned[i] or volume_exit[i]:
+            # Exit short: Price crosses above Camarilla H4 (extreme resistance) OR volume drops below average
+            if close[i] > camarilla_h4_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
