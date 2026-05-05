@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Bollinger Band squeeze breakout with 1w EMA50 trend filter and volume spike confirmation
-# Long when price breaks above upper Bollinger Band(20,2) AND close > 1w EMA50 AND volume > 2.0 * avg_volume(20) on 12h
-# Short when price breaks below lower Bollinger Band(20,2) AND close < 1w EMA50 AND volume > 2.0 * avg_volume(20) on 12h
-# Exit when price returns to middle Bollinger Band (20-period SMA) OR volume drops below average
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Bollinger Band squeeze identifies low volatility periods primed for breakout
-# 1w EMA50 filters for primary trend alignment to avoid counter-trend trades
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses the Donchian(20) midpoint OR volume drops below average
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Donchian channels provide clear trend-following structure
+# 1d EMA50 filters for primary trend alignment to avoid counter-trend trades
 # Volume spike confirms breakout strength and reduces false signals
 # Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
 
-name = "12h_BollingerSqueeze_Breakout_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,28 +28,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA50
+    # Get 1d data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need enough for EMA50
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Bollinger Bands(20,2) on 12h
-    close_s = pd.Series(close)
-    sma20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std20 = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    middle_bb = sma20  # 20-period SMA for exit
+    # Calculate Donchian(20) on primary timeframe (4h)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -60,37 +57,35 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high_20[i]) or 
+            np.isnan(lowest_low_20[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Bollinger Band, above 1w EMA50, volume confirmation, in session
-            if (close[i] > upper_bb[i] and close[i-1] <= upper_bb[i-1] and 
-                close[i] > ema50_1w_aligned[i] and volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: price breaks above Donchian(20) high, above 1d EMA50, volume confirmation, in session
+            if (close[i] > highest_high_20[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below lower Bollinger Band, below 1w EMA50, volume confirmation, in session
-            elif (close[i] < lower_bb[i] and close[i-1] >= lower_bb[i-1] and 
-                  close[i] < ema50_1w_aligned[i] and volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: price breaks below Donchian(20) low, below 1d EMA50, volume confirmation, in session
+            elif (close[i] < lowest_low_20[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle Bollinger Band OR volume drops below average
-            if close[i] <= middle_bb[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: price crosses below Donchian(20) midpoint OR volume drops below average
+            if close[i] < donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price returns to middle Bollinger Band OR volume drops below average
-            if close[i] >= middle_bb[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: price crosses above Donchian(20) midpoint OR volume drops below average
+            if close[i] > donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
