@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band AND 1d ATR(14) > 20-period average AND volume > 1.5x 20-period average
-# Short when price breaks below 4h Donchian lower band AND 1d ATR(14) > 20-period average AND volume > 1.5x 20-period average
-# Exit when price crosses 4h Donchian middle band (mean reversion)
-# Uses 4h primary timeframe with 1d HTF for ATR volatility filter (avoid low volatility breakouts)
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX(14) trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band (20-period high) AND 1w ADX > 25 AND volume > 1.5x 20-period average
+# Short when price breaks below 1d Donchian lower band (20-period low) AND 1w ADX > 25 AND volume > 1.5x 20-period average
+# Exit when price crosses 1d Donchian middle (20-period average of high+low)/2 OR 1w ADX < 20 (trend weakening)
+# Uses 1d primary timeframe with 1w HTF for ADX trend filter and 1d for Donchian levels
+# Higher timeframe ADX reduces whipsaw in ranging markets while capturing strong trends
 # Volume confirmation ensures breakouts have conviction
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
-name = "4h_Donchian20_Breakout_1dATR_Volume_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wADX_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,55 +27,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data ONCE before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    if len(high) >= 20:
-        # Upper band: highest high of last 20 periods
-        upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        # Lower band: lowest low of last 20 periods
-        lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        # Middle band: average of upper and lower
-        middle_band = (upper_band + lower_band) / 2
-    else:
-        upper_band = np.full(n, np.nan)
-        lower_band = np.full(n, np.nan)
-        middle_band = np.full(n, np.nan)
-    
-    # Calculate 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])
     
-    # ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr[13] = np.nanmean(tr[1:15])  # First ATR value
-        for i in range(14, len(tr)):
-            if not np.isnan(atr[i-1]) and not np.isnan(tr[i]):
-                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Directional Movement
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Wilder's smoothing function
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nanmean(data[1:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
             else:
-                atr[i] = np.nan
+                result[i] = np.nan
+        return result
     
-    # Align ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    tr_smooth = wilder_smooth(tr, 14)
+    plus_dm_smooth = wilder_smooth(plus_dm, 14)
+    minus_dm_smooth = wilder_smooth(minus_dm, 14)
     
-    # ATR filter: ATR > 20-period average (avoid low volatility breakouts)
-    if len(atr_1d_aligned) >= 20:
-        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        atr_filter = atr_1d_aligned > atr_ma_20
+    # DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
+    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align ADX to 1d timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 1d Donchian channels (20-period)
+    if len(high) >= 20:
+        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_middle = (donchian_upper + donchian_lower) / 2
     else:
-        atr_filter = np.zeros(n, dtype=bool)
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_middle = np.full(n, np.nan)
     
     # Volume confirmation: volume > 1.5x 20-period average
     if len(volume) >= 20:
@@ -88,10 +102,10 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or 
-            np.isnan(middle_band[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -99,28 +113,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper band AND ATR filter AND volume spike
-            if (close[i] > upper_band[i] and 
-                atr_filter[i] and 
+            # Long conditions: price breaks above Donchian upper band AND ADX > 25 AND volume spike
+            if (close[i] > donchian_upper[i] and 
+                adx_1w_aligned[i] > 25 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower band AND ATR filter AND volume spike
-            elif (close[i] < lower_band[i] and 
-                  atr_filter[i] and 
+            # Short conditions: price breaks below Donchian lower band AND ADX > 25 AND volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  adx_1w_aligned[i] > 25 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below middle band (mean reversion)
-            if close[i] < middle_band[i]:
+            # Exit long: price crosses below Donchian middle (mean reversion) OR ADX < 20 (trend weakening)
+            if close[i] < donchian_middle[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above middle band (mean reversion)
-            if close[i] > middle_band[i]:
+            # Exit short: price crosses above Donchian middle (mean reversion) OR ADX < 20 (trend weakening)
+            if close[i] > donchian_middle[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
