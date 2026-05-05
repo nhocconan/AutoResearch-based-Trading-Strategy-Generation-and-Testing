@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
-# Long when price breaks above Donchian(20) high AND volume > 2.0x 20-period average AND chop > 61.8 (range regime)
-# Short when price breaks below Donchian(20) low AND volume > 2.0x 20-period average AND chop > 61.8 (range regime)
-# Exit when price crosses Donchian(20) midpoint OR chop < 38.2 (trend regime)
-# Uses Donchian structure for breakouts, volume confirmation for conviction, chop filter to avoid whipsaws in trends.
-# Timeframe: 4h, HTF: 1d for chop calculation. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Camarilla R3/S3 fade with 1d trend filter and volume spike confirmation
+# Fade at R3/S3 levels when price shows rejection (wick > 50% of body) AND volume spike
+# Continuation breakout at R4/S4 levels with volume spike AND 1d EMA50 alignment
+# Uses Camarilla pivot structure for mean reversion in ranges and breakout in trends
+# Effective in both bull (continuation longs) and bear (continuation shorts) markets
+# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Fade_R4S4_Breakout_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,122 +23,112 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Calculate volume confirmation on 4h
+    # Volume confirmation: spike > 2.0x 20-period average
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_spike = volume > (2.0 * vol_ma_20)
     else:
-        volume_filter = np.zeros(n, dtype=bool)
+        volume_spike = np.zeros(n, dtype=bool)
     
-    # Get 1d data ONCE before loop for chop regime filter
+    # Get 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Chopiness Index (CHOP) on 1d
-    def calculate_chop(high_arr, low_arr, close_arr, window=14):
-        n = len(close_arr)
-        if n < window:
-            return np.full(n, 50.0)
-        
-        atr_vals = np.zeros(n)
-        for i in range(window-1, n):
-            tr = np.max([
-                high_arr[i] - low_arr[i],
-                abs(high_arr[i] - close_arr[i-1]),
-                abs(low_arr[i] - close_arr[i-1])
-            ])
-            if i == window-1:
-                atr_vals[i] = np.mean(tr)
-            else:
-                atr_vals[i] = (atr_vals[i-1] * (window-1) + tr) / window
-        
-        # True range sum over window
-        tr_sum = np.zeros(n)
-        for i in range(window-1, n):
-            if i == window-1:
-                tr_sum[i] = np.sum([
-                    high_arr[i-window+1:i+1] - low_arr[i-window+1:i+1],
-                    np.abs(high_arr[i-window+1:i+1] - np.roll(close_arr[i-window+1:i+1], 1)),
-                    np.abs(low_arr[i-window+1:i+1] - np.roll(close_arr[i-window+1:i+1], 1))
-                ])
-            else:
-                tr_sum[i] = tr_sum[i-1] + np.max([
-                    high_arr[i] - low_arr[i],
-                    abs(high_arr[i] - close_arr[i-1]),
-                    abs(low_arr[i] - close_arr[i-1])
-                ]) - np.max([
-                    high_arr[i-window] - low_arr[i-window],
-                    abs(high_arr[i-window] - close_arr[i-window-1]),
-                    abs(low_arr[i-window] - close_arr[i-window-1])
-                ])
-        
-        # Avoid division by zero
-        atr_safe = np.where(atr_vals == 0, 1e-10, atr_vals)
-        chop = 100 * np.log10(tr_sum / window / atr_safe) / np.log10(window)
-        return np.where(np.isnan(chop) | np.isinf(chop), 50.0, chop)
+    # Calculate 1d EMA50 trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate Camarilla pivot levels from prior 1d bar
+    # Typical Price = (H + L + C) / 3
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    range_1d = df_1d['high'].values - df_1d['low'].values
     
-    # Calculate Donchian channels on 4h
-    def donchian_channels(high_arr, low_arr, window=20):
-        n = len(high_arr)
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
-        middle = np.full(n, np.nan)
-        
-        for i in range(window-1, n):
-            upper[i] = np.max(high_arr[i-window+1:i+1])
-            lower[i] = np.min(low_arr[i-window+1:i+1])
-            middle[i] = (upper[i] + lower[i]) / 2
-        
-        return upper, lower, middle
+    # Camarilla levels: R3 = TP + 1.1 * range/2, S3 = TP - 1.1 * range/2
+    # R4 = TP + 1.1 * range, S4 = TP - 1.1 * range
+    camarilla_tp = typical_price_1d
+    camarilla_range = range_1d
     
-    donch_upper, donch_lower, donch_middle = donchian_channels(high, low, 20)
+    r3 = camarilla_tp + 1.1 * camarilla_range / 2.0
+    s3 = camarilla_tp - 1.1 * camarilla_range / 2.0
+    r4 = camarilla_tp + 1.1 * camarilla_range
+    s4 = camarilla_tp - 1.1 * camarilla_range
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donch_upper[i]) or 
-            np.isnan(donch_lower[i]) or 
-            np.isnan(donch_middle[i]) or 
-            np.isnan(volume_filter[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade in range markets (CHOP > 61.8)
-        in_range_regime = chop_1d_aligned[i] > 61.8
+        # Calculate rejection condition: wick > 50% of body
+        body_size = abs(close[i] - open_price[i])
+        upper_wick = high[i] - max(close[i], open_price[i])
+        lower_wick = min(close[i], open_price[i]) - low[i]
+        max_wick = max(upper_wick, lower_wick)
         
-        if position == 0 and in_range_regime:
-            # Long: break above Donchian upper with volume spike
-            if close[i] > donch_upper[i] and volume_filter[i]:
+        # Avoid division by zero
+        if body_size == 0:
+            rejection = False
+        else:
+            rejection = max_wick > (0.5 * body_size)
+        
+        if position == 0:
+            # Long fade at S3: price rejects S3 with volume spike AND above 1d EMA50 (bullish bias)
+            if (low[i] <= s3_aligned[i] and 
+                rejection and 
+                volume_spike[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian lower with volume spike
-            elif close[i] < donch_lower[i] and volume_filter[i]:
+            # Short fade at R3: price rejects R3 with volume spike AND below 1d EMA50 (bearish bias)
+            elif (high[i] >= r3_aligned[i] and 
+                  rejection and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+            # Long breakout at R4: price breaks R4 with volume spike AND above 1d EMA50
+            elif (high[i] > r4_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short breakout at S4: price breaks S4 with volume spike AND below 1d EMA50
+            elif (low[i] < s4_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses Donchian middle OR chop < 38.2 (trend regime)
-            if close[i] < donch_middle[i] or chop_1d_aligned[i] < 38.2:
+            # Exit long: price reaches R3 (fade level) or loses volume/spike
+            if (high[i] >= r3_aligned[i] and rejection) or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses Donchian middle OR chop < 38.2 (trend regime)
-            if close[i] > donch_middle[i] or chop_1d_aligned[i] < 38.2:
+            # Exit short: price reaches S3 (fade level) or loses volume/spike
+            if (low[i] <= s3_aligned[i] and rejection) or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
