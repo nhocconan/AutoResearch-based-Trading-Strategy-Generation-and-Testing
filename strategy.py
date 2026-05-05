@@ -9,17 +9,17 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # R3/S3 are strong Camarilla levels (PP ± range*1.1/2) for high-quality breaks with good risk/reward
 # 1d EMA34 provides smoother trend filter than shorter EMAs, reducing whipsaw in ranging markets
 # Volume spike requires 2.0x 20-bar MA for confirmation (balanced to avoid overtrading)
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing trends
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe to minimize fee drag
 # Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation)
 # Timeframe: 12h (primary timeframe as required)
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -69,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN (due to roll or insufficient data)
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
