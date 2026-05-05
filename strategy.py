@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h Volume Spike and 1d Trend Filter
-# Long when: BB Width at 20-period low (squeeze) AND price breaks above upper BB AND 12h volume > 1.5x average AND 1d close > 1d EMA50
-# Short when: BB Width at 20-period low (squeeze) AND price breaks below lower BB AND 12h volume > 1.5x average AND 1d close < 1d EMA50
-# Exit when price returns to middle BB (mean reversion in squeeze)
-# Bollinger Squeeze identifies low volatility primed for expansion
+# Hypothesis: 4h Camarilla R3/S3 Breakout with 1d Volume Spike and 6h EMA34 Trend Filter
+# Long when: price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND 6h close > 6h EMA34
+# Short when: price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND 6h close < 6h EMA34
+# Exit when price returns to Camarilla Pivot Point (mean reversion)
+# Camarilla levels provide high-probability reversal points from 1d OHLC
 # Volume spike confirms institutional participation
-# 1d EMA50 filter ensures alignment with higher timeframe trend
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25 to minimize fee churn
+# 6h EMA34 filter ensures alignment with intermediate timeframe trend
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25 to minimize fee churn
 
-name = "6h_BollingerSqueeze_VolumeSpike_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dVolume_6hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,79 +26,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need enough for volume average
-        return np.zeros(n)
-    volume_12h = df_12h['volume'].values
-    
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    # Get 1d data ONCE before loop for Camarilla levels and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50
+    if len(df_1d) < 20:  # Need enough for volume average
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h average volume (20-period)
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Get 6h data ONCE before loop for EMA34 trend filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 34:  # Need enough for EMA34
+        return np.zeros(n)
+    close_6h = df_6h['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d average volume (20-period)
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Bollinger Bands (20, 2) on 6h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Calculate 6h EMA(34) for trend filter
+    ema_34_6h = pd.Series(close_6h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_6h, ema_34_6h)
     
-    # BB Width percentile lookback (50 periods) to identify squeeze
-    # Squeeze when BB Width is at 20-period low (bottom 20% of last 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_rank = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 50 else np.nan, raw=False
-    ).values
-    squeeze_condition = bb_width_rank <= 0.2  # Bottom 20% = squeeze
+    # Calculate Camarilla levels from previous 1d OHLC
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2, PP = (H+L+C)/3
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    
+    # Align Camarilla levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(squeeze_condition[i])):
+        if (np.isnan(vol_ma_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Squeeze + break above upper BB + volume spike + 1d uptrend
-            if (squeeze_condition[i] and 
-                close[i] > upper_bb[i] and 
-                volume[i] > 1.5 * vol_ma_aligned[i] and 
-                close[i] > ema_50_aligned[i]):
+            # Long: break above R3 + volume spike + 6h uptrend
+            if (close[i] > r3_aligned[i] and 
+                volume_1d[i] > 2.0 * vol_ma_aligned[i] and 
+                close_6h[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Squeeze + break below lower BB + volume spike + 1d downtrend
-            elif (squeeze_condition[i] and 
-                  close[i] < lower_bb[i] and 
-                  volume[i] > 1.5 * vol_ma_aligned[i] and 
-                  close[i] < ema_50_aligned[i]):
+            # Short: break below S3 + volume spike + 6h downtrend
+            elif (close[i] < s3_aligned[i] and 
+                  volume_1d[i] > 2.0 * vol_ma_aligned[i] and 
+                  close_6h[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to middle BB (mean reversion) or stoploss
-            if close[i] < sma_20[i]:
+            # Exit long: return to pivot point (mean reversion)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to middle BB (mean reversion) or stoploss
-            if close[i] > sma_20[i]:
+            # Exit short: return to pivot point (mean reversion)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
