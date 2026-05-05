@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Camarilla R4 AND price > 1d EMA50 AND volume > 2.0 * avg_volume(20)
-# Short when price breaks below Camarilla S4 AND price < 1d EMA50 AND volume > 2.0 * avg_volume(20)
-# Exit when price crosses Camarilla H3/L3 (mid-point) OR volume < avg_volume(20)
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1w EMA34 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla H3 AND price > 1w EMA34 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below Camarilla L3 AND price < 1w EMA34 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses Camarilla H4/L4 (extreme levels) OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
 # Target: 75-200 total trades over 4 years (19-50/year)
-# Camarilla levels from 1d provide robust daily support/resistance; 1d EMA50 filters major trend; volume spike confirms breakout strength
+# Camarilla levels from 1d provide robust daily support/resistance; 1w EMA34 filters major trend; volume spike confirms breakout strength
 # Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "4h_Camarilla_R4S4_Breakout_1dEMA50_VolumeSpike"
+name = "4h_Camarilla_H3L3_Breakout_1wEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,18 +26,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla and EMA50
+    # Get 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50 and Camarilla
+    if len(df_1d) < 30:  # Need enough for Camarilla calculation
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get 1w data ONCE before loop for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need enough for EMA34
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA34
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Calculate Camarilla levels from previous 1d bar
     # Camarilla: based on previous day's high, low, close
@@ -49,7 +55,7 @@ def generate_signals(prices):
     camarilla_h4 = close_1d + 1.1 * range_1d / 2  # R4
     camarilla_l4 = close_1d - 1.1 * range_1d / 2  # S4
     camarilla_h3 = close_1d + 1.1 * range_1d / 4  # R3
-    camarilla_l3 = close_1d - 1.1 * range_1d / 4  # S3
+    camarilla_l3 = close_1d - 1.1 * range_1d / 4  # L3
     
     # Align Camarilla levels to 4h
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
@@ -66,34 +72,34 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume_20[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Camarilla R4, above 1d EMA50, volume confirmation
-            if close[i] > camarilla_h4_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above Camarilla H3, above 1w EMA34, volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and close[i] > ema34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S4, below 1d EMA50, volume confirmation
-            elif close[i] < camarilla_l4_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below Camarilla L3, below 1w EMA34, volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema34_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Camarilla H3/L3 mid-point OR volume drops below average
-            camarilla_mid = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
-            if close[i] < camarilla_mid or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below Camarilla H4/L4 extreme levels OR volume drops below average
+            camarilla_extreme = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+            if close[i] < camarilla_extreme or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Camarilla H3/L3 mid-point OR volume drops below average
-            camarilla_mid = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
-            if close[i] > camarilla_mid or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above Camarilla H4/L4 extreme levels OR volume drops below average
+            camarilla_extreme = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+            if close[i] > camarilla_extreme or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
