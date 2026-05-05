@@ -3,15 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Long when price breaks above 4h Camarilla R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0x 20-period average
-# Short when price breaks below 4h Camarilla S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0x 20-period average
-# Exit when price crosses 4h Camarilla midpoint (H4/L4) OR EMA34 filter reverses
-# Camarilla levels provide precise intraday support/resistance, 1d EMA34 filters regime, volume confirms participation
-# Discrete sizing 0.25 to minimize fee churn, targeting 75-200 trades over 4 years
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper(20) AND price > 1w EMA34 (uptrend) AND volume > 2.0x 20-period average
+# Short when price breaks below 1d Donchian lower(20) AND price < 1w EMA34 (downtrend) AND volume > 2.0x 20-period average
+# Exit when price crosses 1d Donchian midpoint OR EMA34 filter reverses
+# Uses Donchian channels for clear trend structure, 1w EMA34 for regime filter (avoid whipsaws in chop)
+# Volume spike confirms institutional participation
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# Timeframe: 1d (primary timeframe as required)
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +27,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
-        return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h Camarilla levels (based on previous 4h bar's OHLC)
-    # R4 = close + 1.5*(high-low), R3 = close + 1.25*(high-low), etc.
-    # We use the previous completed 4h bar's OHLC (shifted by 1)
-    if len(high_4h) < 2:
-        return np.zeros(n)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
-    prev_high[0] = np.nan  # First value has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    rang = prev_high - prev_low
-    r3 = prev_close + 1.25 * rang
-    s3 = prev_close - 1.25 * rang
-    h4 = prev_close + 0.5 * rang
-    l4 = prev_close - 0.5 * rang
-    midpoint = (h4 + l4) / 2.0  # Same as prev_close
-    
-    # Get 1d data ONCE before loop for EMA34
+    # Get 1d data ONCE before loop for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(34)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Donchian channels (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20), Mid = (Upper + Lower) / 2
+    high_rolling_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    upper_20 = high_rolling_max
+    lower_20 = low_rolling_min
+    midpoint_20 = (upper_20 + lower_20) / 2.0
     
-    # Align HTF indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    midpoint_aligned = align_htf_to_ltf(prices, df_4h, midpoint)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 1w data ONCE before loop for EMA34
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation on 4h (threshold: 2.0x)
+    # Calculate 1w EMA(34)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF indicators to 1d timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_20)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation on 1d (threshold: 2.0x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)
@@ -78,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
             np.isnan(midpoint_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -87,14 +79,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND price > EMA34 (uptrend) AND volume spike
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above upper(20) AND price > EMA34 (uptrend) AND volume spike
+            if (close[i] > upper_aligned[i] and 
                 close[i] > ema_34_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND price < EMA34 (downtrend) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below lower(20) AND price < EMA34 (downtrend) AND volume spike
+            elif (close[i] < lower_aligned[i] and 
                   close[i] < ema_34_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
