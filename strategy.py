@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation
-# Long when: price > Alligator Jaw (teeth > lips) AND close > 1d EMA34 AND volume > 1.5x 24-period MA
-# Short when: price < Alligator Jaw (teeth < lips) AND close < 1d EMA34 AND volume > 1.5x 24-period MA
-# Exit when: price crosses Alligator Jaw (teeth == lips) or trend filter fails
-# Williams Alligator: Jaw=13-period SMMA shifted 8, Teeth=8-period SMMA shifted 5, Lips=5-period SMMA shifted 3
-# Uses 12h timeframe for lower frequency (12-37 trades/year target) to minimize fee drag
-# HTF: 1d for EMA trend and volume confirmation. Alligator calculated on 12h for precise entries.
+# Hypothesis: 4h Williams %R extreme reversal with 1d volume spike and 1w EMA34 trend filter
+# Long when: Williams %R(14) crosses above -80 (oversold), volume > 2.0x 48-period average, and close > 1w EMA34
+# Short when: Williams %R(14) crosses below -20 (overbought), volume > 2.0x 48-period average, and close < 1w EMA34
+# Exit when Williams %R returns to -50 (mean reversion) or opposite extreme
+# Uses Williams %R for timely reversals in ranging markets, volume spike for conviction, 1w EMA for major trend filter
+# Timeframe: 4h, HTF: 1d/1w. Target: 50-150 total trades over 4 years (12-38/year) to avoid fee drag.
 
-name = "12h_WilliamsAlligator_1dEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_WilliamsR_Extreme_1wEMA34_1dVolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,101 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Calculate volume confirmation on 12h using 24-period MA (equivalent to 1d lookback)
-    if len(volume) >= 24:
-        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-        volume_filter = volume > (1.5 * vol_ma_24)
+    # Calculate volume confirmation on 4h using 48-period MA (equivalent to 1d lookback)
+    if len(volume) >= 48:
+        vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+        volume_filter = volume > (2.0 * vol_ma_48)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Get 1d data ONCE before loop for Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Williams %R on 1d: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                         ((highest_high - close_1d) / (highest_high - lowest_low)) * -100, 
+                         -50)  # default to neutral when range is zero
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw: 13-period SMMA of median price, shifted 8 bars
-    # Teeth: 8-period SMMA of median price, shifted 5 bars  
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    median_price = (high + low) / 2.0
-    
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
-    
-    # Apply shifts: Jaw shifted 8, Teeth shifted 5, Lips shifted 3
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # Fill shifted values with NaN
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Align Alligator lines and 1d EMA to 12h timeframe (already aligned as 12h is base)
-    # For 1d EMA, we need alignment
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align Williams %R and 1w EMA to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)  # already computed above
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Jaw AND Teeth > Lips (bullish alignment) AND above 1d EMA34 AND volume filter
-            if (close[i] > jaw[i] and 
-                teeth[i] > lips[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_filter[i]):
+            # Long conditions: Williams %R crosses above -80 (oversold), volume filter, and above 1w EMA34
+            if (williams_r_aligned[i] > -80 and 
+                williams_r_aligned[i-1] <= -80 and  # crossover above -80
+                volume_filter[i] and 
+                close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Jaw AND Teeth < Lips (bearish alignment) AND below 1d EMA34 AND volume filter
-            elif (close[i] < jaw[i] and 
-                  teeth[i] < lips[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_filter[i]):
+            # Short conditions: Williams %R crosses below -20 (overbought), volume filter, and below 1w EMA34
+            elif (williams_r_aligned[i] < -20 and 
+                  williams_r_aligned[i-1] >= -20 and  # crossover below -20
+                  volume_filter[i] and 
+                  close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Jaw OR trend fails (close < 1d EMA34) OR Alligator alignment breaks
-            if (close[i] < jaw[i] or 
-                close[i] < ema_34_1d_aligned[i] or 
-                teeth[i] <= lips[i]):
+            # Exit long: Williams %R returns above -50 (mean reversion) or crosses below -80 (stop)
+            if williams_r_aligned[i] > -50 or williams_r_aligned[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Jaw OR trend fails (close > 1d EMA34) OR Alligator alignment breaks
-            if (close[i] > jaw[i] or 
-                close[i] > ema_34_1d_aligned[i] or 
-                teeth[i] >= lips[i]):
+            # Exit short: Williams %R returns below -50 (mean reversion) or crosses above -20 (stop)
+            if williams_r_aligned[i] < -50 or williams_r_aligned[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
