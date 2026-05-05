@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Williams Fractal breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above daily bearish Williams Fractal AND price > 1d EMA34 AND volume > 1.5 * avg_volume(20) on 12h
-# Short when price breaks below daily bullish Williams Fractal AND price < 1d EMA34 AND volume > 1.5 * avg_volume(20) on 12h
-# Exit when price crosses back below/above daily EMA34 OR volume drops below average
+# Hypothesis: 6h strategy using Donchian(20) breakout with 1d ADX trend filter and volume spike confirmation
+# Long when price breaks above 6h Donchian(20) upper band AND 1d ADX > 25 AND volume > 2.0 * 6h avg_volume(20)
+# Short when price breaks below 6h Donchian(20) lower band AND 1d ADX > 25 AND volume > 2.0 * 6h avg_volume(20)
+# Exit when price touches the opposite Donchian band (upper for long exit, lower for short exit) OR ADX < 20
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 80-120 total trades over 4 years (20-30/year) for 12h timeframe
-# Daily Williams Fractals provide robust support/resistance from higher timeframe with confirmation delay
-# 1d EMA34 filters primary trend to avoid counter-trend trades
-# Volume spike confirms breakout strength and reduces false signals
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Donchian provides clear breakout levels with built-in volatility adaptation
+# 1d ADX ensures we only trade strong trends, reducing whipsaws in ranging markets
+# Volume spike confirms breakout strength and institutional participation
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "12h_WilliamsFractal_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "6h_Donchian20_1dADX_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,42 +28,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data ONCE before loop for Williams Fractals and EMA34
+    # Get 6h data ONCE before loop for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:  # Need enough for Donchian(20)
+        return np.zeros(n)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Calculate 6h Donchian(20) channels
+    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 6h Donchian levels to 6h timeframe (same timeframe, so direct use)
+    # Note: Since primary and HTF are both 6h, no alignment needed, but we keep the pattern
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    
+    # Get 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:  # Need enough for fractal calculation
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals (bearish: high[0] is peak with 2 lower highs on each side)
-    # Bullish fractal: low[0] is trough with 2 higher lows on each side
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Calculate 1d ADX(14)
+    # True Range
+    tr1 = pd.Series(high_1d).diff().abs()
+    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
+    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean()
     
-    for i in range(2, n_1d - 2):
-        # Bearish fractal: middle high is highest of 5 bars
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        # Bullish fractal: middle low is lowest of 5 bars
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Williams Fractals need 2 extra daily bars for confirmation (after the center bar)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -74,32 +89,32 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above daily bearish Williams Fractal, above 1d EMA34, volume confirmation, in session
-            if close[i] > bearish_fractal_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above 6h Donchian upper, 1d ADX > 25, volume confirmation, in session
+            if close[i] > donchian_upper_aligned[i] and adx_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below daily bullish Williams Fractal, below 1d EMA34, volume confirmation, in session
-            elif close[i] < bullish_fractal_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below 6h Donchian lower, 1d ADX > 25, volume confirmation, in session
+            elif close[i] < donchian_lower_aligned[i] and adx_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below daily EMA34 OR volume drops below average
-            if close[i] < ema34_1d_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price touches 6h Donchian lower band OR ADX < 20
+            if close[i] <= donchian_lower_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above daily EMA34 OR volume drops below average
-            if close[i] > ema34_1d_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price touches 6h Donchian upper band OR ADX < 20
+            if close[i] >= donchian_upper_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
