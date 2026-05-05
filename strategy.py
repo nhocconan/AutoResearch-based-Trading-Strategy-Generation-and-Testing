@@ -4,14 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (2.0x)
-# Long when price breaks above Donchian upper AND price > 1d EMA50 AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian lower AND price < 1d EMA50 AND volume > 2.0x 20-period average
+# Long when price breaks above Donchian upper (20) AND price > 1d EMA50 AND volume > 2.0x 20-period average
+# Short when price breaks below Donchian lower (20) AND price < 1d EMA50 AND volume > 2.0x 20-period average
 # Exit when price reverts to Donchian midpoint OR 1d EMA50 filter reverses
-# Uses 4h timeframe with 1d HTF for optimal trade frequency (target: 75-200 total over 4 years)
-# Donchian provides robust price channels that work in both bull and bear markets
+# Uses 4h timeframe with 1d HTF for trend filter and Donchian structure
+# Donchian channels provide robust price channels effective in trending and ranging markets
 # Volume confirmation reduces false breakouts
-# 1d EMA50 offers strong trend filter effective across market regimes
-# Designed for minimal fee drag with discrete position sizing (0.25-0.30)
+# 1d EMA50 offers strong trend filter that works in both bull and bear markets
+# Designed for optimal trade frequency: target 75-200 total trades over 4 years
+# Discrete position sizing (0.25) minimizes fee churn
 
 name = "4h_Donchian20_1dEMA50_VolumeSpike_2.0x"
 timeframe = "4h"
@@ -33,7 +34,7 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate Donchian channels (20-period) on 4h
     if len(high) >= 20:
         donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
         donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -46,7 +47,7 @@ def generate_signals(prices):
     # Calculate 1d EMA(50)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF EMA to 4h timeframe
+    # Align HTF indicators to 4h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation on 4h (threshold: 2.0x for optimal frequency)
