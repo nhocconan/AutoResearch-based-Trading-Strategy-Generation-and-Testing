@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
-# Long when price breaks above 4h Donchian upper AND 1d ADX > 25 (strong trend) AND volume spike
-# Short when price breaks below 4h Donchian lower AND 1d ADX > 25 (strong trend) AND volume spike
-# Exit when price crosses the 4h Donchian middle (mean) OR ADX < 20 (trend weakening)
+# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
+# Long when price breaks above 12h Donchian upper AND 1d ADX > 25 (strong trend) AND volume spike
+# Short when price breaks below 12h Donchian lower AND 1d ADX > 25 (strong trend) AND volume spike
+# Exit when price crosses the 12h Donchian middle (mean) OR ADX < 20 (trend weakening)
 # Uses Donchian channels for structure, 1d ADX for regime filtering (avoid whipsaws in ranging markets)
 # Volume spike confirms institutional participation at breakouts
 # Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
-# Timeframe: 4h (primary timeframe as required)
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Timeframe: 12h (primary timeframe as required)
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
-name = "4h_Donchian20_1dADX_Trend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Donchian20_1dADX_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,20 +27,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data ONCE before loop for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 4h Donchian(20) channels
+    # Calculate 12h Donchian(20) channels
     # Upper = max(high, 20)
     # Lower = min(low, 20)
     # Middle = (upper + lower) / 2
-    high_ma_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    high_ma_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_ma_20
     donchian_lower = low_ma_20
     donchian_middle = (donchian_upper + donchian_lower) / 2
@@ -89,13 +89,13 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
     adx = WilderSmoothing(dx, 14)
     
-    # Align HTF indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
+    # Align HTF indicators to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume confirmation on 4h (threshold: 2.0x)
+    # Volume confirmation on 12h (threshold: 2.0x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)
