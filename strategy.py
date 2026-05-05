@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (1.5x)
-# Long when price breaks above 12h Donchian upper(20) AND price > 1d EMA34 (uptrend) AND volume > 1.5x 20-period average
-# Short when price breaks below 12h Donchian lower(20) AND price < 1d EMA34 (downtrend) AND volume > 1.5x 20-period average
-# Exit when price crosses 12h Donchian midpoint OR EMA34 filter reverses
-# Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year) and 1d EMA34 for stable trend identification
-# Volume threshold lowered to 1.5x to capture more valid breakouts while maintaining filter strength
-# Designed for BTC/ETH resilience in both bull (trend following) and bear (mean reversion via exits) markets
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike (1.8x)
+# Long when price breaks above 4h Donchian upper(20) AND price > 1d EMA34 (uptrend) AND volume > 1.8x 20-period average
+# Short when price breaks below 4h Donchian lower(20) AND price < 1d EMA34 (downtrend) AND volume > 1.8x 20-period average
+# Exit when price crosses 4h Donchian midpoint OR EMA34 filter reverses
+# Uses proven 1d EMA34 for stronger trend identification and moderate volume threshold (1.8x) to balance signal quality and frequency
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining edge in both bull and bear markets
+# Timeframe: 4h (primary)
+# Target symbols: BTC/ETH/SOL (avoid SOL-only bias)
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_1.5x"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_1.8x"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,17 +26,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data ONCE before loop for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Donchian(20) channels
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
+    # Calculate 4h Donchian(20) channels
+    high_series = pd.Series(high_4h)
+    low_series = pd.Series(low_4h)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     donchian_middle = (donchian_upper + donchian_lower) / 2.0
@@ -49,16 +50,16 @@ def generate_signals(prices):
     # Calculate 1d EMA(34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    # Align HTF indicators to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation on 12h (threshold: 1.5x for balanced filter)
+    # Volume confirmation on 4h (threshold: 1.8x for balanced filter)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (1.5 * vol_ma_20)
+        volume_spike = volume > (1.8 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
