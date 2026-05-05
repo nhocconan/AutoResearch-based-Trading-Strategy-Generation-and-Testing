@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator + 1d ADX trend filter + volume confirmation
+# Hypothesis: 12h Williams Alligator + 1w ADX trend filter + volume confirmation
 # Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via aligned SMAs
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
-# Short when: Jaw > Teeth > Lips (bearish alignment) AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Long when: Lips > Teeth > Jaw (bullish alignment) AND 1w ADX > 25 AND volume > 1.5x 20-period MA
+# Short when: Jaw > Teeth > Lips (bearish alignment) AND 1w ADX > 25 AND volume > 1.5x 20-period MA
 # Exit when: Alligator lines cross (trend weakening) OR ADX drops below 20
 # Uses Alligator for trend structure, ADX for trend strength, volume for conviction
-# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Timeframe: 12h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_WilliamsAlligator_1dADX_VolumeConfirm"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1wADX_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator on 4h
+    # Calculate Williams Alligator on 12h
     if len(high) >= 13:
         jaw = pd.Series(high).rolling(window=13, min_periods=13).mean().values  # Jaw (13)
         teeth = pd.Series(high).rolling(window=8, min_periods=8).mean().values   # Teeth (8)
@@ -35,27 +35,27 @@ def generate_signals(prices):
         teeth = np.full(n, np.nan)
         lips = np.full(n, np.nan)
     
-    # Get 1d data ONCE before loop for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for ADX
+    # Get 1w data ONCE before loop for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # need sufficient data for ADX
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ADX(14) on 1w
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    if len(high_1d) >= 14:
+    if len(high_1w) >= 14:
         # True Range
-        tr1 = np.abs(high_1d[1:] - low_1d[1:])
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr1 = np.abs(high_1w[1:] - low_1w[1:])
+        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
         tr = np.maximum(np.maximum(tr1, tr2), tr3)
         tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
         
         # Directional Movement
-        up_move = high_1d[1:] - high_1d[:-1]
-        down_move = low_1d[:-1] - low_1d[1:]
+        up_move = high_1w[1:] - high_1w[:-1]
+        down_move = low_1w[:-1] - low_1w[1:]
         
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
@@ -76,7 +76,7 @@ def generate_signals(prices):
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
     else:
-        adx = np.full(len(high_1d), np.nan)
+        adx = np.full(len(high_1w), np.nan)
     
     # ADX trend strength
     adx_strong = np.zeros(len(adx), dtype=bool)
@@ -86,9 +86,9 @@ def generate_signals(prices):
             adx_strong[i] = adx[i] > 25
             adx_weak[i] = adx[i] < 20
     
-    # Align 1d ADX to 4h timeframe
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
+    # Align 1w ADX to 12h timeframe
+    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong.astype(float))
+    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak.astype(float))
     
     # Williams Alligator alignment signals
     lips_above_teeth = lips > teeth
@@ -99,7 +99,7 @@ def generate_signals(prices):
     bullish_alignment = lips_above_teeth & teeth_above_jaw
     bearish_alignment = jaw_above_teeth & teeth_above_lips
     
-    # Volume confirmation on 4h
+    # Volume confirmation on 12h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
