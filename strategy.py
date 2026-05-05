@@ -4,11 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-# Long when price breaks above R3 (1d) AND price > 1d EMA34 (strong uptrend) AND volume spike (2.0x 20-bar MA)
+# Long when price breaks above R3 (1d) AND price > 1d EMA34 (strong uptrend) AND volume spike
 # Short when price breaks below S3 (1d) AND price < 1d EMA34 (strong downtrend) AND volume spike
-# Uses 1d EMA34 for smoother, more reliable trend filter vs 12h EMA50 to reduce whipsaw
-# Volume spike confirmation filters low-momentum breakouts
-# Exits when price retests the broken level (R3/S3) or trend fails (price crosses 1d EMA34)
+# Uses 1d EMA34 for smoother trend filter than shorter EMAs, reducing whipsaw in ranging markets
+# Volume spike requires 2.0x 20-bar MA for confirmation (balanced to avoid overtrading)
 # Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag while capturing trends
 # Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation)
 # Timeframe: 4h (primary timeframe as required)
@@ -27,12 +26,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla levels and EMA34 trend filter
+    # Get 1d data ONCE before loop for Camarilla levels and EMA34 (from previous completed daily bar)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
