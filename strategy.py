@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
-# Long when price breaks above 6h Donchian upper(20) AND price > 1d EMA34 AND volume > 1.8 * avg_volume(20)
-# Short when price breaks below 6h Donchian lower(20) AND price < 1d EMA34 AND volume > 1.8 * avg_volume(20)
-# Exit when price crosses 6h Donchian midpoint OR volume < 0.9 * avg_volume(20)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 12h Donchian upper(20) AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below 12h Donchian lower(20) AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses 12h Donchian midpoint OR volume < avg_volume(20)
 # Uses discrete sizing 0.25 to minimize fee churn
-# Target: 60-120 total trades over 4 years (15-30/year) - within 6h sweet spot
-# Donchian channels from 6h provide structure; 1d EMA34 filters primary trend; volume spike confirms breakout strength
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+# Donchian channels from 12h provide robust support/resistance; 1d EMA34 filters primary trend; volume spike confirms breakout strength
 # Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
@@ -44,10 +44,9 @@ def generate_signals(prices):
     ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
-    volume_exit = volume < (0.9 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,15 +70,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below Donchian midpoint OR volume drops below threshold
-            if close[i] < donchian_mid[i] or volume_exit[i]:
+            # Exit long: Price crosses below Donchian midpoint OR volume drops below average
+            if close[i] < donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above Donchian midpoint OR volume drops below threshold
-            if close[i] > donchian_mid[i] or volume_exit[i]:
+            # Exit short: Price crosses above Donchian midpoint OR volume drops below average
+            if close[i] > donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
