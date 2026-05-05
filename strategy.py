@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using Williams %R(14) extreme reversal with 1w EMA50 trend filter and volume confirmation
-# Long when Williams %R(14) crosses above -80 (oversold) AND price > 1w EMA50 AND volume > 2.0 * avg_volume(20)
-# Short when Williams %R(14) crosses below -20 (overbought) AND price < 1w EMA50 AND volume > 2.0 * avg_volume(20)
-# Exit when Williams %R crosses back through -50 (mean reversion midpoint) OR volume drops below 1.5 * avg_volume(20)
+# Hypothesis: 6h strategy using daily Elder Ray Index (Bull Power/Bear Power) with 1d EMA13 trend filter and ATR-based volatility regime
+# Long when Bull Power > 0 AND price > 1d EMA13 AND ATR(14) > ATR(50) (high volatility regime)
+# Short when Bear Power < 0 AND price < 1d EMA13 AND ATR(14) > ATR(50) (high volatility regime)
+# Exit when Bull/Bear Power crosses zero OR ATR(14) < ATR(50) (low volatility regime)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Williams %R provides timely reversal signals in ranging markets
-# 1w EMA50 filters for primary trend alignment to avoid counter-trend trades
-# Volume confirmation ensures reversal strength and reduces false signals
-# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Elder Ray measures trend strength via power of bulls/bears relative to EMA
+# 1d EMA13 filters for primary trend alignment to avoid counter-trend trades
+# ATR regime filter ensures we only trade in sufficient volatility environments
+# Works in bull markets (buying strength in uptrend) and bear markets (selling weakness in downtrend)
 
-name = "1d_WilliamsR_EXT_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ElderRay_ATR_Regime_1dEMA13"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,72 +28,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA50
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Get 1d data ONCE before loop for Williams %R calculation
+    # Get 1d data ONCE before loop for Elder Ray and EMA13
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least one completed daily bar for Williams %R
+    if len(df_1d) < 50:  # Need enough for EMA13 and ATR(50)
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on daily timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100
+    # Calculate 1d EMA13 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Williams %R to 1d timeframe (wait for completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Calculate Bull Power and Bear Power (Elder Ray)
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * avg_volume_20)
-    volume_exit = volume < (1.5 * avg_volume_20)  # Exit when volume drops significantly
+    # Align Elder Ray components to 6h timeframe (wait for completed daily bar)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    
+    # Calculate ATR(14) and ATR(50) for volatility regime filter
+    # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close_1d = np.append([np.nan], close_1d[:-1])
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - prev_close_1d)
+    tr3 = np.abs(low_1d - prev_close_1d)
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def calculate_atr(tr, period):
+        atr = np.full_like(tr, np.nan)
+        if len(tr) < period:
+            return atr
+        # First ATR is simple average
+        atr[period-1] = np.nanmean(tr[:period])
+        # Wilder's smoothing: ATR today = (ATR yesterday * (period-1) + TR today) / period
+        for i in range(period, len(tr)):
+            if not np.isnan(atr[i-1]):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
+    
+    atr14_1d = calculate_atr(true_range, 14)
+    atr50_1d = calculate_atr(true_range, 50)
+    
+    # Align ATR indicators to 6h timeframe
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
-        # Skip if any value is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(avg_volume_20[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema13_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+            np.isnan(atr50_1d_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold), above 1w EMA50, volume confirmation
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
-                close[i] > ema50_1w_aligned[i] and volume_confirm[i]):
+            # Long: Bull Power > 0 (bulls in control) AND price > 1d EMA13 AND high volatility regime
+            if (bull_power_aligned[i] > 0 and close[i] > ema13_1d_aligned[i] and 
+                atr14_1d_aligned[i] > atr50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought), below 1w EMA50, volume confirmation
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
-                  close[i] < ema50_1w_aligned[i] and volume_confirm[i]):
+            # Short: Bear Power < 0 (bears in control) AND price < 1d EMA13 AND high volatility regime
+            elif (bear_power_aligned[i] < 0 and close[i] < ema13_1d_aligned[i] and 
+                  atr14_1d_aligned[i] > atr50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion) OR volume drops significantly
-            if williams_r_aligned[i] > -50 or volume_exit[i]:
+            # Exit long: Bull Power crosses zero OR low volatility regime
+            if bull_power_aligned[i] <= 0 or atr14_1d_aligned[i] <= atr50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion) OR volume drops significantly
-            if williams_r_aligned[i] < -50 or volume_exit[i]:
+            # Exit short: Bear Power crosses zero OR low volatility regime
+            if bear_power_aligned[i] >= 0 or atr14_1d_aligned[i] <= atr50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
