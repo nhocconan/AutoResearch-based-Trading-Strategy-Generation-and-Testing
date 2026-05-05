@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Camarilla pivot breakout with 4h HMA21 trend filter and volume spike confirmation
-# Long when price breaks above daily Camarilla R3 level AND price > 4h HMA21 AND volume > 2.0 * avg_volume(20) on 4h
-# Short when price breaks below daily Camarilla S3 level AND price < 4h HMA21 AND volume > 2.0 * avg_volume(20) on 4h
+# Hypothesis: 12h strategy using daily Camarilla pivot breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above daily Camarilla R3 level AND price > 1d EMA34 AND volume > 2.0 * avg_volume(20) on 12h
+# Short when price breaks below daily Camarilla S3 level AND price < 1d EMA34 AND volume > 2.0 * avg_volume(20) on 12h
 # Exit when price crosses back below/above daily Camarilla pivot point OR volume drops below average
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # Daily Camarilla provides robust support/resistance from higher timeframe
-# 4h HMA21 filters primary trend to avoid counter-trend trades
+# 1d EMA34 filters primary trend to avoid counter-trend trades
 # Volume spike confirms breakout strength and reduces false signals
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "4h_Camarilla_R3S3_Breakout_4hHMA21_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,42 +45,23 @@ def generate_signals(prices):
     camarilla_s3 = pivot_1d - (range_1d * 1.1 / 2.0)
     camarilla_pivot = pivot_1d  # PP level for exit
     
-    # Align daily Camarilla levels to 4h timeframe (wait for completed daily bar)
+    # Align daily Camarilla levels to 12h timeframe (wait for completed daily bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Get 4h data ONCE before loop for HMA21 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:  # Need enough for HMA21
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d_ema = get_htf_data(prices, '1d')
+    if len(df_1d_ema) < 34:  # Need enough for EMA34
         return np.zeros(n)
-    close_4h = df_4h['close'].values
+    close_1d_ema = df_1d_ema['close'].values
     
-    # Calculate 4h HMA21 (Hull Moving Average)
-    # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d_ema)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d_ema, ema34_1d)
     
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    
-    wma_half = np.array([wma(close_4h[i:i+half_len], half_len) if i+half_len <= len(close_4h) else np.nan 
-                         for i in range(len(close_4h))])
-    wma_full = np.array([wma(close_4h[i:i+21], 21) if i+21 <= len(close_4h) else np.nan 
-                         for i in range(len(close_4h))])
-    wma_half = np.concatenate([np.full(half_len-1, np.nan), wma_half])
-    wma_full = np.concatenate([np.full(20, np.nan), wma_full])
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma21_4h = np.array([wma(raw_hma[i:i+sqrt_len], sqrt_len) if i+sqrt_len <= len(raw_hma) else np.nan 
-                         for i in range(len(raw_hma))])
-    hma21_4h = np.concatenate([np.full(sqrt_len-1, np.nan), hma21_4h])
-    
-    # Align 4h HMA21 to 4h timeframe (no additional delay needed for HMA)
-    hma21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma21_4h)
-    
-    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * avg_volume_20)
     
@@ -94,7 +75,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(hma21_4h_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -102,12 +83,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above daily Camarilla R3, above 4h HMA21, volume confirmation, in session
-            if close[i] > camarilla_r3_aligned[i] and close[i] > hma21_4h_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above daily Camarilla R3, above 1d EMA34, volume confirmation, in session
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below daily Camarilla S3, below 4h HMA21, volume confirmation, in session
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < hma21_4h_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below daily Camarilla S3, below 1d EMA34, volume confirmation, in session
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
