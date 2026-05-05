@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Williams %R Extreme Reversal with 1d Volume Spike and Chop Regime Filter
-# Long when: Williams %R(14) crosses above -80 (oversold) AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime)
-# Short when: Williams %R(14) crosses below -20 (overbought) AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime)
-# Exit when Williams %R returns to -50 (mean reversion center) or opposite extreme
+# Long when: Williams %R(14) < -80 (oversold) AND 1d volume > 1.8x 20-period average AND chop > 61.8 (range regime)
+# Short when: Williams %R(14) > -20 (overbought) AND 1d volume > 1.8x 20-period average AND chop > 61.8 (range regime)
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # Williams %R identifies exhaustion points in ranging markets
-# Volume spike confirms institutional participation at turning points
-# Chop regime filter (>61.8) ensures we trade in ranging markets where mean reversion works
-# Target: 100-180 total trades over 4 years (25-45/year) with discrete sizing 0.25
+# Volume spike confirms institutional participation at extremes
+# Chop regime filter ensures we trade in ranging markets where mean reversion works
+# Target: 80-160 total trades over 4 years (20-40/year) with discrete sizing 0.25
 
 name = "4h_WilliamsR_Extreme_Reversal_1dVolumeSpike_Chop"
 timeframe = "4h"
@@ -35,21 +35,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate 14-period Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
+    # Handle division by zero (when highest_high == lowest_low)
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Align Williams %R to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Calculate 1d volume spike (current volume > 1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * vol_ma_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     # Calculate 1d True Range for chop
     tr1 = high_1d - low_1d
@@ -61,7 +52,6 @@ def generate_signals(prices):
     
     # Calculate 1d Choppiness Index (CHOP)
     # CHOP = 100 * log10(sum(ATR14) / (n * (max(high) - min(low)))) / log10(n)
-    # Simplified: CHOP > 61.8 = ranging, < 38.2 = trending
     sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
@@ -70,6 +60,14 @@ def generate_signals(prices):
     chop = 100 * (np.log10(sum_atr_14 / (14 * range_14)) / np.log10(14))
     chop = np.where((range_14 == 0) | np.isnan(chop), 50, chop)  # Default to neutral
     chop_regime = chop > 61.8  # Range regime
+    
+    # Calculate 1d volume spike (current volume > 1.8x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (1.8 * vol_ma_20)
+    
+    # Align all 1d indicators to 4h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
@@ -91,28 +89,24 @@ def generate_signals(prices):
         wr = williams_r_aligned[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (from below) in range regime with volume spike
-            if wr > -80 and vol_cond and chop_cond:
-                # Check for crossover: previous value was <= -80
-                if i > 100 and williams_r_aligned[i-1] <= -80:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: Williams %R crosses below -20 (from above) in range regime with volume spike
-            elif wr < -20 and vol_cond and chop_cond:
-                # Check for crossover: previous value was >= -20
-                if i > 100 and williams_r_aligned[i-1] >= -20:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Williams %R < -80 (oversold) in range regime with volume spike
+            if wr < -80 and vol_cond and chop_cond:
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R > -20 (overbought) in range regime with volume spike
+            elif wr > -20 and vol_cond and chop_cond:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or crosses below -80 (reversal)
-            if wr >= -50 or wr < -80:
+            # Exit long: Williams %R crosses above -50 (momentum returning)
+            if wr > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or crosses above -20 (reversal)
-            if wr <= -50 or wr > -20:
+            # Exit short: Williams %R crosses below -50 (momentum returning)
+            if wr < -50:
                 signals[i] = 0.0
                 position = 0
             else:
