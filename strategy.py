@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + choppiness regime filter
-# Long when: price breaks above Donchian(20) high + 1d volume > 2.0x 20-period MA + CHOP(14) > 61.8 (range)
-# Short when: price breaks below Donchian(20) low + 1d volume > 2.0x 20-period MA + CHOP(14) > 61.8 (range)
-# Exit when: price re-enters Donchian channel OR CHOP(14) < 38.2 (trending)
-# Uses Donchian for structure, volume for conviction, chop for ranging markets where mean reversion works
-# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+# Long when: price breaks above Donchian upper channel AND 1w HMA trending up AND volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian lower channel AND 1w HMA trending down AND volume > 1.5x 20-period MA
+# Exit when: price crosses Donchian middle channel OR HMA trend reverses
+# Uses Donchian for structure, HMA for HTF trend filter, volume for conviction
+# Timeframe: 1d, HTF: 1w. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
 
-name = "4h_Donchian20_1dVolumeSpike_ChopRange"
-timeframe = "4h"
+name = "1d_Donchian20_1wHMA21_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +24,110 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels on 4h
+    # Calculate Donchian channels on 1d timeframe
     if len(high) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_middle = (donchian_upper + donchian_lower) / 2
     else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_middle = np.full(n, np.nan)
     
-    # Get 1d data ONCE before loop for volume and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate volume confirmation on 1d using 20-period MA
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
+    
+    # Get 1w data ONCE before loop for HMA calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume spike filter: volume > 2.0x 20-period MA
-    if len(volume_1d) >= 20:
-        vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-        volume_spike_1d = volume_1d > (2.0 * vol_ma_20_1d)
+    # Calculate Hull Moving Average (HMA) on 1w timeframe
+    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    if len(close_1w) >= 21:
+        half_n = 21 // 2
+        sqrt_n = int(np.sqrt(21))
+        
+        # WMA helper function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        # Calculate WMA(21)
+        wma_21 = np.full(len(close_1w), np.nan)
+        if len(close_1w) >= 21:
+            wma_21_vals = wma(close_1w, 21)
+            wma_21[20:] = wma_21_vals
+        
+        # Calculate WMA(10.5) -> WMA(10) for half period
+        wma_half = np.full(len(close_1w), np.nan)
+        if len(close_1w) >= half_n:
+            wma_half_vals = wma(close_1w, half_n)
+            wma_half[half_n-1:] = wma_half_vals
+        
+        # 2*WMA(half) - WMA(21)
+        diff = 2 * wma_half - wma_21
+        
+        # WMA of diff with sqrt(21) period
+        hma_1w = np.full(len(close_1w), np.nan)
+        if len(diff) >= sqrt_n:
+            # Find valid start index for diff
+            valid_start = half_n - 1  # where wma_half becomes valid
+            if valid_start < len(diff):
+                hma_vals = wma(diff[valid_start:], sqrt_n)
+                hma_1w[valid_start + sqrt_n - 1:] = hma_vals
     else:
-        volume_spike_1d = np.full(len(volume_1d), False)
+        hma_1w = np.full(len(close_1w), np.nan)
     
-    # Calculate 1d choppiness index: CHOP(14)
-    # CHOP = 100 * log10(sum(ATR(1),14) / (log10(highest_high - lowest_low) * 14)) / log10(14)
-    if len(high_1d) >= 14:
-        # True Range
-        tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-        tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
-        tr = np.concatenate([[np.nan], tr1])  # align with index
-        
-        # ATR(14)
-        atr_1 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-        
-        # Sum of ATR over 14 periods
-        sum_atr_14 = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-        
-        # Highest high and lowest low over 14 periods
-        highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        
-        # Avoid division by zero
-        range_14 = highest_high_14 - lowest_low_14
-        range_14 = np.where(range_14 == 0, np.nan, range_14)
-        
-        # Chop calculation
-        chop = 100 * np.log10(sum_atr_14 / (np.log10(range_14) * 14)) / np.log10(14)
-        chop = np.where(np.isnan(chop) | np.isinf(chop), 50.0, chop)  # default to neutral
-    else:
-        chop = np.full(len(high_1d), 50.0)
-    
-    # Align 1d indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1w HMA to 1d timeframe
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(hma_1w_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Donchian breakout up + volume spike + chop > 61.8 (range)
-            if (close[i] > donchian_high[i] and 
-                volume_spike_aligned[i] and 
-                chop_aligned[i] > 61.8):
+            # Long conditions: price > Donchian upper AND HMA trending up AND volume filter
+            if (close[i] > donchian_upper[i] and 
+                hma_1w_aligned[i] > hma_1w_aligned[i-1] and  # HMA trending up
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + volume spike + chop > 61.8 (range)
-            elif (close[i] < donchian_low[i] and 
-                  volume_spike_aligned[i] and 
-                  chop_aligned[i] > 61.8):
+            # Short conditions: price < Donchian lower AND HMA trending down AND volume filter
+            elif (close[i] < donchian_lower[i] and 
+                  hma_1w_aligned[i] < hma_1w_aligned[i-1] and  # HMA trending down
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters Donchian channel OR chop < 38.2 (trending)
-            if (close[i] <= donchian_high[i] or chop_aligned[i] < 38.2):
+            # Exit long: price < Donchian middle OR HMA trend turns down
+            if (close[i] < donchian_middle[i] or 
+                hma_1w_aligned[i] < hma_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters Donchian channel OR chop < 38.2 (trending)
-            if (close[i] >= donchian_low[i] or chop_aligned[i] < 38.2):
+            # Exit short: price > Donchian middle OR HMA trend turns up
+            if (close[i] > donchian_middle[i] or 
+                hma_1w_aligned[i] > hma_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
