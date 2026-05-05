@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian upper channel AND price > EMA50(12h) AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian lower channel AND price < EMA50(12h) AND volume > 1.5x 20-period average
-# Exit when price crosses back to Donchian middle (mean reversion) OR trend flips (price crosses EMA50(12h))
-# Donchian channels provide clear trend structure proven effective across BTC/ETH/SOL
-# 12h EMA50 provides higher timeframe trend filter to avoid counter-trend whipsaws
-# Volume spike confirms breakout validity
-# Target: 25-50 trades/year per symbol (100-200 total over 4 years) for 4h timeframe
-# Discrete sizing (0.25) to limit fee drag
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla R3 level AND price > EMA34(4h) AND volume > 2.0x 20-period average
+# Short when price breaks below Camarilla S3 level AND price < EMA34(4h) AND volume > 2.0x 20-period average
+# Exit when price crosses back below Camarilla S3 (for longs) or above R3 (for shorts) OR trend flips (price crosses EMA34(4h))
+# Camarilla pivot levels provide intraday support/resistance structure proven effective on BTC/ETH
+# 4h EMA34 provides higher timeframe trend filter to avoid counter-trend whipsaws
+# Volume spike confirms institutional participation
+# Target: 15-37 trades/year per symbol (60-150 total over 4 years) for 1h timeframe
+# Session filter: 08-20 UTC to reduce noise trades
+# Discrete sizing (0.20) to limit fee drag
 
-name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Trend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,78 +28,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop for EMA34 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 4h close for trend filter
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA34 to 1h timeframe
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Donchian channels (20-period)
-    if len(high) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (donchian_high + donchian_low) / 2.0
-    else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5x 20-period average (spike filter)
+    # Camarilla levels: based on previous day's OHLC
+    # R3 = close + 1.25*(high-low), S3 = close - 1.25*(high-low)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate pivot levels
+    camarilla_r3 = prev_close + 1.25 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.25 * (prev_high - prev_low)
+    
+    # Align daily Camarilla levels to 1h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: volume > 2.0x 20-period average (spike filter)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_filter[i]) or 
+            np.isnan(session_filter[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Only trade during session hours
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper channel AND price > EMA50(12h) AND volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # Long conditions: price breaks above Camarilla R3 AND price > EMA34(4h) AND volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_34_4h_aligned[i] and 
                 volume_filter[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below Donchian lower channel AND price < EMA50(12h) AND volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # Short conditions: price breaks below Camarilla S3 AND price < EMA34(4h) AND volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_34_4h_aligned[i] and 
                   volume_filter[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back to Donchian middle (mean reversion) OR price < EMA50(12h) (trend flip)
-            if (close[i] < donchian_mid[i] or 
-                close[i] < ema_50_12h_aligned[i]):
+            # Exit long: price crosses back below Camarilla S3 (mean reversion) OR price < EMA34(4h) (trend flip)
+            if (close[i] < camarilla_s3_aligned[i] or 
+                close[i] < ema_34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses back to Donchian middle (mean reversion) OR price > EMA50(12h) (trend flip)
-            if (close[i] > donchian_mid[i] or 
-                close[i] > ema_50_12h_aligned[i]):
+            # Exit short: price crosses back above Camarilla R3 (mean reversion) OR price > EMA34(4h) (trend flip)
+            if (close[i] > camarilla_r3_aligned[i] or 
+                close[i] > ema_34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
