@@ -26,10 +26,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian levels (though prices is already 1d, we need rolling window)
-    # For Donchian on 1d timeframe, we can calculate directly from prices
-    # But we still need to get 1w data for EMA50
-    
     # Calculate 1d Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
