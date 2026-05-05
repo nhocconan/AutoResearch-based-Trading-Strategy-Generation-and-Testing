@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume confirmation
-# Long when: close breaks above Donchian upper (20) AND 1d HMA rising (trending up) AND volume > 1.5x 20-period MA
-# Short when: close breaks below Donchian lower (20) AND 1d HMA falling (trending down) AND volume > 1.5x 20-period MA
-# Exit when: price crosses opposite Donchian band OR volume < 1.2x 20-period MA (loss of conviction)
-# Uses Donchian for structure, 1d HMA for higher-timeframe trend filter, volume for conviction
-# Timeframe: 4h, HTF: 1d for HMA. Target: 100-200 total trades over 4 years (25-50/year) to balance edge and fees.
+# Hypothesis: 6h Bollinger Band Squeeze + 12h Volume Spike + 1d Camarilla Pivot Breakout
+# Long when: 6h BB width < 20th percentile (squeeze) AND 12h volume > 2.0x 20-period MA AND price breaks above 1d Camarilla R3
+# Short when: 6h BB width < 20th percentile (squeeze) AND 12h volume > 2.0x 20-period MA AND price breaks below 1d Camarilla S3
+# Exit when: price returns to 6h BB middle (20-period SMA) OR BB width expands above 50th percentile
+# Uses volatility contraction (squeeze) for low-risk entries, volume for conviction, Camarilla for institutional levels
+# Timeframe: 6h, HTF: 12h for volume, 1d for pivots. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_Donchian_1dHMA_VolumeConfirm"
-timeframe = "4h"
+name = "6h_BBSqueeze_12hVol_1dCamarilla"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,110 +24,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) on 4h
-    lookback = 20
-    if len(high) >= lookback:
-        # Upper band: highest high over lookback period
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
-        for i in range(lookback-1, n):
-            upper[i] = np.max(high[i-lookback+1:i+1])
-            lower[i] = np.min(low[i-lookback+1:i+1])
+    # 6h Bollinger Bands (20, 2)
+    if len(close) >= 20:
+        bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        bb_upper = bb_ma + 2 * bb_std
+        bb_lower = bb_ma - 2 * bb_std
+        bb_width = bb_upper - bb_lower
     else:
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
+        bb_ma = np.full(n, np.nan)
+        bb_std = np.full(n, np.nan)
+        bb_upper = np.full(n, np.nan)
+        bb_lower = np.full(n, np.nan)
+        bb_width = np.full(n, np.nan)
     
-    # Volume confirmation on 4h
-    vol_lookback = 20
-    if len(volume) >= vol_lookback:
-        vol_ma = pd.Series(volume).rolling(window=vol_lookback, min_periods=vol_lookback).mean().values
-        volume_filter = volume > (1.5 * vol_ma)
-        volume_exit = volume > (1.2 * vol_ma)  # less strict for exit
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
-        volume_exit = np.zeros(n, dtype=bool)
+    # BB width percentile (20th for squeeze entry, 50th for exit)
+    bb_width_pct = np.full(n, np.nan)
+    for i in range(20, n):
+        window = bb_width[max(0, i-50):i+1]  # 50-bar lookback for percentile
+        if len(window) > 0 and not np.all(np.isnan(window)):
+            valid_widths = window[~np.isnan(window)]
+            if len(valid_widths) >= 10:
+                bb_width_pct[i] = (np.sum(valid_widths <= bb_width[i]) / len(valid_widths)) * 100
     
-    # Get 1d data ONCE before loop for HMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for HMA
+    # Volume confirmation on 12h
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate HMA(21) on 1d: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    close_1d = df_1d['close'].values
-    length = 21
-    if len(close_1d) >= length:
-        def wma(data, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(data, weights, 'valid') / weights.sum()
-        
-        half_length = length // 2
-        sqrt_length = int(np.sqrt(length))
-        
-        wma_half = wma(close_1d, half_length)
-        wma_full = wma(close_1d, length)
-        wma_2xhalf_minus_full = 2 * wma_half - wma_full
-        
-        # Pad arrays to align with original
-        wma_2xhalf_minus_full_padded = np.full(len(close_1d), np.nan)
-        wma_2xhalf_minus_full_padded[half_length-1:len(wma_2xhalf_minus_full)+half_length-1] = wma_2xhalf_minus_full
-        
-        hma = wma(wma_2xhalf_minus_full_padded, sqrt_length)
-        hma_padded = np.full(len(close_1d), np.nan)
-        start_idx = sqrt_length - 1
-        end_idx = start_idx + len(hma)
-        hma_padded[start_idx:end_idx] = hma
-        
-        # HMA rising/falling: compare current to previous
-        hma_rising = np.zeros(len(close_1d), dtype=bool)
-        hma_falling = np.zeros(len(close_1d), dtype=bool)
-        for i in range(1, len(hma_padded)):
-            if not np.isnan(hma_padded[i]) and not np.isnan(hma_padded[i-1]):
-                hma_rising[i] = hma_padded[i] > hma_padded[i-1]
-                hma_falling[i] = hma_padded[i] < hma_padded[i-1]
+    vol_12h = df_12h['volume'].values
+    if len(vol_12h) >= 20:
+        vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+        vol_spike_12h = vol_12h > (2.0 * vol_ma_20_12h)
     else:
-        hma_rising = np.zeros(len(df_1d), dtype=bool)
-        hma_falling = np.zeros(len(df_1d), dtype=bool)
+        vol_spike_12h = np.zeros(len(df_12h), dtype=bool)
     
-    # Align 1d HMA signals to 4h timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising.astype(float))
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling.astype(float))
+    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h.astype(float))
+    
+    # Camarilla pivot levels on 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
+        if i >= 1:  # need previous day
+            pd_high = high_1d[i-1]
+            pd_low = low_1d[i-1]
+            pd_close = close_1d[i-1]
+            diff = pd_high - pd_low
+            camarilla_r3[i] = pd_close + (1.1 * diff / 2)  # R3 = C + 1.1*(H-L)/2
+            camarilla_s3[i] = pd_close - (1.1 * diff / 2)  # S3 = C - 1.1*(H-L)/2
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or
-            np.isnan(volume_filter[i]) or np.isnan(volume_exit[i])):
+        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_ma[i]) or np.isnan(vol_spike_12h_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: break above upper + HMA rising + volume filter
-            if (close[i] > upper[i] and 
-                hma_rising_aligned[i] == 1.0 and 
-                volume_filter[i]):
+            # Long: BB squeeze (width < 20th percentile) AND volume spike AND price breaks above R3
+            if (bb_width_pct[i] < 20.0 and 
+                vol_spike_12h_aligned[i] == 1.0 and 
+                close[i] > camarilla_r3_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below lower + HMA falling + volume filter
-            elif (close[i] < lower[i] and 
-                  hma_falling_aligned[i] == 1.0 and 
-                  volume_filter[i]):
+            # Short: BB squeeze (width < 20th percentile) AND volume spike AND price breaks below S3
+            elif (bb_width_pct[i] < 20.0 and 
+                  vol_spike_12h_aligned[i] == 1.0 and 
+                  close[i] < camarilla_s3_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below lower OR volume exit (loss of conviction)
-            if (close[i] < lower[i] or not volume_exit[i]):
+            # Exit long: price returns to BB middle OR BB width expands (>50th percentile)
+            if (close[i] <= bb_ma[i] or bb_width_pct[i] > 50.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above upper OR volume exit (loss of conviction)
-            if (close[i] > upper[i] or not volume_exit[i]):
+            # Exit short: price returns to BB middle OR BB width expands (>50th percentile)
+            if (close[i] >= bb_ma[i] or bb_width_pct[i] > 50.0):
                 signals[i] = 0.0
                 position = 0
             else:
