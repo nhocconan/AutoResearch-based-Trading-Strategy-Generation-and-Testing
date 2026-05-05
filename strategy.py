@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-# Long when price breaks above R3 (1d) AND price > 1d EMA34 (uptrend) AND volume spike (>2.0x 20-bar MA)
-# Short when price breaks below S3 (1d) AND price < 1d EMA34 (downtrend) AND volume spike
-# R3/S3 are strong Camarilla levels (PP ± range*1.118) for high-probability breaks
-# EMA34 provides smooth trend filter with moderate lag
-# Volume spike requires 2.0x 20-bar MA for confirmation (balanced frequency)
-# Target: 75-150 total trades over 4 years (19-38/year) to minimize fee drag
+# Hypothesis: 12h Camarilla R4/S4 Breakout with 1d HMA50 Trend Filter and Volume Spike
+# Long when price breaks above R4 (1d) AND price > 1d HMA50 (strong uptrend) AND volume spike
+# Short when price breaks below S4 (1d) AND price < 1d HMA50 (strong downtrend) AND volume spike
+# R4/S4 are the strongest Camarilla levels (PP ± range/2) for very high-quality breaks
+# HMA50 provides smooth trend filter with less lag than EMA/SMA
+# Volume spike requires 2.5x 20-bar MA for confirmation (stricter than before)
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 # Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation)
-# Timeframe: 6h (primary timeframe as required)
+# Timeframe: 12h (primary timeframe as required)
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R4S4_Breakout_1dHMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +27,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla and EMA34
+    # Get 1d data ONCE before loop for Camarilla and HMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d HMA50
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    half_len = 50 // 2
+    sqrt_len = int(np.sqrt(50))
+    wma_half = pd.Series(close_1d).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
+    wma_full = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    wma_sqrt = pd.Series(2 * wma_half - wma_full).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
+    hma_50_1d = wma_sqrt
+    hma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_50_1d)
     
     # Calculate Camarilla levels from previous 1d bar (HLC of completed daily bar)
     high_1d = df_1d['high'].values
@@ -48,18 +53,18 @@ def generate_signals(prices):
     pp = (high_1d_shifted + low_1d_shifted + close_1d_shifted) / 3.0
     # Calculate range
     range_1d = high_1d_shifted - low_1d_shifted
-    # Camarilla levels (R3/S3 = PP ± range*1.118)
-    r3 = pp + (range_1d * 1.118)  # R3 = PP + range*1.118
-    s3 = pp - (range_1d * 1.118)  # S3 = PP - range*1.118
+    # Camarilla levels (R4/S4 = strongest levels at PP ± range/2)
+    r4 = pp + (range_1d / 2.0)  # R4 = PP + range/2
+    s4 = pp - (range_1d / 2.0)  # S4 = PP - range/2
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation on 6h (threshold: 2.0x)
+    # Volume confirmation on 12h (stricter threshold: 2.5x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)  # Volume spike threshold
+        volume_spike = volume > (2.5 * vol_ma_20)  # Volume spike threshold
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
@@ -68,36 +73,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN (due to roll or insufficient data)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(hma_50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Long: price breaks above R4 AND strong uptrend (price > HMA50) AND volume spike
+            if (close[i] > r4_aligned[i] and 
+                close[i] > hma_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Short: price breaks below S4 AND strong downtrend (price < HMA50) AND volume spike
+            elif (close[i] < s4_aligned[i] and 
+                  close[i] < hma_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below R3 OR closes below EMA34
-            if close[i] < r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below R4 OR closes below HMA50
+            if close[i] < r4_aligned[i] or close[i] < hma_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above S3 OR closes above EMA34
-            if close[i] > s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above S4 OR closes above HMA50
+            if close[i] > s4_aligned[i] or close[i] > hma_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
