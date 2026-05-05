@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d Regime Filter
-# Long when: Bull Power > 0 (close > EMA13) AND 1d ADX < 20 (range) AND price reverts to EMA20 from below
-# Short when: Bear Power < 0 (close < EMA13) AND 1d ADX < 20 (range) AND price reverts to EMA20 from above
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year on 6h.
-# Works in ranging markets (which dominate 2025+ test period) by fading extensions to the mean.
-# Avoids trending markets via 1d ADX regime filter to prevent whipsaw.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume > 2.0x 20 EMA
+# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume > 2.0x 20 EMA
+# Uses discrete sizing (0.25) to limit fee drag. Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
+# Uses 1d for HTF trend to avoid counter-trend trades and 12h for entry timing.
 
-name = "6h_ElderRay_Power_1dADX_Range_MeanRevert"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,108 +26,81 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ADX for regime filter (range when ADX < 20)
+    # Get daily OHLC arrays
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first bar
+    # Calculate Camarilla levels for each day
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Align daily Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
-        return result
+    # Get 1d data for trend filter
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    period = 14
-    tr14 = WilderSmooth(tr, period)
-    dm_plus_14 = WilderSmooth(dm_plus, period)
-    dm_minus_14 = WilderSmooth(dm_minus, period)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr14
-    di_minus = 100 * dm_minus_14 / tr14
+    # Align 1d trend to 12h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = WilderSmooth(dx, period)
-    
-    # Range regime: ADX < 20
-    range_regime = adx < 20
-    range_regime_aligned = align_htf_to_ltf(prices, df_1d, range_regime.astype(float))
-    
-    # 6h Elder Ray components
-    # Bull Power = Close - EMA13
-    # Bear Power = EMA13 - Close
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = close - ema_13  # > 0 when bullish
-    bear_power = ema_13 - close  # > 0 when bearish
-    
-    # 6h EMA20 for mean reversion target
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Mean reversion conditions:
-    # Long: Bull Power > 0 AND price < EMA20 (extended below mean)
-    # Short: Bear Power > 0 AND price > EMA20 (extended above mean)
-    long_condition = (bull_power > 0) & (close < ema_20)
-    short_condition = (bear_power > 0) & (close > ema_20)
+    # Volume spike filter (20-period volume EMA)
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ema_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(range_regime_aligned[i]) or 
-            np.isnan(long_condition[i]) or 
-            np.isnan(short_condition[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long in range market when bullish but below mean
-            if range_regime_aligned[i] > 0.5 and long_condition[i]:
+            # Long conditions: price breaks above R3 AND 1d uptrend AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                uptrend_1d_aligned[i] > 0.5 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short in range market when bearish but above mean
-            elif range_regime_aligned[i] > 0.5 and short_condition[i]:
+            # Short conditions: price breaks below S3 AND 1d downtrend AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  downtrend_1d_aligned[i] > 0.5 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price reverts to mean OR market trends
-            if (close[i] >= ema_20[i] or 
-                range_regime_aligned[i] <= 0.5):
+            # Exit long: price breaks below S3 OR 1d trend changes to downtrend
+            if (close[i] < s3_aligned[i] or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price reverts to mean OR market trends
-            if (close[i] <= ema_20[i] or 
-                range_regime_aligned[i] <= 0.5):
+            # Exit short: price breaks above R3 OR 1d trend changes to uptrend
+            if (close[i] > r3_aligned[i] or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
