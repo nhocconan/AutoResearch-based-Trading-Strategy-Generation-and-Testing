@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and session filter
-# Long when RSI < 30 AND 4h close > 4h EMA50 AND hour in [08,20] UTC
-# Short when RSI > 70 AND 4h close < 4h EMA50 AND hour in [08,20] UTC
-# Exit when RSI crosses 50 (mean reversion completion)
-# Uses 1h primary timeframe with 4h HTF for trend filter to reduce whipsaw
-# Session filter (08-20 UTC) reduces noise and fee drag
-# Discrete sizing (0.20) to limit fee churn
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Works in bull markets via 4h trend filter and in bear markets via RSI mean reversion
+# Hypothesis: 6h Williams %R Extreme + 1d EMA34 Trend Filter + Volume Spike
+# Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 AND volume > 2.0x 20-period average
+# Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 AND volume > 2.0x 20-period average
+# Exit when Williams %R crosses above -50 (for long) or below -50 (for short)
+# Uses 6h primary timeframe with 1d HTF for trend filter and Williams %R for mean reversion
+# Discrete sizing (0.25) to limit fee drag and manage drawdown
+# Target: 50-150 total trades over 4 years (12-37/year) based on proven Williams %R performance
+# Works in both bull and bear markets by following the 1d trend while using 6h for entry timing
 
-name = "1h_RSI14_MeanReversion_4hEMA50_Trend_Session"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,76 +21,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_time = prices['open_time']
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute session hours ONCE before loop
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data ONCE before loop for trend filter and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 4h close for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA34 on 1d close for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate RSI(14) on 1h data
-    if len(close) >= 14:
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
+    # Calculate Williams %R on 1d data (14-period)
+    if len(df_1d) >= 14:
+        highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+        williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     else:
-        rsi = np.full(n, 50.0)
+        williams_r_aligned = np.full(n, np.nan)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (2.0 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 08-20
-        
         if position == 0:
-            # Long conditions: RSI oversold AND 4h close > 4h EMA50 AND in session
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                in_session):
-                signals[i] = 0.20
+            # Long conditions: Williams %R < -80 (oversold) AND 1d close > 1d EMA34 AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: RSI overbought AND 4h close < 4h EMA50 AND in session
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  in_session):
-                signals[i] = -0.20
+            # Short conditions: Williams %R > -20 (overbought) AND 1d close < 1d EMA34 AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses above 50 (mean reversion completion)
-            if rsi[i] > 50:
+            # Exit long: Williams %R crosses above -50 (mean reversion)
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI crosses below 50 (mean reversion completion)
-            if rsi[i] < 50:
+            # Exit short: Williams %R crosses below -50 (mean reversion)
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
