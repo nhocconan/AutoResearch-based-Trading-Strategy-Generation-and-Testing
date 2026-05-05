@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
+# Hypothesis: 4h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
 # Long when price breaks above R3 (1d) AND price > 1d EMA34 (strong uptrend) AND volume spike
 # Short when price breaks below S3 (1d) AND price < 1d EMA34 (strong downtrend) AND volume spike
 # R3/S3 are strong Camarilla levels (PP ± range*1.1/2) for high-quality breaks with good risk/reward
 # 1d EMA34 provides smoother trend filter than shorter EMAs, reducing whipsaw in ranging markets
 # Volume spike requires 2.0x 20-bar MA for confirmation (balanced to avoid overtrading)
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing trends
+# Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag while capturing trends
 # Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation)
-# Timeframe: 12h (primary timeframe as required)
+# Timeframe: 4h (primary timeframe as required)
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,11 +55,11 @@ def generate_signals(prices):
     r3 = pp + (range_1d * 1.1 / 2.0)  # R3 = PP + range*1.1/2
     s3 = pp - (range_1d * 1.1 / 2.0)  # S3 = PP - range*1.1/2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation on 12h (threshold: 2.0x)
+    # Volume confirmation on 4h (threshold: 2.0x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)  # Volume spike threshold
