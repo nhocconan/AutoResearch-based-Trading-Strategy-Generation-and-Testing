@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation
-# Long when: RSI(14) < 30 (oversold) AND price > 4h EMA50 (uptrend) AND volume > 1.5x 20-period average AND session filter (08-20 UTC)
-# Short when: RSI(14) > 70 (overbought) AND price < 4h EMA50 (downtrend) AND volume > 1.5x 20-period average AND session filter (08-20 UTC)
-# Exit when: RSI crosses back to neutral (40 for long exit, 60 for short exit) OR price crosses 4h EMA50
-# Uses 1h primary timeframe with 4h HTF for trend filter to capture mean reversion in trending markets
-# Discrete sizing (0.20) to limit fee drag and manage drawdown
-# Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag
-# RSI mean reversion works in both bull and bear markets when combined with trend filter and volume confirmation
+# Hypothesis: 6h Williams %R Extreme + 1w EMA50 Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions: Long when %R < -80 (oversold) AND close > 1w EMA50 (uptrend) AND volume spike
+# Short when %R > -20 (overbought) AND close < 1w EMA50 (downtrend) AND volume spike
+# Exit when %R crosses above -50 (for long) or below -50 (for short) OR trend filter fails
+# Uses 6h primary timeframe with 1w HTF for trend filter to capture sustained moves with controlled frequency
+# Discrete sizing (0.25) to limit fee drag and manage drawdown in both bull and bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Williams %R is effective in ranging markets; weekly EMA50 filters for higher-timeframe trend; volume confirms participation
 
-name = "1h_RSI_MeanReversion_4hEMA50_Trend_Volume_Session"
-timeframe = "1h"
+name = "6h_WilliamsR_EXTREME_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,28 +21,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 4h close for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA50 on 1w close for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate RSI(14) on 1h data
-    delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Williams %R on 6h data (14-period)
+    if len(high) >= 14:
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero (when high == low)
+        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    else:
+        williams_r = np.full(n, -50)
     
     # Volume confirmation: volume > 1.5x 20-period average
     if len(volume) >= 20:
@@ -51,52 +52,44 @@ def generate_signals(prices):
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Session filter: 08-20 UTC (pre-compute hours once)
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(session_filter[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: RSI < 30 (oversold) AND price > 4h EMA50 (uptrend) 
-            #              AND volume spike AND session filter
-            if (rsi_values[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume_filter[i] and 
-                session_filter[i]):
-                signals[i] = 0.20
+            # Long conditions: Williams %R < -80 (oversold) AND close > 1w EMA50 AND volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: RSI > 70 (overbought) AND price < 4h EMA50 (downtrend)
-            #               AND volume spike AND session filter
-            elif (rsi_values[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume_filter[i] and 
-                  session_filter[i]):
-                signals[i] = -0.20
+            # Short conditions: Williams %R > -20 (overbought) AND close < 1w EMA50 AND volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses above 40 (mean reversion complete) OR price < 4h EMA50 (trend flip)
-            if rsi_values[i] > 40 or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: Williams %R > -50 (leaving oversold) OR close < 1w EMA50 (trend flip)
+            if williams_r[i] > -50 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI crosses below 60 (mean reversion complete) OR price > 4h EMA50 (trend flip)
-            if rsi_values[i] < 60 or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: Williams %R < -50 (leaving overbought) OR close > 1w EMA50 (trend flip)
+            if williams_r[i] < -50 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
