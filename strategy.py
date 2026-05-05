@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-# Long when: price breaks above Donchian(20) upper band AND 1w HMA(21) rising AND volume > 1.5x 20-period MA
-# Short when: price breaks below Donchian(20) lower band AND 1w HMA(21) falling AND volume > 1.5x 20-period MA
-# Exit when: price crosses Donchian(20) midpoint OR volume drops below average
-# Uses Donchian for structure, HMA for smooth trend filter, volume for conviction
-# Timeframe: 1d, HTF: 1w for HMA. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation
+# Long when: price breaks above R3 (Camarilla resistance) AND 1d EMA34 uptrend (price > EMA34) AND volume > 2x 20-period MA
+# Short when: price breaks below S3 (Camarilla support) AND 1d EMA34 downtrend (price < EMA34) AND volume > 2x 20-period MA
+# Exit when: price reverts to Camarilla pivot point (PP) OR volume drops below average
+# Uses Camarilla for intraday structure, 1d EMA for regime filter, volume for conviction
+# Timeframe: 6h, HTF: 1d for EMA34. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "1d_Donchian20_1wHMA_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,103 +24,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) on 1d
-    if len(high) >= 20:
-        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (donchian_upper + donchian_lower) / 2
-    else:
-        donchian_upper = np.full(n, np.nan)
-        donchian_lower = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
-    
-    # Donchian breakout signals
-    breakout_up = close > donchian_upper
-    breakout_down = close < donchian_lower
-    
-    # Volume confirmation on 1d
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
-    
-    # Get 1w data ONCE before loop for HMA calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # need sufficient data for HMA
+    # Calculate Camarilla levels using previous day's OHLC (1d timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate HMA(21) on 1w
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 21:
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        def wma(data, window):
-            if len(data) < window:
-                return np.full_like(data, np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(data, weights, mode='valid') / weights.sum()
-        
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
-        hma_raw = 2 * wma_half - wma_full
-        hma = wma(hma_raw, sqrt_len)
-        
-        # Pad to original length
-        hma_padded = np.full(len(close_1w), np.nan)
-        hma_padded[half_len:] = hma[:len(close_1w)-half_len]
-        hma_1w = hma_padded
-        
-        # HMA slope: rising if current > previous, falling if current < previous
-        hma_slope = np.diff(hma_1w, prepend=np.nan)
-        hma_rising = hma_slope > 0
-        hma_falling = hma_slope < 0
-    else:
-        hma_rising = np.full(len(df_1w), np.nan)
-        hma_falling = np.full(len(df_1w), np.nan)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align 1w HMA to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising.astype(float))
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling.astype(float))
+    # Camarilla pivot point
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Camarilla R3 and S3 levels
+    r3 = pp + (prev_high - prev_low) * 1.1 / 4
+    s3 = pp - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align 1d Camarilla levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1d EMA34 for trend filter
+    if len(df_1d) >= 34:
+        ema_34 = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    else:
+        ema_34 = np.full(len(df_1d), np.nan)
+    
+    # Align 1d EMA34 to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation on 6h
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (2.0 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(hma_rising_aligned[i]) or 
-            np.isnan(hma_falling_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: breakout up + HMA rising + volume filter
-            if (breakout_up[i] and 
-                hma_rising_aligned[i] == 1.0 and 
+            # Long conditions: price breaks above R3 AND 1d EMA34 uptrend AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: breakout down + HMA falling + volume filter
-            elif (breakout_down[i] and 
-                  hma_falling_aligned[i] == 1.0 and 
+            # Short conditions: price breaks below S3 AND 1d EMA34 downtrend AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakout down OR HMA falling OR volume drops
-            if (breakout_down[i] or hma_falling_aligned[i] == 1.0 or not volume_filter[i]):
+            # Exit long: price reverts to pivot point OR volume drops below average
+            if (close[i] <= pp_aligned[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout up OR HMA rising OR volume drops
-            if (breakout_up[i] or hma_rising_aligned[i] == 1.0 or not volume_filter[i]):
+            # Exit short: price reverts to pivot point OR volume drops below average
+            if (close[i] >= pp_aligned[i] or not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
