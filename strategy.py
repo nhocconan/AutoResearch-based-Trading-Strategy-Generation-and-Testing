@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (2.0x)
-# Long when price breaks above Donchian upper AND price > 1d EMA50 AND volume > 2.0x 20-period average
-# Short when price breaks below Donchian lower AND price < 1d EMA50 AND volume > 2.0x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (1.5x)
+# Long when price breaks above Donchian upper band AND price > 1d EMA50 AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower band AND price < 1d EMA50 AND volume > 1.5x 20-period average
 # Exit when price reverts to Donchian midpoint OR 1d EMA50 filter reverses
-# Uses Donchian channels for structure + volume confirmation to reduce false signals
+# Donchian provides clear price channels that work in both trending and ranging markets
 # 1d EMA50 provides higher timeframe trend filter effective in both bull and bear markets
+# Volume confirmation reduces false breakouts
 # Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 # Timeframe: 4h (primary), HTF: 1d
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_2.0x"
+name = "4h_Donchian20_1dEMA50_VolumeSpike_1.5x"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,7 +33,7 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) on 4h
+    # Calculate Donchian(20) on 4h data
     if len(high) >= 20:
         donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
         donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -48,10 +49,10 @@ def generate_signals(prices):
     # Align HTF indicators to 4h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation on 4h (threshold: 2.0x for optimal frequency)
+    # Volume confirmation on 4h (threshold: 1.5x for optimal frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)
+        volume_spike = volume > (1.5 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
