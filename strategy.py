@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA50 trend filter
-# Long when: price breaks above R3, volume > 2.0x 48-period average (1d equivalent), and close > 1w EMA50
-# Short when: price breaks below S3, volume > 2.0x 48-period average, and close < 1w EMA50
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA34 trend filter
+# Long when: price breaks above R3, volume > 2.0x 48-period average (1d equivalent), and close > 1w EMA34
+# Short when: price breaks below S3, volume > 2.0x 48-period average, and close < 1w EMA34
 # Exit when price returns to Camarilla R3/S3 level (mean reversion)
-# Uses Camarilla R3/S3 levels (more frequent than R4/S4 but still selective), volume spike on 4h for conviction, 1w EMA for major trend filter
-# Timeframe: 4h. Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Uses Camarilla R3/S3 levels for balanced breakout frequency; volume spike on 1d for conviction; 1w EMA for major trend filter
+# Timeframe: 4h, HTF: 1d/1w. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA50_1dVolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1wEMA34_1dVolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,14 +34,14 @@ def generate_signals(prices):
     
     # Get 1w data ONCE before loop for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA50 trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Get 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -71,13 +71,14 @@ def generate_signals(prices):
     # Align Camarilla levels and 1w EMA to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)  # already computed above
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(volume_filter[i])):
@@ -87,18 +88,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3, volume filter, and above 1w EMA50
+            # Long conditions: price breaks above R3, volume filter, and above 1w EMA34
             if (close[i] > camarilla_r3_aligned[i] and 
                 open_price[i] <= camarilla_r3_aligned[i] and  # Ensure breakout happens on this bar
                 volume_filter[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+                close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3, volume filter, and below 1w EMA50
+            # Short conditions: price breaks below S3, volume filter, and below 1w EMA34
             elif (close[i] < camarilla_s3_aligned[i] and 
                   open_price[i] >= camarilla_s3_aligned[i] and  # Ensure breakdown happens on this bar
                   volume_filter[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+                  close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
