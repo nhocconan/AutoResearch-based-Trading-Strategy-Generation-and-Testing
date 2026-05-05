@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze + 12h Volume Spike + 1d Camarilla Pivot Breakout
-# Long when: 6h BB width < 20th percentile (squeeze) AND 12h volume > 2.0x 20-period MA AND price breaks above 1d Camarilla R3
-# Short when: 6h BB width < 20th percentile (squeeze) AND 12h volume > 2.0x 20-period MA AND price breaks below 1d Camarilla S3
-# Exit when: price returns to 6h BB middle (20-period SMA) OR BB width expands above 50th percentile
-# Uses volatility contraction (squeeze) for low-risk entries, volume for conviction, Camarilla for institutional levels
-# Timeframe: 6h, HTF: 12h for volume, 1d for pivots. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) + 1d EMA50 trend filter + volume confirmation
+# Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3)
+# Long when: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume > 1.5x 20-period MA
+# Short when: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume > 1.5x 20-period MA
+# Exit when: Alligator alignment reverses OR volume < 1.2x 20-period MA (loss of conviction)
+# Uses Alligator for trend alignment, 1d EMA for higher-timeframe trend filter, volume for conviction
+# Timeframe: 4h, HTF: 1d for EMA50. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "6h_BBSqueeze_12hVol_1dCamarilla"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dEMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,102 +25,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Bollinger Bands (20, 2)
-    if len(close) >= 20:
-        bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-        bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-        bb_upper = bb_ma + 2 * bb_std
-        bb_lower = bb_ma - 2 * bb_std
-        bb_width = bb_upper - bb_lower
+    # Calculate Williams Alligator on 4h
+    # Jaw: SMA(13,8) - 13-period SMA, 8-period shift
+    if len(close) >= 13:
+        jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+        jaw = np.concatenate([np.full(8, np.nan), jaw_raw[:-8]])  # shift 8 periods
     else:
-        bb_ma = np.full(n, np.nan)
-        bb_std = np.full(n, np.nan)
-        bb_upper = np.full(n, np.nan)
-        bb_lower = np.full(n, np.nan)
-        bb_width = np.full(n, np.nan)
+        jaw = np.full(n, np.nan)
     
-    # BB width percentile (20th for squeeze entry, 50th for exit)
-    bb_width_pct = np.full(n, np.nan)
-    for i in range(20, n):
-        window = bb_width[max(0, i-50):i+1]  # 50-bar lookback for percentile
-        if len(window) > 0 and not np.all(np.isnan(window)):
-            valid_widths = window[~np.isnan(window)]
-            if len(valid_widths) >= 10:
-                bb_width_pct[i] = (np.sum(valid_widths <= bb_width[i]) / len(valid_widths)) * 100
-    
-    # Volume confirmation on 12h
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    vol_12h = df_12h['volume'].values
-    if len(vol_12h) >= 20:
-        vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-        vol_spike_12h = vol_12h > (2.0 * vol_ma_20_12h)
+    # Teeth: SMA(8,5) - 8-period SMA, 5-period shift
+    if len(close) >= 8:
+        teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+        teeth = np.concatenate([np.full(5, np.nan), teeth_raw[:-5]])  # shift 5 periods
     else:
-        vol_spike_12h = np.zeros(len(df_12h), dtype=bool)
+        teeth = np.full(n, np.nan)
     
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h.astype(float))
+    # Lips: SMA(5,3) - 5-period SMA, 3-period shift
+    if len(close) >= 5:
+        lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+        lips = np.concatenate([np.full(3, np.nan), lips_raw[:-3]])  # shift 3 periods
+    else:
+        lips = np.full(n, np.nan)
     
-    # Camarilla pivot levels on 1d
+    # Alligator alignment signals
+    bullish_alignment = (lips > teeth) & (teeth > jaw)  # Lips > Teeth > Jaw
+    bearish_alignment = (lips < teeth) & (teeth < jaw)  # Lips < Teeth < Jaw
+    
+    # Volume confirmation on 4h
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_exit = volume > (1.2 * vol_ma_20)  # softer exit condition
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
+        volume_exit = np.zeros(n, dtype=bool)
+    
+    # Get 1d data ONCE before loop for EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:  # need sufficient data for EMA50
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1d
     close_1d = df_1d['close'].values
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    else:
+        ema_50_1d = np.full(len(df_1d), np.nan)
     
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    
-    for i in range(len(df_1d)):
-        if i >= 1:  # need previous day
-            pd_high = high_1d[i-1]
-            pd_low = low_1d[i-1]
-            pd_close = close_1d[i-1]
-            diff = pd_high - pd_low
-            camarilla_r3[i] = pd_close + (1.1 * diff / 2)  # R3 = C + 1.1*(H-L)/2
-            camarilla_s3[i] = pd_close - (1.1 * diff / 2)  # S3 = C - 1.1*(H-L)/2
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_ma[i]) or np.isnan(vol_spike_12h_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(bullish_alignment[i]) or np.isnan(bearish_alignment[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(volume_exit[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: BB squeeze (width < 20th percentile) AND volume spike AND price breaks above R3
-            if (bb_width_pct[i] < 20.0 and 
-                vol_spike_12h_aligned[i] == 1.0 and 
-                close[i] > camarilla_r3_aligned[i]):
+            # Long conditions: bullish alignment + price > 1d EMA50 + volume filter
+            if (bullish_alignment[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze (width < 20th percentile) AND volume spike AND price breaks below S3
-            elif (bb_width_pct[i] < 20.0 and 
-                  vol_spike_12h_aligned[i] == 1.0 and 
-                  close[i] < camarilla_s3_aligned[i]):
+            # Short conditions: bearish alignment + price < 1d EMA50 + volume filter
+            elif (bearish_alignment[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to BB middle OR BB width expands (>50th percentile)
-            if (close[i] <= bb_ma[i] or bb_width_pct[i] > 50.0):
+            # Exit long: alignment reverses OR volume weakens
+            if (not bullish_alignment[i] or not volume_exit[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to BB middle OR BB width expands (>50th percentile)
-            if (close[i] >= bb_ma[i] or bb_width_pct[i] > 50.0):
+            # Exit short: alignment reverses OR volume weakens
+            if (not bearish_alignment[i] or not volume_exit[i]):
                 signals[i] = 0.0
                 position = 0
             else:
