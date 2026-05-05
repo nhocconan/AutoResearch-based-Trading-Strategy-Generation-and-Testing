@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
-# Long when price breaks above R3 (1d) AND close > 1d EMA34 (uptrend) AND volume spike
-# Short when price breaks below S3 (1d) AND close < 1d EMA34 (downtrend) AND volume spike
-# R3/S3 are stronger Camarilla levels (PP ± 1.1*range/4) for fewer, higher-quality breaks
-# EMA34 provides smoother trend filter than EMA21 to reduce whipsaw
-# Volume spike requires 2.0x 20-bar MA for confirmation
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation)
-# Timeframe: 12h (primary timeframe as required)
+# Hypothesis: 6h Elder Ray + ADX Regime + Volume Spike
+# Elder Ray measures bull/bear power (close - EMA13 for bull, EMA13 - close for bear)
+# ADX > 25 indicates trending market, < 20 indicates ranging
+# In trending markets (ADX > 25): go long when bull power > 0 and rising, short when bear power > 0 and rising
+# In ranging markets (ADX < 20): fade extremes - short when bull power > 0 and falling, long when bear power > 0 and rising
+# Volume spike (2.0x 20-bar MA) confirms institutional participation
+# Works in bull (trend following) and bear (mean reversion in ranges) markets
+# Timeframe: 6h (primary timeframe as required)
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_ADX_Regime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,36 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla and EMA34
+    # Get 1d data ONCE before loop for EMA13 and ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Calculate Camarilla levels from previous 1d bar (HLC of completed daily bar)
+    # Calculate 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_shifted = np.roll(close_1d, 1)
-    high_1d_shifted = np.roll(high_1d, 1)
-    low_1d_shifted = np.roll(low_1d, 1)
+    close_1d = df_1d['close'].values
     
-    # Calculate pivot point (PP) = (H+L+C)/3
-    pp = (high_1d_shifted + low_1d_shifted + close_1d_shifted) / 3.0
-    # Calculate range
-    range_1d = high_1d_shifted - low_1d_shifted
-    # Camarilla levels (R3/S3 = stronger levels at PP ± 1.1*range/4)
-    r3 = pp + (range_1d * 1.1 / 4.0)  # R3 = PP + 1.1*range/4
-    s3 = pp - (range_1d * 1.1 / 4.0)  # S3 = PP - 1.1*range/4
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    up_move = np.concatenate([[np.nan], high_1d[1:] - high_1d[:-1]])
+    down_move = np.concatenate([[np.nan], low_1d[:-1] - low_1d[1:]])
     
-    # Volume confirmation on 12h with standard threshold
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Elder Ray components
+    bull_power = close - ema_13_1d_aligned  # close - EMA13
+    bear_power = ema_13_1d_aligned - close  # EMA13 - close
+    
+    # Volume confirmation on 6h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)
@@ -66,38 +78,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any value is NaN (due to roll or insufficient data)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(30, n):
+        # Skip if any value is NaN
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S3 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # Regime-based entry
+            if adx_aligned[i] > 25:  # Trending market
+                # Long: bull power positive and rising (momentum building)
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: bear power positive and rising (momentum building)
+                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_aligned[i] < 20:  # Ranging market
+                # Long: bear power positive but fading (selling exhaustion)
+                if bear_power[i] > 0 and bear_power[i] < bear_power[i-1] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: bull power positive but fading (buying exhaustion)
+                elif bull_power[i] > 0 and bull_power[i] < bull_power[i-1] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: price crosses below R3 OR closes below EMA34
-            if close[i] < r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: trend weakening or regime change
+            if adx_aligned[i] < 20 or bull_power[i] < 0 or (bull_power[i] > 0 and bull_power[i] < bull_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above S3 OR closes above EMA34
-            if close[i] > s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: trend weakening or regime change
+            if adx_aligned[i] < 20 or bear_power[i] < 0 or (bear_power[i] > 0 and bear_power[i] < bear_power[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
