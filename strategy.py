@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d volume spike and 1d EMA34 trend filter
-# Long when price breaks above R3 AND volume > 2.0x 20-period average AND 1d EMA34 > EMA34_prev (uptrend)
-# Short when price breaks below S3 AND volume > 2.0x 20-period average AND 1d EMA34 < EMA34_prev (downtrend)
-# Exit when price crosses back to H3/L3 level OR 1d EMA34 flips direction
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-30 trades/year per symbol.
-# Camarilla levels provide intraday support/resistance, volume spike confirms institutional interest,
-# 1d EMA34 filters for primary trend direction to avoid counter-trend whipsaws.
-# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
+# Hypothesis: 12h Williams %R reversal with 1d volume confirmation and 4h trend filter
+# Long when Williams %R(14) crosses above -80 (oversold bounce) AND volume > 1.8x 20-period average AND 4h EMA20 > EMA50 (uptrend)
+# Short when Williams %R(14) crosses below -20 (overbought rejection) AND volume > 1.8x 20-period average AND 4h EMA20 < EMA50 (downtrend)
+# Exit when Williams %R crosses above -20 (for longs) or below -80 (for shorts) OR trend flips
+# Uses discrete sizing (0.25) to limit fee drag. Target: 15-35 trades/year per symbol.
+# Williams %R identifies exhaustion points, volume confirms participation, 4h EMA cross filters for higher timeframe momentum alignment.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_Volume_4hEMA_Cross"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,92 +24,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla levels calculation
+    # Get 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on 1d data (using previous day's OHLC)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use previous day's data to avoid look-ahead
-    prev_high = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
-    prev_low = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
-    prev_close = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
+    # Calculate Williams %R on 1d data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low + 1e-10) * -100
     
-    rang = prev_high - prev_low
-    camarilla_h3 = prev_close + (rang * 1.1 / 4)
-    camarilla_l3 = prev_close - (rang * 1.1 / 4)
-    camarilla_h4 = prev_close + (rang * 1.1 / 2)
-    camarilla_l4 = prev_close - (rang * 1.1 / 2)
+    # Align Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align Camarilla levels to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Get 4h data for EMA cross trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Get 1d data for EMA34 trend filter (same timeframe as Camarilla)
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_prev = np.concatenate([[np.nan], ema_34[:-1]])  # Previous EMA for trend direction
+    # Calculate EMA20 and EMA50 on 4h data
+    close_4h = df_4h['close'].values
+    ema_20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Uptrend when current EMA34 > previous EMA34
-    uptrend_1d = ema_34 > ema_34_prev
-    downtrend_1d = ema_34 < ema_34_prev
+    # Uptrend when EMA20 > EMA50, downtrend when EMA20 < EMA50
+    uptrend_4h = ema_20 > ema_50
+    downtrend_4h = ema_20 < ema_50
     
-    # Align 1d trend to 6h timeframe
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
+    # Align 4h trend to 12h timeframe
+    uptrend_4h_aligned = align_htf_to_ltf(prices, df_4h, uptrend_4h.astype(float))
+    downtrend_4h_aligned = align_htf_to_ltf(prices, df_4h, downtrend_4h.astype(float))
     
-    # Volume confirmation: volume > 2.0x 20-period average (spike filter)
+    # Volume confirmation: volume > 1.8x 20-period average (spike filter)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.8 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any value is NaN
-        if (np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or 
-            np.isnan(uptrend_1d_aligned[i]) or 
-            np.isnan(downtrend_1d_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(uptrend_4h_aligned[i]) or 
+            np.isnan(downtrend_4h_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        williams_r_val = williams_r_aligned[i]
+        
         if position == 0:
-            # Long conditions: price breaks above H3 AND volume spike AND 1d uptrend
-            if (close[i] > h3_aligned[i] and 
+            # Long conditions: Williams %R crosses above -80 (from below) AND volume spike AND 4h uptrend
+            if (williams_r_val > -80 and 
+                williams_r_aligned[i-1] <= -80 and 
                 volume_filter[i] and 
-                uptrend_1d_aligned[i] > 0.5):
+                uptrend_4h_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below L3 AND volume spike AND 1d downtrend
-            elif (close[i] < l3_aligned[i] and 
+            # Short conditions: Williams %R crosses below -20 (from above) AND volume spike AND 4h downtrend
+            elif (williams_r_val < -20 and 
+                  williams_r_aligned[i-1] >= -20 and 
                   volume_filter[i] and 
-                  downtrend_1d_aligned[i] > 0.5):
+                  downtrend_4h_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back to L3 OR 1d trend flips to downtrend
-            if (close[i] < l3_aligned[i] or 
-                downtrend_1d_aligned[i] > 0.5):
+            # Exit long: Williams %R crosses above -20 OR 4h trend flips to downtrend
+            if (williams_r_val > -20 and williams_r_aligned[i-1] <= -20) or \
+               downtrend_4h_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back to H3 OR 1d trend flips to uptrend
-            if (close[i] > h3_aligned[i] or 
-                uptrend_1d_aligned[i] > 0.5):
+            # Exit short: Williams %R crosses below -80 OR 4h trend flips to uptrend
+            if (williams_r_val < -80 and williams_r_aligned[i-1] >= -80) or \
+               uptrend_4h_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
