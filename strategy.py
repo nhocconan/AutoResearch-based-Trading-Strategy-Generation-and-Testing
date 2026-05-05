@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) + 12h ADX trend filter + volume confirmation
-# Long when: Bull Power > 0 AND ADX(12h) > 25 AND volume > 1.5x 20-period MA
-# Short when: Bear Power < 0 AND ADX(12h) > 25 AND volume > 1.5x 20-period MA
-# Exit when: Bull/Bear Power crosses zero OR ADX < 20 (trend weakening)
-# Uses Elder Ray for trend strength measurement, ADX for regime filter, volume for conviction
-# Timeframe: 6h, HTF: 12h. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume spike confirmation
+# Long when: price breaks above Donchian(20) upper band AND price > 1d HMA21 (uptrend) AND volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian(20) lower band AND price < 1d HMA21 (downtrend) AND volume > 1.5x 20-period MA
+# Exit when: price touches Donchian(20) midpoint OR trend reverses
+# Uses Donchian for structure, 1d HMA for higher-timeframe trend, volume spike for conviction
+# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "6h_ElderRay_12hADX_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Donchian20_1dHMA21_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,115 +24,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 6h using 20-period MA
+    # Calculate volume confirmation on 4h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Calculate Elder Ray Index on 6h (13-period EMA)
-    if len(high) >= 13 and len(low) >= 13 and len(close) >= 13:
-        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-        bull_power = high - ema_13
-        bear_power = low - ema_13
+    # Calculate Donchian(20) channels on 4h
+    if len(high) >= 20 and len(low) >= 20:
+        highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_upper = highest_high
+        donchian_lower = lowest_low
+        donchian_mid = (donchian_upper + donchian_lower) / 2
     else:
-        bull_power = np.full(n, np.nan)
-        bear_power = np.full(n, np.nan)
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Get 12h data ONCE before loop for ADX calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough data for ADX calculation
+    # Donchian breakout signals
+    donchian_breakout_up = (close > donchian_upper) & (np.roll(close, 1) <= np.roll(donchian_upper, 1))
+    donchian_breakout_down = (close < donchian_lower) & (np.roll(close, 1) >= np.roll(donchian_lower, 1))
+    donchian_touch_mid = np.abs(close - donchian_mid) < (donchian_upper - donchian_lower) * 0.05  # within 5% of mid
+    
+    # Get 1d data ONCE before loop for HMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX components on 12h timeframe
-    if len(high_12h) >= 14 and len(low_12h) >= 14 and len(close_12h) >= 14:
-        # True Range
-        tr1 = high_12h[1:] - low_12h[1:]
-        tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-        tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # Align with original index
+    # Calculate 21-period HMA on 1d timeframe
+    if len(close_1d) >= 21:
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
         
-        # Directional Movement
-        up_move = high_12h[1:] - high_12h[:-1]
-        down_move = low_12h[:-1] - low_12h[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights/weights.sum(), mode='valid')
         
-        # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-        def wilder_smooth(data, period):
-            if len(data) < period:
-                return np.full_like(data, np.nan)
-            result = np.full_like(data, np.nan)
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = result[i-1] - (result[i-1]/period) + data[i]
-            return result
+        wma_half = wma(close_1d, half_len)
+        wma_full = wma(close_1d, 21)
+        wma_diff = 2 * wma_half - wma_full
+        hma_21_1d = wma(wma_diff, sqrt_len)
         
-        period = 14
-        atr = wilder_smooth(tr, period)
-        plus_di = 100 * wilder_smooth(plus_dm, period) / atr
-        minus_di = 100 * wilder_smooth(minus_dm, period) / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = wilder_smooth(dx, period)
+        # Pad to original length
+        hma_21_1d_padded = np.full(len(close_1d), np.nan)
+        hma_21_1d_padded[half_len:len(wma_half)+half_len] = wma_half
+        hma_21_1d_padded[len(wma_half)+half_len:len(wma_half)+half_len+len(wma_full)] = wma_full
+        hma_21_1d_padded[len(wma_half)+half_len+len(wma_full):len(wma_half)+half_len+len(wma_full)+len(hma_21_1d)] = hma_21_1d
         
-        # ADX trend filter
-        adx_strong = adx > 25
-        adx_weak = adx < 20
+        # Simpler approach: use EMA approximation for HMA (commonly used)
+        ema_half = pd.Series(close_1d).ewm(span=half_len, adjust=False, min_periods=half_len).mean().values
+        ema_full = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+        hma_approx = pd.Series(2 * ema_half - ema_full).ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
+        
+        # Use the approximation for simplicity and speed
+        hma_21_1d = hma_approx
+        hma_rising = np.diff(hma_21_1d, prepend=np.nan) > 0
+        hma_falling = np.diff(hma_21_1d, prepend=np.nan) < 0
     else:
-        adx_strong = np.full(len(close_12h), False)
-        adx_weak = np.full(len(close_12h), False)
+        hma_rising = np.full(len(close_1d), False)
+        hma_falling = np.full(len(close_1d), False)
     
-    # Align 12h ADX to 6h timeframe
-    adx_strong_aligned = align_htf_to_ltf(prices, df_12h, adx_strong.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_12h, adx_weak.astype(float))
+    # Align 1d HMA trend to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising.astype(float))
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Bull Power > 0 AND ADX strong AND volume filter
-            if (bull_power[i] > 0 and 
-                adx_strong_aligned[i] == 1.0 and 
+            # Long conditions: Donchian breakout up + 1d HMA rising + volume filter
+            if (donchian_breakout_up[i] and 
+                hma_rising_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power < 0 AND ADX strong AND volume filter
-            elif (bear_power[i] < 0 and 
-                  adx_strong_aligned[i] == 1.0 and 
+            # Short conditions: Donchian breakout down + 1d HMA falling + volume filter
+            elif (donchian_breakout_down[i] and 
+                  hma_falling_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR ADX weak (trend weakening)
-            if (bull_power[i] <= 0 or adx_weak_aligned[i] == 1.0):
+            # Exit long: price touches Donchian midpoint OR 1d HMA turns falling
+            if (donchian_touch_mid[i] or hma_falling_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 OR ADX weak (trend weakening)
-            if (bear_power[i] >= 0 or adx_weak_aligned[i] == 1.0):
+            # Exit short: price touches Donchian midpoint OR 1d HMA turns rising
+            if (donchian_touch_mid[i] or hma_rising_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
