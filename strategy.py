@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Volume Spike + 1d EMA50 Trend + Camarilla R4/S4 Breakout
-# Long when: price breaks above R4 AND close > 1d EMA50 AND volume > 2.0x 20-period average
-# Short when: price breaks below S4 AND close < 1d EMA50 AND volume > 2.0x 20-period average
-# Exit: price reverts to Camarilla pivot point (PP) OR EMA50 filter reverses
-# Uses wider Camarilla bands (R4/S4) for fewer, higher-quality breakouts
-# 1d EMA50 provides strong trend filter effective in both bull and bear markets
-# Volume spike (2.0x) reduces false signals and controls trade frequency
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Timeframe: 12h (primary), HTF: 1d
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation (1.8x)
+# Long when price breaks above Donchian upper band AND price > 12h EMA50 AND volume > 1.8x 20-period average
+# Short when price breaks below Donchian lower band AND price < 12h EMA50 AND volume > 1.8x 20-period average
+# Exit when price reverts to Donchian middle band (20-period mean) OR 12h EMA50 filter reverses
+# Uses Donchian channels for clear trend structure + volume confirmation to reduce false signals
+# 12h EMA50 provides higher timeframe trend filter effective in both bull and bear markets
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+# Timeframe: 4h (primary), HTF: 12h
 
-name = "12h_Camarilla_R4S4_Breakout_1dEMA50_VolumeSpike_2.0x"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_1.8x"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,38 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla and EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data ONCE before loop for EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    camarilla_high = np.roll(high_1d, 1)  # previous day high
-    camarilla_low = np.roll(low_1d, 1)    # previous day low
-    camarilla_close = np.roll(close_1d, 1) # previous day close
+    # Calculate 12h EMA(50)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels
-    camarilla_range = camarilla_high - camarilla_low
-    r4 = camarilla_close + 1.5 * camarilla_range
-    s4 = camarilla_close - 1.5 * camarilla_range
-    pp = (camarilla_high + camarilla_low + camarilla_close) / 3.0
+    # Align HTF indicators to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d EMA(50)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels on 4h (20-period)
+    if len(high) >= 20:
+        # Upper band: highest high over last 20 periods
+        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        # Lower band: lowest low over last 20 periods
+        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        # Middle band: mean of upper and lower bands
+        donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    else:
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+        donchian_middle = np.full(n, np.nan)
     
-    # Align HTF indicators to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation on 12h (threshold: 2.0x for optimal frequency)
+    # Volume confirmation on 4h (threshold: 1.8x for optimal frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)
+        volume_spike = volume > (1.8 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
@@ -67,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R4 AND price > EMA50 AND volume spike
-            if (close[i] > r4_aligned[i] and 
+            # Long: price breaks above Donchian upper AND price > EMA50 AND volume spike
+            if (close[i] > donchian_upper[i] and 
                 close[i] > ema_50_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 AND price < EMA50 AND volume spike
-            elif (close[i] < s4_aligned[i] and 
+            # Short: price breaks below Donchian lower AND price < EMA50 AND volume spike
+            elif (close[i] < donchian_lower[i] and 
                   close[i] < ema_50_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price reverts to PP OR price < EMA50 (trend weakening)
-            if close[i] < pp_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Exit long: price reverts to Donchian middle OR price < EMA50 (trend weakening)
+            if close[i] < donchian_middle[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reverts to PP OR price > EMA50 (trend weakening)
-            if close[i] > pp_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Exit short: price reverts to Donchian middle OR price > EMA50 (trend weakening)
+            if close[i] > donchian_middle[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
