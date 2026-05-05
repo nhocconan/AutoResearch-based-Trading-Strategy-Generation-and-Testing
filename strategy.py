@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian channel breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper (20) AND close > 1d EMA50 AND volume > 1.5 * avg_volume(20) on 4h
-# Short when price breaks below 12h Donchian lower (20) AND close < 1d EMA50 AND volume > 1.5 * avg_volume(20) on 4h
-# Exit when price crosses the 12h Donchian midpoint
-# Uses discrete sizing 0.25 to balance return and risk while minimizing fee drag
-# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
-# Donchian channels provide clear breakout levels that work in both bull and bear markets via trend filter
-# 1d EMA50 ensures we only trade in the direction of the higher timeframe trend
-# Volume confirmation (1.5x) validates breakout strength with moderate threshold to avoid overtrading
+# Hypothesis: 1h strategy using 4h Donchian channel breakout with 1d volume spike filter and session timing
+# Long when price breaks above 4h Donchian upper (20) AND 1d volume > 2.0 * 20-day avg volume AND in 08-20 UTC session
+# Short when price breaks below 4h Donchian lower (20) AND 1d volume > 2.0 * 20-day avg volume AND in 08-20 UTC session
+# Exit when price crosses back through the 4h Donchian midpoint (upper+lower)/2
+# Uses discrete sizing 0.20 to minimize fee churn and control drawdown
+# Target: 80-120 total trades over 4 years (20-30/year) for 1h timeframe
+# 4h Donchian provides structural breakout levels, 1d volume spike confirms institutional interest,
+# session filter avoids low-liquidity Asian session noise. Works in bull (breakouts) and bear (breakdowns).
 
-name = "4h_12hDonchian20_1dEMA50_VolumeConfirm"
-timeframe = "4h"
+name = "1h_4hDonchian20_1dVolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,37 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need at least 20 completed 12h bars for Donchian
+    # Get 4h data ONCE before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:  # Need at least 20 completed 4h bars for Donchian
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid_12h = (donchian_high_12h + donchian_low_12h) / 2.0
+    # Calculate 4h Donchian channels (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.max(arr[i-window+1:i+1])
+        return result
     
-    # Align 12h Donchian to 4h timeframe (wait for completed 12h bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid_12h)
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                result[i] = np.nan
+            else:
+                result[i] = np.min(arr[i-window+1:i+1])
+        return result
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    donchian_upper_4h = rolling_max(high_4h, 20)
+    donchian_lower_4h = rolling_min(low_4h, 20)
+    donchian_mid_4h = (donchian_upper_4h + donchian_lower_4h) / 2.0
+    
+    # Align 4h Donchian to 1h timeframe (wait for completed 4h bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
+    
+    # Get 1d data ONCE before loop for volume spike filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need at least 50 completed daily bars for EMA50
+    if len(df_1d) < 20:  # Need at least 20 completed daily bars for volume average
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA (50-period)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # Calculate 1d volume confirmation: volume > 2.0 * 20-day average volume
+    avg_volume_20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_20d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -68,39 +83,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 12h Donchian high, close > 1d EMA50, volume confirmation, in session
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian upper, 1d volume spike, in session
+            if (close[i] > donchian_upper_aligned[i] and 
+                volume_spike_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below 12h Donchian low, close < 1d EMA50, volume confirmation, in session
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian lower, 1d volume spike, in session
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  volume_spike_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 12h Donchian midpoint
+            # Exit long: price crosses back below 4h Donchian midpoint
             if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses above 12h Donchian midpoint
+            # Exit short: price crosses back above 4h Donchian midpoint
             if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
