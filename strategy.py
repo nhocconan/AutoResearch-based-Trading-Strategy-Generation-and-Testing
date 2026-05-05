@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Williams %R extreme reversal with 4h EMA34 trend filter and volume spike confirmation
-# Long when Williams %R(14) crosses above -80 (oversold) AND price > 4h EMA34 AND volume > 1.8 * avg_volume(20) on 4h
-# Short when Williams %R(14) crosses below -20 (overbought) AND price < 4h EMA34 AND volume > 1.8 * avg_volume(20) on 4h
-# Exit when Williams %R crosses back through -50 (mean reversion midpoint) OR volume drops below average
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Williams %R provides timely reversal signals in ranging markets
-# 4h EMA34 filters for primary trend alignment to avoid counter-trend trades
-# Volume spike confirms reversal strength and reduces false signals
-# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend)
+# Hypothesis: 4h strategy using Donchian channel breakout with 1d ADX trend filter and volume spike confirmation
+# Long when price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 2.0 * 20-period average volume
+# Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 2.0 * 20-period average volume
+# Exit when price returns to Donchian(20) midpoint OR volume drops below average
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe
+# Donchian breakouts capture strong trends in both bull and bear markets
+# 1d ADX filter ensures we only trade in trending regimes, reducing whipsaws
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
 
-name = "4h_WilliamsR_EXT_4hEMA34_VolumeSpike"
+name = "4h_Donchian20_1dADX25_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,37 +28,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Williams %R calculation
+    # Get 1d data ONCE before loop for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least one completed daily bar for Williams %R
+    if len(df_1d) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on daily timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100
+    # Calculate 1d ADX(14)
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - pd.Series(close_1d).shift(1)))
+    tr3 = pd.Series(np.abs(low_1d - pd.Series(close_1d).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Align Williams %R to 4h timeframe (wait for completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Get 4h data ONCE before loop for EMA34 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:  # Need enough for EMA34
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr
     
-    # Calculate 4h EMA34
-    close_4h_series = pd.Series(close_4h)
-    ema34_4h = close_4h_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume on 4h
+    # Align ADX to 4h timeframe (wait for completed daily bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian(20) channels on 4h
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -69,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_4h_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -77,29 +87,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold), above 4h EMA34, volume confirmation, in session
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
-                close[i] > ema34_4h_aligned[i] and volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: price breaks above Donchian high AND ADX > 25 AND volume confirmation
+            if (close[i] > highest_high_20[i] and adx_aligned[i] > 25 and volume_confirm[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought), below 4h EMA34, volume confirmation, in session
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
-                  close[i] < ema34_4h_aligned[i] and volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: price breaks below Donchian low AND ADX > 25 AND volume confirmation
+            elif (close[i] < lowest_low_20[i] and adx_aligned[i] > 25 and volume_confirm[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion) OR volume drops below average
-            if williams_r_aligned[i] > -50 or volume[i] < avg_volume_20[i]:
+            # Exit long: price returns to Donchian midpoint OR volume drops below average
+            if close[i] <= donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion) OR volume drops below average
-            if williams_r_aligned[i] < -50 or volume[i] < avg_volume_20[i]:
+            # Exit short: price returns to Donchian midpoint OR volume drops below average
+            if close[i] >= donchian_mid[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
