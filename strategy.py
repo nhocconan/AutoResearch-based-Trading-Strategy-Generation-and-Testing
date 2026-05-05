@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
-# Long when: Price breaks above Donchian upper channel (20) AND 12h EMA(50) > price (uptrend) AND volume > 1.5x 20-period average volume
-# Short when: Price breaks below Donchian lower channel (20) AND 12h EMA(50) < price (downtrend) AND volume > 1.5x 20-period average volume
-# Exit when price returns to Donchian middle (mean of upper and lower channel)
-# Donchian breakout captures sustained momentum after consolidation
-# 12h EMA filter ensures we trade in direction of higher timeframe trend
-# Volume confirmation adds conviction to breakouts
-# Works in both bull and bear markets by filtering breakouts with higher timeframe trend
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25
+# Hypothesis: 1h Camarilla Pivot Breakout with 4h Trend and Volume Confirmation
+# Long when: Price breaks above Camarilla R3 (4h) AND 4h close > 4h EMA50 AND 1h volume > 1.5 * 20-bar avg volume
+# Short when: Price breaks below Camarilla S3 (4h) AND 4h close < 4h EMA50 AND 1h volume > 1.5 * 20-bar avg volume
+# Exit when price returns to Camarilla Pivot Point (4h) OR opposite Camarilla level touched
+# Uses 4h for signal direction and structure, 1h only for precise entry timing
+# Volume filter reduces false breakouts, trend filter ensures momentum alignment
+# Discrete sizing 0.20 to minimize fee churn, target 60-150 trades over 4 years (15-37/year)
+# Works in bull markets via breakout continuation and bear markets via mean reversion off pivots
 
-name = "4h_DonchianBreakout_12hEMA_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,61 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need enough for EMA(50)
+    # Get 4h data ONCE before loop for Camarilla pivots and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:  # Need enough for EMA50
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA(50)
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla pivots for 4h (based on previous 4h bar)
+    # Camarilla levels: Pivot = (H+L+C)/3, Range = H-L
+    # R3 = Pivot + 1.1 * Range / 2, S3 = Pivot - 1.1 * Range / 2
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
+    r3_4h = pivot_4h + (1.1 * range_4h / 2.0)
+    s3_4h = pivot_4h - (1.1 * range_4h / 2.0)
     
-    # Calculate Donchian channels (20) on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (highest_20 + lowest_20) / 2.0
+    # Align Camarilla levels to 1h (wait for completed 4h bar)
+    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
+    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
     
-    # Calculate 20-period average volume for confirmation
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Calculate 1h volume filter: volume > 1.5 * 20-bar average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma_20)
+    
+    # Session filter: 08-20 UTC (reduce noise trades)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(avg_volume_20[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
+            np.isnan(pivot_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * avg_volume_20[i]
-        
         if position == 0:
-            # Long: Break above upper Donchian channel with uptrend and volume
-            if close[i] > highest_20[i] and ema_50_12h_aligned[i] > close[i] and volume_confirm:
-                signals[i] = 0.25
+            # Long: Break above R3 with 4h bullish trend and volume confirmation
+            if (close[i] > r3_4h_aligned[i] and 
+                close_4h[-1] > ema_50_4h[-1] if len(close_4h) > 0 else False and  # Use last known 4h close
+                vol_filter[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Break below lower Donchian channel with downtrend and volume
-            elif close[i] < lowest_20[i] and ema_50_12h_aligned[i] < close[i] and volume_confirm:
-                signals[i] = -0.25
+            # Short: Break below S3 with 4h bearish trend and volume confirmation
+            elif (close[i] < s3_4h_aligned[i] and 
+                  close_4h[-1] < ema_50_4h[-1] if len(close_4h) > 0 else False and  # Use last known 4h close
+                  vol_filter[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: return to Donchian middle (mean reversion)
-            if close[i] < donchian_middle[i]:
+            # Exit long: return to pivot point OR touch S3 (mean reversion)
+            if close[i] < pivot_4h_aligned[i] or close[i] < s3_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: return to Donchian middle (mean reversion)
-            if close[i] > donchian_middle[i]:
+            # Exit short: return to pivot point OR touch R3 (mean reversion)
+            if close[i] > pivot_4h_aligned[i] or close[i] > r3_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
