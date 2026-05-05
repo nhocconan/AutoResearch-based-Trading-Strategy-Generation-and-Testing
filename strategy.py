@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA34 trend filter
-# Long when: price breaks above R3, volume > 2.0x 48-period average (1d equivalent), and close > 1w EMA34
-# Short when: price breaks below S3, volume > 2.0x 48-period average, and close < 1w EMA34
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and 1d volume spike
+# Long when: price breaks above R3, volume > 2.0x 20-period average (1d equivalent), and close > 1w EMA34
+# Short when: price breaks below S3, volume > 2.0x 20-period average, and close < 1w EMA34
 # Exit when price returns to Camarilla R3/S3 level (mean reversion)
-# Uses moderate Camarilla levels (R3/S3) for balanced trade frequency; volume spike on 1d for conviction; 1w EMA for major trend filter
-# Timeframe: 4h, HTF: 1d/1w. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Uses Camarilla R3/S3 levels for balanced breakout frequency; volume spike on 1d for conviction; 1w EMA for major trend filter
+# Timeframe: 1d, HTF: 1w. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA34_1dVolumeSpike"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_1dVolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,12 +25,23 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_price = prices['open'].values
     
-    # Calculate volume confirmation on 4h using 48-period MA (equivalent to 1d lookback)
-    if len(volume) >= 48:
-        vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-        volume_filter = volume > (2.0 * vol_ma_48)
+    # Calculate volume confirmation on 1d using 20-period MA
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
+    
+    # Get 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Get 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -57,25 +68,14 @@ def generate_signals(prices):
         camarilla_r3 = np.full(len(close_1d), np.nan)
         camarilla_s3 = np.full(len(close_1d), np.nan)
     
-    # Get 1w data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels and 1w EMA to 1d timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any value is NaN
         if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or 
