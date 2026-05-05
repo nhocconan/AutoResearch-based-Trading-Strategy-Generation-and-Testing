@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze Breakout + 1d ADX Trend Filter + Volume Confirmation
-# Long when: BB Width at 20-period low (squeeze) + price breaks above upper BB + 1d ADX > 25 + volume > 1.5x 20-period MA
-# Short when: BB Width at 20-period low (squeeze) + price breaks below lower BB + 1d ADX > 25 + volume > 1.5x 20-period MA
-# Exit when: price returns to middle BB (mean reversion) OR ADX < 20 (trend weakens)
-# Uses Bollinger Squeeze for low volatility breakout, ADX for regime filter, volume for conviction
-# Timeframe: 6h, HTF: 1d for ADX. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# Works in both bull and bear markets by trading breakouts in the direction of the higher-timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + daily choppiness regime filter
+# Long when: price breaks above 20-period 12h Donchian high AND 1d volume > 2x 20-period MA AND 1d chop > 61.8 (range) → mean reversion long at lower band
+# Short when: price breaks below 20-period 12h Donchian low AND 1d volume > 2x 20-period MA AND 1d chop > 61.8 (range) → mean reversion short at upper band
+# Uses Donchian for structure, volume for conviction, chop for regime (range = mean reversion)
+# Timeframe: 12h, HTF: 1d for volume and chop. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_BBSqueeze_1dADX_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolume_Chop_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,135 +21,106 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate Bollinger Bands on 6h (20, 2)
-    if len(close) >= 20:
-        ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-        upper_bb = ma_20 + (2 * std_20)
-        lower_bb = ma_20 - (2 * std_20)
-        middle_bb = ma_20
-        bb_width = (upper_bb - lower_bb) / ma_20  # normalized width
-    else:
-        ma_20 = np.full(n, np.nan)
-        std_20 = np.full(n, np.nan)
-        upper_bb = np.full(n, np.nan)
-        lower_bb = np.full(n, np.nan)
-        middle_bb = np.full(n, np.nan)
-        bb_width = np.full(n, np.nan)
-    
-    # Bollinger Squeeze: BB Width at 20-period low (lowest 10% of recent values)
-    if len(bb_width) >= 20:
-        # Find rolling minimum of BB Width over 20 periods
-        bb_width_series = pd.Series(bb_width)
-        bb_width_min_20 = bb_width_series.rolling(window=20, min_periods=20).min().values
-        squeeze_condition = bb_width <= bb_width_min_20  # at or near 20-period low
-    else:
-        squeeze_condition = np.zeros(n, dtype=bool)
-    
-    # Breakout conditions
-    breakout_up = close > upper_bb  # price breaks above upper BB
-    breakout_down = close < lower_bb  # price breaks below lower BB
-    
-    # Volume confirmation on 6h
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
-    
-    # Get 1d data ONCE before loop for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for ADX
+    # 12h Donchian(20) - calculate on 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Donchian channels
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (already aligned via get_htf_data + align_htf_to_ltf)
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    
+    # Get 1d data ONCE before loop for volume and chop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    if len(high_1d) >= 14:
+    # 1d volume spike: > 2x 20-period MA
+    if len(volume_1d) >= 20:
+        vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+        volume_spike = volume_1d > (2.0 * vol_ma_20)
+    else:
+        volume_spike = np.zeros(len(df_1d), dtype=bool)
+    
+    # 1d choppiness index: CHOP > 61.8 = range (mean reversion regime)
+    if len(close_1d) >= 14:
         # True Range
         tr1 = np.abs(high_1d[1:] - low_1d[1:])
         tr2 = np.abs(high_1d[1:] - close_1d[:-1])
         tr3 = np.abs(low_1d[1:] - close_1d[:-1])
         tr = np.maximum(np.maximum(tr1, tr2), tr3)
-        tr = np.concatenate([[np.nan], tr])  # align with index
+        tr = np.concatenate([[np.nan], tr])
         
-        # Directional Movement
-        up_move = high_1d[1:] - high_1d[:-1]
-        down_move = low_1d[:-1] - low_1d[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
+        # Sum of TR over 14 periods
+        tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
         
-        # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-        def wilder_smooth(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1]/period) + data[i]
-            return result
+        # Highest high and lowest low over 14 periods
+        hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
         
-        atr = wilder_smooth(tr, 14)
-        plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-        minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = wilder_smooth(dx, 14)
+        # Chop = 100 * log10(sum(tr) / (hh - ll)) / log10(14)
+        # Avoid division by zero
+        range_hl = hh - ll
+        chop = np.full_like(tr_sum, np.nan)
+        valid = (range_ll > 0) & ~np.isnan(tr_sum) & ~np.isnan(range_hl)
+        chop[valid] = 100 * np.log10(tr_sum[valid] / range_hl[valid]) / np.log10(14)
+        
+        chop_regime = chop > 61.8  # range = mean reversion
     else:
-        adx = np.full(len(df_1d), np.nan)
+        chop_regime = np.zeros(len(df_1d), dtype=bool)
     
-    # ADX trend filter: ADX > 25 = strong trend
-    adx_trend = adx > 25
-    adx_weak = adx < 20  # for exit condition
-    
-    # Align 1d ADX to 6h timeframe
-    adx_trend_aligned = align_htf_to_ltf(prices, df_1d, adx_trend.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
+    # Align 1d indicators to 12h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(squeeze_condition[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_trend_aligned[i]) or np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: squeeze + breakout up + strong trend + volume filter
-            if (squeeze_condition[i] and 
-                breakout_up[i] and 
-                adx_trend_aligned[i] == 1.0 and 
-                volume_filter[i]):
+            # Long: price breaks above Donchian high AND volume spike AND chop regime (range)
+            if (close[i] > donch_high_aligned[i] and 
+                volume_spike_aligned[i] == 1.0 and 
+                chop_regime_aligned[i] == 1.0):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: squeeze + breakout down + strong trend + volume filter
-            elif (squeeze_condition[i] and 
-                  breakout_down[i] and 
-                  adx_trend_aligned[i] == 1.0 and 
-                  volume_filter[i]):
+            # Short: price breaks below Donchian low AND volume spike AND chop regime (range)
+            elif (close[i] < donch_low_aligned[i] and 
+                  volume_spike_aligned[i] == 1.0 and 
+                  chop_regime_aligned[i] == 1.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle BB OR trend weakens
-            if (close[i] <= middle_bb[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: price breaks below Donchian low OR chop regime ends (trend starts)
+            if (close[i] < donch_low_aligned[i] or chop_regime_aligned[i] == 0.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle BB OR trend weakens
-            if (close[i] >= middle_bb[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: price breaks above Donchian high OR chop regime ends (trend starts)
+            if (close[i] > donch_high_aligned[i] or chop_regime_aligned[i] == 0.0):
                 signals[i] = 0.0
                 position = 0
             else:
