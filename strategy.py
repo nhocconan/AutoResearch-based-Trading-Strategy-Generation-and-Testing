@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray Power with 1d regime filter
-# Long when: Jaw > Teeth > Lips (bullish alignment) AND Bear Power < 0 (bullish momentum) AND 1d ADX > 25 (trending market)
-# Short when: Jaw < Teeth < Lips (bearish alignment) AND Bull Power < 0 (bearish momentum) AND 1d ADX > 25 (trending market)
-# Exit when Alligator alignment breaks (Jaw-Teeth-Lips not in proper order)
-# Uses 6h timeframe with 1d HTF for ADX regime filter and Elder Ray calculation (target: 50-150 total over 4 years)
-# Williams Alligator identifies trend alignment and absence of chop
-# Elder Ray measures bull/bear power relative to EMA13
-# 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ADX regime filter
+# Long when: price breaks above 20-period Donchian high AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
+# Short when: price breaks below 20-period Donchian low AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
+# Exit when price retouches the Donchian midpoint (mean reversion within the channel)
+# Uses 12h timeframe with 1d HTF for volume and ADX regime filters (target: 50-150 total over 4 years)
+# Donchian channels provide clear trend structure and breakout signals
+# Volume confirmation ensures breakouts have conviction
+# 1d ADX > 25 filters for trending markets, avoiding whipsaws in ranges
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
 
-name = "6h_WilliamsAlligator_ElderRay_1dADX_Regime"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolumeSpike_ADX_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,13 +26,14 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data ONCE before loop for ADX and Elder Ray
+    # Get 1d data ONCE before loop for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 30:  # Need enough for ADX and volume MA calculation
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d ADX(14)
     if len(high_1d) >= 14:
@@ -82,80 +83,65 @@ def generate_signals(prices):
     else:
         adx = np.full(len(close_1d), np.nan)
     
-    # Calculate 1d EMA(13) for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d volume 20-period EMA for volume spike detection
+    volume_ema_20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = low_1d - ema_13_1d
-    
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    volume_ema_aligned = align_htf_to_ltf(prices, df_1d, volume_ema_20_1d)
     
-    # Calculate 6h Williams Alligator
-    # Jaw: Smoothed Median Price (13,8) - Blue line
-    # Teeth: Smoothed Median Price (8,5) - Red line  
-    # Lips: Smoothed Median Price (5,3) - Green line
-    median_price = (high + low) / 2
+    # Calculate 12h Donchian channels (20-period)
+    def donchian_high(data, period):
+        return pd.Series(data).rolling(window=period, min_periods=period).max().values
     
-    def alligator_jaw(data, period1=13, period2=8):
-        # First smooth with period1, then smooth result with period2
-        smoothed1 = pd.Series(data).ewm(span=period1, adjust=False, min_periods=period1).mean().values
-        smoothed2 = pd.Series(smoothed1).ewm(span=period2, adjust=False, min_periods=period2).mean().values
-        return smoothed2
+    def donchian_low(data, period):
+        return pd.Series(data).rolling(window=period, min_periods=period).min().values
     
-    def alligator_teeth(data, period1=8, period2=5):
-        smoothed1 = pd.Series(data).ewm(span=period1, adjust=False, min_periods=period1).mean().values
-        smoothed2 = pd.Series(smoothed1).ewm(span=period2, adjust=False, min_periods=period2).mean().values
-        return smoothed2
+    def donchian_mid(data, period):
+        high = donchian_high(data, period)
+        low = donchian_low(data, period)
+        return (high + low) / 2
     
-    def alligator_lips(data, period1=5, period2=3):
-        smoothed1 = pd.Series(data).ewm(span=period1, adjust=False, min_periods=period1).mean().values
-        smoothed2 = pd.Series(smoothed1).ewm(span=period2, adjust=False, min_periods=period2).mean().values
-        return smoothed2
-    
-    jaw = alligator_jaw(median_price)
-    teeth = alligator_teeth(median_price)
-    lips = alligator_lips(median_price)
+    donchian_high_20 = donchian_high(high, 20)
+    donchian_low_20 = donchian_low(low, 20)
+    donchian_mid_20 = donchian_mid(close, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or np.isnan(lips[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(volume_ema_aligned[i]) or 
+            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(donchian_mid_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Jaw > Teeth > Lips (bullish alignment) AND Bear Power < 0 (bullish momentum) AND ADX > 25
-            if (jaw[i] > teeth[i] > lips[i] and 
-                bear_power_aligned[i] < 0 and 
+            # Long: price breaks above Donchian high AND volume spike AND ADX > 25
+            if (close[i] > donchian_high_20[i] and 
+                volume_1d[-1] > 1.5 * volume_ema_20_1d[-1] if len(volume_1d) > 0 else False and  # Use latest 1d volume
                 adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw < Teeth < Lips (bearish alignment) AND Bull Power < 0 (bearish momentum) AND ADX > 25
-            elif (jaw[i] < teeth[i] < lips[i] and 
-                  bull_power_aligned[i] < 0 and 
+            # Short: price breaks below Donchian low AND volume spike AND ADX > 25
+            elif (close[i] < donchian_low_20[i] and 
+                  volume_1d[-1] > 1.5 * volume_ema_20_1d[-1] if len(volume_1d) > 0 else False and  # Use latest 1d volume
                   adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator alignment breaks (not Jaw > Teeth > Lips)
-            if not (jaw[i] > teeth[i] > lips[i]):
+            # Exit long: price retouches Donchian midpoint
+            if close[i] <= donchian_mid_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator alignment breaks (not Jaw < Teeth < Lips)
-            if not (jaw[i] < teeth[i] < lips[i]):
+            # Exit short: price retouches Donchian midpoint
+            if close[i] >= donchian_mid_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
