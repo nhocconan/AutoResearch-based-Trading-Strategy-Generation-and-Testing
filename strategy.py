@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter
-# Long when price breaks above 1d Ichimoku Senkou Span A AND Tenkan > Kijun AND close > cloud
-# Short when price breaks below 1d Ichimoku Senkou Span B AND Tenkan < Kijun AND close < cloud
-# Exit when Tenkan/Kijun cross reverses
-# Uses 6h primary timeframe for execution
-# 1d HTF for Ichimoku calculation to avoid noise and ensure structure
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w trend filter and volume spike confirmation
+# Long when price breaks above 1w Camarilla R3 AND volume > 2.0x 20-period average AND close > 1w EMA34
+# Short when price breaks below 1w Camarilla S3 AND volume > 2.0x 20-period average AND close < 1w EMA34
+# Exit when price crosses 1w Camarilla pivot point (mean reversion to weekly equilibrium)
+# Uses 12h primary timeframe for execution with volume from same timeframe (no HTF volume lag)
+# 1w HTF for Camarilla levels and EMA trend filter to avoid counter-trend trades
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Ichimoku works in both bull/bear via cloud as dynamic support/resistance
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,91 +24,80 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Ichimoku calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Calculate volume spike filter on 12h (no HTF needed for volume)
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (2.0 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
+    
+    # Get 1w data ONCE before loop for Camarilla levels and EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    if len(high_1d) >= period_tenkan:
-        tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
-                      pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
-    else:
-        tenkan_sen = np.full(len(high_1d), np.nan)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    if len(high_1d) >= period_kijun:
-        kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
-                     pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
-    else:
-        kijun_sen = np.full(len(high_1d), np.nan)
+    # Camarilla levels: R3 = close + range * 1.1/2, S3 = close - range * 1.1/2
+    camarilla_r3 = close_1w + (range_1w * 1.1 / 2)
+    camarilla_s3 = close_1w - (range_1w * 1.1 / 2)
+    camarilla_pivot = pivot_1w  # Use standard pivot as exit level
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Align 1w indicators to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period_senkou_b = 52
-    if len(high_1d) >= period_senkou_b:
-        senkou_span_b = ((pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
-                          pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2)
-    else:
-        senkou_span_b = np.full(len(high_1d), np.nan)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or 
-            np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or 
-            np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
         if position == 0:
-            # Long conditions: price above cloud AND Tenkan > Kijun (bullish momentum)
-            if (close[i] > upper_cloud and 
-                tenkan_sen_aligned[i] > kijun_sen_aligned[i]):
+            # Long conditions: price breaks above Camarilla R3 AND volume spike AND above 1w EMA34
+            if (close[i] > camarilla_r3_aligned[i] and 
+                volume_filter[i] and 
+                close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below cloud AND Tenkan < Kijun (bearish momentum)
-            elif (close[i] < lower_cloud and 
-                  tenkan_sen_aligned[i] < kijun_sen_aligned[i]):
+            # Short conditions: price breaks below Camarilla S3 AND volume spike AND below 1w EMA34
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Tenkan/Kijun cross turns bearish OR price falls below cloud
-            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or 
-                close[i] < lower_cloud):
+            # Exit long: price crosses below Camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Tenkan/Kijun cross turns bullish OR price rises above cloud
-            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or 
-                close[i] > upper_cloud):
+            # Exit short: price crosses above Camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
