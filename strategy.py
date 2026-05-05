@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction (from Camarilla) + volume spike confirmation
-# Long when: price breaks above 6h Donchian(20) high AND 1d weekly pivot shows bullish bias (close > R3) AND volume > 2x 20-period MA
-# Short when: price breaks below 6h Donchian(20) low AND 1d weekly pivot shows bearish bias (close < S3) AND volume > 2x 20-period MA
-# Exit when: price returns to 6h Donchian(20) midpoint OR opposite breakout occurs
-# Uses Donchian for structure, weekly pivot for bias, volume for conviction
-# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 12h Williams Alligator + 1d ATR regime filter + volume confirmation
+# Long when: Alligator jaws < teeth < lips (bullish alignment) AND ATR(14) > ATR(50) (high volatility regime) AND volume > 1.5x 20-period MA
+# Short when: Alligator jaws > teeth > lips (bearish alignment) AND ATR(14) > ATR(50) AND volume > 1.5x 20-period MA
+# Exit when: Alligator alignment breaks OR ATR(14) < ATR(50) (low volatility regime)
+# Uses Alligator for trend direction, ATR regime for volatility filter, volume for conviction
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "6h_Donchian20_1dWeeklyPivot_VolumeConfirm"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dATRRegime_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,69 +24,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate volume confirmation on 6h using 20-period MA
+    # Calculate volume confirmation on 12h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Calculate Donchian(20) on 6h
-    if len(high) >= 20 and len(low) >= 20:
-        highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate Williams Alligator on 12h
+    # Jaw (blue line): 13-period SMMA smoothed 8 periods ahead
+    # Teeth (red line): 8-period SMMA smoothed 5 periods ahead  
+    # Lips (green line): 5-period SMMA smoothed 3 periods ahead
+    if len(close) >= 13:
+        # SMMA calculation (smoothed moving average)
+        def smma(data, period):
+            if len(data) < period:
+                return np.full(len(data), np.nan)
+            result = np.full(len(data), np.nan)
+            # First value is SMA
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_DATA) / period
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        jaw = smma(close, 13)
+        teeth = smma(close, 8)
+        lips = smma(close, 5)
+        
+        # Alligator alignment: Jaw < Teeth < Lips = bullish, Jaw > Teeth > Lips = bearish
+        bullish_alignment = (jaw < teeth) & (teeth < lips)
+        bearish_alignment = (jaw > teeth) & (teeth > lips)
     else:
-        highest_high = np.full(n, np.nan)
-        lowest_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
+        jaw = np.full(n, np.nan)
+        teeth = np.full(n, np.nan)
+        lips = np.full(n, np.nan)
+        bullish_alignment = np.zeros(n, dtype=bool)
+        bearish_alignment = np.zeros(n, dtype=bool)
     
-    # Donchian breakout signals
-    donchian_breakout_up = (close > highest_high) & (np.roll(close, 1) <= np.roll(highest_high, 1))
-    donchian_breakout_down = (close < lowest_low) & (np.roll(close, 1) >= np.roll(lowest_low, 1))
-    donchian_revert_mid = np.abs(close - donchian_mid) < 0.001 * close  # approximate midpoint return
-    
-    # Get 1d data ONCE before loop for weekly pivot calculation (Camarilla)
+    # Get 1d data ONCE before loop for ATR regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # need at least a week for weekly pivot
+    if len(df_1d) < 50:  # need sufficient data for ATR(50)
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels from prior week's daily OHLC
-    # We'll use the prior week's high, low, close to calculate weekly pivot
-    # For simplicity, we approximate weekly levels using rolling window
-    if len(df_1d) >= 5:
-        # Get prior week's OHLC (5 trading days)
-        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    # Calculate ATR on 1d
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
         
-        # Calculate Camarilla levels for weekly timeframe
-        # Camarilla: R4 = close + ((high-low) * 1.1/2), R3 = close + ((high-low) * 1.1/4)
-        #          S3 = close - ((high-low) * 1.1/4), S4 = close - ((high-low) * 1.1/2)
-        weekly_range = weekly_high - weekly_low
-        camarilla_r3 = weekly_close + (weekly_range * 1.1 / 4)
-        camarilla_s3 = weekly_close - (weekly_range * 1.1 / 4)
+        # True Range
+        tr1 = high_1d - low_1d
+        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+        tr1[0] = 0  # first period has no previous close
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
         
-        # Bullish bias: close > R3, Bearish bias: close < S3
-        weekly_bullish = df_1d['close'].values > camarilla_r3
-        weekly_bearish = df_1d['close'].values < camarilla_s3
+        # ATR calculation
+        def atr(data, period):
+            if len(data) < period:
+                return np.full(len(data), np.nan)
+            result = np.full(len(data), np.nan)
+            # First value is ATR = average of first 'period' TR values
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: ATR = (PREV_ATR * (period-1) + CURRENT_TR) / period
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        atr_14 = atr(tr, 14)
+        atr_50 = atr(tr, 50)
+        
+        # ATR regime: ATR(14) > ATR(50) = high volatility regime (good for trend following)
+        atr_regime = atr_14 > atr_50
     else:
-        weekly_bullish = np.full(len(df_1d), False)
-        weekly_bearish = np.full(len(df_1d), False)
-        camarilla_r3 = np.full(len(df_1d), np.nan)
-        camarilla_s3 = np.full(len(df_1d), np.nan)
+        atr_14 = np.full(len(df_1d), np.nan)
+        atr_50 = np.full(len(df_1d), np.nan)
+        atr_regime = np.zeros(len(df_1d), dtype=bool)
     
-    # Align 1d weekly pivot bias to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bearish.astype(float))
+    # Align 1d ATR regime to 12h timeframe
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(atr_regime_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -94,28 +121,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: Donchian breakout up + weekly bullish + volume filter
-            if (donchian_breakout_up[i] and 
-                weekly_bullish_aligned[i] == 1.0 and 
+            # Long conditions: Alligator bullish alignment + ATR regime + volume filter
+            if (bullish_alignment[i] and 
+                atr_regime_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + weekly bearish + volume filter
-            elif (donchian_breakout_down[i] and 
-                  weekly_bearish_aligned[i] == 1.0 and 
+            # Short conditions: Alligator bearish alignment + ATR regime + volume filter
+            elif (bearish_alignment[i] and 
+                  atr_regime_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR short breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_down[i]):
+            # Exit long: Alligator alignment breaks OR ATR regime changes to low volatility
+            if not (bullish_alignment[i] and atr_regime_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR long breakout occurs
-            if (donchian_revert_mid[i] or donchian_breakout_up[i]):
+            # Exit short: Alligator alignment breaks OR ATR regime changes to low volatility
+            if not (bearish_alignment[i] and atr_regime_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
