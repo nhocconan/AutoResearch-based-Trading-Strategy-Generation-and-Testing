@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot Breakout with 1d Volume Spike and Weekly Trend Filter
-# Long when: Price breaks above R4 AND 1d volume > 1.5 * 20-period average volume AND weekly close > weekly open (bullish week)
-# Short when: Price breaks below S4 AND 1d volume > 1.5 * 20-period average volume AND weekly close < weekly open (bearish week)
-# Exit when price returns to the 1d VWAP (mean reversion to institutional value area)
-# Uses Camarilla's extreme levels (R4/S4) for high-probability breakouts, volume spike for confirmation, weekly trend for bias
-# Works in both bull and bear markets by only taking breakouts in the direction of the weekly trend
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
+# Long when: Price breaks above Donchian upper (20) AND 1w EMA50 trend up AND volume > 1.5x 20-period average
+# Short when: Price breaks below Donchian lower (20) AND 1w EMA50 trend down AND volume > 1.5x 20-period average
+# Exit when price returns to Donchian middle (mean reversion) or opposite breakout occurs
+# Donchian breakout captures volatility expansion after consolidation
+# 1w EMA50 filter ensures we trade with the higher timeframe trend
+# Volume confirmation reduces false breakouts
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "6h_Camarilla_R4S4_Breakout_VolumeSpike_WeeklyTrend"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,89 +25,68 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Get 1d data ONCE before loop for volume average and VWAP
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Get 1w data ONCE before loop for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 50:  # Need enough for EMA(50)
         return np.zeros(n)
-    open_1w = df_1w['open'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1d average volume (20-period)
-    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d VWAP for exit
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_1d = (typical_price_1d * volume_1d).cumsum() / volume_1d.cumsum()
-    vwap_1d[volume_1d.cumsum() == 0] = np.nan  # Avoid division by zero
+    # Calculate Donchian Channels (20) on 12h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    middle_20 = (highest_20 + lowest_20) / 2.0
     
-    # Calculate weekly trend: bullish if weekly close > weekly open
-    weekly_bullish = close_1w > open_1w
-    
-    # Align 1d indicators to 6h timeframe
-    avg_volume_20_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish.astype(float))  # Convert bool to float for alignment
+    # Calculate volume average (20) for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(avg_volume_20_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(weekly_bullish_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition: current 1d volume > 1.5 * 20-period average
-        # We need to map 6h bar to the 1d volume - use the most recent completed 1d bar
-        vol_spike = volume_1d[-1] > 1.5 * avg_volume_20_1d[-1] if len(volume_1d) > 0 and len(avg_volume_20_1d) > 0 else False
-        # For simplicity and to avoid look-ahead, use aligned volume spike signal
-        # Recalculate volume spike using aligned data
-        vol_spike_aligned = volume[i] > 1.5 * avg_volume_20_aligned[i] if not np.isnan(avg_volume_20_aligned[i]) else False
+        # Trend filter: 1w EMA50 slope (up if current > previous, down if current < previous)
+        if i > 100:
+            ema_slope = ema_50_1w_aligned[i] - ema_50_1w_aligned[i-1]
+            trend_up = ema_slope > 0
+            trend_down = ema_slope < 0
+        else:
+            trend_up = False
+            trend_down = False
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Calculate Camarilla levels from previous 1d bar
-            # Need to use previous 1d bar's OHLC to avoid look-ahead
-            if len(df_1d) >= 2:
-                prev_high = high_1d[-2]
-                prev_low = low_1d[-2]
-                prev_close = close_1d[-2]
-                pivot = (prev_high + prev_low + prev_close) / 3
-                range_ = prev_high - prev_low
-                r4 = pivot + (range_ * 1.1 / 2)
-                s4 = pivot - (range_ * 1.1 / 2)
-                
-                # Long: Break above R4 with volume spike and weekly bullish
-                if close[i] > r4 and vol_spike_aligned and weekly_bullish_aligned[i] == 1.0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Break below S4 with volume spike and weekly bearish
-                elif close[i] < s4 and vol_spike_aligned and weekly_bullish_aligned[i] == 0.0:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Break above Donchian upper with uptrend and volume confirmation
+            if close[i] > highest_20[i] and trend_up and volume_confirmed:
+                signals[i] = 0.25
+                position = 1
+            # Short: Break below Donchian lower with downtrend and volume confirmation
+            elif close[i] < lowest_20[i] and trend_down and volume_confirmed:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: return to 1d VWAP (mean reversion)
-            if close[i] < vwap_1d_aligned[i]:
+            # Exit long: return to Donchian middle OR opposite breakout with confirmation
+            if close[i] < middle_20[i] or (close[i] < lowest_20[i] and trend_down and volume_confirmed):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to 1d VWAP (mean reversion)
-            if close[i] > vwap_1d_aligned[i]:
+            # Exit short: return to Donchian middle OR opposite breakout with confirmation
+            if close[i] > middle_20[i] or (close[i] > highest_20[i] and trend_up and volume_confirmed):
                 signals[i] = 0.0
                 position = 0
             else:
