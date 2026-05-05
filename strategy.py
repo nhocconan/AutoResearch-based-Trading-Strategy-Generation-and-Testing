@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume confirmation
-# Long when: price breaks above Donchian upper band AND 1d HMA(21) is rising AND volume > 1.5x 20-period MA
-# Short when: price breaks below Donchian lower band AND 1d HMA(21) is falling AND volume > 1.5x 20-period MA
-# Exit when: price reverts to Donchian midpoint OR volume drops below average
-# Uses Donchian for price channel breakouts, 1d HMA for multi-timeframe trend filter, volume for conviction
-# Timeframe: 4h, HTF: 1d for HMA. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout + 1d Volume Regime Filter
+# Long when: BB(20,2) width < 20th percentile (squeeze) AND price breaks above upper band AND 1d volume > 1.5x 20-period MA
+# Short when: BB(20,2) width < 20th percentile (squeeze) AND price breaks below lower band AND 1d volume > 1.5x 20-period MA
+# Exit when: price returns to middle band (mean reversion) OR squeeze breaks without follow-through
+# Uses volatility contraction/expansion principle - works in both bull/bear markets by capturing breakouts from low volatility
+# Timeframe: 6h, HTF: 1d for volume regime filter. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_Donchian_1dHMA_VolumeConfirm_v2"
-timeframe = "4h"
+name = "6h_BBSqueeze_Breakout_1dVolRegime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,73 +19,54 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) on 4h
-    if len(high) >= 20:
-        donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Calculate Bollinger Bands on 6h
+    if len(close) >= 20:
+        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        upper_band = sma_20 + (2 * std_20)
+        lower_band = sma_20 - (2 * std_20)
+        bb_width = (upper_band - lower_band) / sma_20  # normalized width
     else:
-        donchian_upper = np.full(n, np.nan)
-        donchian_lower = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
+        sma_20 = np.full(n, np.nan)
+        upper_band = np.full(n, np.nan)
+        lower_band = np.full(n, np.nan)
+        bb_width = np.full(n, np.nan)
+    
+    # Calculate BB width percentile (20th) for squeeze detection
+    bb_width_pct_20 = np.full(n, np.nan)
+    for i in range(50, n):  # need sufficient history for percentile
+        window = bb_width[max(0, i-50):i+1]  # 50-bar lookback for percentile
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) >= 10:
+            bb_width_pct_20[i] = np.percentile(valid_window, 20)
+    
+    # Squeeze condition: BB width below 20th percentile
+    squeeze = bb_width < bb_width_pct_20
     
     # Breakout conditions
-    breakout_up = close > donchian_upper  # price breaks above upper band
-    breakout_down = close < donchian_lower  # price breaks below lower band
-    revert_to_mid = np.abs(close - donchian_mid) < (donchian_upper - donchian_lower) * 0.1  # near midpoint
+    breakout_up = (close > upper_band) & squeeze
+    breakout_down = (close < lower_band) & squeeze
     
-    # Volume confirmation on 4h
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-        volume_exit = volume < vol_ma_20  # exit when volume drops below average
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
-        volume_exit = np.zeros(n, dtype=bool)
-    
-    # Get 1d data ONCE before loop for HMA calculation
+    # Get 1d data ONCE before loop for volume regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:  # need sufficient data for HMA
+    if len(df_1d) < 30:  # need sufficient data
         return np.zeros(n)
     
-    # Calculate HMA(21) on 1d: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(data, window):
-        if len(data) < window:
-            return np.full_like(data, np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights, mode='valid') / weights.sum()
-    
-    close_1d = df_1d['close'].values
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    
-    if len(close_1d) >= 21:
-        wma_half = wma(close_1d, half_len)
-        wma_full = wma(close_1d, 21)
-        # Pad to align arrays
-        wma_half_padded = np.concatenate([np.full(half_len - 1, np.nan), wma_half])
-        wma_full_padded = np.concatenate([np.full(20, np.nan), wma_full])  # 21-1=20
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma = wma(raw_hma, sqrt_len)
-        # Pad HMA to original length
-        hma_final = np.concatenate([np.full(len(close_1d) - len(hma), np.nan), hma])
+    # Calculate 1d volume MA
+    vol_1d = df_1d['volume'].values
+    if len(vol_1d) >= 20:
+        vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        volume_regime = vol_1d > (1.5 * vol_ma_20_1d)  # high volume regime
     else:
-        hma_final = np.full(len(close_1d), np.nan)
+        volume_regime = np.zeros(len(df_1d), dtype=bool)
     
-    # HMA slope: rising if current > previous, falling if current < previous
-    hma_rising = np.zeros(len(hma_final), dtype=bool)
-    hma_falling = np.zeros(len(hma_final), dtype=bool)
-    hma_rising[1:] = hma_final[1:] > hma_final[:-1]
-    hma_falling[1:] = hma_final[1:] < hma_final[:-1]
-    
-    # Align 1d HMA to 4h timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising.astype(float))
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling.astype(float))
+    # Align 1d volume regime to 6h timeframe
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,37 +74,31 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or 
-            np.isnan(revert_to_mid[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(volume_exit[i]) or np.isnan(hma_rising_aligned[i]) or 
-            np.isnan(hma_falling_aligned[i])):
+            np.isnan(volume_regime_aligned[i]) or np.isnan(sma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: breakout up + HMA rising + volume filter
-            if (breakout_up[i] and 
-                hma_rising_aligned[i] == 1.0 and 
-                volume_filter[i]):
+            # Long breakout with volume confirmation
+            if breakout_up[i] and volume_regime_aligned[i] == 1.0:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: breakout down + HMA falling + volume filter
-            elif (breakout_down[i] and 
-                  hma_falling_aligned[i] == 1.0 and 
-                  volume_filter[i]):
+            # Short breakout with volume confirmation
+            elif breakout_down[i] and volume_regime_aligned[i] == 1.0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: revert to midpoint OR volume exit OR HMA falls
-            if (revert_to_mid[i] or volume_exit[i] or hma_falling_aligned[i] == 1.0):
+            # Exit long: price returns to middle band OR squeeze breaks without follow-through
+            if close[i] <= sma_20[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: revert to midpoint OR volume exit OR HMA rises
-            if (revert_to_mid[i] or volume_exit[i] or hma_rising_aligned[i] == 1.0):
+            # Exit short: price returns to middle band OR squeeze breaks without follow-through
+            if close[i] >= sma_20[i] or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
