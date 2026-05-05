@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
-# Donchian breakout provides clear entry/exit levels with built-in trend following
-# ADX > 25 ensures we only trade in strong trends (avoids chop)
-# Volume > 1.5x 20-period MA confirms conviction
-# Long when: price breaks above 20-period Donchian upper + ADX strong + volume confirmation
-# Short when: price breaks below 20-period Donchian lower + ADX strong + volume confirmation
-# Exit when: price touches opposite Donchian band OR ADX weakens (<20)
-# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Donchian channel breakout with 1d volume spike filter and ADX trend confirmation
+# Long when: price breaks above Donchian(20) high AND 1d volume > 2.0x 20-period MA AND 1d ADX > 25
+# Short when: price breaks below Donchian(20) low AND 1d volume > 2.0x 20-period MA AND 1d ADX > 25
+# Exit when: price crosses Donchian midpoint OR ADX drops below 20
+# Uses Donchian for structure, volume for conviction, ADX for trend filter
+# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "12h_Donchian20_1dADX_VolumeConfirm"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dVolumeSpike_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels on 12h (20-period)
+    # Calculate Donchian Channel on 4h (20-period)
     if len(high) >= 20:
         donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
         donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+        donchian_mid = (donchian_high + donchian_low) / 2.0
     else:
         donchian_high = np.full(n, np.nan)
         donchian_low = np.full(n, np.nan)
+        donchian_mid = np.full(n, np.nan)
     
-    # Get 1d data ONCE before loop for ADX calculation
+    # Get 1d data ONCE before loop for volume and ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # need sufficient data for ADX
+    if len(df_1d) < 30:  # need sufficient data for calculations
         return np.zeros(n)
+    
+    # Calculate volume spike filter on 1d
+    vol_1d = df_1d['volume'].values
+    if len(vol_1d) >= 20:
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        volume_spike = vol_1d > (2.0 * vol_ma_20)
+    else:
+        volume_spike = np.zeros(len(vol_1d), dtype=bool)
     
     # Calculate ADX(14) on 1d
     high_1d = df_1d['high'].values
@@ -77,7 +85,7 @@ def generate_signals(prices):
     else:
         adx = np.full(len(high_1d), np.nan)
     
-    # ADX trend strength
+    # ADX trend strength filters
     adx_strong = np.zeros(len(adx), dtype=bool)
     adx_weak = np.zeros(len(adx), dtype=bool)
     for i in range(len(adx)):
@@ -85,53 +93,46 @@ def generate_signals(prices):
             adx_strong[i] = adx[i] > 25
             adx_weak[i] = adx[i] < 20
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d indicators to 4h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
     adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
-    
-    # Volume confirmation on 12h
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price above Donchian upper + strong ADX + volume filter
+            # Long conditions: break above Donchian high + volume spike + strong ADX
             if (close[i] > donchian_high[i] and 
-                adx_strong_aligned[i] == 1.0 and 
-                volume_filter[i]):
+                volume_spike_aligned[i] == 1.0 and 
+                adx_strong_aligned[i] == 1.0):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below Donchian lower + strong ADX + volume filter
+            # Short conditions: break below Donchian low + volume spike + strong ADX
             elif (close[i] < donchian_low[i] and 
-                  adx_strong_aligned[i] == 1.0 and 
-                  volume_filter[i]):
+                  volume_spike_aligned[i] == 1.0 and 
+                  adx_strong_aligned[i] == 1.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches Donchian lower OR ADX weakens
-            if (close[i] < donchian_low[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: price crosses Donchian midpoint OR weak ADX
+            if (close[i] < donchian_mid[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches Donchian upper OR ADX weakens
-            if (close[i] > donchian_high[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: price crosses Donchian midpoint OR weak ADX
+            if (close[i] > donchian_mid[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
