@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR(14) volatility filter
-# Long when price breaks above Donchian upper band AND 1d close > 1d EMA50 AND ATR(14) < 0.05 * close
-# Short when price breaks below Donchian lower band AND 1d close < 1d EMA50 AND ATR(14) < 0.05 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 20-50 trades/year per symbol.
-# Donchian provides structure; EMA50 filters trend; ATR filter avoids high volatility chop.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR(14) volatility filter
+# Long when price breaks above Donchian upper band AND 1d close > 1d EMA34 AND ATR(14) < 0.04 * close
+# Short when price breaks below Donchian lower band AND 1d close < 1d EMA34 AND ATR(14) < 0.04 * close
+# Uses discrete sizing (0.25) to limit fee drag. Target: 12-25 trades/year per symbol.
+# Donchian provides structure; EMA34 filters trend; ATR filter avoids high volatility chop.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# 4h timeframe balances trade frequency and trend capture.
+# 4h timeframe reduces trade frequency to minimize fee drag while capturing medium-term trends.
 
-name = "4h_Donchian20_1dEMA50_ATR_Filter_v2"
+name = "4h_Donchian20_1dEMA34_ATR_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -51,15 +51,15 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_1d = close_1d > ema_50_1d
-    downtrend_1d = close_1d < ema_50_1d
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
     # Align 1d trend to 4h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
@@ -74,8 +74,8 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 5% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.05 * close)
+    # Volatility filter: ATR < 4% of price (avoid high volatility chop)
+    vol_filter = atr_14 < (0.04 * close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
