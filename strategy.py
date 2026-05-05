@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d ATR-based volatility breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above 1d high + 0.5*ATR(10) AND price > 12h EMA50 AND volume > 1.5 * avg_volume(20) on 12h
-# Short when price breaks below 1d low - 0.5*ATR(10) AND price < 12h EMA50 AND volume > 1.5 * avg_volume(20) on 12h
-# Exit when price crosses 12h EMA50 in opposite direction OR volume drops below average
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# ATR-based breakout captures momentum after volatility contraction/expansion cycles
+# Hypothesis: 4h strategy using Camarilla pivot breakouts with 12h EMA50 trend filter and volume spike confirmation
+# Long when price breaks above Camarilla R3 level AND price > 12h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
+# Short when price breaks below Camarilla S3 level AND price < 12h EMA50 AND volume > 2.0 * avg_volume(20) on 4h
+# Exit when price retests Camarilla pivot level (PP) OR volume drops below average
+# Uses discrete sizing 0.30 to balance return and risk
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Camarilla levels provide precise intraday support/resistance based on prior day's range
 # 12h EMA50 filters for primary trend alignment to avoid counter-trend trades
-# Volume confirmation ensures breakout validity and reduces false signals
+# Volume spike confirms breakout strength and reduces false signals
 # Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
 
-name = "12h_ATRBreakout_12hEMA50_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,31 +28,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR breakout levels
+    # Get 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:  # Need enough for ATR calculation
+    if len(df_1d) < 1:  # Need at least one completed daily bar
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(10)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar: no previous close
-    tr2[0] = high_1d[0] - close_1d[0]  # Approximation for first bar
-    tr3[0] = low_1d[0] - close_1d[0]   # Approximation for first bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate Camarilla pivot levels from prior 1d bar
+    # PP = (High + Low + Close) / 3
+    # R3 = PP + (High - Low) * 1.1 / 2
+    # S3 = PP - (High - Low) * 1.1 / 2
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r3 = pp + (high_1d - low_1d) * 1.1 / 2.0
+    s3 = pp - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Calculate breakout levels: 1d high/low ± 0.5*ATR(10)
-    breakout_up = high_1d + 0.5 * atr_10
-    breakout_down = low_1d - 0.5 * atr_10
-    
-    # Align breakout levels to 12h timeframe (wait for completed daily bar)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
+    # Align Camarilla levels to 4h timeframe (wait for completed daily bar)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Get 12h data ONCE before loop for EMA50 trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -65,9 +60,9 @@ def generate_signals(prices):
     ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 4h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -78,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema50_12h_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -86,29 +81,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1d high + 0.5*ATR(10), above 12h EMA50, volume confirmation, in session
-            if (close[i] > breakout_up_aligned[i] and 
+            # Long: price breaks above R3, above 12h EMA50, volume confirmation, in session
+            if (close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and 
                 close[i] > ema50_12h_aligned[i] and volume_confirm[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below 1d low - 0.5*ATR(10), below 12h EMA50, volume confirmation, in session
-            elif (close[i] < breakout_down_aligned[i] and 
+            # Short: price breaks below S3, below 12h EMA50, volume confirmation, in session
+            elif (close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and 
                   close[i] < ema50_12h_aligned[i] and volume_confirm[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 12h EMA50 OR volume drops below average
-            if close[i] < ema50_12h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: price retests pivot point (PP) OR volume drops below average
+            if close[i] <= pp_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price crosses above 12h EMA50 OR volume drops below average
-            if close[i] > ema50_12h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: price retests pivot point (PP) OR volume drops below average
+            if close[i] >= pp_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
