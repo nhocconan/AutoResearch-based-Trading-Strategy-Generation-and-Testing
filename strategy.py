@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and ATR(14) volatility filter
-# Long when price breaks above Donchian upper(20) AND 12h close > 12h EMA50 AND ATR(14) < 0.03 * close
-# Short when price breaks below Donchian lower(20) AND 12h close < 12h EMA50 AND ATR(14) < 0.03 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 15-30 trades/year per symbol.
-# Donchian provides structure; EMA50 filters trend; ATR filter avoids high volatility chop.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation
+# Long when price breaks above 1h Camarilla R3 AND 4h close > 4h EMA50 AND volume > 1.5 * 20-period average volume
+# Short when price breaks below 1h Camarilla S3 AND 4h close < 4h EMA50 AND volume > 1.5 * 20-period average volume
+# Uses discrete sizing (0.20) to limit fee drag. Target: 15-30 trades/year per symbol (60-120 over 4 years).
+# Camarilla provides structure; 4h EMA50 filters trend; volume confirmation ensures conviction.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# 4h timeframe balances trade frequency and trend capture.
+# Session filter (08-20 UTC) reduces noise trades outside active market hours.
 
-name = "4h_Donchian20_12hEMA50_ATR_Filter"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_4hEMA50_VolumeConfirm_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,80 +25,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Session filter: 08-20 UTC (active market hours)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 1h data ONCE before loop for Camarilla calculation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1h Camarilla levels based on previous 1h bar
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    
+    # Camarilla calculation: based on previous bar's range
+    range_1h = high_1h - low_1h
+    camarilla_h5 = close_1h + (range_1h * 1.1 / 2)  # R3 level
+    camarilla_l5 = close_1h - (range_1h * 1.1 / 2)  # S3 level
+    
+    # Shift to use previous bar's levels (breakout of previous bar's Camarilla)
+    camarilla_h5 = np.roll(camarilla_h5, 1)
+    camarilla_l5 = np.roll(camarilla_l5, 1)
+    camarilla_h5[0] = np.nan  # First value invalid after roll
+    camarilla_l5[0] = np.nan
+    
+    # Align Camarilla levels to prices timeframe (1h)
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1h, camarilla_h5)
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1h, camarilla_l5)
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_12h = close_12h > ema_50_12h
-    downtrend_12h = close_12h < ema_50_12h
+    uptrend_4h = close_4h > ema_50_4h
+    downtrend_4h = close_4h < ema_50_4h
     
-    # Align 12h trend to 4h timeframe
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    # Align 4h trend to 1h timeframe
+    uptrend_4h_aligned = align_htf_to_ltf(prices, df_4h, uptrend_4h.astype(float))
+    downtrend_4h_aligned = align_htf_to_ltf(prices, df_4h, downtrend_4h.astype(float))
     
-    # Calculate Donchian(20) on 4h data
-    # Upper band: highest high of last 20 bars
-    # Lower band: lowest low of last 20 bars
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 3% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.03 * close)
+    # Volume confirmation: volume > 1.5 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
-            np.isnan(vol_filter[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(camarilla_h5_aligned[i]) or np.isnan(camarilla_l5_aligned[i]) or 
+            np.isnan(uptrend_4h_aligned[i]) or np.isnan(downtrend_4h_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade during active market hours
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Donchian upper AND 12h uptrend AND low volatility
-            if (close[i] > highest_high[i] and 
-                uptrend_12h_aligned[i] > 0.5 and 
-                vol_filter[i]):
-                signals[i] = 0.25
+            # Long conditions: price > Camarilla R3 AND 4h uptrend AND volume confirmation
+            if (close[i] > camarilla_h5_aligned[i] and 
+                uptrend_4h_aligned[i] > 0.5 and 
+                volume_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price < Donchian lower AND 12h downtrend AND low volatility
-            elif (close[i] < lowest_low[i] and 
-                  downtrend_12h_aligned[i] > 0.5 and 
-                  vol_filter[i]):
-                signals[i] = -0.25
+            # Short conditions: price < Camarilla S3 AND 4h downtrend AND volume confirmation
+            elif (close[i] < camarilla_l5_aligned[i] and 
+                  downtrend_4h_aligned[i] > 0.5 and 
+                  volume_confirm[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian lower OR 12h trend changes to downtrend
-            if (close[i] < lowest_low[i] or 
-                downtrend_12h_aligned[i] > 0.5):
+            # Exit long: price < Camarilla S3 OR 4h trend changes to downtrend
+            if (close[i] < camarilla_l5_aligned[i] or 
+                downtrend_4h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price > Donchian upper OR 12h trend changes to uptrend
-            if (close[i] > highest_high[i] or 
-                uptrend_12h_aligned[i] > 0.5):
+            # Exit short: price > Camarilla R3 OR 4h trend changes to uptrend
+            if (close[i] > camarilla_h5_aligned[i] or 
+                uptrend_4h_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
