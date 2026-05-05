@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout + 1d volume spike + ADX trend filter
-# Long when: BB width at 20-period low (squeeze) + price breaks above upper BB + 1d ADX > 25 + volume > 2x 20-period MA
-# Short when: BB width at 20-period low (squeeze) + price breaks below lower BB + 1d ADX > 25 + volume > 2x 20-period MA
-# Exit when: price returns to middle BB (20-period SMA) OR ADX drops below 20
-# Uses Bollinger Bands for volatility contraction/expansion, ADX for trend strength, volume for conviction
-# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: 12h Donchian(20) breakout + 1d ADX trend filter + volume confirmation
+# Long when: price breaks above Donchian upper band AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Short when: price breaks below Donchian lower band AND 1d ADX > 25 AND volume > 1.5x 20-period MA
+# Exit when: price reverts to Donchian midpoint OR ADX drops below 20
+# Uses Donchian for structure, ADX for trend strength, volume for conviction
+# Timeframe: 12h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "4h_BBSqueeze_Breakout_1dADX_VolumeFilter"
-timeframe = "4h"
+name = "12h_Donchian20_1dADX_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +24,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands on 4h (20, 2)
-    if len(close) >= 20:
-        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-        upper_bb = sma_20 + (2 * std_20)
-        lower_bb = sma_20 - (2 * std_20)
-        bb_width = (upper_bb - lower_bb) / sma_20  # normalized width
-        
-        # BB width 20-period low (squeeze condition)
-        bb_width_low = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
-        squeeze = bb_width <= bb_width_low
-        
-        # Breakout conditions
-        breakout_up = close > upper_bb
-        breakout_down = close < lower_bb
-        
-        # Exit condition: return to middle BB
-        return_to_middle = np.abs(close - sma_20) < (0.1 * std_20)  # within 10% of middle BB
+    # Calculate Donchian channels on 12h
+    lookback = 20
+    if len(high) >= lookback:
+        upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+        lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+        mid = (upper + lower) / 2
     else:
-        sma_20 = np.full(n, np.nan)
-        std_20 = np.full(n, np.nan)
-        upper_bb = np.full(n, np.nan)
-        lower_bb = np.full(n, np.nan)
-        bb_width = np.full(n, np.nan)
-        squeeze = np.zeros(n, dtype=bool)
-        breakout_up = np.zeros(n, dtype=bool)
-        breakout_down = np.zeros(n, dtype=bool)
-        return_to_middle = np.zeros(n, dtype=bool)
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
+        mid = np.full(n, np.nan)
     
-    # Get 1d data ONCE before loop for ADX and volume
+    # Get 1d data ONCE before loop for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:  # need sufficient data for ADX
         return np.zeros(n)
@@ -62,7 +44,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
     if len(high_1d) >= 14:
         # True Range
@@ -97,13 +78,6 @@ def generate_signals(prices):
     else:
         adx = np.full(len(high_1d), np.nan)
     
-    # Calculate 1d volume spike (volume > 2x 20-period MA)
-    if len(vol_1d) >= 20:
-        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-        volume_spike = vol_1d > (2 * vol_ma_20)
-    else:
-        volume_spike = np.zeros(len(vol_1d), dtype=bool)
-    
     # ADX trend strength
     adx_strong = np.zeros(len(adx), dtype=bool)
     adx_weak = np.zeros(len(adx), dtype=bool)
@@ -112,49 +86,53 @@ def generate_signals(prices):
             adx_strong[i] = adx[i] > 25
             adx_weak[i] = adx[i] < 20
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
     adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    
+    # Volume confirmation on 12h
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(mid[i]) or 
             np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i])):
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: squeeze + breakout up + strong ADX + volume spike
-            if (squeeze[i] and 
-                breakout_up[i] and 
+            # Long conditions: price breaks above upper band + strong ADX + volume filter
+            if (close[i] > upper[i] and 
                 adx_strong_aligned[i] == 1.0 and 
-                volume_spike_aligned[i] == 1.0):
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: squeeze + breakout down + strong ADX + volume spike
-            elif (squeeze[i] and 
-                  breakout_down[i] and 
+            # Short conditions: price breaks below lower band + strong ADX + volume filter
+            elif (close[i] < lower[i] and 
                   adx_strong_aligned[i] == 1.0 and 
-                  volume_spike_aligned[i] == 1.0):
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to middle BB OR weak ADX
-            if (return_to_middle[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: price reverts to midpoint OR weak ADX
+            if (close[i] < mid[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to middle BB OR weak ADX
-            if (return_to_middle[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: price reverts to midpoint OR weak ADX
+            if (close[i] > mid[i] or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
