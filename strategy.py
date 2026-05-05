@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
 # Long when price breaks above Camarilla R3 AND close > EMA34(1d) AND volume > 2.0x 20-period average
 # Short when price breaks below Camarilla S3 AND close < EMA34(1d) AND volume > 2.0x 20-period average
 # Exit when price retracement to Camarilla pivot point OR EMA34(1d) trend flip
-# Uses 6h primary timeframe with 1d HTF for trend filter to reduce whipsaw in bear markets
+# Uses 12h primary timeframe with 1d HTF for trend filter to reduce whipsaw in bear markets
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from previous 6h bar
+    # Calculate Camarilla pivot levels from previous 12h bar
     if len(high) >= 2 and len(low) >= 2 and len(close) >= 2:
         # Use previous bar's OHLC for today's Camarilla levels
         phigh = pd.Series(high).shift(1).values
