@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R Extreme + 1w EMA50 Trend Filter + Volume Spike
-# Long when Williams %R < -80 (oversold) AND price > weekly EMA50 (uptrend) AND volume spike
-# Short when Williams %R > -20 (overbought) AND price < weekly EMA50 (downtrend) AND volume spike
-# Williams %R identifies overextended moves; weekly EMA50 filters for primary trend alignment
-# Volume spike (2.0x 20-bar MA) confirms institutional participation at extremes
-# Works in bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend)
-# Timeframe: 1d (primary timeframe as required)
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and maximize edge
+# Hypothesis: 6h Volume-Weighted MACD with 12h Regime Filter
+# Long when VW-MACD line > signal line AND 12h ADX > 20 (trending regime)
+# Short when VW-MACD line < signal line AND 12h ADX > 20 (trending regime)
+# VW-MACD uses volume-weighted price instead of close for institutional confirmation
+# Works in bull (strong uptrend + buying pressure) and bear (strong downtrend + selling pressure)
+# Timeframe: 6h (primary timeframe as required)
+# Target: 80-120 total trades over 4 years (20-30/year) to balance signal quality and fee drag
 
-name = "1d_WilliamsR_Extreme_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_VW_MACD_12hADX_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,73 +25,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data ONCE before loop for ADX regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 50:
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema_50_1w = np.full(len(close_1w), np.nan)
+    # Calculate 12h ADX (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR
     
-    # Williams %R (14-period) on 1d
-    if len(high) >= 14 and len(low) >= 14 and len(close) >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-        # Handle division by zero (when high == low)
-        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    else:
-        williams_r = np.full(n, np.nan)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume confirmation on 1d (threshold: 2.0x)
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (2.0 * vol_ma_20)
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nansum(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    atr_12h = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_12h != 0, (dm_plus_smooth / atr_12h) * 100, 0)
+    di_minus = np.where(atr_12h != 0, (dm_minus_smooth / atr_12h) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0,
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_12h = wilders_smoothing(dx, 14)
+    
+    # Align 12h ADX to 6h timeframe
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate 6h VW-MACD
+    # Volume-weighted price: (high + low + close) * volume / (3 * volume) = (high + low + close) / 3
+    # Actually, standard VWAP is typical price * volume, but for MACD we use typical price
+    typical_price = (high + low + close) / 3.0
+    
+    # Fast EMA (12) and Slow EMA (26) of typical price
+    if len(typical_price) >= 26:
+        ema_fast = pd.Series(typical_price).ewm(span=12, adjust=False, min_periods=12).mean().values
+        ema_slow = pd.Series(typical_price).ewm(span=26, adjust=False, min_periods=26).mean().values
+        macd_line = ema_fast - ema_slow
+        signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+        macd_histogram = macd_line - signal_line
     else:
-        volume_spike = np.zeros(n, dtype=bool)
+        macd_line = np.full(n, np.nan)
+        signal_line = np.full(n, np.nan)
+        macd_histogram = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(macd_line[i]) or 
+            np.isnan(signal_line[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price > weekly EMA50 (uptrend) AND volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_spike[i]):
+            # Long: MACD line > signal line AND ADX > 20 (trending regime)
+            if (macd_line[i] > signal_line[i] and 
+                adx_12h_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price < weekly EMA50 (downtrend) AND volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_spike[i]):
+            # Short: MACD line < signal line AND ADX > 20 (trending regime)
+            elif (macd_line[i] < signal_line[i] and 
+                  adx_12h_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R > -50 (momentum fading) OR price < weekly EMA50 (trend break)
-            if williams_r[i] > -50 or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: MACD line <= signal line (momentum weakening)
+            if macd_line[i] <= signal_line[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R < -50 (momentum fading) OR price > weekly EMA50 (trend break)
-            if williams_r[i] < -50 or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: MACD line >= signal line (momentum weakening)
+            if macd_line[i] >= signal_line[i]:
                 signals[i] = 0.0
                 position = 0
             else:
