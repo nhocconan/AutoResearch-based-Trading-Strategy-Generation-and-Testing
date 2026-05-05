@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla R3/S3 Breakout with 1d EMA34 trend filter and volume confirmation (1.8x)
+# Hypothesis: 12h Camarilla R3/S3 Breakout with 1d EMA34 trend filter and volume confirmation (1.8x)
 # Long when price breaks above R3 AND price > 1d EMA34 AND volume > 1.8x 20-period average
 # Short when price breaks below S3 AND price < 1d EMA34 AND volume > 1.8x 20-period average
 # Exit when price reverts to Camarilla pivot point (PP)
-# Uses 6h timeframe with 1d HTF for robust trend filtering (target: 50-150 total over 4 years)
+# Uses 12h timeframe with 1d HTF for robust trend filtering (target: 50-150 total over 4 years)
 # Camarilla levels provide precise intraday structure from 1d candles
 # Volume confirmation reduces false breakouts
 # 1d EMA34 offers strong trend filter effective in both bull and bear markets
 # Discrete position sizing (0.25) minimizes fee churn while maintaining adequate exposure
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_1.8x"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_1.8x"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,13 +49,13 @@ def generate_signals(prices):
     # Calculate 1d EMA(34)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation on 6h (threshold: 1.8x for optimal frequency)
+    # Volume confirmation on 12h (threshold: 1.8x for optimal frequency)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (1.8 * vol_ma_20)
