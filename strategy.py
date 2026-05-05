@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Fractal breakout with 1w EMA34 trend filter and volume confirmation
-# Long when price breaks above latest bearish fractal AND price > 1w EMA34 (uptrend) AND volume > 1.5x 20-period average
-# Short when price breaks below latest bullish fractal AND price < 1w EMA34 (downtrend) AND volume > 1.5x 20-period average
-# Exit when price crosses 12h midpoint (average of recent high/low) OR EMA34 filter reverses
-# Williams Fractals identify key swing points; 1w EMA34 filters for major trend to avoid counter-trend whipsaws
-# Volume confirmation ensures breakout has institutional participation
-# Timeframe: 12h (primary timeframe as required)
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper(20) AND price > 1d EMA50 (uptrend) AND volume > 1.8x 20-period average
+# Short when price breaks below 4h Donchian lower(20) AND price < 1d EMA50 (downtrend) AND volume > 1.8x 20-period average
+# Exit when price crosses 4h Donchian midpoint OR EMA50 filter reverses
+# Uses Donchian channels for clear trend structure, 1d EMA50 for regime filter (avoid whipsaws in chop)
+# Volume spike confirms institutional participation
+# Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+# Timeframe: 4h (primary timeframe as required)
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 
-name = "12h_WilliamsFractal_Breakout_1wEMA34_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,59 +27,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Williams Fractals and midpoint
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # Get 4h data ONCE before loop for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Williams Fractals on 12h
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    bearish_fractal = np.full(len(high_12h), np.nan)
-    bullish_fractal = np.full(len(low_12h), np.nan)
+    # Calculate 4h Donchian channels (20-period)
+    # Upper = max(high, 20), Lower = min(low, 20), Mid = (Upper + Lower) / 2
+    high_rolling_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    upper_20 = high_rolling_max
+    lower_20 = low_rolling_min
+    midpoint_20 = (upper_20 + lower_20) / 2.0
     
-    for i in range(2, len(high_12h) - 2):
-        if (high_12h[i-2] < high_12h[i-1] and 
-            high_12h[i] < high_12h[i-1] and
-            high_12h[i-3] < high_12h[i-1] and
-            high_12h[i+1] < high_12h[i-1]):
-            bearish_fractal[i-1] = high_12h[i-1]
-        
-        if (low_12h[i-2] > low_12h[i-1] and 
-            low_12h[i] > low_12h[i-1] and
-            low_12h[i-3] > low_12h[i-1] and
-            low_12h[i+1] > low_12h[i-1]):
-            bullish_fractal[i-1] = low_12h[i-1]
-    
-    # Get 1w data ONCE before loop for EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data ONCE before loop for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA(34)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA(50)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align HTF indicators to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    midpoint_aligned = align_htf_to_ltf(prices, df_4h, midpoint_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h midpoint for exit (average of recent 12h high/low)
-    high_12h_series = pd.Series(high_12h)
-    low_12h_series = pd.Series(low_12h)
-    rolling_high = high_12h_series.rolling(window=10, min_periods=1).max().values
-    rolling_low = low_12h_series.rolling(window=10, min_periods=1).min().values
-    midpoint_12h = (rolling_high + rolling_low) / 2.0
-    midpoint_aligned = align_htf_to_ltf(prices, df_12h, midpoint_12h)
-    
-    # Volume confirmation on 12h (threshold: 1.5x)
+    # Volume confirmation on 4h (threshold: 1.8x)
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_spike = volume > (1.5 * vol_ma_20)
+        volume_spike = volume > (1.8 * vol_ma_20)
     else:
         volume_spike = np.zeros(n, dtype=bool)
     
@@ -87,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(midpoint_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(midpoint_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -96,28 +79,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above bearish fractal AND price > EMA34 (uptrend) AND volume spike
-            if (close[i] > bearish_fractal_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+            # Long: price breaks above upper(20) AND price > EMA50 (uptrend) AND volume spike
+            if (close[i] > upper_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below bullish fractal AND price < EMA34 (downtrend) AND volume spike
-            elif (close[i] < bullish_fractal_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
+            # Short: price breaks below lower(20) AND price < EMA50 (downtrend) AND volume spike
+            elif (close[i] < lower_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below midpoint OR price < EMA34 (trend weakening)
-            if close[i] < midpoint_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Exit long: price crosses below midpoint OR price < EMA50 (trend weakening)
+            if close[i] < midpoint_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above midpoint OR price > EMA34 (trend weakening)
-            if close[i] > midpoint_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Exit short: price crosses above midpoint OR price > EMA50 (trend weakening)
+            if close[i] > midpoint_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
