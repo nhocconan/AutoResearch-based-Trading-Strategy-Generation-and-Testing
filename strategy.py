@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper AND 1d EMA50 > previous 1d EMA50 (uptrend) AND volume > 1.5 * avg_volume(20) on 4h
-# Short when price breaks below 12h Donchian lower AND 1d EMA50 < previous 1d EMA50 (downtrend) AND volume > 1.5 * avg_volume(20) on 4h
-# Exit when price crosses back through the 12h Donchian midpoint (upper/lower average)
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Donchian channels from 12h provide robust structure that works in both bull and bear markets
-# 1d EMA50 filter ensures we trade with the higher timeframe trend, reducing whipsaw
-# Volume confirmation (1.5x) validates breakout strength without being too restrictive
+# Hypothesis: 1h strategy using 4h Supertrend for trend direction and 1h RSI(14) for entry timing
+# Long when 4h Supertrend is bullish AND 1h RSI(14) crosses above 30 (oversold bounce)
+# Short when 4h Supertrend is bearish AND 1h RSI(14) crosses below 70 (overbought rejection)
+# Exit when RSI crosses 50 in opposite direction or Supertrend flips
+# Uses discrete sizing 0.20 to minimize fee churn
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h
+# Supertrend on 4h provides robust trend filtering that works in both bull and bear markets
+# RSI(14) on 1h provides precise entry timing for mean reversion within the trend
+# Session filter (08-20 UTC) reduces noise during low-volume periods
 
-name = "4h_12hDonchian20_1dEMA50_VolumeConfirm"
-timeframe = "4h"
+name = "1h_4hSupertrend_1hRSI_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +25,61 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need at least 20 completed 12h bars for Donchian
+    # Get 4h data ONCE before loop for Supertrend calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:  # Need sufficient data for ATR
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Donchian(20) channels
-    # Upper = max(high, 20), Lower = min(low, 20)
-    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    midpoint_12h = (upper_12h + lower_12h) / 2.0
+    # Calculate ATR(10) for 4h Supertrend
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align 12h Donchian to 4h timeframe (wait for completed 12h bar)
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    midpoint_12h_aligned = align_htf_to_ltf(prices, df_12h, midpoint_12h)
+    # Calculate Supertrend components
+    hl2 = (high_4h + low_4h) / 2
+    upper_band = hl2 + (3.0 * atr_10)
+    lower_band = hl2 - (3.0 * atr_10)
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need at least 50 completed daily bars for EMA50
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
+    # Initialize Supertrend arrays
+    supertrend = np.zeros_like(close_4h)
+    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Supertrend
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_4h[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # Align 4h Supertrend to 1h timeframe (wait for completed 4h bar)
+    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
+    
+    # Calculate 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -69,39 +90,37 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
+            np.isnan(rsi[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 12h Donchian upper, 1d EMA50 rising (uptrend), volume confirmation, in session
-            if (close[i] > upper_12h_aligned[i] and 
-                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
-                volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: 4h Supertrend bullish AND 1h RSI crosses above 30 (oversold bounce)
+            if (direction_aligned[i] == 1 and 
+                rsi[i] > 30 and rsi[i-1] <= 30):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below 12h Donchian lower, 1d EMA50 falling (downtrend), volume confirmation, in session
-            elif (close[i] < lower_12h_aligned[i] and 
-                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
-                  volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: 4h Supertrend bearish AND 1h RSI crosses below 70 (overbought rejection)
+            elif (direction_aligned[i] == -1 and 
+                  rsi[i] < 70 and rsi[i-1] >= 70):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below 12h Donchian midpoint
-            if close[i] < midpoint_12h_aligned[i]:
+            # Exit long: RSI crosses below 50 OR Supertrend flips bearish
+            if (rsi[i] < 50 and rsi[i-1] >= 50) or direction_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price crosses back above 12h Donchian midpoint
-            if close[i] > midpoint_12h_aligned[i]:
+            # Exit short: RSI crosses above 50 OR Supertrend flips bullish
+            if (rsi[i] > 50 and rsi[i-1] <= 50) or direction_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
