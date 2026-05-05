@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h volume spike and 1d ATR volatility filter
-# Long when price breaks above 1h Camarilla R3 AND 4h volume > 2x 20-period average AND 1d ATR(14) > 0.5 * 20-period ATR mean
-# Short when price breaks below 1h Camarilla S3 AND same volatility and volume conditions
-# Exit when price crosses 1h Camarilla pivot point (mean reversion)
-# Uses 1h primary timeframe with 4h HTF for volume and 1d HTF for ATR-based volatility filter
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR volatility filter and volume confirmation
+# Long when price breaks above 12h Camarilla R3 level AND 12h ATR(14) > 0.5 * 20-period ATR mean AND volume > 1.5x 20-period average
+# Short when price breaks below 12h Camarilla S3 level AND same volatility and volume conditions
+# Exit when price crosses 12h Camarilla pivot point (mean reversion)
+# Uses 12h primary timeframe with 1d HTF for ATR-based volatility filter (adaptive to market conditions)
 # Volume confirmation ensures breakouts have conviction
-# Discrete sizing (0.20) to limit fee drag and manage drawdown
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Session filter: 08-20 UTC to reduce noise trades
+# Discrete sizing (0.25) to limit fee drag and manage drawdown
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "1h_Camarilla_R3S3_Breakout_4hVol_1dATR_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,25 +25,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data ONCE before loop for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h volume MA for confirmation
-    vol_4h = df_4h['volume'].values
-    if len(vol_4h) >= 20:
-        vol_ma_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-        vol_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-        volume_filter = vol_4h > (2.0 * vol_ma_20_4h)  # 4h volume > 2x 20-period average
-        volume_filter_aligned = align_htf_to_ltf(prices, df_4h, volume_filter.astype(float)) > 0.5
-    else:
-        volume_filter_aligned = np.zeros(n, dtype=bool)
     
     # Get 1d data ONCE before loop for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
@@ -78,7 +58,7 @@ def generate_signals(prices):
     
     atr_1d = wilder_smooth(tr, 14)
     
-    # Align ATR to 1h timeframe
+    # Align ATR to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate ATR mean for adaptive threshold
@@ -88,21 +68,33 @@ def generate_signals(prices):
     else:
         vol_filter = np.zeros(n, dtype=bool)
     
-    # Get 1h data ONCE before loop for Camarilla levels
-    camarilla_r3 = close + (1.1 * (high - low) / 2)
-    camarilla_s3 = close - (1.1 * (high - low) / 2)
-    camarilla_pivot = (high + low + close) / 3  # Standard pivot point
+    # Get 1d data ONCE before loop for Camarilla levels (same df_1d)
+    camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
+    camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3  # Standard pivot point
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+    else:
+        volume_filter = np.zeros(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any value is NaN or outside session
+        # Skip if any value is NaN
         if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or 
-            np.isnan(camarilla_pivot[i]) or 
-            not session_filter[i]):
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -110,30 +102,30 @@ def generate_signals(prices):
         
         if position == 0:
             # Long conditions: price breaks above Camarilla R3 AND volatility filter AND volume spike
-            if (close[i] > camarilla_r3[i] and 
+            if (close[i] > camarilla_r3_aligned[i] and 
                 vol_filter[i] and 
-                volume_filter_aligned[i]):
-                signals[i] = 0.20
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
             # Short conditions: price breaks below Camarilla S3 AND volatility filter AND volume spike
-            elif (close[i] < camarilla_s3[i] and 
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   vol_filter[i] and 
-                  volume_filter_aligned[i]):
-                signals[i] = -0.20
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price crosses below Camarilla pivot (mean reversion)
-            if close[i] < camarilla_pivot[i]:
+            if close[i] < camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: price crosses above Camarilla pivot (mean reversion)
-            if close[i] > camarilla_pivot[i]:
+            if close[i] > camarilla_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
