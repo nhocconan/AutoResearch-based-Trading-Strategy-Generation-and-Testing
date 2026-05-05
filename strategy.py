@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 12h Camarilla R3 level AND 1d close > 1d EMA34 AND volume > 2.0x 20-period average
-# Short when price breaks below 12h Camarilla S3 level AND 1d close < 1d EMA34 AND volume > 2.0x 20-period average
-# Exit when price crosses 1d EMA34 (trend reversal) OR price retouches the 12h Camarilla pivot point (mean reversion)
-# Uses 12h primary timeframe with 1d HTF for all indicators (Camarilla levels, EMA34)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 4h Camarilla R3 level AND 1d close > 1d EMA34 AND volume > 2.0x 20-period average
+# Short when price breaks below 4h Camarilla S3 level AND 1d close < 1d EMA34 AND volume > 2.0x 20-period average
+# Exit when price crosses 1d EMA34 (trend reversal) OR price retouches the 4h Camarilla pivot point (mean reversion)
+# Uses 4h primary timeframe with 1d HTF for all indicators (Camarilla levels, EMA34)
 # Camarilla R3/S3 levels provide stronger breakout confirmation than R1/S1, reducing false signals
 # Volume confirmation filters low-momentum breakouts
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,23 +36,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Camarilla levels (based on previous bar's OHLC)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
+    # Get 4h data ONCE before loop for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 2:
         # Use previous bar's OHLC to calculate current bar's Camarilla levels (no look-ahead)
-        prev_high = df_12h['high'].shift(1).values
-        prev_low = df_12h['low'].shift(1).values
-        prev_close = df_12h['close'].shift(1).values
+        prev_high = df_4h['high'].shift(1).values
+        prev_low = df_4h['low'].shift(1).values
+        prev_close = df_4h['close'].shift(1).values
         
         # Calculate Camarilla levels for each bar based on previous bar
         camarilla_pp = (prev_high + prev_low + prev_close) / 3
         camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
         camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
         
-        # Align to 12h timeframe
-        camarilla_pp_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pp)
-        camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-        camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+        # Align to 4h timeframe
+        camarilla_pp_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pp)
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     else:
         camarilla_pp_aligned = np.full(n, np.nan)
         camarilla_r3_aligned = np.full(n, np.nan)
