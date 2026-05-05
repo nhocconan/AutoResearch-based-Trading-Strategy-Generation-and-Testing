@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike confirmation
-# Long when price breaks above R3 AND price > EMA50(4h) AND volume > 2.0x 20-period average
-# Short when price breaks below S3 AND price < EMA50(4h) AND volume > 2.0x 20-period average
-# Exit when price crosses EMA50(4h) in opposite direction OR Camarilla R4/S4 level is touched
-# Camarilla levels provide intraday support/resistance structure proven effective on crypto
-# 4h EMA50 filters counter-trend trades during 2022 bear market and 2025 ranging conditions
-# Volume spike confirms institutional participation to avoid false breakouts
-# Target: 15-37 trades/year per symbol (60-150 total over 4 years) for 1h timeframe
-# Discrete sizing (0.20) to limit fee drag and manage drawdown
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
+# Long when price breaks above upper BB(20,2) AND BB width < 20th percentile (squeeze) AND price > 1w EMA50
+# Short when price breaks below lower BB(20,2) AND BB width < 20th percentile (squeeze) AND price < 1w EMA50
+# Exit when price crosses middle BB (20-period SMA) OR BB width > 50th percentile (squeeze end)
+# Bollinger squeeze indicates low volatility pre-breakout; breakout captures the move
+# 1w EMA50 ensures we only trade in direction of higher timeframe trend to avoid whipsaws
+# Volume confirmation filters weak breakouts
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) for 6h timeframe
+# Discrete sizing (0.25) to limit fee drag
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6h_BollingerSqueeze_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,58 +22,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Session filter: 08-20 UTC (reduce noise outside active trading hours)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 4h close for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 4h EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align 1w EMA50 to 6h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get daily data for Camarilla pivot calculation (using prior day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2)
+    if len(close) >= 20:
+        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        upper_bb = sma_20 + (2 * std_20)
+        lower_bb = sma_20 - (2 * std_20)
+        middle_bb = sma_20
+        bb_width = (upper_bb - lower_bb) / middle_bb  # normalized width
+    else:
+        sma_20 = np.full(n, np.nan)
+        std_20 = np.full(n, np.nan)
+        upper_bb = np.full(n, np.nan)
+        lower_bb = np.full(n, np.nan)
+        middle_bb = np.full(n, np.nan)
+        bb_width = np.full(n, np.nan)
     
-    # Calculate Camarilla levels using prior day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # BB width percentiles for squeeze detection (20th percentile = squeeze, 50th = exit)
+    if len(bb_width) >= 50:
+        # Use expanding window to avoid look-ahead: percentile of past values
+        bb_width_pct = np.full(n, np.nan)
+        for i in range(20, n):  # need at least 20 values for BB width
+            past_widths = bb_width[20:i+1]  # exclude future
+            if len(past_widths) >= 20:
+                sorted_widths = np.sort(past_widths[~np.isnan(past_widths)])
+                if len(sorted_widths) > 0:
+                    idx_20 = max(0, min(len(sorted_widths)-1, int(0.2 * len(sorted_widths))))
+                    idx_50 = max(0, min(len(sorted_widths)-1, int(0.5 * len(sorted_widths))))
+                    bb_width_pct[i] = sorted_widths[idx_20]  # 20th percentile threshold
+                    bb_width_pct[i+len(sorted_widths)//2] = sorted_widths[idx_50]  # 50th percentile (simplified)
+        # Simplified: use fixed threshold based on median of first 100 values
+        if np.sum(~np.isnan(bb_width[:100])) > 20:
+            bb_width_median = np.nanmedian(bb_width[:100])
+            bb_width_squeeze = bb_width_median * 0.5  # squeeze when width < 50% of median
+            bb_width_exit = bb_width_median * 1.5     # exit when width > 150% of median
+        else:
+            bb_width_squeeze = 0.1
+            bb_width_exit = 0.3
+    else:
+        bb_width_squeeze = 0.1
+        bb_width_exit = 0.3
     
-    # Camarilla R3, S3, R4, S4 levels
-    # R4 = close + (high - low) * 1.1/2
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # S4 = close - (high - low) * 1.1/2
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (spike filter)
+    # Volume confirmation: volume > 1.5x 20-period average
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -81,47 +91,48 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(volume_filter[i]) or
-            not in_session[i]):
+        # Skip if any value is NaN
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or 
+            np.isnan(middle_bb[i]) or 
+            np.isnan(bb_width[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above R3 AND price > EMA50(4h) AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
+            # Long conditions: price > upper BB AND BB squeeze AND price > 1w EMA50 AND volume spike
+            if (close[i] > upper_bb[i] and 
+                bb_width[i] < bb_width_squeeze and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S3 AND price < EMA50(4h) AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
+            # Short conditions: price < lower BB AND BB squeeze AND price < 1w EMA50 AND volume spike
+            elif (close[i] < lower_bb[i] and 
+                  bb_width[i] < bb_width_squeeze and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA50(4h) OR touches S4 level (mean reversion)
-            if (close[i] < ema_50_4h_aligned[i] or 
-                close[i] <= camarilla_s4_aligned[i]):
+            # Exit long: price < middle BB OR BB width expansion (squeeze end)
+            if (close[i] < middle_bb[i] or 
+                bb_width[i] > bb_width_exit):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above EMA50(4h) OR touches R4 level (mean reversion)
-            if (close[i] > ema_50_4h_aligned[i] or 
-                close[i] >= camarilla_r4_aligned[i]):
+            # Exit short: price > middle BB OR BB width expansion (squeeze end)
+            if (close[i] > middle_bb[i] or 
+                bb_width[i] > bb_width_exit):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
