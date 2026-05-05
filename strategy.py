@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) + 1d EMA34 trend filter + volume confirmation
-# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA34 AND volume > 1.5x 20-period average
-# Short when Bull Power < 0 AND Bear Power > 0 AND close < 1d EMA34 AND volume > 1.5x 20-period average
-# Exit when Bull Power and Bear Power have same sign (both positive or both negative) OR close crosses 1d EMA34
-# Uses 6h primary timeframe with 1d HTF for trend filter to capture multi-day moves with controlled frequency
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high AND close > 1d EMA50 AND volume > 2.0x 20-period average
+# Short when price breaks below Donchian(20) low AND close < 1d EMA50 AND volume > 2.0x 20-period average
+# Exit when price crosses Donchian(20) midpoint OR close crosses 1d EMA50 (trend flip)
+# Uses 4h primary timeframe with 1d HTF for trend filter to capture multi-day moves with controlled frequency
 # Discrete sizing (0.25) to limit fee drag and manage drawdown in both bull and bear markets
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-# Elder Ray measures bull/bear strength relative to EMA; EMA34 filters for higher-timeframe trend; volume confirms participation
+# Target: 75-150 total trades over 4 years (19-37/year) to avoid fee drag
+# Donchian channels provide clear breakout levels; EMA50 filters for higher-timeframe trend; volume confirms participation
 
-name = "6h_Elder_Ray_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,24 +26,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA50 on 1d close for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Elder Ray components on 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Donchian channels on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -53,36 +52,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Elder Ray conditions
-        bullish_pressure = bull_power[i] > 0 and bear_power[i] < 0  # Bull Power > 0 AND Bear Power < 0
-        bearish_pressure = bull_power[i] < 0 and bear_power[i] > 0  # Bull Power < 0 AND Bear Power > 0
-        
         if position == 0:
-            # Long conditions: Bullish pressure AND close > 1d EMA34 AND volume spike
-            if bullish_pressure and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            # Long conditions: break above Donchian high AND close > 1d EMA50 AND volume spike
+            if close[i] > donchian_high[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bearish pressure AND close < 1d EMA34 AND volume spike
-            elif bearish_pressure and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            # Short conditions: break below Donchian low AND close < 1d EMA50 AND volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bullish and Bear Power same sign OR close < 1d EMA34 (trend flip)
-            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0) or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses Donchian midpoint OR close < 1d EMA50 (trend flip)
+            if close[i] < donchian_mid[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bullish and Bear Power same sign OR close > 1d EMA34 (trend flip)
-            if (bull_power[i] > 0 and bear_power[i] > 0) or (bull_power[i] < 0 and bear_power[i] < 0) or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses Donchian midpoint OR close > 1d EMA50 (trend flip)
+            if close[i] > donchian_mid[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
