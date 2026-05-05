@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR volatility filter and volume confirmation
-# Long when price breaks above 12h Camarilla R3 level AND 12h ATR(14) > 0.5 * 20-period ATR mean AND volume > 1.5x 20-period average
-# Short when price breaks below 12h Camarilla S3 level AND same volatility and volume conditions
-# Exit when price crosses 12h Camarilla pivot point (mean reversion)
-# Uses 12h primary timeframe with 1d HTF for ATR-based volatility filter (adaptive to market conditions)
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ATR volatility filter and volume confirmation
+# Long when price breaks above 4h Camarilla R3 level AND 1d ATR(14) > 0.5 * 20-period ATR mean AND volume > 1.5x 20-period average
+# Short when price breaks below 4h Camarilla S3 level AND same volatility and volume conditions
+# Exit when price crosses 4h Camarilla pivot point (mean reversion)
+# Uses 4h primary timeframe with 1d HTF for ATR-based volatility filter (adaptive to market conditions)
 # Volume confirmation ensures breakouts have conviction
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# BTC/ETH focus: Camarilla levels from daily timeframe provide structural support/resistance that works across regimes
 
-name = "12h_Camarilla_R3S3_Breakout_1dATR_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dATR_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,24 +27,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR volatility filter
+    # Get 1d data ONCE before loop for ATR volatility filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])
     
-    # ATR calculation using Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -58,7 +57,7 @@ def generate_signals(prices):
     
     atr_1d = wilder_smooth(tr, 14)
     
-    # Align ATR to 12h timeframe
+    # Align ATR to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate ATR mean for adaptive threshold
@@ -68,12 +67,12 @@ def generate_signals(prices):
     else:
         vol_filter = np.zeros(n, dtype=bool)
     
-    # Get 1d data ONCE before loop for Camarilla levels (same df_1d)
+    # Calculate 1d Camarilla levels
     camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
     camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
     camarilla_pivot = (high_1d + low_1d + close_1d) / 3  # Standard pivot point
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
