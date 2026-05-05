@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-# Long when: price breaks above Donchian upper band (20) AND 1w HMA(21) rising AND volume > 1.5x 20-period MA
-# Short when: price breaks below Donchian lower band (20) AND 1w HMA(21) falling AND volume > 1.5x 20-period MA
-# Exit when: price retouches Donchian middle band (10-period SMA of high/low) OR volume drops below average
-# Uses Donchian for structure, 1w HMA for higher-timeframe trend filter, volume for conviction
-# Timeframe: 1d, HTF: 1w. Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# Hypothesis: 6h ADX + 1d Williams %R + volume confirmation
+# Long when: ADX > 25 (trending), Williams %R < -80 (oversold on 1d), volume > 1.5x 24-period MA
+# Short when: ADX > 25 (trending), Williams %R > -20 (overbought on 1d), volume > 1.5x 24-period MA
+# Exit when: ADX < 20 (no trend) or Williams %R crosses midline (-50) in opposite direction
+# Uses ADX for trend strength, Williams %R for overextension, volume for conviction
+# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "1d_Donchian20_Breakout_1wHMA21_VolumeConfirm"
-timeframe = "1d"
+name = "6h_ADX_1dWilliamsR_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,195 +24,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels on 1d (20-period)
-    if len(high) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-        donchian_mid = (donchian_high + donchian_low) / 2.0
-    else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
-        donchian_mid = np.full(n, np.nan)
-    
-    # Calculate volume confirmation on 1d using 20-period MA
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+    # Calculate volume confirmation on 6h using 24-period MA (equivalent to 1d lookback)
+    if len(volume) >= 24:
+        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+        volume_filter = volume > (1.5 * vol_ma_24)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for HMA calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data ONCE before loop for Williams %R calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Hull Moving Average (HMA) on 1w
-    # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-    if len(close_1w) >= 21:
-        n = 21
-        half_n = n // 2
-        sqrt_n = int(np.sqrt(n))
+    # Calculate 14-period Williams %R on 1d timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    if len(close_1d) >= 14:
+        highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+        williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+        # Handle division by zero when highest_high == lowest_low
+        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    else:
+        williams_r = np.full(len(close_1d), np.nan)
+    
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate ADX on 6h timeframe (standard 14-period)
+    if len(close) >= 14:
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr1[0] = 0  # First period has no previous close
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
         
-        # WMA function
-        def wma(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, mode='valid') / weights.sum()
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
         
-        # Calculate WMAs
-        wma_full = np.full(len(close_1w), np.nan)
-        wma_half = np.full(len(close_1w), np.nan)
-        
-        for i in range(n - 1, len(close_1w)):
-            wma_full[i] = wma(close_1w[i - n + 1:i + 1], n)[-1]
-        for i in range(half_n - 1, len(close_1w)):
-            wma_half[i] = wma(close_1w[i - half_n + 1:i + 1], half_n)[-1]
-        
-        # HMA = WMA(2*WMA(half) - WMA(full), sqrt_n)
-        hma_1w = np.full(len(close_1w), np.nan)
-        for i in range(n - 1, len(close_1w)):
-            if not np.isnan(wma_full[i]) and not np.isnan(wma_half[i]):
-                diff = 2 * wma_half[i] - wma_full[i]
-                hma_1w[i] = wma(close_1w[i - n + 1:i + 1], n)[-1] if i >= n - 1 else np.nan
-                # Simplified: use the actual HMA formula correctly
-                if i >= n - 1:
-                    # Recalculate properly for HMA
-                    wma_diff = np.full(len(close_1w), np.nan)
-                    for j in range(n - 1, len(close_1w)):
-                        wma_diff[j] = wma(close_1w[j - n + 1:j + 1], n)[-1] if j >= n - 1 else np.nan
-                    # Actually, let's compute HMA step by step correctly
-                    wma_half_vals = np.full(len(close_1w), np.nan)
-                    wma_full_vals = np.full(len(close_1w), np.nan)
-                    for j in range(half_n - 1, len(close_1w)):
-                        wma_half_vals[j] = wma(close_1w[j - half_n + 1:j + 1], half_n)[-1]
-                    for j in range(n - 1, len(close_1w)):
-                        wma_full_vals[j] = wma(close_1w[j - n + 1:j + 1], n)[-1]
-                    # Now HMA
-                    if i >= n - 1:
-                        hma_input = 2 * wma_half_vals[i] - wma_full_vals[i]
-                        # We need WMA of hma_input over sqrt_n period
-                        # But since we don't have history of hma_input, approximate:
-                        hma_1w[i] = (2 * wma_half_vals[i] - wma_full_vals[i])  # Simplified proxy
-        
-        # Much simpler approach: use HMA approximation via WMA
-        # HMA(21) ≈ WMA(2*WMA(10.5) - WMA(21), 4) since sqrt(21)≈4.58→4
-        half_n = 10
-        wma_21 = np.full(len(close_1w), np.nan)
-        wma_10 = np.full(len(close_1w), np.nan)
-        for i in range(20, len(close_1w)):
-            wma_21[i] = wma(close_1w[i-20:i+1], 21)[-1]
-        for i in range(9, len(close_1w)):
-            wma_10[i] = wma(close_1w[i-9:i+1], 10)[-1]
-        
-        hma_1w = np.full(len(close_1w), np.nan)
-        for i in range(20, len(close_1w)):
-            if not np.isnan(wma_21[i]) and not np.isnan(wma_10[i]):
-                hma_1w[i] = 2 * wma_10[i] - wma_21[i]  # Simplified HMA
-                # Apply WMA of this over 4 periods
-                if i >= 23:  # 20 + 3 for 4-period WMA
-                    hma_4 = np.full(len(close_1w), np.nan)
-                    for j in range(3, len(close_1w)):
-                        hma_4[j] = wma(hma_1w[j-3:j+1], 4)[-1] if j >= 3 else np.nan
-                    hma_1w = hma_4
-        
-        # Even simpler: just use the smoothed median
-        # Let's use a proper HMA implementation
-        def calculate_hma(values, window):
-            half = window // 2
-            sqrt = int(np.sqrt(window))
-            
-            wma_half = np.full(len(values), np.nan)
-            wma_full = np.full(len(values), np.nan)
-            
-            for i in range(half - 1, len(values)):
-                wma_half[i] = np.nansum(values[i - half + 1:i + 1] * np.arange(1, half + 1)) / (half * (half + 1) / 2)
-            for i in range(window - 1, len(values)):
-                wma_full[i] = np.nansum(values[i - window + 1:i + 1] * np.arange(1, window + 1)) / (window * (window + 1) / 2)
-            
-            hma = np.full(len(values), np.nan)
-            for i in range(window - 1, len(values)):
-                if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-                    diff = 2 * wma_half[i] - wma_full[i]
-                    if i >= half - 1:  # enough for WMA of diff
-                        wma_diff = np.nansum(diff * np.ones(half)) / half if half > 0 else diff  # Simplified
-                        hma[i] = wma_diff  # Further simplified
-            
-            # Apply WMA of the diff over sqrt period
-            hma_final = np.full(len(values), np.nan)
-            for i in range(window - 1, len(values)):
-                if not np.isnan(hma[i]):
-                    hma_final[i] = hma[i]  # Placeholder - using simplified HMA
-            
-            return hma_final
-        
-        # Use a working HMA approximation
-        def wma_simple(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
-            result = np.full(len(values), np.nan)
-            weights = np.arange(1, window + 1)
-            for i in range(window - 1, len(values)):
-                result[i] = np.sum(values[i - window + 1:i + 1] * weights) / np.sum(weights)
+        # Smoothed TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+        def wilders_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                # First value is simple average
+                result[period-1] = np.nansum(data[:period]) / period
+                # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current_data
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]):
+                        result[i] = result[i-1] - (result[i-1]/period) + data[i]
             return result
         
-        wma_21 = wma_simple(close_1w, 21)
-        wma_10 = wma_simple(close_1w, 10)
-        hma_raw = 2 * wma_10 - wma_21
-        hma_1w = wma_simple(hma_raw, 4)  # sqrt(21)≈4.58→4
+        atr = wilders_smoothing(tr, 14)
+        plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+        minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        # Handle division by zero
+        dx = np.where((plus_di + minus_di) == 0, 0, dx)
+        adx = wilders_smoothing(dx, 14)
     else:
-        hma_1w = np.full(len(close_1w), np.nan)
-    
-    # Align 1w HMA to 1d timeframe
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # Calculate HMA slope for trend (rising/falling)
-    hma_1w_slope = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(hma_1w_aligned[i]) and not np.isnan(hma_1w_aligned[i-1]):
-            hma_1w_slope[i] = hma_1w_aligned[i] - hma_1w_aligned[i-1]
+        adx = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(hma_1w_slope[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(adx[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Donchian upper AND HMA rising AND volume filter
-            if (close[i] > donchian_high[i] and 
-                hma_1w_slope[i] > 0 and 
+            # Long conditions: ADX > 25 (trending), Williams %R < -80 (oversold), volume filter
+            if (adx[i] > 25 and 
+                williams_r_aligned[i] < -80 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Donchian lower AND HMA falling AND volume filter
-            elif (close[i] < donchian_low[i] and 
-                  hma_1w_slope[i] < 0 and 
+            # Short conditions: ADX > 25 (trending), Williams %R > -20 (overbought), volume filter
+            elif (adx[i] > 25 and 
+                  williams_r_aligned[i] > -20 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian mid OR HMA slope turns negative OR volume drops
-            if (close[i] < donchian_mid[i] or 
-                hma_1w_slope[i] <= 0 or 
-                not volume_filter[i]):
+            # Exit long: ADX < 20 (no trend) or Williams %R crosses above -50
+            if (adx[i] < 20 or williams_r_aligned[i] > -50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Donchian mid OR HMA slope turns positive OR volume drops
-            if (close[i] > donchian_mid[i] or 
-                hma_1w_slope[i] >= 0 or 
-                not volume_filter[i]):
+            # Exit short: ADX < 20 (no trend) or Williams %R crosses below -50
+            if (adx[i] < 20 or williams_r_aligned[i] < -50):
                 signals[i] = 0.0
                 position = 0
             else:
