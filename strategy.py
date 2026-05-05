@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA34 Trend + Volume Spike
-# Long when Williams %R(14) < -80 (oversold) AND close > 1d EMA34 (uptrend) AND volume spike
-# Short when Williams %R(14) > -20 (overbought) AND close < 1d EMA34 (downtrend) AND volume spike
-# Williams %R captures mean reversion extremes, EMA34 filters trend direction to avoid counter-trend trades,
-# volume spike ensures conviction. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# Works in bull (trend + oversold bounces) and bear (overbought selloffs in downtrend).
+# Hypothesis: 4h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike
+# Long when price breaks above R3 (1d) AND close > 1d EMA34 (uptrend) AND volume spike
+# Short when price breaks below S3 (1d) AND close < 1d EMA34 (downtrend) AND volume spike
+# Uses Camarilla levels (R3/S3 = strong support/resistance) for high-probability breaks,
+# EMA34 for trend filter (avoid counter-trend trades), volume spike for conviction.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume confirmation).
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA34
+    # Get 1d data ONCE before loop for Camarilla and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d EMA34
@@ -34,17 +35,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams %R on 6h timeframe
-    if len(high) >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        # Avoid division by zero
-        rr = highest_high - lowest_low
-        williams_r = np.where(rr != 0, -100 * (highest_high - close) / rr, -50.0)
-    else:
-        williams_r = np.full(n, -50.0)
+    # Calculate Camarilla levels from previous 1d bar (HLC of completed daily bar)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_shifted = np.roll(close_1d, 1)
+    high_1d_shifted = np.roll(high_1d, 1)
+    low_1d_shifted = np.roll(low_1d, 1)
+    # First value will be invalid due to roll, but we'll handle with min_periods logic
     
-    # Volume confirmation on 6h
+    # Calculate pivot point (PP) = (H+L+C)/3
+    pp = (high_1d_shifted + low_1d_shifted + close_1d_shifted) / 3.0
+    # Calculate range
+    range_1d = high_1d_shifted - low_1d_shifted
+    # Camarilla levels (R3/S3 = strong levels)
+    r3 = pp + (range_1d * 1.1 / 4.0)  # R3 = PP + 1.1*range/4
+    s3 = pp - (range_1d * 1.1 / 4.0)  # S3 = PP - 1.1*range/4
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_spike = volume > (2.0 * vol_ma_20)  # Higher threshold for fewer trades
@@ -55,37 +66,37 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any value is NaN (insufficient data for indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_spike[i])):
+        # Skip if any value is NaN (due to roll or insufficient data)
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND uptrend (close > EMA34) AND volume spike
-            if (williams_r[i] < -80.0 and 
+            # Long: price breaks above R3 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND downtrend (close < EMA34) AND volume spike
-            elif (williams_r[i] > -20.0 and 
+            # Short: price breaks below S3 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (momentum loss) OR close < EMA34
-            if williams_r[i] > -50.0 or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below R3 OR closes below EMA34
+            if close[i] < r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (momentum loss) OR close > EMA34
-            if williams_r[i] < -50.0 or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above S3 OR closes above EMA34
+            if close[i] > s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
