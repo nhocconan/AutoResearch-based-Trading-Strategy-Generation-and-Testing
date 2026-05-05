@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1w ADX trend filter + volume confirmation
-# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via aligned SMAs
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND 1w ADX > 25 AND volume > 1.5x 20-period MA
-# Short when: Jaw > Teeth > Lips (bearish alignment) AND 1w ADX > 25 AND volume > 1.5x 20-period MA
-# Exit when: Alligator lines cross (trend weakening) OR ADX drops below 20
-# Uses Alligator for trend structure, ADX for trend strength, volume for conviction
-# Timeframe: 12h, HTF: 1w. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
+# Bollinger Band squeeze (low volatility) precedes breakouts in both bull and bear markets
+# Long when: BB width < 20th percentile AND close > upper band AND 1d close > 1d EMA50 AND volume > 2x 20-period MA
+# Short when: BB width < 20th percentile AND close < lower band AND 1d close < 1d EMA50 AND volume > 2x 20-period MA
+# Exit when: BB width > 50th percentile (squeeze ends) OR opposite band touch
+# Uses BB squeeze for low volatility breakouts, 1d EMA for trend filter, volume for conviction
+# Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "12h_WilliamsAlligator_1wADX_VolumeConfirm"
-timeframe = "12h"
+name = "4h_BBSqueeze_1dEMA50_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,89 +20,63 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator on 12h
-    if len(high) >= 13:
-        jaw = pd.Series(high).rolling(window=13, min_periods=13).mean().values  # Jaw (13)
-        teeth = pd.Series(high).rolling(window=8, min_periods=8).mean().values   # Teeth (8)
-        lips = pd.Series(high).rolling(window=5, min_periods=5).mean().values    # Lips (5)
+    # Bollinger Bands (20, 2) on 4h
+    if len(close) >= 20:
+        ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        upper_band = ma_20 + (2 * std_20)
+        lower_band = ma_20 - (2 * std_20)
+        bb_width = (upper_band - lower_band) / ma_20  # normalized width
+        
+        # Percentile rank of BB width (20-period lookback)
+        bb_width_percentile = np.full(n, np.nan)
+        for i in range(20, n):
+            window = bb_width[max(0, i-19):i+1]
+            if not np.all(np.isnan(window)):
+                bb_width_percentile[i] = (np.sum(~np.isnan(window) & (window <= bb_width[i])) / np.sum(~np.isnan(window))) * 100
+        
+        squeeze_condition = bb_width_percentile < 20  # BB width in lower 20th percentile
+        long_breakout = close > upper_band
+        short_breakout = close < lower_band
     else:
-        jaw = np.full(n, np.nan)
-        teeth = np.full(n, np.nan)
-        lips = np.full(n, np.nan)
+        ma_20 = np.full(n, np.nan)
+        std_20 = np.full(n, np.nan)
+        upper_band = np.full(n, np.nan)
+        lower_band = np.full(n, np.nan)
+        bb_width = np.full(n, np.nan)
+        bb_width_percentile = np.full(n, np.nan)
+        squeeze_condition = np.zeros(n, dtype=bool)
+        long_breakout = np.zeros(n, dtype=bool)
+        short_breakout = np.zeros(n, dtype=bool)
     
-    # Get 1w data ONCE before loop for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # need sufficient data for ADX
+    # Get 1d data ONCE before loop for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1w
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    if len(high_1w) >= 14:
-        # True Range
-        tr1 = np.abs(high_1w[1:] - low_1w[1:])
-        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-        tr = np.maximum(np.maximum(tr1, tr2), tr3)
-        tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
-        
-        # Directional Movement
-        up_move = high_1w[1:] - high_1w[:-1]
-        down_move = low_1w[:-1] - low_1w[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
-        
-        # Smoothed TR, +DM, -DM
-        tr_period = 14
-        atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
-        plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
-        minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    close_1d = df_1d['close'].values
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+        trend_up = close_1d > ema_50_1d
+        trend_down = close_1d < ema_50_1d
     else:
-        adx = np.full(len(high_1w), np.nan)
+        ema_50_1d = np.full(len(close_1d), np.nan)
+        trend_up = np.zeros(len(close_1d), dtype=bool)
+        trend_down = np.zeros(len(close_1d), dtype=bool)
     
-    # ADX trend strength
-    adx_strong = np.zeros(len(adx), dtype=bool)
-    adx_weak = np.zeros(len(adx), dtype=bool)
-    for i in range(len(adx)):
-        if not np.isnan(adx[i]):
-            adx_strong[i] = adx[i] > 25
-            adx_weak[i] = adx[i] < 20
+    # Align 1d trend to 4h timeframe
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down.astype(float))
     
-    # Align 1w ADX to 12h timeframe
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1w, adx_strong.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1w, adx_weak.astype(float))
-    
-    # Williams Alligator alignment signals
-    lips_above_teeth = lips > teeth
-    teeth_above_jaw = teeth > jaw
-    jaw_above_teeth = jaw > teeth
-    teeth_above_lips = teeth > lips
-    
-    bullish_alignment = lips_above_teeth & teeth_above_jaw
-    bearish_alignment = jaw_above_teeth & teeth_above_lips
-    
-    # Volume confirmation on 12h
+    # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -111,8 +85,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx_strong_aligned[i]) or np.isnan(adx_weak_aligned[i]) or 
+        if (np.isnan(ma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -120,28 +94,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: bullish Alligator alignment + strong ADX + volume filter
-            if (bullish_alignment[i] and 
-                adx_strong_aligned[i] == 1.0 and 
+            # Long conditions: squeeze + long breakout + uptrend + volume
+            if (squeeze_condition[i] and 
+                long_breakout[i] and 
+                trend_up_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish Alligator alignment + strong ADX + volume filter
-            elif (bearish_alignment[i] and 
-                  adx_strong_aligned[i] == 1.0 and 
+            # Short conditions: squeeze + short breakout + downtrend + volume
+            elif (squeeze_condition[i] and 
+                  short_breakout[i] and 
+                  trend_down_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish Alligator alignment OR weak ADX
-            if (bearish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: squeeze ends OR short breakout
+            if (bb_width_percentile[i] > 50 or short_breakout[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish Alligator alignment OR weak ADX
-            if (bullish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: squeeze ends OR long breakout
+            if (bb_width_percentile[i] > 50 or long_breakout[i]):
                 signals[i] = 0.0
                 position = 0
             else:
