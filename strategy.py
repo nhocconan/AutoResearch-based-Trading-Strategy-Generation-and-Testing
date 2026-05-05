@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator breakout with 1w EMA50 trend filter and volume spike confirmation
-# Long when price breaks above Alligator Jaw (13-period SMMA) AND price > EMA50(1w) AND volume > 2.0x 20-period average
-# Short when price breaks below Alligator Jaw AND price < EMA50(1w) AND volume > 2.0x 20-period average
-# Exit when price crosses back below/above Alligator Jaw OR trend flips (price crosses EMA50(1w))
-# Williams Alligator uses smoothed moving averages (SMMA) with specific periods (13,8,5) and shifts (8,5,3)
-# The Jaw (13-period, shifted 8) acts as a dynamic support/resistance level
-# 1w EMA50 provides higher timeframe trend filter to avoid counter-trend whipsaws
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA34 trend filter and volume spike confirmation
+# Long when Bull Power > 0 AND price > EMA34(1d) AND volume > 2.0x 20-period average
+# Short when Bear Power < 0 AND price < EMA34(1d) AND volume > 2.0x 20-period average
+# Exit when Bull/Bear Power crosses zero OR price crosses EMA34(1d) in opposite direction
+# Elder Ray measures bull/bear strength relative to EMA13: Bull=High-EMA13, Bear=Low-EMA13
+# 1d EMA34 provides higher timeframe trend filter to avoid counter-trend whipsaws
 # Volume spike confirms institutional participation
-# Target: 7-25 trades/year per symbol (30-100 total over 4 years) for 1d timeframe
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) for 6h timeframe
 # Discrete sizing (0.25) to limit fee drag
 
-name = "1d_WilliamsAlligator_JawBreak_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +27,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA34 to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 1d data
-    # SMMA (Smoothed Moving Average) calculation
-    def smma(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan, dtype=float)
-        result = np.full_like(data, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (Prev_SMMA*(period-1) + Current_Price) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate EMA13 for Elder Ray (using close as proxy for typical price)
+    if len(close) >= 13:
+        ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    else:
+        ema_13 = np.full(n, np.nan)
     
-    # Alligator components: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = smma(close, 13)  # 13-period SMMA
-    jaw = np.roll(jaw, 8)   # Shifted by 8 bars
-    
-    teeth = smma(close, 8)   # 8-period SMMA
-    teeth = np.roll(teeth, 5) # Shifted by 5 bars
-    
-    lips = smma(close, 5)    # 5-period SMMA
-    lips = np.roll(lips, 3)   # Shifted by 3 bars
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Volume confirmation: volume > 2.0x 20-period average (spike filter)
     if len(volume) >= 20:
@@ -75,8 +61,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(jaw[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -84,30 +71,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Alligator Jaw AND price > EMA50(1w) AND volume spike
-            if (close[i] > jaw[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long conditions: Bull Power > 0 AND price > EMA34(1d) AND volume spike
+            if (bull_power[i] > 0 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Alligator Jaw AND price < EMA50(1w) AND volume spike
-            elif (close[i] < jaw[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short conditions: Bear Power < 0 AND price < EMA34(1d) AND volume spike
+            elif (bear_power[i] < 0 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below Alligator Jaw (mean reversion) OR price < EMA50(1w) (trend flip)
-            if (close[i] < jaw[i] or 
-                close[i] < ema_50_1w_aligned[i]):
+            # Exit long: Bull Power crosses below zero OR price < EMA34(1d) (trend flip)
+            if (bull_power[i] <= 0 or 
+                close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above Alligator Jaw (mean reversion) OR price > EMA50(1w) (trend flip)
-            if (close[i] > jaw[i] or 
-                close[i] > ema_50_1w_aligned[i]):
+            # Exit short: Bear Power crosses above zero OR price > EMA34(1d) (trend flip)
+            if (bear_power[i] >= 0 or 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
