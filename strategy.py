@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian channel breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian(20) upper band AND price > 1d EMA34 AND volume > 1.5 * avg_volume(20) on 4h
-# Short when price breaks below 4h Donchian(20) lower band AND price < 1d EMA34 AND volume > 1.5 * avg_volume(20) on 4h
-# Exit when price crosses back below/above 4h Donchian(20) middle band OR volume drops below average
-# Uses discrete sizing 0.25 to balance return and risk
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# Donchian provides robust price channels, EMA34 filters higher timeframe trend
-# Volume confirmation reduces false breakouts, works in both bull and bear markets via trend filter
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ATR-based position sizing
+# Long when price breaks above weekly Donchian high(20) AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below weekly Donchian low(20) AND volume > 1.5 * avg_volume(20)
+# Position size scaled by ATR volatility (0.20 in low vol, 0.35 in high vol) to adapt to market conditions
+# Exit when price crosses back below/above weekly Donchian midpoint
+# Weekly Donchian provides robust structure from higher timeframe, reducing false breakouts
+# Volume confirmation ensures breakout strength, ATR scaling manages risk across regimes
+# Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm"
-timeframe = "4h"
+name = "1d_Donchian20_Weekly_VolumeSpike_ATRsize"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +26,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:  # Need at least one completed 4h bar for Donchian
+    # Get weekly data ONCE before loop for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need enough for Donchian(20)
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    upper_4h = high_20
-    lower_4h = low_20
-    middle_4h = (upper_4h + lower_4h) / 2.0
+    # Calculate weekly Donchian(20) channels (based on completed weekly bars)
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_20
+    donchian_low = low_20
+    donchian_mid = (donchian_high + donchian_low) / 2.0  # Midpoint for exit
     
-    # Align 4h Donchian levels to 4h timeframe (wait for completed 4h bar)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    middle_4h_aligned = align_htf_to_ltf(prices, df_4h, middle_4h)
+    # Align weekly Donchian levels to 1d timeframe (wait for completed weekly bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
+    # Calculate ATR(14) for volatility-based position sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Normalize ATR to [0,1] range over 50-period for adaptive sizing
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=10).mean().values
+    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
+    atr_ratio = np.clip(atr_ratio, 0.5, 2.0)  # Bound between 0.5x and 2x average
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    # Base size 0.25 scaled by ATR ratio (0.20 in low vol, 0.35 in high vol)
+    base_size = 0.25
+    size_multiplier = 0.6 + 0.6 * (atr_ratio - 0.5) / 1.5  # Maps 0.5→0.6, 2.0→1.2
+    position_size = base_size * size_multiplier
+    position_size = np.clip(position_size, 0.20, 0.35)  # Final size bounds
+    
+    # Volume confirmation: volume > 1.5 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * avg_volume_20)
     
@@ -70,36 +77,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(middle_4h_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(avg_volume_20[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian upper band, above 1d EMA34, volume confirmation, in session
-            if close[i] > upper_4h_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above weekly Donchian high AND volume confirmation
+            if close[i] > donchian_high_aligned[i] and volume_confirm[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # Short: Price breaks below 4h Donchian lower band, below 1d EMA34, volume confirmation, in session
-            elif close[i] < lower_4h_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below weekly Donchian low AND volume confirmation
+            elif close[i] < donchian_low_aligned[i] and volume_confirm[i]:
+                signals[i] = -position_size[i]
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below 4h Donchian middle band OR volume drops below average
-            if close[i] < middle_4h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below weekly Donchian midpoint
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
         elif position == -1:
-            # Exit short: Price crosses above 4h Donchian middle band OR volume drops below average
-            if close[i] > middle_4h_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above weekly Donchian midpoint
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
     
     return signals
