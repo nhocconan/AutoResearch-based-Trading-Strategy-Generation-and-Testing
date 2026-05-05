@@ -3,89 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze + 1d Donchian Breakout
-# Long when: BB(20,2) width < 20th percentile (squeeze) AND price breaks above 1d Donchian(20) high
-# Short when: BB squeeze AND price breaks below 1d Donchian(20) low
-# Exit when: BB width > 50th percentile (squeeze ends) OR opposite Donchian break
-# Uses 6h for squeeze detection (low volatility precursors) and 1d Donchian for directional breakout
-# Works in bull/bear: squeeze breaks often precede strong moves in either direction
-# Target: 80-160 total trades over 4 years (20-40/year) with discrete sizing 0.25
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + choppiness regime filter
+# Long when price breaks above 20-period 12h Donchian high AND 1d volume > 1.5x 20-period average AND 1d choppiness > 61.8 (range)
+# Short when price breaks below 20-period 12h Donchian low AND 1d volume > 1.5x 20-period average AND 1d choppiness > 61.8 (range)
+# Exit when price returns to the 12-period Donchian midpoint OR choppiness < 38.2 (trending)
+# Uses discrete sizing 0.25 to minimize fee churn. Works in ranging markets (chop > 61.8) where reversals are reliable.
+# Target: 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH/SOL
 
-name = "6h_BBSqueeze_1dDonchianBreakout"
-timeframe = "6h"
+name = "12h_Donchian20_VolumeSpike_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian channels
+    # Get 1d data ONCE before loop for volume and choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for Donchian calculation
+    if len(df_1d) < 30:  # Need enough for calculations
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian(20) channels
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d volume 20-period EMA
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ema20_1d = volume_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ratio_1d = volume_1d / volume_ema20_1d  # Current volume / 20-period average
     
-    # Align 1d Donchian to 6h
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    # Calculate 1d choppiness index
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 6h Bollinger Bands (20,2)
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2 * dev
-    lower_band = basis - 2 * dev
-    bb_width = (upper_band - lower_band) / basis * 100  # Percentage width
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate 6h BB width percentiles for squeeze detection (using 50-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=50, min_periods=20).rank(pct=True).values * 100
+    # Highest high and lowest low over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness index: 100 * log10(sum(tr14) / (max_high14 - min_low14)) / log10(14)
+    range_14 = max_high_14 - min_low_14
+    # Avoid division by zero or near-zero
+    safe_range = np.where(range_14 < 1e-10, 1e-10, range_14)
+    choppiness = 100 * np.log10(tr_sum_14 / safe_range) / np.log10(14)
+    choppiness = np.where(np.isnan(choppiness) | np.isinf(choppiness), 50.0, choppiness)  # Neutral if invalid
+    
+    # Align 1d indicators to 12h
+    volume_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_1d)
+    choppiness_aligned = align_htf_to_ltf(prices, df_1d, choppiness)
+    
+    # Calculate 12h Donchian channels (20-period)
+    max_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    min_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (max_high_20 + min_low_20) / 2.0  # Midpoint for exit
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any value is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
-            np.isnan(bb_width[i]) or np.isnan(bb_width_pct[i])):
+        if (np.isnan(volume_ratio_1d_aligned[i]) or np.isnan(choppiness_aligned[i]) or 
+            np.isnan(max_high_20[i]) or np.isnan(min_low_20[i]) or np.isnan(donchian_mid[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bb_squeeze = bb_width_pct[i] < 20  # BB width in lower 20th percentile = squeeze
-        bb_squeeze_end = bb_width_pct[i] > 50  # BB width above median = squeeze ending
+        # Regime filter: only trade in ranging markets (chop > 61.8)
+        in_range = choppiness_aligned[i] > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_spike = volume_ratio_1d_aligned[i] > 1.5
         
         if position == 0:
-            # Long: BB squeeze + price breaks above 1d Donchian high
-            if bb_squeeze and close[i] > donch_high_20_aligned[i]:
+            # Long: price breaks above Donchian high + volume spike + in range
+            if close[i] > max_high_20[i] and volume_spike and in_range:
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze + price breaks below 1d Donchian low
-            elif bb_squeeze and close[i] < donch_low_20_aligned[i]:
+            # Short: price breaks below Donchian low + volume spike + in range
+            elif close[i] < min_low_20[i] and volume_spike and in_range:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Squeeze ends OR price breaks below 1d Donchian low (reverse signal)
-            if bb_squeeze_end or close[i] < donch_low_20_aligned[i]:
+            # Exit long: price returns to midpoint OR choppiness < 38.2 (trending)
+            if close[i] <= donchian_mid[i] or choppiness_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Squeeze ends OR price breaks above 1d Donchian high (reverse signal)
-            if bb_squeeze_end or close[i] > donch_high_20_aligned[i]:
+            # Exit short: price returns to midpoint OR choppiness < 38.2 (trending)
+            if close[i] >= donchian_mid[i] or choppiness_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
