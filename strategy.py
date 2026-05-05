@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA(21) pullback strategy with 4h trend filter and volume confirmation
-# Long when: price pulls back to EMA(21) in uptrend (4h close > 4h EMA(50)) with volume > 1.5x average
-# Short when: price pulls back to EMA(21) in downtrend (4h close < 4h EMA(50)) with volume > 1.5x average
-# Uses 4h for trend direction (reduces whipsaw) and 1h for precise entry timing
-# Session filter: 08-20 UTC to avoid low-liquidity periods
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Signal size: 0.20 (discrete to minimize fee churn)
+# Hypothesis: 6h Williams %R Extreme + 1d EMA34 trend + volume spike
+# Long when: Williams %R(14) crosses above -80 (oversold bounce), close > 1d EMA34, volume > 2x 20-period average
+# Short when: Williams %R(14) crosses below -20 (overbought rejection), close < 1d EMA34, volume > 2x 20-period average
+# Exit when: Williams %R crosses above -20 (for longs) or below -80 (for shorts) - mean reversion logic
+# Williams %R identifies exhaustion points; EMA34 filters for higher timeframe trend alignment; volume confirms conviction.
+# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1h_EMA21_Pullback_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_WilliamsRExtreme_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,78 +24,77 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
+    open_price = prices['open'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate Williams %R on 6h
+    if len(high) >= 14:
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero when highest_high == lowest_low
+        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    else:
+        williams_r = np.full(n, np.nan)
     
-    # Calculate volume confirmation on 1h
+    # Calculate volume confirmation on 6h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
+        volume_filter = volume > (2.0 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Get 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data ONCE before loop for EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA50 trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1h EMA21 for pullback entries
-    if len(close) >= 21:
-        ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    else:
-        ema_21 = np.full(n, np.nan)
+    # Calculate 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_21[i]) or 
-            np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        # Skip if any value is NaN
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price at or slightly below EMA21, uptrend on 4h, volume confirmation
-            if (close[i] <= ema_21[i] * 1.001 and  # Allow small tolerance for pullback
-                low[i] >= ema_21[i] * 0.995 and   # Price didn't break below EMA21 significantly
-                close_4h[i//16] > ema_50_4h[i//16] if i//16 < len(ema_50_4h) else False and  # 4h uptrend
-                volume_filter[i]):
-                signals[i] = 0.20
+            # Long: Williams %R crosses above -80 (from below), volume filter, and above 1d EMA34
+            if (williams_r[i] > -80 and 
+                williams_r[i-1] <= -80 and 
+                volume_filter[i] and 
+                close[i] > ema_34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price at or slightly above EMA21, downtrend on 4h, volume confirmation
-            elif (close[i] >= ema_21[i] * 0.999 and  # Allow small tolerance for pullback
-                  high[i] <= ema_21[i] * 1.005 and   # Price didn't break above EMA21 significantly
-                  close_4h[i//16] < ema_50_4h[i//16] if i//16 < len(ema_50_4h) else False and  # 4h downtrend
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # Short: Williams %R crosses below -20 (from above), volume filter, and below 1d EMA34
+            elif (williams_r[i] < -20 and 
+                  williams_r[i-1] >= -20 and 
+                  volume_filter[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks above EMA21 (momentum continuation) or stops loss implicitly
-            if close[i] > ema_21[i] * 1.01:  # Clear break above EMA21
+            # Exit long: Williams %R crosses above -20 (overbought, mean reversion)
+            if williams_r[i] > -20 and williams_r[i-1] <= -20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks below EMA21 (momentum continuation)
-            if close[i] < ema_21[i] * 0.99:  # Clear break below EMA21
+            # Exit short: Williams %R crosses below -80 (oversold, mean reversion)
+            if williams_r[i] < -80 and williams_r[i-1] >= -80:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
