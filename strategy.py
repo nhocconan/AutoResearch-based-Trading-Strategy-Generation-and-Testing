@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d ADX(14) trend filter
-# Long when price breaks above Donchian upper AND volume > 1.5x 20-period average AND 1d ADX > 25 (trending market)
-# Short when price breaks below Donchian lower AND volume > 1.5x 20-period average AND 1d ADX > 25 (trending market)
-# Exit when price crosses back to Donchian midpoint OR ADX < 20 (trend weakening)
-# Uses discrete sizing (0.25) to limit fee drag. Target: 20-40 trades/year per symbol.
-# Donchian channels provide clear breakout levels, volume confirms conviction,
-# ADX filters for trending conditions to avoid whipsaws in ranging markets.
-# Works in bull markets via breakout longs and bear markets via breakdown shorts.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w volume spike and 1w EMA34 trend filter
+# Long when price breaks above R3 AND volume > 2.0x 20-period average AND 1w EMA34 > EMA34_prev (uptrend)
+# Short when price breaks below S3 AND volume > 2.0x 20-period average AND 1w EMA34 < EMA34_prev (downtrend)
+# Exit when price crosses back to H3/L3 level OR 1w EMA34 flips direction
+# Uses discrete sizing (0.25) to limit fee drag. Target: 15-35 trades/year per symbol.
+# Camarilla levels provide key support/resistance, volume spike confirms institutional interest,
+# 1w EMA34 filters for primary trend direction to avoid counter-trend whipsaws.
+# Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
+# 1d timeframe minimizes trade frequency to reduce fee drag while capturing multi-week trends.
 
-name = "4h_Donchian20_VolumeSpike_1dADX25_Trend"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,119 +27,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ADX calculation
+    # Get 1d data ONCE before loop for Camarilla levels calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels on 1d data (using previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use previous day's data to avoid look-ahead
+    prev_high = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+    prev_low = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+    prev_close = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    rang = prev_high - prev_low
+    camarilla_h3 = prev_close + (rang * 1.1 / 4)
+    camarilla_l3 = prev_close - (rang * 1.1 / 4)
+    camarilla_h4 = prev_close + (rang * 1.1 / 2)
+    camarilla_l4 = prev_close - (rang * 1.1 / 2)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
-                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d),
-                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
-                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])),
-                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    # Align Camarilla levels to 1d timeframe (same timeframe, so direct assignment with 1-bar lag)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Smoothed values
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) >= period:
-            result[period-1] = np.nansum(arr[:period])
-            for i in range(period, len(arr)):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Get 1w data for EMA34 trend filter and volume spike
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    atr = smma(tr, 14)
-    dm_plus_smooth = smma(dm_plus, 14)
-    dm_minus_smooth = smma(dm_minus, 14)
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, (dm_plus_smooth / atr) * 100, 0)
-    di_minus = np.where(atr > 0, (dm_minus_smooth / atr) * 100, 0)
+    # Calculate EMA34 on 1w close
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_prev = np.concatenate([[np.nan], ema_34[:-1]])  # Previous EMA for trend direction
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = smma(dx, 14)
+    # Uptrend when current EMA34 > previous EMA34
+    uptrend_1w = ema_34 > ema_34_prev
+    downtrend_1w = ema_34 < ema_34_prev
     
-    # Trend filter: ADX > 25
-    trending = adx > 25
-    weak_trend = adx < 20  # Exit condition
+    # Align 1w trend to 1d timeframe
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
     
-    # Align 1d ADX to 4h timeframe
-    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
-    weak_trend_aligned = align_htf_to_ltf(prices, df_1d, weak_trend.astype(float))
-    
-    # Donchian(20) on 4h data
-    lookback = 20
-    if len(high) >= lookback:
-        upper = np.full_like(high, np.nan, dtype=float)
-        lower = np.full_like(high, np.nan, dtype=float)
-        for i in range(lookback-1, len(high)):
-            upper[i] = np.max(high[i-lookback+1:i+1])
-            lower[i] = np.min(low[i-lookback+1:i+1])
-        midpoint = (upper + lower) / 2
+    # Volume confirmation: 1w volume > 2.0x 20-period average (spike filter)
+    if len(volume_1w) >= 20:
+        vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+        volume_filter_1w = volume_1w > (2.0 * vol_ma_20)
     else:
-        upper = lower = midpoint = np.full_like(high, np.nan, dtype=float)
+        volume_filter_1w = np.zeros(len(df_1w), dtype=bool)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    if len(volume) >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.5 * vol_ma_20)
-    else:
-        volume_filter = np.zeros(n, dtype=bool)
+    # Align 1w volume filter to 1d timeframe
+    volume_filter_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_filter_1w.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or 
-            np.isnan(trending_aligned[i]) or 
-            np.isnan(weak_trend_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or 
+            np.isnan(uptrend_1w_aligned[i]) or 
+            np.isnan(downtrend_1w_aligned[i]) or 
+            np.isnan(volume_filter_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price breaks above upper AND volume spike AND trending market
-            if (close[i] > upper[i] and 
-                volume_filter[i] and 
-                trending_aligned[i] > 0.5):
+            # Long conditions: price breaks above H3 AND volume spike AND 1w uptrend
+            if (close[i] > h3_aligned[i] and 
+                volume_filter_1w_aligned[i] > 0.5 and 
+                uptrend_1w_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower AND volume spike AND trending market
-            elif (close[i] < lower[i] and 
-                  volume_filter[i] and 
-                  trending_aligned[i] > 0.5):
+            # Short conditions: price breaks below L3 AND volume spike AND 1w downtrend
+            elif (close[i] < l3_aligned[i] and 
+                  volume_filter_1w_aligned[i] > 0.5 and 
+                  downtrend_1w_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back to midpoint OR trend weakens
-            if (close[i] < midpoint[i] or 
-                weak_trend_aligned[i] > 0.5):
+            # Exit long: price crosses back to L3 OR 1w trend flips to downtrend
+            if (close[i] < l3_aligned[i] or 
+                downtrend_1w_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back to midpoint OR trend weakens
-            if (close[i] > midpoint[i] or 
-                weak_trend_aligned[i] > 0.5):
+            # Exit short: price crosses back to H3 OR 1w trend flips to uptrend
+            if (close[i] > h3_aligned[i] or 
+                uptrend_1w_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
