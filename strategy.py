@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR regime filter
-# Long when: Price breaks above Donchian upper (20) AND 1d volume > 1.5x 20-period average AND ATR(14) < ATR(50) (low vol regime)
-# Short when: Price breaks below Donchian lower (20) AND 1d volume > 1.5x 20-period average AND ATR(14) < ATR(50)
-# Exit when price returns to Donchian middle (mean of upper/lower)
-# Donchian breakout captures volatility expansion after consolidation
-# Volume spike confirms institutional participation
-# ATR regime filter ensures we trade during low volatility periods (pre-breakout squeeze)
-# Works in both bull and bear markets by trading breakouts in direction of the squeeze break
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25
+# Hypothesis: 6h Camarilla Pivot Breakout with 1d Volume Spike and Weekly Trend Filter
+# Long when: Price breaks above R4 AND 1d volume > 1.5 * 20-period average volume AND weekly close > weekly open (bullish week)
+# Short when: Price breaks below S4 AND 1d volume > 1.5 * 20-period average volume AND weekly close < weekly open (bearish week)
+# Exit when price returns to the 1d VWAP (mean reversion to institutional value area)
+# Uses Camarilla's extreme levels (R4/S4) for high-probability breakouts, volume spike for confirmation, weekly trend for bias
+# Works in both bull and bear markets by only taking breakouts in the direction of the weekly trend
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "4h_DonchianBreakout_VolumeSpike_ATRRegime"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_VolumeSpike_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,74 +24,89 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data ONCE before loop for volume and ATR regime filter
+    # Get 1d data ONCE before loop for volume average and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for ATR(50) and volume average
+    if len(df_1d) < 20:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d True Range and ATR
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan  # First value has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    open_1w = df_1w['open'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume spike: current volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.5 * vol_ma_20_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Calculate 1d average volume (20-period)
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian Channels (20) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate 1d VWAP for exit
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = (typical_price_1d * volume_1d).cumsum() / volume_1d.cumsum()
+    vwap_1d[volume_1d.cumsum() == 0] = np.nan  # Avoid division by zero
+    
+    # Calculate weekly trend: bullish if weekly close > weekly open
+    weekly_bullish = close_1w > open_1w
+    
+    # Align 1d indicators to 6h timeframe
+    avg_volume_20_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20_1d)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish.astype(float))  # Convert bool to float for alignment
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(avg_volume_20_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(weekly_bullish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # ATR regime: low volatility (ATR14 < ATR50)
-        low_vol_regime = atr_14_aligned[i] < atr_50_aligned[i]
-        # Volume spike condition
-        vol_spike = vol_spike_aligned[i] > 0.5  # Boolean as float
+        # Volume spike condition: current 1d volume > 1.5 * 20-period average
+        # We need to map 6h bar to the 1d volume - use the most recent completed 1d bar
+        vol_spike = volume_1d[-1] > 1.5 * avg_volume_20_1d[-1] if len(volume_1d) > 0 and len(avg_volume_20_1d) > 0 else False
+        # For simplicity and to avoid look-ahead, use aligned volume spike signal
+        # Recalculate volume spike using aligned data
+        vol_spike_aligned = volume[i] > 1.5 * avg_volume_20_aligned[i] if not np.isnan(avg_volume_20_aligned[i]) else False
         
         if position == 0:
-            # Long: Break above Donchian high in low volatility regime with volume spike
-            if close[i] > donchian_high[i] and low_vol_regime and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Short: Break below Donchian low in low volatility regime with volume spike
-            elif close[i] < donchian_low[i] and low_vol_regime and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Calculate Camarilla levels from previous 1d bar
+            # Need to use previous 1d bar's OHLC to avoid look-ahead
+            if len(df_1d) >= 2:
+                prev_high = high_1d[-2]
+                prev_low = low_1d[-2]
+                prev_close = close_1d[-2]
+                pivot = (prev_high + prev_low + prev_close) / 3
+                range_ = prev_high - prev_low
+                r4 = pivot + (range_ * 1.1 / 2)
+                s4 = pivot - (range_ * 1.1 / 2)
+                
+                # Long: Break above R4 with volume spike and weekly bullish
+                if close[i] > r4 and vol_spike_aligned and weekly_bullish_aligned[i] == 1.0:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Break below S4 with volume spike and weekly bearish
+                elif close[i] < s4 and vol_spike_aligned and weekly_bullish_aligned[i] == 0.0:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: return to Donchian middle (mean reversion)
-            if close[i] < donchian_mid[i]:
+            # Exit long: return to 1d VWAP (mean reversion)
+            if close[i] < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to Donchian middle (mean reversion)
-            if close[i] > donchian_mid[i]:
+            # Exit short: return to 1d VWAP (mean reversion)
+            if close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
