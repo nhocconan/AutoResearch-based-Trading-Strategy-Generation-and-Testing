@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) + 1d ADX trend filter + volume confirmation
-# Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3)
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 (strong trend) AND volume > 1.3x 20-period MA
-# Short when: Lips < Teeth < Jaw (bearish alignment) AND 1d ADX > 25 (strong trend) AND volume > 1.3x 20-period MA
-# Exit when: Alligator alignment reverses OR ADX < 20 (trend weakens)
-# Uses Alligator for trend alignment, ADX for regime filter, volume for conviction
-# Timeframe: 12h, HTF: 1d for ADX. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Hypothesis: 4h Williams %R + 1d ADX trend filter + volume confirmation
+# Williams %R: momentum oscillator identifying overbought/oversold conditions
+# Long when: Williams %R < -80 (oversold) AND 1d ADX > 25 (strong trend) AND volume > 1.5x 20-period MA
+# Short when: Williams %R > -20 (overbought) AND 1d ADX > 25 (strong trend) AND volume > 1.5x 20-period MA
+# Exit when: Williams %R reverses (> -50 for long, < -50 for short) OR ADX < 20 (trend weakens)
+# Uses Williams %R for mean reversion entries, ADX for regime filter, volume for conviction
+# Timeframe: 4h, HTF: 1d for ADX. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "12h_WilliamsAlligator_1dADX_VolumeConfirm"
-timeframe = "12h"
+name = "4h_WilliamsR_1dADX_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +25,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator on 12h
-    if len(close) >= 13:
-        # Jaw: SMA(13, 8) - 13-period SMA shifted 8 bars
-        jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-        # Teeth: SMA(8, 5) - 8-period SMA shifted 5 bars
-        teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-        # Lips: SMA(5, 3) - 5-period SMA shifted 3 bars
-        lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
-        
-        jaw = jaw.values
-        teeth = teeth.values
-        lips = lips.values
-        
-        # Alligator alignment signals
-        bullish_alignment = (lips > teeth) & (teeth > jaw)  # Lips > Teeth > Jaw
-        bearish_alignment = (lips < teeth) & (teeth < jaw)  # Lips < Teeth < Jaw
+    # Calculate Williams %R(14) on 4h
+    if len(high) >= 14:
+        # Highest High and Lowest Low over 14 periods
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero (when highest_high == lowest_low)
+        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     else:
-        jaw = teeth = lips = np.full(n, np.nan)
-        bullish_alignment = bearish_alignment = np.zeros(n, dtype=bool)
+        williams_r = np.full(n, np.nan)
     
-    # Volume confirmation on 12h
+    # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (1.3 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -102,7 +93,7 @@ def generate_signals(prices):
     adx_trend = adx > 25
     adx_weak = adx < 20  # for exit condition
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_trend_aligned = align_htf_to_ltf(prices, df_1d, adx_trend.astype(float))
     adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
     
@@ -111,37 +102,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(bullish_alignment[i]) or np.isnan(bearish_alignment[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(adx_trend_aligned[i]) or 
-            np.isnan(adx_weak_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(adx_trend_aligned[i]) or np.isnan(adx_weak_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: bullish alignment + strong trend + volume filter
-            if (bullish_alignment[i] and 
+            # Long conditions: Williams %R oversold + strong trend + volume filter
+            if (williams_r[i] < -80 and 
                 adx_trend_aligned[i] == 1.0 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish alignment + strong trend + volume filter
-            elif (bearish_alignment[i] and 
+            # Short conditions: Williams %R overbought + strong trend + volume filter
+            elif (williams_r[i] > -20 and 
                   adx_trend_aligned[i] == 1.0 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: alignment reverses OR trend weakens
-            if (not bullish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit long: Williams %R reverses above -50 OR trend weakens
+            if (williams_r[i] > -50 or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: alignment reverses OR trend weakens
-            if (not bearish_alignment[i] or adx_weak_aligned[i] == 1.0):
+            # Exit short: Williams %R reverses below -50 OR trend weakens
+            if (williams_r[i] < -50 or adx_weak_aligned[i] == 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
