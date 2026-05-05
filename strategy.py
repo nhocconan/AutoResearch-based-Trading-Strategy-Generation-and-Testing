@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d EMA50 trend filter
-# Long when: price breaks above 20-period Donchian high AND 12h volume > 1.3x average AND 1d close > 1d EMA50
-# Short when: price breaks below 20-period Donchian low AND 12h volume > 1.3x average AND 1d close < 1d EMA50
-# Exit when price returns to 20-period Donchian middle (mean reversion)
-# Donchian channels provide clear structure for breakouts in both bull and bear markets
-# Volume confirmation filters false breakouts
-# 1d EMA50 ensures alignment with higher timeframe trend
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25 to minimize fee churn
+# Hypothesis: 1d Camarilla Pivot R3/S3 Breakout with 1w Volume Spike and ADX Trend Filter
+# Long when: price breaks above Camarilla R3 AND 1w volume > 1.3x average AND 1w ADX > 25
+# Short when: price breaks below Camarilla S3 AND 1w volume > 1.3x average AND 1w ADX > 25
+# Exit when price returns to Camarilla Pivot Point (mean reversion)
+# Camarilla pivots identify key intraday support/resistance levels
+# Volume spike confirms institutional participation
+# 1w ADX > 25 ensures alignment with higher timeframe trend
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25 to minimize fee churn
 
-name = "4h_Donchian20_12hVolumeSpike_1dEMA50_Trend"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wVolumeSpike_ADXTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +26,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need enough for volume average
+    # Get 1w data ONCE before loop for volume average and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for ADX and volume average
         return np.zeros(n)
-    volume_12h = df_12h['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
+    # Calculate 1w average volume (20-period)
+    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
-    # Calculate 12h average volume (20-period)
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Calculate 1w ADX(14)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > low[i-1] - low[i] else 0
+            minus_dm[i] = max(low[i-1] - low[i], 0) if low[i-1] - low[i] > high[i] - high[i-1] else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_smoothed = np.mean(plus_dm[1:period+1])
+        minus_dm_smoothed = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smoothed = (plus_dm_smoothed * (period-1) + plus_dm[i]) / period
+            minus_dm_smoothed = (minus_dm_smoothed * (period-1) + minus_dm[i]) / period
+            
+            plus_di[i] = 100 * plus_dm_smoothed / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_smoothed / atr[i] if atr[i] != 0 else 0
+            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        # ADX is smoothed DX
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Calculate Donchian Channel (20) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_high + donchian_low) / 2
+    # Calculate Camarilla levels for 1d (based on previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We need to shift by 1 to avoid look-ahead (use previous day's OHLC)
+    camarilla_pp = np.zeros(n)
+    camarilla_r3 = np.zeros(n)
+    camarilla_s3 = np.zeros(n)
+    
+    for i in range(1, n):
+        # Use previous day's OHLC to calculate today's Camarilla levels
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        camarilla_pp[i] = (prev_high + prev_low + prev_close) / 3
+        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_middle[i])):
+        if (np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(camarilla_pp[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian high + volume spike + 1d uptrend
-            if (close[i] > donchian_high[i] and 
+            # Long: break above R3 + volume spike + ADX > 25
+            if (close[i] > camarilla_r3[i] and 
                 volume[i] > 1.3 * vol_ma_aligned[i] and 
-                close[i] > ema_50_aligned[i]):
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + volume spike + 1d downtrend
-            elif (close[i] < donchian_low[i] and 
+            # Short: break below S3 + volume spike + ADX > 25
+            elif (close[i] < camarilla_s3[i] and 
                   volume[i] > 1.3 * vol_ma_aligned[i] and 
-                  close[i] < ema_50_aligned[i]):
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to Donchian middle (mean reversion)
-            if close[i] < donchian_middle[i]:
+            # Exit long: return to pivot point (mean reversion)
+            if close[i] < camarilla_pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to Donchian middle (mean reversion)
-            if close[i] > donchian_middle[i]:
+            # Exit short: return to pivot point (mean reversion)
+            if close[i] > camarilla_pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
