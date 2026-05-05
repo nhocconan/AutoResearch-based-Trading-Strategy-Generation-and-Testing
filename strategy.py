@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot point rejection + 1d volume confirmation
-# Short when price rejects weekly R3 (fails to close above) AND volume > 1.5 * avg_volume(20)
-# Long when price rejects weekly S3 (fails to close below) AND volume > 1.5 * avg_volume(20)
-# Uses weekly pivot levels from prior completed week for structure
-# Volume confirmation filters weak rejections
-# Discrete sizing 0.25 to balance return and drawdown
-# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe
-# Weekly pivots provide significant support/resistance that price often respects
-# Rejection at these levels with volume indicates institutional interest
-# Works in ranging markets (fade extremes) and can catch reversals in trends
+# Hypothesis: 12h strategy using 1d Camarilla pivot breakout with 1w EMA50 trend filter and volume spike confirmation
+# Long when price breaks above 1d Camarilla R3 level AND price > 1w EMA50 AND volume > 2.0 * avg_volume(20) on 12h
+# Short when price breaks below 1d Camarilla S3 level AND price < 1w EMA50 AND volume > 2.0 * avg_volume(20) on 12h
+# Exit when price crosses back below/above 1d Camarilla pivot point OR volume drops below average
+# Uses discrete sizing 0.25 to balance profit potential and risk management
+# Target: 75-125 total trades over 4 years (19-31/year) for 12h timeframe
+# 1d Camarilla provides robust support/resistance levels from higher timeframe
+# 1w EMA50 filters primary trend to avoid counter-trend trades in bear markets
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "6h_WeeklyPivotRejection_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,34 +28,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:  # Need at least one completed week
+    # Get 1d data ONCE before loop for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:  # Need at least one completed 1d bar
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R3 = Pivot + Range * 1.1/2, S3 = Pivot - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r3 = pivot_1d + (range_1d * 1.1 / 2.0)
+    camarilla_s3 = pivot_1d - (range_1d * 1.1 / 2.0)
+    camarilla_pivot = pivot_1d  # PP level for exit
+    
+    # Align 1d Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough for EMA50
+        return np.zeros(n)
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (based on prior completed week)
-    # Standard pivot: P = (H + L + C) / 3
-    # R3 = P + 2*(H - L), S3 = P - 2*(H - L)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    camarilla_r3_1w = pivot_1w + 2.0 * (high_1w - low_1w)
-    camarilla_s3_1w = pivot_1w - 2.0 * (high_1w - low_1w)
+    # Calculate 1w EMA50
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align weekly pivot points to 6h timeframe (wait for completed weekly bar)
-    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
-    
-    # Get 1d data ONCE before loop for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for volume average
-        return np.zeros(n)
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d average volume (20-period)
-    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_20_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20_1d)
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -66,34 +74,33 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(camarilla_r3_1w_aligned[i]) or np.isnan(camarilla_s3_1w_aligned[i]) or 
-            np.isnan(avg_volume_20_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price rejects weekly S3 (closes above it) with volume confirmation
-            # Rejection = price moves above S3 but doesn't sustain below it
-            # We enter when we see confirmation of rejection: close > S3 AND volume spike
-            if close[i] > camarilla_s3_1w_aligned[i] and volume[i] > (1.5 * avg_volume_20_1d_aligned[i]):
+            # Long: Price breaks above 1d Camarilla R3, above 1w EMA50, volume confirmation, in session
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price rejects weekly R3 (closes below it) with volume confirmation
-            elif close[i] < camarilla_r3_1w_aligned[i] and volume[i] > (1.5 * avg_volume_20_1d_aligned[i]):
+            # Short: Price breaks below 1d Camarilla S3, below 1w EMA50, volume confirmation, in session
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below weekly S3 (rejection failed) OR volume drops
-            if close[i] < camarilla_s3_1w_aligned[i] or volume[i] < avg_volume_20_1d_aligned[i]:
+            # Exit long: Price crosses below 1d Camarilla pivot OR volume drops below average
+            if close[i] < camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above weekly R3 (rejection failed) OR volume drops
-            if close[i] > camarilla_r3_1w_aligned[i] or volume[i] < avg_volume_20_1d_aligned[i]:
+            # Exit short: Price crosses above 1d Camarilla pivot OR volume drops below average
+            if close[i] > camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
