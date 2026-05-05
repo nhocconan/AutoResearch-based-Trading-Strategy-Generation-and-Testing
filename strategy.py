@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
-# Long when: price breaks above Camarilla R3 AND 1d EMA34 up AND volume > 2.0x 20-period MA
-# Short when: price breaks below Camarilla S3 AND 1d EMA34 down AND volume > 2.0x 20-period MA
-# Exit when: price retouches Camarilla pivot (PP) OR volume drops below average
-# Uses Camarilla levels for structure, 1d EMA for trend filter, volume for conviction
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation
+# Donchian breakout provides clear structure with infrequent signals
+# 1d EMA34 filter ensures we only trade in the direction of the higher timeframe trend
+# Volume confirmation adds conviction to breakouts
+# Exit on opposite Donchian breakout or trend reversal
 # Timeframe: 4h, HTF: 1d. Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,46 +24,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each bar using prior bar's OHLC
-    camarilla_pp = np.full(n, np.nan)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # Calculate Donchian channels on 4h
+    if len(high) >= 20:
+        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    else:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use prior bar's OHLC to avoid look-ahead
-        phigh = high[i-1]
-        plow = low[i-1]
-        pclose = close[i-1]
-        
-        camarilla_pp[i] = (phigh + plow + pclose) / 3.0
-        camarilla_r3[i] = camarilla_pp[i] + (phigh - plow) * 1.1 / 4.0
-        camarilla_s3[i] = camarilla_pp[i] - (phigh - plow) * 1.1 / 4.0
-    
-    # Get 1d data ONCE before loop for EMA34 calculation
+    # Get 1d data ONCE before loop for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 35:  # need sufficient data for EMA34
         return np.zeros(n)
     
     # Calculate EMA(34) on 1d close
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    if len(close_1d) >= 34:
+        ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    else:
+        ema_34 = np.full(len(close_1d), np.nan)
     
-    # EMA trend: 1 = up, -1 = down, 0 = unclear
-    ema_trend = np.zeros(len(ema_34), dtype=int)
-    for i in range(1, len(ema_34)):
-        if not np.isnan(ema_34[i]) and not np.isnan(ema_34[i-1]):
-            if ema_34[i] > ema_34[i-1]:
-                ema_trend[i] = 1
-            elif ema_34[i] < ema_34[i-1]:
-                ema_trend[i] = -1
-    
-    # Align 1d EMA trend to 4h timeframe
-    ema_trend_aligned = align_htf_to_ltf(prices, df_1d, ema_trend.astype(float))
+    # Align 1d EMA34 to 4h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation on 4h
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_filter = volume > (2.0 * vol_ma_20)
+        volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
@@ -72,36 +59,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_pp[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_trend_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > R3 AND EMA up AND volume spike
-            if (close[i] > camarilla_r3[i] and 
-                ema_trend_aligned[i] == 1.0 and 
+            # Long conditions: price breaks above Donchian high + price above 1d EMA34 + volume filter
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < S3 AND EMA down AND volume spike
-            elif (close[i] < camarilla_s3[i] and 
-                  ema_trend_aligned[i] == -1.0 and 
+            # Short conditions: price breaks below Donchian low + price below 1d EMA34 + volume filter
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < PP OR volume drops below average
-            if (close[i] < camarilla_pp[i] or not volume_filter[i]):
+            # Exit long: price breaks below Donchian low OR price below 1d EMA34
+            if (close[i] < donchian_low[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > PP OR volume drops below average
-            if (close[i] > camarilla_pp[i] or not volume_filter[i]):
+            # Exit short: price breaks above Donchian high OR price above 1d EMA34
+            if (close[i] > donchian_high[i] or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
