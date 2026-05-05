@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and ATR(14) volatility filter
-# Long when price breaks above Donchian upper band AND 12h close > 12h EMA50 AND ATR(14) < 0.05 * close
-# Short when price breaks below Donchian lower band AND 12h close < 12h EMA50 AND ATR(14) < 0.05 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 20-40 trades/year per symbol.
-# Donchian provides structure; EMA50 filters trend; ATR filter avoids high volatility chop.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and ATR(14) volatility filter
+# Long when price breaks above 1d Donchian upper band AND 1w close > 1w EMA34 AND ATR(14) < 0.06 * close
+# Short when price breaks below 1d Donchian lower band AND 1w close < 1w EMA34 AND ATR(14) < 0.06 * close
+# Uses discrete sizing (0.25) to limit fee drag. Target: 15-25 trades/year per symbol.
+# Donchian provides structure; 1w EMA34 filters major trend; ATR filter avoids high volatility chop.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# Uses 12h for HTF trend to avoid counter-trend trades and 4h for Donchian timing.
+# Primary timeframe = 1d, HTF = 1w as specified in experiment #125844.
 
-name = "4h_Donchian20_12hEMA50_ATR_Filter"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_ATR_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,19 +25,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data ONCE before loop for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data ONCE before loop for Donchian calculation (primary timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian bands (20-period) based on previous 4h bar
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1d Donchian bands (20-period) based on previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Donchian upper band: highest high of previous 20 bars
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     # Donchian lower band: lowest low of previous 20 bars
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Shift to use previous bar's levels (breakout of previous bar's Donchian)
     donchian_high = np.roll(donchian_high, 1)
@@ -45,25 +45,25 @@ def generate_signals(prices):
     donchian_high[0] = np.nan  # First value invalid after roll
     donchian_low[0] = np.nan
     
-    # Align Donchian bands to prices timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align Donchian bands to prices timeframe (1d to 1d - identity but required for consistency)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_12h = close_12h > ema_50_12h
-    downtrend_12h = close_12h < ema_50_12h
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Uptrend when close > EMA34, downtrend when close < EMA34
+    uptrend_1w = close_1w > ema_34_1w
+    downtrend_1w = close_1w < ema_34_1w
     
-    # Align 12h trend to 4h timeframe
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    # Align 1w trend to 1d timeframe
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
     
     # Calculate ATR(14) for volatility filter
     tr1 = high - low
@@ -74,8 +74,8 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 5% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.05 * close)
+    # Volatility filter: ATR < 6% of price (avoid high volatility chop)
+    vol_filter = atr_14 < (0.06 * close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,7 +83,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any value is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or 
+            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or 
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,30 +91,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price > Donchian upper AND 12h uptrend AND low volatility
+            # Long conditions: price > Donchian upper AND 1w uptrend AND low volatility
             if (close[i] > donchian_high_aligned[i] and 
-                uptrend_12h_aligned[i] > 0.5 and 
+                uptrend_1w_aligned[i] > 0.5 and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Donchian lower AND 12h downtrend AND low volatility
+            # Short conditions: price < Donchian lower AND 1w downtrend AND low volatility
             elif (close[i] < donchian_low_aligned[i] and 
-                  downtrend_12h_aligned[i] > 0.5 and 
+                  downtrend_1w_aligned[i] > 0.5 and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian lower OR 12h trend changes to downtrend
+            # Exit long: price < Donchian lower OR 1w trend changes to downtrend
             if (close[i] < donchian_low_aligned[i] or 
-                downtrend_12h_aligned[i] > 0.5):
+                downtrend_1w_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Donchian upper OR 12h trend changes to uptrend
+            # Exit short: price > Donchian upper OR 1w trend changes to uptrend
             if (close[i] > donchian_high_aligned[i] or 
-                uptrend_12h_aligned[i] > 0.5):
+                uptrend_1w_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
