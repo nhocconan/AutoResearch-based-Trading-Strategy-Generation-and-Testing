@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and ATR(14) volatility filter
-# Long when price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND ATR(14) < 0.04 * close
-# Short when price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND ATR(14) < 0.04 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-25 trades/year per symbol.
-# Camarilla provides structure; EMA34 filters trend; ATR filter avoids high volatility chop.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR(14) volatility filter
+# Long when price breaks above Donchian(20) high AND 1d close > 1d EMA50 AND ATR(14) < 0.03 * close
+# Short when price breaks below Donchian(20) low AND 1d close < 1d EMA50 AND ATR(14) < 0.03 * close
+# Uses discrete sizing (0.25) to limit fee drag. Target: 15-25 trades/year per symbol.
+# Donchian provides price channel structure; EMA50 filters trend; ATR filter avoids high volatility chop.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# 12h timeframe reduces trade frequency to minimize fee drag while capturing medium-term trends.
+# 4h timeframe balances trade frequency and signal quality to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_1dEMA34_ATR_Filter"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +25,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate Donchian(20) on primary timeframe (4h)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate 12h Camarilla levels based on previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Camarilla calculation: based on previous bar's range
-    range_12h = high_12h - low_12h
-    camarilla_h5 = close_12h + (range_12h * 1.1 / 2)  # R3 level
-    camarilla_l5 = close_12h - (range_12h * 1.1 / 2)  # S3 level
-    
-    # Shift to use previous bar's levels (breakout of previous bar's Camarilla)
-    camarilla_h5 = np.roll(camarilla_h5, 1)
-    camarilla_l5 = np.roll(camarilla_l5, 1)
-    camarilla_h5[0] = np.nan  # First value invalid after roll
-    camarilla_l5[0] = np.nan
-    
-    # Align Camarilla levels to prices timeframe
-    camarilla_h5_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h5)
-    camarilla_l5_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l5)
-    
-    # Get 1d data for trend filter
+    # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Uptrend when close > EMA34, downtrend when close < EMA34
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Uptrend when close > EMA50, downtrend when close < EMA50
+    uptrend_1d = close_1d > ema_50_1d
+    downtrend_1d = close_1d < ema_50_1d
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
@@ -75,15 +55,15 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 4% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.04 * close)
+    # Volatility filter: ATR < 3% of price (avoid high volatility chop)
+    vol_filter = atr_14 < (0.03 * close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(camarilla_h5_aligned[i]) or np.isnan(camarilla_l5_aligned[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or 
             np.isnan(vol_filter[i])):
             if position != 0:
@@ -92,29 +72,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price > Camarilla R3 AND 1d uptrend AND low volatility
-            if (close[i] > camarilla_h5_aligned[i] and 
+            # Long conditions: price > Donchian high AND 1d uptrend AND low volatility
+            if (close[i] > highest_high[i] and 
                 uptrend_1d_aligned[i] > 0.5 and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Camarilla S3 AND 1d downtrend AND low volatility
-            elif (close[i] < camarilla_l5_aligned[i] and 
+            # Short conditions: price < Donchian low AND 1d downtrend AND low volatility
+            elif (close[i] < lowest_low[i] and 
                   downtrend_1d_aligned[i] > 0.5 and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Camarilla S3 OR 1d trend changes to downtrend
-            if (close[i] < camarilla_l5_aligned[i] or 
+            # Exit long: price < Donchian low OR 1d trend changes to downtrend
+            if (close[i] < lowest_low[i] or 
                 downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Camarilla R3 OR 1d trend changes to uptrend
-            if (close[i] > camarilla_h5_aligned[i] or 
+            # Exit short: price > Donchian high OR 1d trend changes to uptrend
+            if (close[i] > highest_high[i] or 
                 uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
