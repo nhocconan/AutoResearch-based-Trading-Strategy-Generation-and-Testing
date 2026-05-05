@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout (R1/S1) with 4h trend filter (EMA50) and volume spike confirmation
-# Long when: price breaks above R1 AND 4h EMA50 rising AND volume > 1.5x 20-period MA
-# Short when: price breaks below S1 AND 4h EMA50 falling AND volume > 1.5x 20-period MA
-# Exit when: price returns to pivot point (PP) OR trend reverses
-# Uses Camarilla pivots for intraday support/resistance, 4h EMA for trend filter, volume for conviction
-# Timeframe: 1h, HTF: 4h. Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag.
-# Session filter: 08-20 UTC to reduce noise trades.
-# Position size: 0.20 (discrete level to minimize churn)
+# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation
+# Long when: Tenkan-sen crosses above Kijun-sen AND price above 1d EMA50 AND volume > 1.5x 20-period MA AND price above Kumo cloud
+# Short when: Tenkan-sen crosses below Kijun-sen AND price below 1d EMA50 AND volume > 1.5x 20-period MA AND price below Kumo cloud
+# Exit when: Tenkan-sen/Kijun-sen cross reverses OR price crosses Kumo cloud in opposite direction
+# Uses Ichimoku for momentum/trend structure, 1d EMA for higher timeframe trend, volume for conviction
+# Timeframe: 6h, HTF: 1d. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_VolumeConfirm"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_1dEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,111 +23,122 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Calculate volume confirmation on 1h using 20-period MA
+    # Calculate volume confirmation on 6h using 20-period MA
     if len(volume) >= 20:
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_filter = volume > (1.5 * vol_ma_20)
     else:
         volume_filter = np.zeros(n, dtype=bool)
     
-    # Calculate Camarilla pivots on 1h using previous bar's OHLC
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    # PP = (high + low + close)/3
-    if len(high) >= 2 and len(low) >= 2 and len(close) >= 2:
-        prev_high = np.roll(high, 1)
-        prev_low = np.roll(low, 1)
-        prev_close = np.roll(close, 1)
-        prev_high[0] = np.nan
-        prev_low[0] = np.nan
-        prev_close[0] = np.nan
+    # Calculate Ichimoku components on 6h (9, 26, 52 periods)
+    if len(high) >= 52 and len(low) >= 52 and len(close) >= 52:
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+        tenkan_sen = (period9_high + period9_low) / 2
         
-        camarilla_range = prev_high - prev_low
-        r1 = prev_close + 1.1 * camarilla_range / 12
-        s1 = prev_close - 1.1 * camarilla_range / 12
-        pp = (prev_high + prev_low + prev_close) / 3
+        # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+        period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+        kijun_sen = (period26_high + period26_low) / 2
+        
+        # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+        senkou_span_a = (tenkan_sen + kijun_sen) / 2
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+        period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+        period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+        senkou_span_b = (period52_high + period52_low) / 2
+        
+        # Kumo cloud boundaries
+        upper_kumo = np.maximum(senkou_span_a, senkou_span_b)
+        lower_kumo = np.minimum(senkou_span_a, senkou_span_b)
+        
+        # Tenkan/Kijun cross signals
+        tenkan_prev = np.roll(tenkan_sen, 1)
+        tenkan_prev[0] = np.nan
+        kijun_prev = np.roll(kijun_sen, 1)
+        kijun_prev[0] = np.nan
+        tk_cross_above = (tenkan_prev <= kijun_prev) & (tenkan_sen > kijun_sen)
+        tk_cross_below = (tenkan_prev >= kijun_prev) & (tenkan_sen < kijun_sen)
+        
+        # Price relative to cloud
+        price_above_kumo = close > upper_kumo
+        price_below_kumo = close < lower_kumo
     else:
-        r1 = np.full(n, np.nan)
-        s1 = np.full(n, np.nan)
-        pp = np.full(n, np.nan)
+        tenkan_sen = np.full(n, np.nan)
+        kijun_sen = np.full(n, np.nan)
+        senkou_span_a = np.full(n, np.nan)
+        senkou_span_b = np.full(n, np.nan)
+        upper_kumo = np.full(n, np.nan)
+        lower_kumo = np.full(n, np.nan)
+        tk_cross_above = np.zeros(n, dtype=bool)
+        tk_cross_below = np.zeros(n, dtype=bool)
+        price_above_kumo = np.zeros(n, dtype=bool)
+        price_below_kumo = np.zeros(n, dtype=bool)
     
-    # Breakout signals
-    breakout_above_r1 = (close > r1) & (np.roll(close, 1) <= r1)
-    breakout_below_s1 = (close < s1) & (np.roll(close, 1) >= s1)
-    return_to_pp = (close > pp * 0.995) & (close < pp * 1.005)  # within 0.5% of PP
-    
-    # Get 4h data ONCE before loop for EMA calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data ONCE before loop for EMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 4h timeframe
-    if len(close_4h) >= 50:
-        ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-        ema_rising = np.diff(ema_50_4h, prepend=np.nan) > 0
-        ema_falling = np.diff(ema_50_4h, prepend=np.nan) < 0
+    # Calculate 50-period EMA on 1d timeframe
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_above = close_1d > ema_50_1d
+        ema_below = close_1d < ema_50_1d
     else:
-        ema_rising = np.full(len(close_4h), False)
-        ema_falling = np.full(len(close_4h), False)
+        ema_above = np.full(len(close_1d), False)
+        ema_below = np.full(len(close_1d), False)
     
-    # Align 4h EMA trend to 1h timeframe
-    ema_rising_aligned = align_htf_to_ltf(prices, df_4h, ema_rising.astype(float))
-    ema_falling_aligned = align_htf_to_ltf(prices, df_4h, ema_falling.astype(float))
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align 1d EMA trend to 6h timeframe
+    ema_above_aligned = align_htf_to_ltf(prices, df_1d, ema_above.astype(float))
+    ema_below_aligned = align_htf_to_ltf(prices, df_1d, ema_below.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(pp[i]) or 
-            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i]) or 
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(upper_kumo[i]) or 
+            np.isnan(lower_kumo[i]) or np.isnan(ema_above_aligned[i]) or np.isnan(ema_below_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long conditions: breakout above R1 + 4h EMA50 rising + volume filter + session
-            if (breakout_above_r1[i] and 
-                ema_rising_aligned[i] == 1.0 and 
-                volume_filter[i]):
-                signals[i] = 0.20
+            # Long conditions: TK cross above + price above 1d EMA50 + volume filter + price above Kumo
+            if (tk_cross_above[i] and 
+                ema_above_aligned[i] == 1.0 and 
+                volume_filter[i] and 
+                price_above_kumo[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: breakout below S1 + 4h EMA50 falling + volume filter + session
-            elif (breakout_below_s1[i] and 
-                  ema_falling_aligned[i] == 1.0 and 
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # Short conditions: TK cross below + price below 1d EMA50 + volume filter + price below Kumo
+            elif (tk_cross_below[i] and 
+                  ema_below_aligned[i] == 1.0 and 
+                  volume_filter[i] and 
+                  price_below_kumo[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: return to PP OR 4h EMA turns falling
-            if (return_to_pp[i] or ema_falling_aligned[i] == 1.0):
+            # Exit long: TK cross below OR price crosses below Kumo
+            if (tk_cross_below[i] or (close[i] < lower_kumo[i])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: return to PP OR 4h EMA turns rising
-            if (return_to_pp[i] or ema_rising_aligned[i] == 1.0):
+            # Exit short: TK cross above OR price crosses above Kumo
+            if (tk_cross_above[i] or (close[i] > upper_kumo[i])):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
