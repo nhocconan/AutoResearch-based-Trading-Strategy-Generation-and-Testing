@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h volume spike and 1d ADX trend filter
-# Long when price breaks above 1h Camarilla R1 level AND 4h volume > 2x 20-period average AND 1d ADX > 25
-# Short when price breaks below 1h Camarilla S1 level AND 4h volume > 2x 20-period average AND 1d ADX > 25
-# Exit when price crosses 1h Camarilla pivot point (mean reversion) OR 1d ADX < 20 (trend weakening)
-# Uses 1h primary timeframe with 4h for volume confirmation and 1d for ADX trend filter
-# Session filter: 08-20 UTC to reduce noise trades
-# Discrete sizing (0.20) to limit fee drag and manage drawdown
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR volatility filter and 1w EMA trend filter
+# Long when price breaks above 12h Camarilla R3 level AND 1w EMA50 > EMA200 (bullish trend) AND ATR(14) < 0.5 * ATR(50) (low volatility)
+# Short when price breaks below 12h Camarilla S3 level AND 1w EMA50 < EMA200 (bearish trend) AND ATR(14) < 0.5 * ATR(50) (low volatility)
+# Exit when price crosses 12h Camarilla pivot point (mean reversion) OR volatility expands (ATR(14) > ATR(50))
+# Uses 12h primary timeframe with 1w HTF for EMA trend filter and 1d for ATR volatility filter and Camarilla levels
+# Volatility contraction breakouts capture explosive moves after consolidation, working in both bull and bear markets
+# Discrete sizing (0.25) to limit fee drag and manage drawdown
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "1h_Camarilla_R1S1_Breakout_4hVol_1dADX_Trend"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA_Trend_ATR_Vol"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,22 +26,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ADX trend filter
+    # Get 1d data ONCE before loop for ATR and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data ONCE before loop for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Get 1h data ONCE before loop for Camarilla levels (based on previous 1h bar)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 1d ADX(14) for trend filter
+    # Calculate 1d ATR(14) and ATR(50) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -53,15 +48,7 @@ def generate_signals(prices):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Wilder's smoothing function
+    # Wilder's smoothing for ATR
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -74,100 +61,78 @@ def generate_signals(prices):
                 result[i] = np.nan
         return result
     
-    tr_smooth = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
+    atr_14 = wilder_smooth(tr, 14)
+    atr_50 = wilder_smooth(tr, 50)
     
-    # DI+ and DI-
-    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
-    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
+    # Align ATR to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
     
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
-    adx = wilder_smooth(dx, 14)
+    # Calculate 1w EMA50 and EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align ADX to 1h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align EMA to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
     
-    # Calculate 4h volume 20-period average for confirmation
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
+    camarilla_r3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
+    camarilla_s3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3  # Standard pivot point
     
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_filter_4h = volume_4h > (2.0 * vol_ma_20)
-    
-    # Align volume filter to 1h timeframe
-    volume_filter_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_filter_4h.astype(float))
-    
-    # Calculate 1h Camarilla levels (based on previous 1h bar)
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
-    
-    # Camarilla R1 and S1 levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1h + (1.1 * (high_1h - low_1h) / 12)
-    camarilla_s1 = close_1h - (1.1 * (high_1h - low_1h) / 12)
-    camarilla_pivot = (high_1h + low_1h + close_1h) / 3  # Standard pivot point
-    
-    # Align to 1h timeframe (using previous 1h bar's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_s1)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1h, camarilla_pivot)
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Align to 12h timeframe (using previous 1d bar's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any value is NaN
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(volume_filter_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(atr_50_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(ema_200_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(camarilla_pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility filter: ATR(14) < 0.5 * ATR(50) (low volatility)
+        vol_filter = atr_14_aligned[i] < (0.5 * atr_50_aligned[i])
+        
         if position == 0:
-            # Long conditions: price breaks above Camarilla R1 AND 4h volume spike AND 1d ADX > 25
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_filter_4h_aligned[i] > 0.5 and 
-                adx_1d_aligned[i] > 25):
-                signals[i] = 0.20
+            # Long conditions: price breaks above Camarilla R3 AND bullish trend AND low volatility
+            if (close[i] > camarilla_r3_aligned[i] and 
+                ema_50_aligned[i] > ema_200_aligned[i] and 
+                vol_filter):
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Camarilla S1 AND 4h volume spike AND 1d ADX > 25
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_filter_4h_aligned[i] > 0.5 and 
-                  adx_1d_aligned[i] > 25):
-                signals[i] = -0.20
+            # Short conditions: price breaks below Camarilla S3 AND bearish trend AND low volatility
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  ema_50_aligned[i] < ema_200_aligned[i] and 
+                  vol_filter):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla pivot (mean reversion) OR 1d ADX < 20 (trend weakening)
-            if close[i] < camarilla_pivot_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit long: price crosses below Camarilla pivot (mean reversion) OR volatility expands (ATR(14) > ATR(50))
+            if close[i] < camarilla_pivot_aligned[i] or atr_14_aligned[i] > atr_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla pivot (mean reversion) OR 1d ADX < 20 (trend weakening)
-            if close[i] > camarilla_pivot_aligned[i] or adx_1d_aligned[i] < 20:
+            # Exit short: price crosses above Camarilla pivot (mean reversion) OR volatility expands (ATR(14) > ATR(50))
+            if close[i] > camarilla_pivot_aligned[i] or atr_14_aligned[i] > atr_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
