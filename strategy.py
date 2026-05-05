@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when: Price breaks above 20-day high AND 1w EMA50 is rising AND volume > 1.5x 20-day avg volume
-# Short when: Price breaks below 20-day low AND 1w EMA50 is falling AND volume > 1.5x 20-day avg volume
-# Exit when price returns to 20-day midpoint (mean reversion)
-# Donchian breakout captures volatility expansion after consolidation
-# 1w EMA50 filter ensures we trade in direction of higher timeframe trend
-# Volume confirmation reduces false breakouts
-# Works in both bull and bear markets by trading breakouts in direction of weekly trend
-# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike + chop regime filter
+# Long when: Price breaks above 12h Donchian upper channel (20) AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime)
+# Short when: Price breaks below 12h Donchian lower channel (20) AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime)
+# Exit when price returns to 12h Donchian midpoint (mean reversion in range)
+# Donchian breakout captures volatility expansion after consolidation in ranging markets
+# Volume spike confirms participation, chop filter ensures we only trade in ranging regimes
+# Works in both bull and bear markets by trading mean reversion within ranges
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "1d_Donchian20_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "12h_DonchianBreakout_VolumeChop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,61 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA(50)
+    # Get 1d data ONCE before loop for volume and chop regime filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need enough for calculations
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1w EMA(50)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d True Range for chopiness index
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan  # First value has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 1w EMA50 slope (rising/falling)
-    ema_50_slope = np.diff(ema_50_1w_aligned, prepend=ema_50_1w_aligned[0])
-    ema_50_rising = ema_50_slope > 0
-    ema_50_falling = ema_50_slope < 0
+    # Calculate chopiness index (14)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.log(max_high - min_low) * np.log(14)
+    chop = 100 * np.log10(atr_sum / chop_denom) / np.log10(14)
+    chop = np.where(chop_denom <= 0, 50, chop)  # Avoid division by zero/log of zero
     
-    # Calculate Donchian channels (20) on 1d
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2
+    # Calculate 1d volume average (20)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 20-day average volume for confirmation
-    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_vol_20)
+    # Align 1d indicators to 12h timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 12h Donchian channels (20)
+    donch_h_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_l_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_h_20 + donch_l_20) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(avg_vol_20[i])):
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(donch_h_20[i]) or np.isnan(donch_l_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filters: volume spike (>1.5x average) AND chop > 61.8 (range regime)
+        vol_spike = volume[i] > (1.5 * vol_ma_20_aligned[i])
+        range_regime = chop_aligned[i] > 61.8
+        
         if position == 0:
-            # Long: Break above 20-day high AND weekly EMA50 rising AND volume spike
-            if close[i] > highest_20[i] and ema_50_rising[i] and volume_spike[i]:
+            # Long: Break above upper Donchian channel in range regime with volume spike
+            if close[i] > donch_h_20[i] and vol_spike and range_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below 20-day low AND weekly EMA50 falling AND volume spike
-            elif close[i] < lowest_20[i] and ema_50_falling[i] and volume_spike[i]:
+            # Short: Break below lower Donchian channel in range regime with volume spike
+            elif close[i] < donch_l_20[i] and vol_spike and range_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: return to Donchian midpoint (mean reversion)
-            if close[i] < donchian_mid[i]:
+            if close[i] < donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: return to Donchian midpoint (mean reversion)
-            if close[i] > donchian_mid[i]:
+            if close[i] > donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
