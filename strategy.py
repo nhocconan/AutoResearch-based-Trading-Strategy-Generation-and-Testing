@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band AND 1d ATR(14) > 20-period ATR mean AND volume > 1.5x 20-period volume mean
-# Short when price breaks below 4h Donchian lower band AND same volatility and volume conditions
-# Exit when price crosses 4h Donchian middle band (mean reversion)
-# Uses 4h primary timeframe with 1d HTF for ATR-based regime filter (adaptive to market conditions)
+# Hypothesis: 1d Donchian(20) breakout with 1w HMA trend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper band AND 1w HMA(21) is rising AND volume > 1.5x 20-period average
+# Short when price breaks below 1d Donchian lower band AND 1w HMA(21) is falling AND volume > 1.5x 20-period average
+# Exit when price crosses 1d Donchian middle band (mean reversion)
+# Uses 1d primary timeframe with 1w HTF for HMA trend filter
 # Volume confirmation ensures breakouts have conviction
 # Discrete sizing (0.25) to limit fee drag and manage drawdown
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
-name = "4h_Donchian20_Breakout_1dATR_Volume_Regime"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wHMA_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,49 +26,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data ONCE before loop for HMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w HMA(21)
+    close_1w = df_1w['close'].values
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
     
-    # ATR calculation using Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[1:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-            else:
-                result[i] = np.nan
-        return result
-    
-    atr_1d = wilder_smooth(tr, 14)
-    
-    # Align ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate ATR mean for adaptive threshold (regime filter)
-    if len(atr_1d_aligned) >= 20:
-        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        vol_filter = atr_1d_aligned > atr_ma_20  # ATR above mean = high volatility regime
+    if len(close_1w) >= 21:
+        wma_half = np.array([wma(close_1w[i:i+half_length], half_length) 
+                            for i in range(len(close_1w) - half_length + 1)])
+        wma_full = np.array([wma(close_1w[i:i+21], 21) 
+                            for i in range(len(close_1w) - 21 + 1)])
+        wma_sqrt = np.array([wma(close_1w[i:i+sqrt_length], sqrt_length) 
+                            for i in range(len(close_1w) - sqrt_length + 1)])
+        
+        # Align arrays to same length
+        min_len = min(len(wma_half), len(wma_full), len(wma_sqrt))
+        if min_len > 0:
+            wma_half = wma_half[-min_len:]
+            wma_full = wma_full[-min_len:]
+            wma_sqrt = wma_sqrt[-min_len:]
+            hma_1w = 2 * wma_half - wma_full
+            hma_1w = wma(hma_1w, sqrt_length)
+            
+            # Pad to match original length
+            hma_1w_padded = np.full(len(close_1w), np.nan)
+            start_idx = len(close_1w) - len(hma_1w)
+            hma_1w_padded[start_idx:] = hma_1w
+            hma_1w = hma_1w_padded
+        else:
+            hma_1w = np.full(len(close_1w), np.nan)
     else:
-        vol_filter = np.zeros(n, dtype=bool)
+        hma_1w = np.full(len(close_1w), np.nan)
     
-    # Calculate 4h Donchian channels
+    # Align HMA to 1d timeframe
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    
+    # Calculate HMA slope for trend filter (rising/falling)
+    hma_slope = np.diff(hma_1w_aligned, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
+    
+    # Calculate 1d Donchian channels (20-period)
     if len(high) >= 20:
         donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
         donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -90,7 +97,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any value is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
+        if (np.isnan(hma_1w_aligned[i]) or 
             np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or 
             np.isnan(donchian_middle[i]) or 
@@ -101,15 +108,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper AND volatility regime AND volume spike
+            # Long conditions: price breaks above Donchian upper AND HMA rising AND volume spike
             if (close[i] > donchian_upper[i] and 
-                vol_filter[i] and 
+                hma_rising[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian lower AND volatility regime AND volume spike
+            # Short conditions: price breaks below Donchian lower AND HMA falling AND volume spike
             elif (close[i] < donchian_lower[i] and 
-                  vol_filter[i] and 
+                  hma_falling[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
