@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w EMA50 trend filter and ATR(14) volatility filter
-# Long when price breaks above 6h Donchian high(20) AND 1w close > 1w EMA50 AND ATR(14) < 0.03 * close
-# Short when price breaks below 6h Donchian low(20) AND 1w close < 1w EMA50 AND ATR(14) < 0.03 * close
-# Uses discrete sizing (0.25) to limit fee drag. Target: 12-30 trades/year per symbol.
-# Donchian provides structure; 1w EMA50 filters primary trend; ATR filter avoids high volatility chop.
+# Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume confirmation
+# Long when price > Alligator Jaw AND 1d EMA50 uptrend AND volume > 1.5x 20-period average
+# Short when price < Alligator Jaw AND 1d EMA50 downtrend AND volume > 1.5x 20-period average
+# Exit when price crosses Alligator Teeth or trend reverses
+# Uses discrete sizing (0.25) to limit fee drag. Target: 15-30 trades/year per symbol.
+# Alligator identifies trend, EMA50 filters higher timeframe direction, volume confirms strength.
 # Works in bull markets via longs in uptrends and bear markets via shorts in downtrends.
-# 6h timeframe balances trade frequency and responsiveness while minimizing fee drag.
+# 12h timeframe minimizes fee drag while capturing medium-term Alligator signals.
 
-name = "6h_Donchian20_1wEMA50_ATR_Filter"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,95 +26,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data ONCE before loop for Donchian calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data ONCE before loop for Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 13:
         return np.zeros(n)
     
-    # Calculate 6h Donchian channels based on previous 6h bar
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate Williams Alligator on 12h data
+    # Jaw (Blue): 13-period SMMA smoothed 8 bars ahead
+    # Teeth (Red): 8-period SMMA smoothed 5 bars ahead
+    # Lips (Green): 5-period SMMA smoothed 3 bars ahead
+    # We'll use Jaw as the main trend indicator (slowest)
     
-    # Donchian(20): 20-period high and low
-    high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV SMMA * (period-1) + CLOSE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Shift to use previous bar's levels (breakout of previous bar's Donchian)
-    high_20 = np.roll(high_20, 1)
-    low_20 = np.roll(low_20, 1)
-    high_20[0] = np.nan  # First value invalid after roll
-    low_20[0] = np.nan
+    close_12h = df_12h['close'].values
+    jaw = smma(close_12h, 13)  # Jaw (Blue line)
+    teeth = smma(close_12h, 8)  # Teeth (Red line)
+    lips = smma(close_12h, 5)   # Lips (Green line)
     
-    # Align Donchian levels to prices timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_6h, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_6h, low_20)
+    # Align Alligator Jaw to prices timeframe (main trend indicator)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     # Uptrend when close > EMA50, downtrend when close < EMA50
-    uptrend_1w = close_1w > ema_50_1w
-    downtrend_1w = close_1w < ema_50_1w
+    uptrend_1d = close_1d > ema_50_1d
+    downtrend_1d = close_1d < ema_50_1d
     
-    # Align 1w trend to 6h timeframe
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
+    # Align 1d trend to 12h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
     
-    # Calculate ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Volatility filter: ATR < 3% of price (avoid high volatility chop)
-    vol_filter = atr_14 < (0.03 * close)
+    # Volume confirmation: volume > 1.5x 20-period average
+    if len(volume) >= 20:
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_filter = volume > (1.5 * vol_ma_20)
+    else:
+        volume_filter = np.ones(n, dtype=bool)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any value is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or 
-            np.isnan(vol_filter[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(uptrend_1d_aligned[i]) or 
+            np.isnan(downtrend_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: price > Donchian high(20) AND 1w uptrend AND low volatility
-            if (close[i] > high_20_aligned[i] and 
-                uptrend_1w_aligned[i] > 0.5 and 
-                vol_filter[i]):
+            # Long conditions: price > Alligator Jaw AND 1d EMA50 uptrend AND volume confirmation
+            if (close[i] > jaw_aligned[i] and 
+                uptrend_1d_aligned[i] > 0.5 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < Donchian low(20) AND 1w downtrend AND low volatility
-            elif (close[i] < low_20_aligned[i] and 
-                  downtrend_1w_aligned[i] > 0.5 and 
-                  vol_filter[i]):
+            # Short conditions: price < Alligator Jaw AND 1d EMA50 downtrend AND volume confirmation
+            elif (close[i] < jaw_aligned[i] and 
+                  downtrend_1d_aligned[i] > 0.5 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < Donchian low(20) OR 1w trend changes to downtrend
-            if (close[i] < low_20_aligned[i] or 
-                downtrend_1w_aligned[i] > 0.5):
+            # Exit long: price < Alligator Teeth OR 1d trend changes to downtrend
+            # Use teeth for tighter exit (faster line)
+            teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+            if (np.isnan(teeth_aligned[i]) or 
+                close[i] < teeth_aligned[i] or 
+                downtrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > Donchian high(20) OR 1w trend changes to uptrend
-            if (close[i] > high_20_aligned[i] or 
-                uptrend_1w_aligned[i] > 0.5):
+            # Exit short: price > Alligator Teeth OR 1d trend changes to uptrend
+            teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+            if (np.isnan(teeth_aligned[i]) or 
+                close[i] > teeth_aligned[i] or 
+                uptrend_1d_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
