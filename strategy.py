@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot breakout with 1d trend filter (EMA34) and volume spike confirmation
-# Long when price breaks above 12h Camarilla R3 level AND price > 1d EMA34 AND volume > 1.5 * avg_volume(20) on 6h
-# Short when price breaks below 12h Camarilla S3 level AND price < 1d EMA34 AND volume > 1.5 * avg_volume(20) on 6h
-# Exit when price crosses back below/above 12h Camarilla pivot point OR volume drops below average
+# Hypothesis: 4h strategy using daily Williams Alligator (Jaw/Teeth/Lips) for trend direction, combined with 4h Donchian breakout and volume confirmation
+# Long when price breaks above 4h Donchian(20) upper band AND Alligator is bullish (Lips > Teeth > Jaw) AND volume > 1.5 * avg_volume(20)
+# Short when price breaks below 4h Donchian(20) lower band AND Alligator is bearish (Lips < Teeth < Jaw) AND volume > 1.5 * avg_volume(20)
+# Exit when price crosses back below/above 4h Donchian(20) midpoint OR Alligator trend reverses
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe
-# 12h Camarilla provides robust structure from higher timeframe
-# 1d EMA34 filters primary trend to avoid counter-trend trades in choppy markets
-# Volume spike confirms breakout strength and reduces false signals
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Williams Alligator provides smoothed trend filter to avoid whipsaws
+# Donchian breakout captures momentum with clear structure
+# Volume confirmation reduces false breakouts
 # Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend)
 
-name = "6h_Camarilla_R3S3_Breakout_12h_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_DonchianBreakout_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,42 +28,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:  # Need at least one completed 12h bar
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h Camarilla levels (based on previous completed 12h bar)
-    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
-    # R3 = Pivot + Range * 1.1/2, S3 = Pivot - Range * 1.1/2
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    camarilla_r3 = pivot_12h + (range_12h * 1.1 / 2.0)
-    camarilla_s3 = pivot_12h - (range_12h * 1.1 / 2.0)
-    camarilla_pivot = pivot_12h  # PP level for exit
-    
-    # Align 12h Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
-    
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get daily data ONCE before loop for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    if len(df_1d) < 34:  # Need enough for Alligator (13,8,5 smoothed)
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Williams Alligator components (Smoothed Moving Average = SMA with period)
+    # Jaw: 13-period SMMA of Median Price, smoothed 8 bars ahead
+    # Teeth: 8-period SMMA of Median Price, smoothed 5 bars ahead  
+    # Lips: 5-period SMMA of Median Price, smoothed 3 bars ahead
+    median_price_1d = (high_1d + low_1d) / 2.0
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 6h
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    # Jaw: SMA(13) then smoothed by 8
+    jaw_1d = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean()
+    jaw_1d = jaw_1d.rolling(window=8, min_periods=8).mean().values
+    
+    # Teeth: SMA(8) then smoothed by 5
+    teeth_1d = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean()
+    teeth_1d = teeth_1d.rolling(window=5, min_periods=5).mean().values
+    
+    # Lips: SMA(5) then smoothed by 3
+    lips_1d = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean()
+    lips_1d = lips_1d.rolling(window=3, min_periods=3).mean().values
+    
+    # Align Williams Alligator to 4h timeframe (wait for completed daily bar)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    
+    # Get 4h data ONCE before loop for Donchian channels and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:  # Need enough for Donchian(20)
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 4h
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume_4h > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -74,8 +86,9 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
             np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -83,24 +96,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above 12h Camarilla R3, above 1d EMA34, volume confirmation, in session
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above 4h Donchian high, Alligator bullish (Lips > Teeth > Jaw), volume confirmation, in session
+            if (close[i] > donchian_high[i] and 
+                lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 12h Camarilla S3, below 1d EMA34, volume confirmation, in session
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below 4h Donchian low, Alligator bearish (Lips < Teeth < Jaw), volume confirmation, in session
+            elif (close[i] < donchian_low[i] and 
+                  lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below 12h Camarilla pivot OR volume drops below average
-            if close[i] < camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit long: Price crosses below 4h Donchian mid OR Alligator turns bearish
+            if (close[i] < donchian_mid[i] or 
+                not (lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above 12h Camarilla pivot OR volume drops below average
-            if close[i] > camarilla_pivot_aligned[i] or volume[i] < avg_volume_20[i]:
+            # Exit short: Price crosses above 4h Donchian mid OR Alligator turns bullish
+            if (close[i] > donchian_mid[i] or 
+                not (lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i])):
                 signals[i] = 0.0
                 position = 0
             else:
