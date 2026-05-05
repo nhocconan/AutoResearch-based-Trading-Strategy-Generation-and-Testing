@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using daily Elder Ray Index (Bull Power/Bear Power) with 1d EMA13 trend filter and ATR-based volatility regime
-# Long when Bull Power > 0 AND price > 1d EMA13 AND ATR(14) > ATR(50) (high volatility regime)
-# Short when Bear Power < 0 AND price < 1d EMA13 AND ATR(14) > ATR(50) (high volatility regime)
-# Exit when Bull/Bear Power crosses zero OR ATR(14) < ATR(50) (low volatility regime)
+# Hypothesis: 12h strategy using daily Donchian channel breakout with 12h ADX trend filter and volume confirmation
+# Long when price breaks above daily Donchian(20) upper band AND 12h ADX > 25 (trending) AND volume > 2.0 * avg_volume(20)
+# Short when price breaks below daily Donchian(20) lower band AND 12h ADX > 25 (trending) AND volume > 2.0 * avg_volume(20)
+# Exit when price crosses back through daily Donchian(20) midpoint OR ADX drops below 20 (range)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Elder Ray measures trend strength via power of bulls/bears relative to EMA
-# 1d EMA13 filters for primary trend alignment to avoid counter-trend trades
-# ATR regime filter ensures we only trade in sufficient volatility environments
-# Works in bull markets (buying strength in uptrend) and bear markets (selling weakness in downtrend)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Daily Donchian provides structural breakouts in both bull and bear markets
+# 12h ADX filters for trending conditions to avoid false breakouts in ranging markets
+# Volume spike confirms breakout strength and reduces false signals
+# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend)
 
-name = "6h_ElderRay_ATR_Regime_1dEMA13"
-timeframe = "6h"
+name = "12h_Donchian20_12hADX25_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,56 +28,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Elder Ray and EMA13
+    # Get daily data ONCE before loop for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA13 and ATR(50)
+    if len(df_1d) < 20:  # Need at least 20 completed daily bars for Donchian(20)
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA13 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Donchian Channel(20) on daily timeframe
+    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high_20
+    donchian_lower = lowest_low_20
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Calculate Bull Power and Bear Power (Elder Ray)
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Align Donchian levels to 12h timeframe (wait for completed daily bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # Align Elder Ray components to 6h timeframe (wait for completed daily bar)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Get 12h data ONCE before loop for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ADX calculation
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ATR(14) and ATR(50) for volatility regime filter
-    # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    prev_close_1d = np.append([np.nan], close_1d[:-1])
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - prev_close_1d)
-    tr3 = np.abs(low_1d - prev_close_1d)
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate ADX(14) on 12h timeframe
+    # True Range
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def calculate_atr(tr, period):
-        atr = np.full_like(tr, np.nan)
-        if len(tr) < period:
-            return atr
-        # First ATR is simple average
-        atr[period-1] = np.nanmean(tr[:period])
-        # Wilder's smoothing: ATR today = (ATR yesterday * (period-1) + TR today) / period
-        for i in range(period, len(tr)):
-            if not np.isnan(atr[i-1]):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Directional Movement
+    up_move = np.diff(high_12h, prepend=high_12h[0])
+    down_move = np.diff(low_12h, prepend=low_12h[0]) * -1  # Invert to positive
     
-    atr14_1d = calculate_atr(true_range, 14)
-    atr50_1d = calculate_atr(true_range, 50)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align ATR indicators to 6h timeframe
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    tr_smooth = wilders_smoothing(tr, period)
+    plus_dm_smooth = wilders_smoothing(plus_dm, period)
+    minus_dm_smooth = wilders_smoothing(minus_dm, period)
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0.0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align ADX to 12h timeframe (already on 12h, but align for consistency)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 12h
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -88,35 +108,35 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema13_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
-            np.isnan(atr50_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) AND price > 1d EMA13 AND high volatility regime
-            if (bull_power_aligned[i] > 0 and close[i] > ema13_1d_aligned[i] and 
-                atr14_1d_aligned[i] > atr50_1d_aligned[i]):
+            # Long: Price breaks above daily Donchian upper, ADX > 25 (trending), volume confirmation, in session
+            if (close[i] > donchian_upper_aligned[i] and close[i-1] <= donchian_upper_aligned[i-1] and 
+                adx_aligned[i] > 25 and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) AND price < 1d EMA13 AND high volatility regime
-            elif (bear_power_aligned[i] < 0 and close[i] < ema13_1d_aligned[i] and 
-                  atr14_1d_aligned[i] > atr50_1d_aligned[i]):
+            # Short: Price breaks below daily Donchian lower, ADX > 25 (trending), volume confirmation, in session
+            elif (close[i] < donchian_lower_aligned[i] and close[i-1] >= donchian_lower_aligned[i-1] and 
+                  adx_aligned[i] > 25 and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power crosses zero OR low volatility regime
-            if bull_power_aligned[i] <= 0 or atr14_1d_aligned[i] <= atr50_1d_aligned[i]:
+            # Exit long: Price crosses back below daily Donchian midpoint OR ADX drops below 20 (range)
+            if close[i] < donchian_mid_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power crosses zero OR low volatility regime
-            if bear_power_aligned[i] >= 0 or atr14_1d_aligned[i] <= atr50_1d_aligned[i]:
+            # Exit short: Price crosses back above daily Donchian midpoint OR ADX drops below 20 (range)
+            if close[i] > donchian_mid_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
