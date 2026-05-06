@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot points with daily trend filter and volume confirmation
-# Weekly pivots (from previous week) provide robust support/resistance levels
-# Breakouts above weekly R1 or below S1 with volume > 1.5x 20-period average indicate momentum
-# Trend filter: 50-period EMA on daily timeframe to align with higher timeframe trend
-# This avoids counter-trend trades and works in both bull/bear markets by following the weekly trend
+# Hypothesis: 12h strategy using Donchian channel breakout with volume confirmation and trend filter
+# Donchian(20) identifies breakout levels; volume > 1.5x 20-period average confirms momentum
+# Trend filter: 50-period EMA on 12h timeframe to avoid counter-trend trades
+# Works in bull/bear markets: breakouts capture trends, with exits at opposite channel or trend reversal
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_WeeklyPivot_DailyTrend_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_VolumeTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,38 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    s1 = pivot - (range_ * 1.0)
-    
-    # Align weekly levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Calculate daily EMA for trend filter
+    # Calculate daily trend filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily 50-period EMA for trend filter
+    close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    
+    # Align daily trend to 12h timeframe
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Calculate Donchian channel (20-period) on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,8 +58,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(uptrend_1d_aligned[i]) or 
+            np.isnan(downtrend_1d_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -79,24 +68,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above weekly R1 with volume confirmation and daily uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i]:
+            # Long breakout: price breaks above Donchian high with volume confirmation and uptrend
+            if close[i] > donchian_high[i] and volume_filter[i] and uptrend_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below weekly S1 with volume confirmation and daily downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i]:
+            # Short breakout: price breaks below Donchian low with volume confirmation and downtrend
+            elif close[i] < donchian_low[i] and volume_filter[i] and downtrend_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly S1 (failed support)
-            if close[i] < s1_aligned[i]:
+            # Exit long: price breaks below Donchian low (failed breakout) or trend reverses
+            if close[i] < donchian_low[i] or not uptrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly R1 (failed resistance)
-            if close[i] > r1_aligned[i]:
+            # Exit short: price breaks above Donchian high (failed breakdown) or trend reverses
+            if close[i] > donchian_high[i] or not downtrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
