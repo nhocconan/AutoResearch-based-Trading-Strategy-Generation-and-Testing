@@ -1,24 +1,23 @@
-# 1. Hypothesis: 4h strategy using daily Pivot Points (High, Low, Close of prior day) with breakout and fade logic
-# - Fade (counter-trend) at S1/R1 levels when price reverses from these levels with volume confirmation
-# - Breakout (trend-following) at S2/R2 levels when price breaks through with volume expansion
-# - Uses daily Pivot Points calculated from prior day's OHLC
-# - Adds 4h EMA50 filter to only take trades in direction of 4h trend
-# - Designed to work in ranging markets (fades at S1/R1) and trending markets (breakouts at S2/R2)
-# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
-# - BTC/ETH focus: Pivot points work well in ranging/mean-reverting markets (bear) and breakout markets (bull)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_DailyPivot_S1R1_S2R2_4hEMA50_Trend_Filter"
-timeframe = "4h"
+# Hypothesis: 6h strategy using 1-day Williams %R with 1-week EMA trend filter
+# - Williams %R(14) identifies overbought/oversold conditions on the daily chart
+# - Buy when %R crosses above -80 from below (oversold bounce) in uptrend (price > weekly EMA50)
+# - Sell when %R crosses below -20 from above (overbought rejection) in downtrend (price < weekly EMA50)
+# - Uses volume confirmation to avoid false signals
+# - Designed to work in ranging markets (mean reversion at extremes) and trending markets (pullbacks in trend)
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+
+name = "6h_WilliamsR_14_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,42 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Pivot Point calculation
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Pivot Points for each day: based on prior day's OHLC
-    # Pivot = (high + low + close) / 3
-    # R1 = 2*Pivot - low
-    # S1 = 2*Pivot - high
-    # R2 = Pivot + (high - low)
-    # S2 = Pivot - (high - low)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
+    # Calculate Williams %R on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr = np.where(rr == 0, 0.0001, rr)
     
-    # Align Pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1.values)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2.values)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2.values)
+    williams_r = -100 * (highest_high - df_1d['close'].values) / rr
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Williams %R to 6h timeframe
+    williams_r_6h = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume filters
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma_20)  # Volume confirmation
-    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
-    volume_expansion[0] = False
+    volume_filter = volume > (1.2 * vol_ma_20)  # Require 20% above average volume
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -70,59 +62,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup for EMA50
+    for i in range(20, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
-            not session_filter[i]):
+        if (np.isnan(williams_r_6h[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Fade at S1/R1: counter-trend entry when price reverses from these levels
-            # Long fade at S1: price touches S1 and closes back above it
-            if close[i] <= s1_4h[i] * 1.001 and close[i] > s1_4h[i] and volume_filter[i]:
-                # Only take long fade if below 4h EMA50 (bearish context)
-                if close[i] < ema_50_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short fade at R1: price touches R1 and closes back below it
-            elif close[i] >= r1_4h[i] * 0.999 and close[i] < r1_4h[i] and volume_filter[i]:
-                # Only take short fade if above 4h EMA50 (bullish context)
-                if close[i] > ema_50_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout at S2/R2: trend-following entry when price breaks through
-            # Long breakout at R2: price breaks above R2 with volume expansion
-            elif close[i] > r2_4h[i] and volume_expansion[i]:
-                # Only take long breakout if above 4h EMA50 (bullish context)
-                if close[i] > ema_50_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short breakout at S2: price breaks below S2 with volume expansion
-            elif close[i] < s2_4h[i] and volume_expansion[i]:
-                # Only take short breakout if below 4h EMA50 (bearish context)
-                if close[i] < ema_50_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long signal: Williams %R crosses above -80 from below (bullish reversal) in uptrend
+            if (williams_r_6h[i] > -80 and williams_r_6h[i-1] <= -80 and 
+                close[i] > ema_50_1w_aligned[i] and volume_filter[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short signal: Williams %R crosses below -20 from above (bearish reversal) in downtrend
+            elif (williams_r_6h[i] < -20 and williams_r_6h[i-1] >= -20 and 
+                  close[i] < ema_50_1w_aligned[i] and volume_filter[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches R1 (profit target) or breaks below S2 (stop)
-            if close[i] >= r1_4h[i] * 0.999:  # Take profit at R1
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < s2_4h[i]:  # Stop loss if breaks below S2
+            # Exit long: Williams %R reaches overbought (-20) or trend changes
+            if williams_r_6h[i] >= -20 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches S1 (profit target) or breaks above R2 (stop)
-            if close[i] <= s1_4h[i] * 1.001:  # Take profit at S1
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > r2_4h[i]:  # Stop loss if breaks above R2
+            # Exit short: Williams %R reaches oversold (-80) or trend changes
+            if williams_r_6h[i] <= -80 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
