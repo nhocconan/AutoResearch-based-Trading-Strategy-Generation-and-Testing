@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume spike
-# Uses 1w EMA34 for trend alignment to reduce whipsaw during choppy markets
-# Volume spike (>1.8x 20-bar average) confirms breakout strength
-# ATR-based trailing stop via signal=0 when price retraces 25% of ATR from extreme
-# Discrete sizing 0.25 to balance profit potential and fee drag; target 80-160 total trades over 4 years (20-40/year)
-# Works in both bull/bear: breakouts capture momentum, trend filter avoids counter-trend traps, volume filter ensures participation
+# Hypothesis: 4h KAMA trend filter with 1d RSI mean reversion and volume confirmation
+# Uses 1d RSI(14) for mean reversion signals (RSI < 30 long, RSI > 70 short)
+# 4h KAMA(14) filters trend direction to avoid counter-trend trades
+# Volume spike (>1.5x 20-bar average) confirms momentum
+# Fixed profit targets at 1.5% and 3% with trailing stop via signal=0 when adverse move exceeds 0.5%
+# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag
+# Works in bull/bear: mean reversion captures reversals, trend filter avoids false signals, volume ensures participation
 
-name = "4h_Camarilla_R3S3_1wEMA34_VolumeSpike_v1"
+name = "4h_KAMA_1dRSI_MeanRev_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,33 +26,38 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA34 trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d RSI(14) for mean reversion
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate ATR(14) for stoploss
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 4h KAMA(14) trend filter
+    change = np.abs(np.diff(close, k=1))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.0645 - 0.0625) + 0.0625) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate volume spike filter (>1.8x 20-bar average)
+    # Calculate volume confirmation (>1.5x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Calculate 1w EMA34 trend (already computed)
-    # Align HTF indicators to 4h timeframe (primary)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align HTF RSI to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -59,54 +65,37 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0
-    short_extreme = 0.0
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
-        # Calculate 1w-based Camarilla levels for current bar
-        # Need to get the current week's high/low/close from the aligned 1w data
-        # Since we don't have direct access to weekly OHLC in the loop, we approximate
-        # by using the most recent available weekly values (which are already aligned)
-        # For breakout logic, we use price vs EMA trend and volume as primary signals
         if position == 0:
-            # Long breakout: price > EMA34 (uptrend) AND volume spike
-            if close[i] > ema34_1w_aligned[i] and volume_filter[i]:
+            # Long signal: RSI < 30 (oversold) AND price > KAMA (uptrend) AND volume spike
+            if rsi_1d_aligned[i] < 30 and close[i] > kama[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                long_extreme = close[i]
-            # Short breakdown: price < EMA34 (downtrend) AND volume spike
-            elif close[i] < ema34_1w_aligned[i] and volume_filter[i]:
+            # Short signal: RSI > 70 (overbought) AND price < KAMA (downtrend) AND volume spike
+            elif rsi_1d_aligned[i] > 70 and close[i] < kama[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                short_extreme = close[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, close[i])
-            # Exit long: price retraces 25% of ATR from extreme
-            if close[i] <= long_extreme - 0.25 * atr[i]:
+            # Exit long: RSI > 50 (mean reversion complete) or adverse move > 0.5%
+            if rsi_1d_aligned[i] > 50 or close[i] < signals[i-1] * 0.995 * (1 if signals[i-1] > 0 else 1):
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, close[i])
-            # Exit short: price retraces 25% of ATR from extreme
-            if close[i] >= short_extreme + 0.25 * atr[i]:
+            # Exit short: RSI < 50 (mean reversion complete) or adverse move > 0.5%
+            if rsi_1d_aligned[i] < 50 or close[i] > signals[i-1] * 1.005 * (1 if signals[i-1] < 0 else 1):
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
