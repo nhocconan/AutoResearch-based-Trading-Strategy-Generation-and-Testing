@@ -3,34 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1d Choppiness Index regime filter with 1d Williams Alligator
-# - Long when price > Alligator Jaw (13-period SMMA) and Choppiness Index < 38.2 (trending)
-# - Short when price < Alligator Jaw and Choppiness Index < 38.2
-# - Exit when Choppiness Index > 61.8 (range) or price crosses Alligator Teeth
-# - Uses 1d timeframe for regime and trend filters to avoid whipsaw in sideways markets
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1d VWAP with Bollinger Bands for mean-reversion trades
+# - Long when price touches lower Bollinger Band (20, 2) from 1d VWAP with volume spike and above 1d EMA50
+# - Short when price touches upper Bollinger Band (20, 2) from 1d VWAP with volume spike and below 1d EMA50
+# - Exit when price crosses back above/below 1d VWAP
+# - Uses Bollinger Bands calculated from 1d VWAP to capture institutional support/resistance
+# - Volume filter requires current volume > 1.5x 20-period average to confirm institutional interest
+# - EMA50 trend filter ensures trades align with higher timeframe trend
+# - Designed for institutional mean-reversion at key daily levels with volume confirmation
+# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "12h_Alligator_Chop_1d"
-timeframe = "12h"
+name = "4h_VWAP_BBands_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
-
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - same as RMA/Wilder's"""
-    if length < 1:
-        return np.full_like(source, np.nan, dtype=np.float64)
-    result = np.full_like(source, np.nan, dtype=np.float64)
-    alpha = 1.0 / length
-    for i in range(len(source)):
-        if np.isnan(source[i]):
-            result[i] = np.nan
-        elif i == 0:
-            result[i] = source[i]
-        else:
-            if np.isnan(result[i-1]):
-                result[i] = source[i]
-            else:
-                result[i] = (1 - alpha) * result[i-1] + alpha * source[i]
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,101 +25,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Alligator and Choppiness Index
+    # Get 1d data for VWAP and EMA calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d typical price and VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pv = (typical_price * df_1d['volume']).values
+    vol = df_1d['volume'].values
     
-    # Williams Alligator (13,8,5 SMMA)
-    jaw = smma(close_1d, 13)   # Jaw (blue) - 13-period SMMA
-    teeth = smma(close_1d, 8)  # Teeth (red) - 8-period SMMA
-    lips = smma(close_1d, 5)   # Lips (green) - 5-period SMMA
+    # Calculate cumulative VWAP
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(vol)
+    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
     
-    # Choppiness Index (14-period)
-    def choppiness_index(high_arr, low_arr, close_arr, length=14):
-        """Choppiness Index: measures if market is choppy (range) or trending"""
-        atr_sum = np.zeros_like(close_arr)
-        true_range = np.maximum(
-            high_arr - low_arr,
-            np.maximum(
-                np.abs(high_arr - np.roll(close_arr, 1)),
-                np.abs(low_arr - np.roll(close_arr, 1))
-            )
-        )
-        # Handle first bar
-        true_range[0] = high_arr[0] - low_arr[0]
-        
-        # ATR calculation (smoothed)
-        atr = np.zeros_like(close_arr)
-        atr[0] = true_range[0]
-        for i in range(1, len(true_range)):
-            atr[i] = (atr[i-1] * (length-1) + true_range[i]) / length
-        
-        # Sum of ATR over period
-        atr_sum = np.zeros_like(close_arr)
-        for i in range(length-1, len(atr)):
-            atr_sum[i] = np.sum(atr[i-length+1:i+1])
-        
-        # Highest high and lowest low over period
-        highest_high = np.zeros_like(close_arr)
-        lowest_low = np.zeros_like(close_arr)
-        for i in range(length-1, len(close_arr)):
-            highest_high[i] = np.max(high_arr[i-length+1:i+1])
-            lowest_low[i] = np.min(low_arr[i-length+1:i+1])
-        
-        # Choppiness formula
-        chop = np.full_like(close_arr, 50.0, dtype=np.float64)
-        for i in range(length-1, len(close_arr)):
-            if highest_high[i] != lowest_low[i]:
-                log_val = np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(length)
-                chop[i] = 100 * log_val
-        
-        return chop
+    # Calculate 1d Bollinger Bands (20, 2) from VWAP
+    vwap_series = pd.Series(vwap)
+    vwap_ma = vwap_series.rolling(window=20, min_periods=20).mean().values
+    vwap_std = vwap_series.rolling(window=20, min_periods=20).std().values
+    bb_lower = vwap_ma - (2 * vwap_std)
+    bb_upper = vwap_ma + (2 * vwap_std)
     
-    chop = choppiness_index(high_1d, low_1d, close_1d, 14)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    jaw_12h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_12h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_12h = align_htf_to_ltf(prices, df_1d, lips)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1d indicators to 4h timeframe
+    bb_lower_4h = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_upper_4h = align_htf_to_ltf(prices, df_1d, bb_upper)
+    vwap_4h = align_htf_to_ltf(prices, df_1d, vwap)
+    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filters (4h timeframe)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)  # Volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or 
-            np.isnan(chop_12h[i])):
+        if (np.isnan(bb_lower_4h[i]) or np.isnan(bb_upper_4h[i]) or 
+            np.isnan(vwap_4h[i]) or np.isnan(ema_50_1d_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > Jaw AND chop < 38.2 (trending)
-            if close[i] > jaw_12h[i] and chop_12h[i] < 38.2:
+            # Long: price touches or goes below BB lower with volume spike and above EMA50
+            if low[i] <= bb_lower_4h[i] and volume_spike[i] and close[i] > ema_50_1d_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < Jaw AND chop < 38.2 (trending)
-            elif close[i] < jaw_12h[i] and chop_12h[i] < 38.2:
+            # Short: price touches or goes above BB upper with volume spike and below EMA50
+            elif high[i] >= bb_upper_4h[i] and volume_spike[i] and close[i] < ema_50_1d_4h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: chop > 61.8 (range) OR price < Teeth
-            if chop_12h[i] > 61.8 or close[i] < teeth_12h[i]:
+            # Exit long: price crosses above VWAP
+            if close[i] > vwap_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: chop > 61.8 (range) OR price > Teeth
-            if chop_12h[i] > 61.8 or close[i] > teeth_12h[i]:
+            # Exit short: price crosses below VWAP
+            if close[i] < vwap_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
