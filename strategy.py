@@ -3,95 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly RSI for mean reversion and daily volume for confirmation
-# - Uses 1w RSI(14) to identify oversold/overbought conditions
-# - Uses 1d volume spike (2x 20-day average) for confirmation
-# - Enters long when 1w RSI < 30 and price closes above 1d open with volume spike
-# - Enters short when 1w RSI > 70 and price closes below 1d open with volume spike
-# - Exits when RSI returns to neutral zone (40-60) or opposite signal occurs
-# - Designed to capture mean reversion in weekly extremes with daily confirmation
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
+# Hypothesis: 6h strategy using 12h Donchian channel breakout with volume confirmation and 1d trend filter
+# - Uses 12h Donchian(20) breakout for entry signals
+# - Confirms with volume spike (>2x 20-period average) on 6h timeframe
+# - Uses 1d EMA(50) to filter trades in direction of higher timeframe trend
+# - Exits when price returns to the 12h Donchian midpoint or reverses
+# - Designed to capture medium-term breakouts with trend alignment to reduce false signals
+# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "1d_1wRSI_1dVolume_MeanReversion"
-timeframe = "1d"
+name = "6h_12hDonchian_20_1dEMA50_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 12h data for Donchian channel calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 1w RSI (14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Wilder's smoothing for RSI
-    def wilders_rsi(gain, loss, period):
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        if len(gain) < period:
-            return np.full_like(gain, 50.0)
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate 12h Donchian channel (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    rsi_1w = wilders_rsi(gain, loss, 14)
+    # Upper band: highest high of last 20 periods
+    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    mid_20 = (high_20 + low_20) / 2
     
-    # Align 1w RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily volume spike (2x 20-day average)
+    # Align 12h indicators to 6h timeframe
+    high_20_6h = align_htf_to_ltf(prices, df_12h, high_20)
+    low_20_6h = align_htf_to_ltf(prices, df_12h, low_20)
+    mid_20_6h = align_htf_to_ltf(prices, df_12h, mid_20)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volume filters (6h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)  # Volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_20_6h[i]) or np.isnan(low_20_6h[i]) or np.isnan(mid_20_6h[i]) or
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1w RSI oversold (<30) and price closes above open with volume spike
-            if rsi_1w_aligned[i] < 30 and close[i] > open_[i] and volume_spike[i]:
+            # Long: price breaks above 12h Donchian upper band with volume spike and above 1d EMA50
+            if close[i] > high_20_6h[i] and volume_spike[i] and close[i] > ema_50_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 1w RSI overbought (>70) and price closes below open with volume spike
-            elif rsi_1w_aligned[i] > 70 and close[i] < open_[i] and volume_spike[i]:
+            # Short: price breaks below 12h Donchian lower band with volume spike and below 1d EMA50
+            elif close[i] < low_20_6h[i] and volume_spike[i] and close[i] < ema_50_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI returns to neutral (>=40) or opposite signal
-            if rsi_1w_aligned[i] >= 40 or (rsi_1w_aligned[i] > 70 and close[i] < open_[i] and volume_spike[i]):
+            # Exit long: price returns to 12h Donchian midpoint or breaks below lower band
+            if close[i] < mid_20_6h[i] or close[i] < low_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI returns to neutral (<=60) or opposite signal
-            if rsi_1w_aligned[i] <= 60 or (rsi_1w_aligned[i] < 30 and close[i] > open_[i] and volume_spike[i]):
+            # Exit short: price returns to 12h Donchian midpoint or breaks above upper band
+            if close[i] > mid_20_6h[i] or close[i] > high_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
