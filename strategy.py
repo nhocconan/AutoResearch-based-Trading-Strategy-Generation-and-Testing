@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day pivot points with volume confirmation and volatility filter
-# Daily pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key support/resistance levels
-# Breakout above R1 or below S1 with volume > 2.0x 20-period average indicates strong momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion within daily range
-# Volatility filter: ATR(14) > 20-period average ATR to avoid choppy markets
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
-# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using 1-day pivot points (R1/S1 for breakout, R2/S2 for reversal) with volume confirmation and volatility filter.
+# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum.
+# Rejection at R2 or S2 with volume confirmation indicates mean reversion within daily range.
+# Volatility filter: ATR(14) > 20-period average ATR to avoid choppy markets.
+# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend.
+# Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing.
 
-name = "6h_1dPivot_R1S2_VolumeVolFilter_v1"
-timeframe = "6h"
+name = "4h_1dPivot_R1S2_VolumeVolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,15 +46,15 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.0)
     s2 = pivot - (range_ * 2.0)
     
-    # Align 1d levels to 6h timeframe
+    # Align 1d levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: >2.0x 20-period average (higher threshold to reduce trades)
+    # Volume confirmation: >1.5x 20-period average (balanced threshold)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # Volatility filter: ATR(14) > 20-period average ATR
     tr1 = high[1:] - low[1:]
