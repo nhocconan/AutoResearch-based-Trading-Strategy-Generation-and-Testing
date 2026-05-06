@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Long when price breaks above 1w Donchian upper channel AND 1w EMA50 > EMA200 AND volume > 1.5 * avg_volume(20)
-# Short when price breaks below 1w Donchian lower channel AND 1w EMA50 < EMA200 AND volume > 1.5 * avg_volume(20)
-# Exit when price crosses 1w EMA50 (trend reversal signal)
+# Hypothesis: 6h strategy using 12h Williams %R extreme reversal with 1d EMA trend filter and volume spike confirmation
+# Long when 12h Williams %R < -80 (oversold) AND 1d EMA34 > EMA200 AND volume > 2.0 * avg_volume(20)
+# Short when 12h Williams %R > -20 (overbought) AND 1d EMA34 < EMA200 AND volume > 2.0 * avg_volume(20)
+# Exit when 12h Williams %R crosses back above -50 (for long) or below -50 (for short)
 # Uses discrete sizing 0.25 to balance return and drawdown
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# 1w Donchian provides clear structure with proven breakout edge
-# 1w EMA50/EMA200 filter ensures alignment with higher timeframe trend (works in bull/bear)
-# Volume confirmation filters weak breakouts (reduces false signals)
-# Works in both bull and bear markets by following the 1w trend
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Williams %R identifies exhaustion points that work in both bull and bear markets
+# 1d EMA34/EMA200 filter ensures alignment with higher timeframe trend
+# Volume spike confirmation filters weak reversals (reduces false signals)
 
-name = "1d_1wDonchian20_1wEMA50Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_12hWilliamsRExtreme_1dEMA34Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,47 +27,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for Donchian channels and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need sufficient data for EMA50
+    # Get 12h data ONCE before loop for Williams %R and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:  # Need sufficient data for Williams %R
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w Donchian(20) channels based on previous 20 1w bars
-    high_series_1w = pd.Series(high_1w)
-    low_series_1w = pd.Series(low_1w)
-    donchian_high_1w = high_series_1w.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_1w = low_series_1w.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 12h Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Williams %R = -100 * (HHV - Close) / (HHV - LLV)
+    highest_high_12h = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r_12h = -100 * (highest_high_12h - close_12h) / (highest_high_12h - lowest_low_12h)
     
-    # Calculate 1w EMA50 and EMA200 for trend filter
-    close_series_1w = pd.Series(close_1w)
-    ema_50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1w = close_series_1w.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 12h EMA34 for trend filter
+    close_series_12h = pd.Series(close_12h)
+    ema_34_12h = close_series_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 1d data ONCE before loop for volume confirmation
-    # (volume is already in prices, but we need to ensure sufficient data)
-    if len(prices) < 20:  # Need sufficient data for volume average
+    # Get 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:  # Need sufficient data for EMA200
         return np.zeros(n)
+    close_1d = df_1d['close'].values
     
-    # Align 1w Donchian levels and EMA to 1d timeframe (wait for completed 1w bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA34 and EMA200 for trend filter
+    close_series_1d = pd.Series(close_1d)
+    ema_34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_200_1d = close_series_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume
+    # Align 12h Williams %R and EMA to 6h timeframe (wait for completed 12h bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r_12h)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Align 1d EMA indicators to 6h timeframe (wait for completed 1d bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(avg_volume_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,26 +82,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 1w Donchian upper channel with 1w EMA50 > EMA200 and volume confirmation
-            if (close[i] > donchian_high_aligned[i] and close[i-1] <= donchian_high_aligned[i-1] and 
-                ema_50_1w_aligned[i] > ema_200_1w_aligned[i] and volume_confirm[i]):
+            # Long: Williams %R < -80 (oversold) with 1d EMA34 > EMA200 and volume spike
+            if (williams_r_aligned[i] < -80 and 
+                ema_34_1d_aligned[i] > ema_200_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1w Donchian lower channel with 1w EMA50 < EMA200 and volume confirmation
-            elif (close[i] < donchian_low_aligned[i] and close[i-1] >= donchian_low_aligned[i-1] and 
-                  ema_50_1w_aligned[i] < ema_200_1w_aligned[i] and volume_confirm[i]):
+            # Short: Williams %R > -20 (overbought) with 1d EMA34 < EMA200 and volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  ema_34_1d_aligned[i] < ema_200_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 1w EMA50 (trend reversal)
-            if close[i] < ema_50_1w_aligned[i]:
+            # Exit long: Williams %R crosses back above -50 (momentum fading)
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above 1w EMA50 (trend reversal)
-            if close[i] > ema_50_1w_aligned[i]:
+            # Exit short: Williams %R crosses back below -50 (momentum fading)
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
