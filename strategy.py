@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike
-# Long when price breaks above R1 AND price > 4h EMA50 (uptrend) AND volume > 2.0 * 20-bar avg volume
-# Short when price breaks below S1 AND price < 4h EMA50 (downtrend) AND volume > 2.0 * 20-bar avg volume
+# Hypothesis: 6h Williams Alligator + 1d EMA34 trend filter + volume confirmation
+# Williams Alligator: Jaw (EMA13, 8-period smoothed), Teeth (EMA8, 5-period smoothed), Lips (EMA5, 3-period smoothed)
+# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34 (uptrend) AND volume > 1.8 * 20-bar avg volume
+# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34 (downtrend) AND volume > 1.8 * 20-bar avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.0 * ATR OR short and price > lowest_low + 2.0 * ATR
-# Uses discrete sizing 0.20 to manage drawdown (BTC -77% in 2022 → ~15.4% loss at 0.20 exposure)
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# Uses 4h/1d for signal direction, 1h only for entry timing
-# Session filter: 08-20 UTC to reduce noise trades
-# Camarilla pivots provide mathematically derived support/resistance levels with institutional relevance
-# Volume confirmation ensures conviction behind breakouts, reducing false signals
+# Uses discrete sizing 0.25 to manage drawdown (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Williams Alligator identifies trend phases and avoids whipsaws in ranging markets
+# 1d EMA34 provides higher-timeframe trend filter to avoid counter-trend trades
+# Volume confirmation ensures conviction behind Alligator signals
 # ATR trailing stop manages risk while allowing trends to develop
+# Works in bull via buying Alligator bullish alignment in uptrend, works in bear via selling bearish alignment in downtrend
 
-name = "1h_Camarilla_R1S1_4hEMA50_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1dEMA34_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,52 +30,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) ONCE before loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA50
-    close_4h_series = pd.Series(close_4h)
-    ema_50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate Camarilla pivot levels for 1h timeframe using previous 1d OHLC
-    # Camarilla: R1 = close + 0.105*(high-low), S1 = close - 0.105*(high-low)
+    # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for previous day
-    camarilla_R1 = prev_close_1d + 0.105 * (prev_high_1d - prev_low_1d)
-    camarilla_S1 = prev_close_1d - 0.105 * (prev_high_1d - prev_low_1d)
+    # Calculate 1d EMA34
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to 1h timeframe (wait for completed HTF bar)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    # Calculate Williams Alligator on 6h data
+    # Jaw: EMA13 of close, smoothed by 8 periods
+    jaw_raw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).ewm(span=8, adjust=False, min_periods=8).mean().values
     
-    # Calculate 20-period ATR(20) for stoploss on 1h data
+    # Teeth: EMA8 of close, smoothed by 5 periods
+    teeth_raw = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).ewm(span=5, adjust=False, min_periods=5).mean().values
+    
+    # Lips: EMA5 of close, smoothed by 3 periods
+    lips_raw = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Align HTF indicators to 6h timeframe (wait for completed HTF bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period TR is just high-low
-    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume confirmation: volume > 2.0 * 20-bar average volume
+    # Calculate volume confirmation: volume > 1.8 * 20-bar average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
+    volume_spike = volume > (1.8 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,17 +75,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or
-            np.isnan(atr_20[i]) or np.isnan(volume_spike[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
-            continue
-        
-        # Session filter: only trade between 08-20 UTC
-        if not in_session[i]:
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,39 +85,39 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Camarilla breakout signals with trend and volume filters
-            breakout_up = close[i] > camarilla_R1_aligned[i]  # Price breaks above R1
-            breakout_down = close[i] < camarilla_S1_aligned[i]  # Price breaks below S1
+            # Williams Alligator signals with trend and volume filters
+            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
             
-            # Long: breakout up AND uptrend AND volume spike
-            if breakout_up and close[i] > ema_50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: bullish alignment AND uptrend AND volume spike
+            if bullish_alignment and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: breakout down AND downtrend AND volume spike
-            elif breakout_down and close[i] < ema_50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: bearish alignment AND downtrend AND volume spike
+            elif bearish_alignment and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             # Exit long: price drops below highest_high - 2.0 * ATR (trailing stop)
-            if close[i] < highest_high_since_entry - 2.0 * atr_20[i]:
+            if close[i] < highest_high_since_entry - 2.0 * atr_14[i]:
                 signals[i] = 0.0
                 position = 0
                 highest_high_since_entry = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             # Exit short: price rises above lowest_low + 2.0 * ATR (trailing stop)
-            if close[i] > lowest_low_since_entry + 2.0 * atr_20[i]:
+            if close[i] > lowest_low_since_entry + 2.0 * atr_14[i]:
                 signals[i] = 0.0
                 position = 0
                 lowest_low_since_entry = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
