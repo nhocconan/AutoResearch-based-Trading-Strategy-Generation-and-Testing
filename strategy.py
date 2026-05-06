@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high AND price > 1d EMA50 (uptrend) AND volume > 1.8 * 20-period avg volume
-# Short when price breaks below 20-period Donchian low AND price < 1d EMA50 (downtrend) AND volume > 1.8 * 20-period avg volume
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above Donchian upper channel (20-period high) AND price > 1d EMA34 (uptrend) AND volume > 2.0 * 20-period avg volume
+# Short when price breaks below Donchian lower channel (20-period low) AND price < 1d EMA34 (downtrend) AND volume > 2.0 * 20-period avg volume
 # Exit with ATR-based trailing stop: signal→0 when long and price < highest_high - 2.5 * ATR OR short and price > lowest_low + 2.5 * ATR
 # Uses discrete sizing 0.25 to balance risk and return (BTC -77% in 2022 → ~19.25% loss at 0.25 exposure)
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Donchian channels identify key price structure, 1d EMA50 filters primary trend, volume confirms breakout momentum
-# Works in both bull and bear markets by following the primary trend on 1d timeframe
+# Target: 80-180 total trades over 4 years (20-45/year) for 4h timeframe
+# Donchian channels identify key support/resistance, 1d EMA34 filters primary trend, volume confirms breakout momentum
 
-name = "12h_Donchian20_EMA50_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,23 +24,18 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (00-23 UTC for 12h - less restrictive)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 0) & (hours <= 23)  # Always in session for 12h
-    
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50
+    # Calculate 1d EMA34
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h ATR(14) for stoploss
+    # Calculate 4h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -49,16 +43,16 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period TR is just high-low
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume confirmation: volume > 1.8 * 20-period average volume
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * avg_volume_20)
+    volume_spike = volume > (2.0 * avg_volume_20)
     
-    # Calculate Donchian(20) channels on 12h data
+    # Calculate Donchian channels (20-period)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align HTF indicators to 12h timeframe (wait for completed HTF bar)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align HTF indicators to 4h timeframe (wait for completed HTF bar)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,10 +60,9 @@ def generate_signals(prices):
     lowest_low_since_entry = 0.0
     
     for i in range(50, n):  # Start after warmup period
-        # Skip if any value is NaN or outside session
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            not in_session[i]):
+        # Skip if any value is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,13 +75,13 @@ def generate_signals(prices):
             breakout_long = close[i] > highest_20[i]
             breakout_short = close[i] < lowest_20[i]
             
-            # Long: breakout above Donchian high AND uptrend AND volume spike
-            if breakout_long and close[i] > ema_50_1d_aligned[i] and volume_spike[i]:
+            # Long: breakout above upper channel AND uptrend AND volume spike
+            if breakout_long and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = close[i]
-            # Short: breakout below Donchian low AND downtrend AND volume spike
-            elif breakout_short and close[i] < ema_50_1d_aligned[i] and volume_spike[i]:
+            # Short: breakout below lower channel AND downtrend AND volume spike
+            elif breakout_short and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = close[i]
