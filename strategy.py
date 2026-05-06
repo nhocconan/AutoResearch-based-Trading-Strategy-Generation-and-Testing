@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams Alligator with momentum confirmation
-# Long when Alligator mouth opens upward (Jaw < Teeth < Lips) + close > Teeth + volume > 1.5x average
-# Short when Alligator mouth opens downward (Jaw > Teeth > Lips) + close < Teeth + volume > 1.5x average
-# Alligator identifies trend direction and strength. Mouth open indicates strong trend.
-# Volume confirms momentum behind the move. Works in bull/bear markets by following established trends.
-# Target: 20-40 trades per year (80-160 over 4 years) with 0.25 position sizing.
+# Hypothesis: 4h strategy using 1-week Donchian breakout with 1-day ATR filter and volume confirmation
+# Long when price breaks above weekly Donchian high with ATR(1d) > 1.5*ATR(30d) and volume > 1.5x average
+# Short when price breaks below weekly Donchian low with ATR(1d) > 1.5*ATR(30d) and volume > 1.5x average
+# Weekly Donchian provides strong trend structure, ATR filter ensures volatility expansion,
+# Volume confirms breakout strength. Works in bull/bear markets by capturing genuine breakouts.
+# Target: 20-50 trades per year (80-200 over 4 years) with 0.25 position sizing.
 
-name = "4h_1dWilliamsAlligator_Momentum_v1"
+name = "4h_1wDonchian_20_ATRVol_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,48 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Williams Alligator (SMMA) ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 1-week Donchian channels ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 13:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Williams Alligator uses Smoothed Moving Average (SMMA)
-    # Jaw: 13-period SMMA, 8 bars ahead
-    # Teeth: 8-period SMMA, 5 bars ahead
-    # Lips: 5-period SMMA, 3 bars ahead
+    # Weekly Donchian channels (20-period high/low)
+    donchian_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align weekly Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    close_1d = df_1d['close'].values
+    # Calculate 1-day ATR for volatility filter
+    df_1d = get_htf_data(prices, '1d')
     
-    jaw = smma(close_1d, 13)
-    teeth = smma(close_1d, 8)
-    lips = smma(close_1d, 5)
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Shift jaws forward as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # True Range calculation for 1-day ATR
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Align 1-day Alligator lines to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate 30-day ATR for volatility ratio
+    tr_30d = tr.rolling(window=30, min_periods=30).mean().values
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Align ATR values to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_30d_aligned = align_htf_to_ltf(prices, df_1d, tr_30d)
+    
+    # Volatility filter: ATR(1d) > 1.5 * ATR(30d) indicating volatility expansion
+    vol_filter = atr_1d_aligned > (1.5 * atr_30d_aligned)
+    
+    # Volume confirmation: >1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (1.5 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -74,37 +72,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(volume_filter[i]) or
-            not session_filter[i]):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_30d_aligned[i]) or
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Alligator mouth opens upward (Jaw < Teeth < Lips) + momentum + volume
-            if (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i] and 
-                close[i] > teeth_aligned[i] and volume_filter[i]):
+            # Long breakout: price breaks above weekly Donchian high with volatility and volume confirmation
+            if close[i] > donchian_high_aligned[i] and vol_filter[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator mouth opens downward (Jaw > Teeth > Lips) + momentum + volume
-            elif (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and 
-                  close[i] < teeth_aligned[i] and volume_filter[i]):
+            # Short breakout: price breaks below weekly Donchian low with volatility and volume confirmation
+            elif close[i] < donchian_low_aligned[i] and vol_filter[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: mouth closes or reverses
-            if not (jaw_aligned[i] < teeth_aligned[i] < lips_aligned[i]) or close[i] < teeth_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low (trend reversal)
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: mouth closes or reverses
-            if not (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]) or close[i] > teeth_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high (trend reversal)
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
