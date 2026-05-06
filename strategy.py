@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using daily pivot points with volume confirmation and momentum filter
-# Daily pivots provide key support/resistance. Breakouts above R1 or below S1 with volume > 2x 20-period average
-# indicate strong momentum. Momentum filter (RSI > 55 for long, < 45 for short) ensures trend alignment.
-# Works in bull/bear markets: breakouts capture trends, momentum filter avoids counter-trend trades.
+# Hypothesis: 12h strategy using daily pivot points with volume confirmation and RSI filter
+# Daily pivot points (R1, S1) provide key support/resistance levels. Breakouts above R1 or below S1
+# with volume > 1.8x 20-period average indicate strong momentum. RSI filter (RSI > 55 for long,
+# RSI < 45 for short) ensures trend alignment and avoids counter-trend trades.
+# Designed to work in both bull and bear markets: breakouts capture trends, filters reduce whipsaws.
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
 
-name = "6h_1dPivot_R1S1_MomVol_Filter_v1"
-timeframe = "6h"
+name = "12h_1dPivot_R1S1_VolumeRSI_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,15 +43,15 @@ def generate_signals(prices):
     r1 = pivot + range_
     s1 = pivot - range_
     
-    # Align 1d levels to 6h timeframe
+    # Align 1d levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: >2.0x 20-period average
+    # Volume confirmation: >1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    volume_filter = volume > (1.8 * vol_ma_20)
     
-    # Momentum filter: RSI(14)
+    # RSI filter: RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -79,11 +80,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume and momentum confirmation
+            # Long breakout: price breaks above R1 with volume and RSI confirmation
             if close[i] > r1_aligned[i] and volume_filter[i] and rsi_long[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume and momentum confirmation
+            # Short breakout: price breaks below S1 with volume and RSI confirmation
             elif close[i] < s1_aligned[i] and volume_filter[i] and rsi_short[i]:
                 signals[i] = -0.25
                 position = -1
