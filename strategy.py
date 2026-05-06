@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian(20) breakout with volume confirmation and choppiness regime filter
-# Long when price breaks above weekly Donchian upper channel AND volume > 1.5 * avg_volume(20) AND weekly chop < 61.8 (trending)
-# Short when price breaks below weekly Donchian lower channel AND volume > 1.5 * avg_volume(20) AND weekly chop < 61.8 (trending)
-# Exit when price crosses weekly Donchian midpoint (mean reversion)
+# Hypothesis: 6h strategy using 12h Camarilla R3/S3 levels with 1d EMA34 trend filter and volume spike confirmation
+# Long when price breaks above 12h R3 level AND 1d EMA34 > EMA34 previous (uptrend) AND volume > 2.0 * avg_volume(20) on 6h
+# Short when price breaks below 12h S3 level AND 1d EMA34 < EMA34 previous (downtrend) AND volume > 2.0 * avg_volume(20) on 6h
+# Exit when price returns to 12h pivot level (mean reversion to center)
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
-# Weekly Donchian provides strong structural support/resistance levels
-# Volume confirmation ensures breakout validity while limiting overtrading
-# Chop filter avoids false breakouts in ranging markets
-# Works in both bull (buy breakouts) and bear (sell breakdowns) markets
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Camarilla R3/S3 levels provide high-probability breakout points in trending markets
+# 1d EMA34 trend filter ensures we trade with the dominant daily trend
+# Volume spike confirmation (2.0x) validates breakout strength while limiting overtrading
+# Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
 
-name = "1d_1wDonchian20_Breakout_Volume_Chop"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,84 +28,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop for Donchian and chop calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 completed weekly bars for Donchian(20)
+    # Get 12h data ONCE before loop for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:  # Need at least 2 completed 12h bars for pivot calculation
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high_20
-    donchian_lower = lowest_low_20
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 12h Camarilla pivot levels
+    # Pivot = (High + Low + Close) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Range = High - Low
+    range_12h = high_12h - low_12h
+    # Resistance levels: R3 = Pivot + Range * 1.1/2, R4 = Pivot + Range * 1.1
+    # Support levels: S3 = Pivot - Range * 1.1/2, S4 = Pivot - Range * 1.1
+    r3_12h = pivot_12h + range_12h * 1.1 / 2.0
+    s3_12h = pivot_12h - range_12h * 1.1 / 2.0
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
-    # Align weekly Donchian to 1d timeframe (wait for completed weekly bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    # Get 1d data ONCE before loop for EMA34 calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:  # Need at least 34 completed daily bars for EMA34
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly choppiness index (14-period)
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(HH - LL) * 14)) / log10(14)
-    tr1 = high_1w[1:] - low_1w[:-1]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop_denom = np.log10(hh_14 - ll_14) * 14
-    chop_denom = np.where(chop_denom == 0, np.nan, chop_denom)
-    chop_raw = 100 * np.log10(sum_atr_14) / chop_denom / np.log10(14)
-    chop_14 = np.where(np.isnan(chop_raw) | (hh_14 - ll_14) == 0, 50, chop_raw)
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly chop to 1d timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_14)
-    
-    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 1d
+    # Calculate volume confirmation: volume > 2.0 * 20-period average volume on 6h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume_20)
+    volume_confirm = volume > (2.0 * avg_volume_20)
+    
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup period
-        # Skip if any value is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(avg_volume_20[i])):
+        # Skip if any value is NaN or outside session
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
+            np.isnan(s3_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper, volume confirm, chop < 61.8 (trending)
-            if (close[i] > donchian_upper_aligned[i] and 
-                volume_confirm[i] and 
-                chop_aligned[i] < 61.8):
+            # Long: price breaks above R3, 1d EMA34 > EMA34 previous (uptrend), volume spike, in session
+            if (close[i] > r3_12h_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian lower, volume confirm, chop < 61.8 (trending)
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  volume_confirm[i] and 
-                  chop_aligned[i] < 61.8):
+            # Short: price breaks below S3, 1d EMA34 < EMA34 previous (downtrend), volume spike, in session
+            elif (close[i] < s3_12h_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian midpoint
-            if close[i] < donchian_mid_aligned[i]:
+            # Exit long: price returns to pivot level (mean reversion)
+            if close[i] <= pivot_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian midpoint
-            if close[i] > donchian_mid_aligned[i]:
+            # Exit short: price returns to pivot level (mean reversion)
+            if close[i] >= pivot_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
