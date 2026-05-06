@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversal with 1d EMA34 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND close > 1d EMA34 (uptrend) AND volume > 1.5 * 20-bar avg volume
-# Short when Williams %R > -20 (overbought) AND close < 1d EMA34 (downtrend) AND volume > 1.5 * 20-bar avg volume
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold) AND close > 1d EMA34 AND volume > 1.5 * 20-bar avg volume
+# Short when Williams %R crosses below -20 (overbought) AND close < 1d EMA34 AND volume > 1.5 * 20-bar avg volume
+# Exit when Williams %R crosses opposite threshold (-50 for mean reversion)
 # Uses discrete sizing 0.25 to control fee drag and drawdown
 # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 # Williams %R identifies overextended moves; EMA34 ensures higher-timeframe trend alignment
-# Volume spike confirms participation; mean-reversion exit works in both trending and ranging markets
+# Volume spike confirms institutional participation; mean-reversion exit works in ranging markets
 
-name = "4h_WilliamsR_1dEMA34_Volume_v1"
+name = "4h_WilliamsR_1dEMA34_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,7 +53,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +62,24 @@ def generate_signals(prices):
         
         if position == 0:
             # Williams %R signals with trend and volume filters
-            # Long: Oversold AND uptrend AND volume spike
-            if williams_r[i] < -80 and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # Long: Williams %R crosses above -80 (from below) AND uptrend AND volume spike
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought AND downtrend AND volume spike
-            elif williams_r[i] > -20 and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # Short: Williams %R crosses below -20 (from above) AND downtrend AND volume spike
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Williams %R crosses above -50 (mean reversion)
-            if williams_r[i] > -50:
+            if williams_r[i] >= -50 and williams_r[i-1] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: Williams %R crosses below -50 (mean reversion)
-            if williams_r[i] < -50:
+            if williams_r[i] <= -50 and williams_r[i-1] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
