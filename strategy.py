@@ -1,24 +1,24 @@
+# 1d_GoldenCross_Momentum_Exhaustion_v1
+# Strategy: 1d Golden Cross + RSI exhaustion with volume confirmation
+# - Long when 50-day EMA crosses above 200-day EMA and RSI < 40 (oversold pullback in uptrend)
+# - Short when 50-day EMA crosses below 200-day EMA and RSI > 60 (overbought bounce in downtrend)
+# - Uses weekly trend filter to avoid counter-trend trades
+# - Volume confirmation reduces false signals
+# - Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag
+# - Works in bull markets (golden cross longs) and bear markets (death cross shorts)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1w pivot levels with breakout and fade logic
-# - Fade (counter-trend) at S2/R2 levels when price reverses from these levels with volume confirmation
-# - Breakout (trend-following) at S3/R3 levels when price breaks through with volume expansion
-# - Uses 1w pivot levels calculated from prior weekly bar's range
-# - Adds 1d EMA50 filter to only take trades in direction of daily trend
-# - Designed to work in ranging markets (fades at S2/R2) and trending markets (breakouts at S3/R3)
-# - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
-# - Focus on BTC/ETH with SOL as secondary confirmation
-
-name = "4h_1wPivot_S2R2_S3R3_1dEMA50_Trend_Filter"
-timeframe = "4h"
+name = "1d_GoldenCross_Momentum_Exhaustion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:  # Need enough data for 200 EMA
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,107 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for pivot calculation
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels: based on prior weekly bar's range
-    # R3 = high + 2*(high - low), R2 = pivot + (high - low)
-    # S2 = pivot - (high - low), S3 = low - 2*(high - low)
-    # pivot = (high + low + close) / 3
-    prev_high = df_1w['high'].shift(1)
-    prev_low = df_1w['low'].shift(1)
-    prev_close = df_1w['close'].shift(1)
+    # Calculate weekly 50 EMA for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    price_range = prev_high - prev_low
+    # Daily EMAs for golden/death cross
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    R3 = prev_high + 2 * price_range
-    R2 = pivot + price_range
-    S2 = pivot - price_range
-    S3 = prev_low - 2 * price_range
+    # Daily RSI for exhaustion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align weekly pivot levels to 4h timeframe
-    R3_4h = align_htf_to_ltf(prices, df_1w, R3.values)
-    R2_4h = align_htf_to_ltf(prices, df_1w, R2.values)
-    S2_4h = align_htf_to_ltf(prices, df_1w, S2.values)
-    S3_4h = align_htf_to_ltf(prices, df_1w, S3.values)
-    
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filters
+    # Volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)  # Volume confirmation
-    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
-    volume_expansion[0] = False
+    volume_filter = volume > (1.2 * vol_ma_20)
     
-    # Session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Golden cross: 50 EMA crosses above 200 EMA
+    golden_cross = (ema_50 > ema_200) & (np.roll(ema_50, 1) <= np.roll(ema_200, 1))
+    golden_cross[0] = False
+    
+    # Death cross: 50 EMA crosses below 200 EMA
+    death_cross = (ema_50 < ema_200) & (np.roll(ema_50, 1) >= np.roll(ema_200, 1))
+    death_cross[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
-        # Skip if any critical value is NaN or outside session
-        if (np.isnan(R3_4h[i]) or np.isnan(R2_4h[i]) or np.isnan(S2_4h[i]) or np.isnan(S3_4h[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
-            not session_filter[i]):
+    for i in range(50, n):  # Start after EMA warmup
+        # Skip if any critical value is NaN
+        if (np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Fade at S2/R2: counter-trend entry when price reverses from these levels
-            # Long fade at S2: price touches S2 and closes back above it
-            if close[i] <= S2_4h[i] * 1.001 and close[i] > S2_4h[i] and volume_filter[i]:
-                # Only take long fade if below daily EMA (bearish context)
-                if close[i] < ema_50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short fade at R2: price touches R2 and closes back below it
-            elif close[i] >= R2_4h[i] * 0.999 and close[i] < R2_4h[i] and volume_filter[i]:
-                # Only take short fade if above daily EMA (bullish context)
-                if close[i] > ema_50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout at S3/R3: trend-following entry when price breaks through
-            # Long breakout at R3: price breaks above R3 with volume expansion
-            elif close[i] > R3_4h[i] and volume_expansion[i]:
-                # Only take long breakout if above daily EMA (bullish context)
-                if close[i] > ema_50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short breakout at S3: price breaks below S3 with volume expansion
-            elif close[i] < S3_4h[i] and volume_expansion[i]:
-                # Only take short breakout if below daily EMA (bearish context)
-                if close[i] < ema_50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Golden cross + RSI oversold (<40) + above weekly EMA50 + volume
+            if (golden_cross[i] and rsi[i] < 40 and 
+                close[i] > ema_50_1w_aligned[i] and volume_filter[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: Death cross + RSI overbought (>60) + below weekly EMA50 + volume
+            elif (death_cross[i] and rsi[i] > 60 and 
+                  close[i] < ema_50_1w_aligned[i] and volume_filter[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches R2 (profit target) or breaks below S3 (stop)
-            if close[i] >= R2_4h[i] * 0.999:  # Take profit at R2
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < S3_4h[i]:  # Stop loss if breaks below S3
+            # Exit long: RSI overbought (>70) or death cross
+            if rsi[i] > 70 or death_cross[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches S2 (profit target) or breaks above R3 (stop)
-            if close[i] <= S2_4h[i] * 1.001:  # Take profit at S2
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > R3_4h[i]:  # Stop loss if breaks above R3
+            # Exit short: RSI oversold (<30) or golden cross
+            if rsi[i] < 30 or golden_cross[i]:
                 signals[i] = 0.0
                 position = 0
             else:
