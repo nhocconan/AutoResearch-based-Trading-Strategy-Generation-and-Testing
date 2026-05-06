@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly pivot points with volume confirmation and trend filter
-# Weekly pivots (R1/S1 for breakouts, R2/S2 for reversals) provide key weekly levels
-# Breakout above R1 or below S1 with volume > 1.5x 20-period average indicates strong momentum
-# Rejection at R2 or S2 with volume confirmation indicates mean reversion within weekly range
-# Trend filter: 50-period SMA on 1w timeframe to avoid counter-trend trades
-# Works in bull/bear markets: breakouts capture trends, reversals capture pullbacks within trend
+# Hypothesis: 12h strategy using daily ATR-based breakout with volume confirmation and trend filter
+# Daily ATR breakout captures volatility expansion in both bull and bear markets
+# Breakout above/below previous day's close ± 1.5x ATR with volume > 1.5x 20-period average
+# Trend filter: 50-period EMA on 12h to avoid counter-trend trades
 # Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "1d_WeeklyPivot_R1S2_VolumeTrendFilter_v1"
-timeframe = "1d"
+name = "12h_ATRBreakout_VolumeTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate daily ATR and close for breakout levels ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Previous day's OHLC for ATR calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Pivot point calculation
-    # Pivot = (previous high + previous low + previous close) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
+    # True Range calculation
+    tr1 = prev_high - prev_low
+    tr2 = np.abs(prev_high - prev_close)
+    tr3 = np.abs(prev_low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Support and Resistance levels
-    r1 = pivot + (range_ * 1.0)
-    r2 = pivot + (range_ * 2.0)
-    s1 = pivot - (range_ * 1.0)
-    s2 = pivot - (range_ * 2.0)
+    # ATR(14) calculation
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Breakout levels: previous close ± 1.5 * ATR
+    upper_break = prev_close + (1.5 * atr_14)
+    lower_break = prev_close - (1.5 * atr_14)
     
-    # Volume confirmation: >1.5x 20-period average (moderate threshold)
+    # Align daily levels to 12h timeframe
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
+    
+    # Volume confirmation: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma_20)
     
-    # Trend filter: 50-period SMA on 1w timeframe
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
-    uptrend = close > sma_50_1w_aligned
-    downtrend = close < sma_50_1w_aligned
+    # Trend filter: 50-period EMA on 12h timeframe
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if any critical value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(sma_50_1w_aligned[i])):
+        # Skip if any critical value is NaN or outside session
+        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(ema_50[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_filter[i] and uptrend[i]:
+            # Long breakout: price breaks above upper level with volume confirmation and uptrend
+            if close[i] > upper_break_aligned[i] and volume_filter[i] and uptrend[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_filter[i] and downtrend[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long reversal: price rejects S2 with volume confirmation (bounce from support)
-            elif close[i] < s2_aligned[i] and close[i] > s2_aligned[i] * 0.995 and volume_filter[i] and uptrend[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short reversal: price rejects R2 with volume confirmation (rejection from resistance)
-            elif close[i] > r2_aligned[i] and close[i] < r2_aligned[i] * 1.005 and volume_filter[i] and downtrend[i]:
+            # Short breakout: price breaks below lower level with volume confirmation and downtrend
+            elif close[i] < lower_break_aligned[i] and volume_filter[i] and downtrend[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 (failed support) or reaches R2 (take profit)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit long: price breaks below previous day's close (failed breakout) or reaches 2x ATR target
+            if close[i] < prev_close_aligned[i] or close[i] > upper_break_aligned[i] + (atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 (failed resistance) or reaches S2 (take profit)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit short: price breaks above previous day's close (failed breakdown) or reaches 2x ATR target
+            if close[i] > prev_close_aligned[i] or close[i] < lower_break_aligned[i] - (atr_14_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Pre-calculate aligned arrays for prev_close and atr_14 to avoid recomputation in loop
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
