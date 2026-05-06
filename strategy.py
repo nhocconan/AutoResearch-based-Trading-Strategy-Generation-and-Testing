@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Bollinger Band width (volatility) and 1d ADX (trend strength) to filter entries
-# - Uses Bollinger Band width percentile to identify low volatility regimes (squeeze) on 12h
-# - Uses 1d ADX to confirm trend strength (ADX > 25) for breakout direction
-# - Enters long when price breaks above upper BB with volume spike in low vol + strong trend
-# - Enters short when price breaks below lower BB with volume spike in low vol + strong trend
-# - Exits when price crosses back below/above middle BB or volatility expands (BB width > 80th percentile)
-# - Designed to capture volatility breakouts after consolidation periods with trend confirmation
-# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
+# Hypothesis: 4h strategy using Donchian(20) breakout with 1d Supertrend trend filter and volume confirmation
+# - Uses Donchian channel breakout for entry signals
+# - Uses 1d Supertrend (ATR=10, multiplier=3) to filter for trend direction
+# - Requires volume spike (2x 20-period average) for confirmation
+# - Exits when price reverses back into the Donchian channel
+# - Designed to capture strong trending moves with confirmation to reduce whipsaws
+# - Target: 75-200 total trades over 4 years (19-50/year) with 0.25 position sizing
 
-name = "6h_BBWidth_ADX_TrendBreakout"
-timeframe = "6h"
+name = "4h_DonchianBreakout_Supertrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,38 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Bollinger Band width calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    # Get 1d data for ADX calculation
+    # Get 1d data for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Bollinger Bands (20, 2)
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Donchian Channel (20)
+    high_4h = high
+    low_4h = low
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Middle band (SMA20)
-    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_dev = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + (2 * std_dev)
-    lower_bb = sma_20 - (2 * std_dev)
-    # Bollinger Band width
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Calculate 12h BB width percentile rank (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Calculate 1d ADX (14)
+    # Calculate 1d Supertrend (ATR=10, multiplier=3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -67,86 +46,84 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # ATR(10)
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1d + low_1d) / 2 + 3 * atr_10
+    basic_lb = (high_1d + low_1d) / 2 - 3 * atr_10
     
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
+    for i in range(1, len(basic_ub)):
+        if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
+    # Supertrend
+    supertrend = np.zeros_like(close_1d)
+    supertrend[0] = final_ub[0]
+    for i in range(1, len(supertrend)):
+        if supertrend[i-1] == final_ub[i-1]:
+            supertrend[i] = final_lb[i] if close_1d[i] <= final_lb[i] else final_ub[i]
+        else:
+            supertrend[i] = final_ub[i] if close_1d[i] >= final_ub[i] else final_lb[i]
     
-    # Align 12h indicators to 6h timeframe
-    bb_width_percentile_6h = align_htf_to_ltf(prices, df_12h, bb_width_percentile)
-    middle_bb_6h = align_htf_to_ltf(prices, df_12h, sma_20)
-    upper_bb_6h = align_htf_to_ltf(prices, df_12h, upper_bb)
-    lower_bb_6h = align_htf_to_ltf(prices, df_12h, lower_bb)
+    # Determine trend direction: 1 for uptrend (price above Supertrend), -1 for downtrend
+    trend_dir = np.where(close_1d > supertrend, 1, -1)
     
-    # Align 1d ADX to 6h timeframe
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d indicators to 4h timeframe
+    trend_dir_4h = align_htf_to_ltf(prices, df_1d, trend_dir)
     
-    # Volume filters (6h timeframe)
+    # Volume filters (4h timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(bb_width_percentile_6h[i]) or np.isnan(middle_bb_6h[i]) or 
-            np.isnan(upper_bb_6h[i]) or np.isnan(lower_bb_6h[i]) or
-            np.isnan(adx_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(trend_dir_4h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Look for low volatility regime (BB width < 20th percentile) and strong trend (ADX > 25)
-            low_vol_regime = bb_width_percentile_6h[i] < 20
-            strong_trend = adx_6h[i] > 25
+            # Look for breakout with trend alignment and volume confirmation
+            bullish_breakout = close[i] > donchian_high[i] and trend_dir_4h[i] == 1
+            bearish_breakout = close[i] < donchian_low[i] and trend_dir_4h[i] == -1
             
-            if low_vol_regime and strong_trend:
-                # Long: price breaks above upper BB with volume spike
-                if close[i] > upper_bb_6h[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below lower BB with volume spike
-                elif close[i] < lower_bb_6h[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            if bullish_breakout and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            elif bearish_breakout and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price crosses below middle BB OR volatility expands (BB width > 80th percentile)
-            if close[i] < middle_bb_6h[i] or bb_width_percentile_6h[i] > 80:
+            # Exit long: price breaks back below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above middle BB OR volatility expands (BB width > 80th percentile)
-            if close[i] > middle_bb_6h[i] or bb_width_percentile_6h[i] > 80:
+            # Exit short: price breaks back above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
