@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot levels with breakout and mean reversion logic
-# - Mean reversion (fade) at weekly S2/R2 levels when price reaches these levels with overbought/oversold signals
-# - Breakout (trend-following) at weekly S3/R3 levels when price breaks through with volume confirmation
-# - Uses weekly pivot levels calculated from prior week's range (more stable than daily)
-# - Adds 1d RSI(14) filter to avoid fading in strong trends and to confirm breakout momentum
-# - Designed to work in ranging markets (fades at S2/R2) and trending markets (breakouts at S3/R3)
-# - Weekly pivots provide stronger support/resistance, reducing false signals
+# Hypothesis: 12h strategy using 1w RSI divergence with 1d volume confirmation
+# - Bearish divergence: price makes higher high while 1w RSI makes lower high → short
+# - Bullish divergence: price makes lower low while 1w RSI makes higher low → long
+# - Uses 1d volume spike to confirm reversal strength
+# - Filters trades to only occur when price is outside 1d Bollinger Bands (2,2) for extremity
+# - Designed to work in ranging markets (divergences at extremes) and avoid chop
 # - Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing
 
-name = "6h_WeeklyPivot_S2R2_S3R3_1dRSI14"
-timeframe = "6h"
+name = "12h_RSIDivergence_1dVolume_BollingerFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,61 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get 1w data for RSI calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels based on prior week's OHLC
-    # Standard pivot: P = (H + L + C) / 3
-    # S1 = 2*P - H, R1 = 2*P - L
-    # S2 = P - (H - L), R2 = P + (H - L)
-    # S3 = S1 - (H - L), R3 = R1 + (H - L)
-    prev_week_high = df_1w['high'].shift(1)
-    prev_week_low = df_1w['low'].shift(1)
-    prev_week_close = df_1w['close'].shift(1)
+    # Calculate 14-period RSI on 1w close
+    rsi_period = 14
+    delta = np.diff(df_1w['close'], prepend=df_1w['close'][0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate pivot point and weekly range
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    weekly_range = prev_week_high - prev_week_low
-    
-    # Avoid division by zero
-    weekly_range = np.where(weekly_range == 0, 0.0001, weekly_range)
-    
-    S1 = 2 * pivot - prev_week_high
-    R1 = 2 * pivot - prev_week_low
-    S2 = pivot - weekly_range
-    R2 = pivot + weekly_range
-    S3 = S1 - weekly_range
-    R3 = R1 + weekly_range
-    
-    # Align weekly pivot levels to 6h timeframe
-    S2_6h = align_htf_to_ltf(prices, df_1w, S2.values)
-    R2_6h = align_htf_to_ltf(prices, df_1w, R2.values)
-    S3_6h = align_htf_to_ltf(prices, df_1w, S3.values)
-    R3_6h = align_htf_to_ltf(prices, df_1w, R3.values)
-    
-    # 1d RSI(14) for momentum/filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # Calculate RSI(14) on daily close
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Volume filters
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.2 * vol_ma_20)  # Volume confirmation
-    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
-    volume_expansion[0] = False
+    # Align 1w RSI to 12h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    
+    # Get 1d data for volume and Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1d Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(df_1d['close']).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(df_1d['close']).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
+    
+    # Align 1d indicators to 12h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    
+    # 1d volume and its 20-period moving average
+    vol_ma = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    
+    # Volume spike: current volume > 1.5 * 20-period average
+    volume_spike = df_1d['volume'].values > (1.5 * vol_ma)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     # Session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -89,10 +76,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(S2_6h[i]) or np.isnan(R2_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(R3_6h[i]) or
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i]) or
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
             not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -100,40 +87,107 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Mean reversion at S2/R2: fade when price reaches these levels with RSI extremes
-            # Long at S2: price touches S2 and RSI shows oversold (< 30)
-            if close[i] <= S2_6h[i] * 1.002 and close[i] >= S2_6h[i] * 0.998 and rsi_1d_aligned[i] < 30:
-                signals[i] = 0.25
-                position = 1
-            # Short at R2: price touches R2 and RSI shows overbought (> 70)
-            elif close[i] >= R2_6h[i] * 0.998 and close[i] <= R2_6h[i] * 1.002 and rsi_1d_aligned[i] > 70:
-                signals[i] = -0.25
-                position = -1
-            # Breakout at S3/R3: trend-following when price breaks through with volume
-            # Long breakout: price breaks above R3 with volume expansion and RSI > 50
-            elif close[i] > R3_6h[i] and volume_expansion[i] and rsi_1d_aligned[i] > 50:
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price breaks below S3 with volume expansion and RSI < 50
-            elif close[i] < S3_6h[i] and volume_expansion[i] and rsi_1d_aligned[i] < 50:
-                signals[i] = -0.25
-                position = -1
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            # Look back 3 periods for swing points
+            if i >= 3:
+                # Price lower low
+                price_lower_low = (low[i] < low[i-1]) and (low[i-1] < low[i-2])
+                # RSI higher low
+                rsi_higher_low = (rsi_1w_aligned[i] > rsi_1w_aligned[i-1]) and (rsi_1w_aligned[i-1] > rsi_1w_aligned[i-2])
+                
+                if price_lower_low and rsi_higher_low:
+                    # Price must be below lower Bollinger Band for extremity
+                    if close[i] < lower_band_aligned[i]:
+                        # Volume spike confirmation
+                        if volume_spike_aligned[i]:
+                            signals[i] = 0.25
+                            position = 1
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            if i >= 3:
+                # Price higher high
+                price_higher_high = (high[i] > high[i-1]) and (high[i-1] > high[i-2])
+                # RSI lower high
+                rsi_lower_high = (rsi_1w_aligned[i] < rsi_1w_aligned[i-1]) and (rsi_1w_aligned[i-1] < rsi_1w_aligned[i-2])
+                
+                if price_higher_high and rsi_lower_high:
+                    # Price must be above upper Bollinger Band for extremity
+                    if close[i] > upper_band_aligned[i]:
+                        # Volume spike confirmation
+                        if volume_spike_aligned[i]:
+                            signals[i] = -0.25
+                            position = -1
+        
         elif position == 1:
-            # Exit long: take profit at R1 or stop loss if breaks below S2
-            if close[i] >= R1_6h[i]:  # Take profit at R1
+            # Exit long: price returns to middle of Bollinger Bands (SMA) or RSI overbought
+            if close[i] >= sma_aligned[i] if 'sma_aligned' in locals() else False:  # Will define sma_aligned below
                 signals[i] = 0.0
                 position = 0
-            elif close[i] < S2_6h[i]:  # Stop loss if breaks below S2
+            elif rsi_1w_aligned[i] > 70:  # RSI overbought
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: take profit at S1 or stop loss if breaks above R2
-            if close[i] <= S1_6h[i]:  # Take profit at S1
+            # Exit short: price returns to middle of Bollinger Bands or RSI oversold
+            if close[i] <= sma_aligned[i] if 'sma_aligned' in locals() else False:
                 signals[i] = 0.0
                 position = 0
-            elif close[i] > R2_6h[i]:  # Stop loss if breaks above R2
+            elif rsi_1w_aligned[i] < 30:  # RSI oversold
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    # Recalculate sma_aligned for exit conditions (moved inside loop for clarity)
+    sma_aligned = align_htf_to_ltf(prices, df_1d, sma)
+    
+    # Re-run loop with proper sma_aligned reference
+    signals = np.zeros(n)
+    position = 0
+    
+    for i in range(50, n):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(sma_aligned[i]) or np.isnan(vol_ma_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
+            not session_filter[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0:
+            if i >= 3:
+                price_lower_low = (low[i] < low[i-1]) and (low[i-1] < low[i-2])
+                rsi_higher_low = (rsi_1w_aligned[i] > rsi_1w_aligned[i-1]) and (rsi_1w_aligned[i-1] > rsi_1w_aligned[i-2])
+                if price_lower_low and rsi_higher_low:
+                    if close[i] < lower_band_aligned[i]:
+                        if volume_spike_aligned[i]:
+                            signals[i] = 0.25
+                            position = 1
+            
+            if i >= 3:
+                price_higher_high = (high[i] > high[i-1]) and (high[i-1] > high[i-2])
+                rsi_lower_high = (rsi_1w_aligned[i] < rsi_1w_aligned[i-1]) and (rsi_1w_aligned[i-1] < rsi_1w_aligned[i-2])
+                if price_higher_high and rsi_lower_high:
+                    if close[i] > upper_band_aligned[i]:
+                        if volume_spike_aligned[i]:
+                            signals[i] = -0.25
+                            position = -1
+        
+        elif position == 1:
+            if close[i] >= sma_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif rsi_1w_aligned[i] > 70:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            if close[i] <= sma_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            elif rsi_1w_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
