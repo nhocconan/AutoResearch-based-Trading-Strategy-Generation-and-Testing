@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and ADX trend filter
-# - Uses 1w Donchian channels (20-period) for long-term structure
-# - Uses 1d volume spike for entry confirmation
-# - Uses 1d ADX > 25 to filter for trending markets only
-# - Enters long when price breaks above 1w Donchian upper band with volume and trend
-# - Enters short when price breaks below 1w Donchian lower band with volume and trend
-# - Exits when price returns to 1w Donchian middle (median) or opposite band
-# - Designed to capture major trend moves with institutional level respect
-# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
-# - Works in both bull and bear markets by filtering for strong trends (ADX > 25)
+# Hypothesis: 4h strategy using daily Chaikin Money Flow (CMF) for institutional flow detection
+# - Uses 1d CMF(20) to detect accumulation/distribution (>0.15 accumulation, <-0.15 distribution)
+# - Uses 4h price action for entry timing with volume confirmation
+# - Uses 4h ADX > 20 to avoid choppy markets
+# - Enters long when 1d CMF > 0.15 and price closes above 4h VWAP with volume
+# - Enters short when 1d CMF < -0.15 and price closes below 4h VWAP with volume
+# - Exits when CMF returns to neutral zone (-0.05 to 0.05) or opposite signal
+# - Designed to capture institutional flow shifts with confirmation
+# - Target: 100-180 total trades over 4 years (25-45/year) with 0.25 position sizing
 
-name = "1d_1wDonchian_20_Volume_ADX_Trend"
-timeframe = "1d"
+name = "4h_1dCMF_20_VWAP_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,31 +27,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Chaikin Money Flow
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2  # Median line for exit
+    # Calculate Chaikin Money Flow (20-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    mfm = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if high_1d[i] != low_1d[i]:
+            mfm[i] = ((close_1d[i] - low_1d[i]) - (high_1d[i] - close_1d[i])) / (high_1d[i] - low_1d[i])
+        else:
+            mfm[i] = 0.0  # Avoid division by zero
     
-    # Align 1w Donchian channels to 1d timeframe
-    upper_20_1d = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_1d = align_htf_to_ltf(prices, df_1w, lower_20)
-    middle_20_1d = align_htf_to_ltf(prices, df_1w, middle_20)
+    # Money Flow Volume = MFM * Volume
+    mfv = mfm * volume_1d
     
-    # Volume filter (1d timeframe)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_spike = volume > (1.8 * vol_ma_10)  # Strong volume confirmation
+    # CMF = 20-period sum of MFV / 20-period sum of Volume
+    cmf = np.zeros_like(close_1d)
+    for i in range(19, len(close_1d)):  # Start at index 19 for 20-period
+        mfv_sum = np.sum(mfv[i-19:i+1])
+        vol_sum = np.sum(volume_1d[i-19:i+1])
+        if vol_sum != 0:
+            cmf[i] = mfv_sum / vol_sum
+        else:
+            cmf[i] = 0.0
     
-    # ADX filter (1d timeframe) - trend strength
+    # Align 1d CMF to 4h timeframe
+    cmf_4h = align_htf_to_ltf(prices, df_1d, cmf)
+    
+    # VWAP calculation (4h timeframe)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.divide(vwap_numerator, vwap_denominator, out=np.zeros_like(vwap_numerator), where=vwap_denominator!=0)
+    
+    # Volume filter (4h timeframe)
+    vol_ma_15 = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_spike = volume > (1.5 * vol_ma_15)  # Volume confirmation
+    
+    # ADX filter (4h timeframe) - trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -98,40 +118,39 @@ def generate_signals(prices):
         return adx
     
     adx_values = calculate_adx(high, low, close, 14)
-    adx_filter = adx_values > 25  # Strong trend filter
+    adx_filter = adx_values > 20  # Moderate trend filter to avoid chop
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any critical value is NaN
-        if (np.isnan(upper_20_1d[i]) or np.isnan(lower_20_1d[i]) or 
-            np.isnan(middle_20_1d[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(adx_filter[i])):
+        if (np.isnan(cmf_4h[i]) or np.isnan(vwap[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(adx_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above 1w Donchian upper with volume and trend
-            if close[i] > upper_20_1d[i] and volume_spike[i] and adx_filter[i]:
+            # Long: CMF accumulation + price above VWAP + volume + trend
+            if cmf_4h[i] > 0.15 and close[i] > vwap[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1w Donchian lower with volume and trend
-            elif close[i] < lower_20_1d[i] and volume_spike[i] and adx_filter[i]:
+            # Short: CMF distribution + price below VWAP + volume + trend
+            elif cmf_4h[i] < -0.15 and close[i] < vwap[i] and volume_spike[i] and adx_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to middle OR breaks below lower band
-            if close[i] < middle_20_1d[i] or close[i] < lower_20_1d[i]:
+            # Exit long: CMF returns to neutral or turns negative
+            if cmf_4h[i] < 0.05 or cmf_4h[i] < -0.05:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to middle OR breaks above upper band
-            if close[i] > middle_20_1d[i] or close[i] > upper_20_1d[i]:
+            # Exit short: CMF returns to neutral or turns positive
+            if cmf_4h[i] > -0.05 or cmf_4h[i] > 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
