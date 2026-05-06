@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extremes with 6h EMA21 trend filter and volume confirmation
-# Long when 1d Williams %R < -80 (oversold) AND 6h EMA21 > EMA50 (uptrend) AND volume > 1.3 * avg_volume(20)
-# Short when 1d Williams %R > -20 (overbought) AND 6h EMA21 < EMA50 (downtrend) AND volume > 1.3 * avg_volume(20)
-# Exit when 1d Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w Supertrend filter and volume confirmation
+# Long when price breaks above 1d Donchian upper(20) AND 1w Supertrend = uptrend AND volume > 1.5 * avg_volume(20) on 12h
+# Short when price breaks below 1d Donchian lower(20) AND 1w Supertrend = downtrend AND volume > 1.5 * avg_volume(20) on 12h
+# Exit when price crosses back through the 1d Donchian midpoint (upper+lower)/2
 # Uses discrete sizing 0.25 to balance return and risk
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Williams %R provides mean reversion edge in ranging markets
-# EMA21/EMA50 crossover filters for trend alignment to avoid counter-trend whipsaw
-# Volume confirmation validates momentum while limiting overtrading
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# 1d Donchian(20) provides strong breakout levels that reduce whipsaw
+# 1w Supertrend filter ensures we trade with the dominant weekly trend
+# Volume confirmation (1.5x) validates breakout strength while limiting overtrading
 
-name = "6h_1dWilliamsR_6hEMA21EMA50_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_1dDonchian20_1wSupertrend_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,31 +27,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Williams %R calculation
+    # Get 1d data ONCE before loop for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:  # Need at least 14 completed 1d bars for Williams %R
+    if len(df_1d) < 20:  # Need at least 20 completed 1d bars for Donchian(20)
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R: (highest_high - close) / (highest_high - lowest_low) * -100
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
-    # Handle division by zero (when high == low)
-    williams_r_1d = np.where(highest_high_1d == lowest_low_1d, -50, williams_r_1d)
+    # Calculate 1d Donchian(20) levels
+    # Donchian upper = max(high, lookback=20), Donchian lower = min(low, lookback=20)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_upper_1d = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower_1d = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid_1d = (donchian_upper_1d + donchian_lower_1d) / 2.0
     
-    # Align 1d Williams %R to 6h timeframe (wait for completed 1d bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Align 1d Donchian to 12h timeframe (wait for completed 1d bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid_1d)
     
-    # Get 6h data for EMA21 and EMA50 trend filter
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1w data ONCE before loop for Supertrend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:  # Need at least 10 completed weekly bars for Supertrend(10,3)
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate volume confirmation: volume > 1.3 * 20-period average volume
+    # Calculate 1w Supertrend(10,3)
+    # ATR(10)
+    tr1 = np.maximum(high_1w, np.roll(close_1w, 1)) - np.minimum(low_1w, np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]  # First TR
+    atr = pd.Series(tr1).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1w + low_1w) / 2.0 + 3.0 * atr
+    basic_lb = (high_1w + low_1w) / 2.0 - 3.0 * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close_1w)
+    final_lb = np.zeros_like(close_1w)
+    supertrend = np.zeros_like(close_1w)
+    trend = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1w)):
+        # Final Upper Band
+        if basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+        
+        # Final Lower Band
+        if basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+        
+        # Supertrend and Trend
+        if trend[i-1] == -1 and close_1w[i] > final_ub[i]:
+            trend[i] = 1
+        elif trend[i-1] == 1 and close_1w[i] < final_lb[i]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+        
+        supertrend[i] = final_ub[i] if trend[i] == -1 else final_lb[i]
+    
+    # Initialize first values
+    if len(close_1w) > 0:
+        supertrend[0] = final_lb[0]
+        trend[0] = 1
+    
+    # Align 1w Supertrend trend to 12h timeframe (wait for completed 1w bar)
+    trend_aligned = align_htf_to_ltf(prices, df_1w, trend.astype(float))
+    
+    # Calculate volume confirmation: volume > 1.5 * 20-period average volume on 12h
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * avg_volume_20)
+    volume_confirm = volume > (1.5 * avg_volume_20)
     
     # Session filter: 08-20 UTC (pre-compute for efficiency)
     hours = prices.index.hour
@@ -62,36 +115,36 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup period
         # Skip if any value is NaN or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(avg_volume_20[i]) or not in_session[i]):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(trend_aligned[i]) or np.isnan(avg_volume_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 1d Williams %R < -80 (oversold), 6h EMA21 > EMA50 (uptrend), volume confirmation, in session
-            if (williams_r_aligned[i] < -80 and 
-                ema_21[i] > ema_50[i] and 
+            # Long: price breaks above 1d Donchian upper, 1w Supertrend uptrend (trend=1), volume confirmation, in session
+            if (close[i] > donchian_upper_aligned[i] and 
+                trend_aligned[i] == 1 and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d Williams %R > -20 (overbought), 6h EMA21 < EMA50 (downtrend), volume confirmation, in session
-            elif (williams_r_aligned[i] > -20 and 
-                  ema_21[i] < ema_50[i] and 
+            # Short: price breaks below 1d Donchian lower, 1w Supertrend downtrend (trend=-1), volume confirmation, in session
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  trend_aligned[i] == -1 and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 1d Williams %R crosses back above -50 (recovering from oversold)
-            if williams_r_aligned[i] > -50:
+            # Exit long: price crosses back below 1d Donchian midpoint
+            if close[i] < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: 1d Williams %R crosses back below -50 (declining from overbought)
-            if williams_r_aligned[i] < -50:
+            # Exit short: price crosses back above 1d Donchian midpoint
+            if close[i] > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
