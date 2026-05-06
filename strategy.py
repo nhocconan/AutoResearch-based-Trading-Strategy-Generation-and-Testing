@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Camarilla pivot levels with volume confirmation and 12h EMA34 trend filter
-# - Long when price crosses above Camarilla R1 with volume expansion and price above 12h EMA34
-# - Short when price crosses below Camarilla S1 with volume expansion and price below 12h EMA34
-# - Exit when price returns to Camarilla pivot (midpoint of high-low)
-# - Volume filter requires current volume > 1.5x 20-period average
-# - Designed to capture reversals at key levels in ranging markets while filtering with trend
-# - Target: 60-120 total trades over 4 years (15-30/year) with 0.25 position sizing
+# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and weekly ADX trend filter
+# - Long when price breaks above weekly Donchian high (20 periods) with volume expansion and weekly ADX > 25
+# - Short when price breaks below weekly Donchian low (20 periods) with volume expansion and weekly ADX > 25
+# - Exit when price crosses back below/above weekly EMA20
+# - Volume filter requires current volume > 1.3x 20-period average
+# - Designed to capture strong trends while avoiding whipsaws in ranging markets
+# - Target: 30-100 total trades over 4 years (7-25/year) with 0.25 position sizing
 
-name = "4h_CamarillaPivot_12hEMA34_Volume"
-timeframe = "4h"
+name = "1d_DonchianBreakout_WeeklyADX_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,74 +25,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla and EMA calculations
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Get weekly data for Donchian, ADX and EMA calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels (based on previous day's range)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly Donchian channels (20-period high/low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate pivot and ranges
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Donchian high: rolling max of high over 20 periods
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low over 20 periods
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    r1_12h = close_12h + (range_12h * 1.1 / 12)
-    s1_12h = close_12h - (range_12h * 1.1 / 12)
-    r2_12h = close_12h + (range_12h * 1.1 / 6)
-    s2_12h = close_12h - (range_12h * 1.1 / 6)
-    r3_12h = close_12h + (range_12h * 1.1 / 4)
-    s3_12h = close_12h - (range_12h * 1.1 / 4)
-    r4_12h = close_12h + (range_12h * 1.1 / 2)
-    s4_12h = close_12h - (range_12h * 1.1 / 2)
+    # Calculate weekly EMA20 for exit
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly ADX for trend filter (14-period)
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align 12h indicators to 4h timeframe
-    pivot_12h_4h = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_12h_4h = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_4h = align_htf_to_ltf(prices, df_12h, s1_12h)
-    ema_34_12h_4h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # +DM and -DM
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Volume filters (4h timeframe)
+    # Smooth TR, +DM, -DM (14-period)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align weekly indicators to daily timeframe
+    donchian_high_1d = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_1d = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema_20_1w_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    adx_1w_1d = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume filters (daily timeframe)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    volume_filter = volume > (1.3 * vol_ma_20)  # Volume confirmation
+    volume_expansion = volume > np.roll(volume, 1)  # Current volume > previous
+    volume_expansion[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if any critical value is NaN
-        if (np.isnan(pivot_12h_4h[i]) or np.isnan(r1_12h_4h[i]) or np.isnan(s1_12h_4h[i]) or 
-            np.isnan(ema_34_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high_1d[i]) or np.isnan(donchian_low_1d[i]) or 
+            np.isnan(ema_20_1w_1d[i]) or np.isnan(adx_1w_1d[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(volume_expansion[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long entry: price crosses above R1 with volume expansion and above EMA34
-            if close[i] > r1_12h_4h[i] and close[i-1] <= r1_12h_4h[i-1] and volume_filter[i] and close[i] > ema_34_12h_4h[i]:
+            # Long breakout: price breaks above Donchian high with volume expansion and ADX > 25
+            if close[i] > donchian_high_1d[i] and volume_expansion[i] and adx_1w_1d[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price crosses below S1 with volume expansion and below EMA34
-            elif close[i] < s1_12h_4h[i] and close[i-1] >= s1_12h_4h[i-1] and volume_filter[i] and close[i] < ema_34_12h_4h[i]:
+            # Short breakout: price breaks below Donchian low with volume expansion and ADX > 25
+            elif close[i] < donchian_low_1d[i] and volume_expansion[i] and adx_1w_1d[i] > 25:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price returns to pivot level
-            if close[i] <= pivot_12h_4h[i]:
+            # Exit long: price crosses below EMA20
+            if close[i] < ema_20_1w_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price returns to pivot level
-            if close[i] >= pivot_12h_4h[i]:
+            # Exit short: price crosses above EMA20
+            if close[i] > ema_20_1w_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
