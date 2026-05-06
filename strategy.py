@@ -1,17 +1,18 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly Ichimoku cloud direction with 1d Tenkan/Kijun cross for entry and volume confirmation
-# Long when price is above weekly Ichimoku cloud, 1d Tenkan crosses above Kijun, and volume > 1.5x average
-# Short when price is below weekly Ichimoku cloud, 1d Tenkan crosses below Kijun, and volume > 1.5x average
-# Weekly Ichimoku provides strong trend filter, daily TK cross provides timely entry, volume confirms strength.
-# Works in bull/bear markets by only taking trades in direction of higher timeframe trend.
-# Target: 12-37 trades per year (50-150 over 4 years) with 0.25 position sizing.
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume spike and Choppiness regime filter
+# Long when price crosses above Camarilla R3 with volume > 2x average and CHOP > 61.8 (ranging market for mean reversion)
+# Short when price crosses below Camarilla S3 with volume > 2x average and CHOP > 61.8
+# Exit when price crosses opposite Camarilla level (S1 for long, R1 for short) or CHOP < 38.2 (trending market)
+# Daily Camarilla provides intraday support/resistance, volume spike confirms institutional interest,
+# Choppiness filter ensures we only trade in ranging markets where mean reversion works.
+# Target: 15-35 trades per year (60-140 over 4 years) with 0.25 position sizing.
 
-name = "6h_1wIchimoku_1dTKCross_Volume_v1"
-timeframe = "6h"
+name = "12h_1dCamarilla_R3S3_Volume_Chop_MeanRev_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,69 +25,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Ichimoku components ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min()
-    tenkan_sen = ((period9_high + period9_low) / 2).values
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min()
-    kijun_sen = ((period26_high + period26_low) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
-    
-    # Calculate 1-day Tenkan/Kijun for entry signal
+    # Calculate daily Camarilla pivot levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 26:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1-day Tenkan-sen (9-period)
-    td_period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max()
-    td_period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min()
-    td_tenkan = ((td_period9_high + td_period9_low) / 2).values
+    # Daily OHLC for Camarilla calculation
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # 1-day Kijun-sen (26-period)
-    td_period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max()
-    td_period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min()
-    td_kijun = ((td_period26_high + td_period26_low) / 2).values
+    # Camarilla levels: H-L range
+    range_hl = daily_high - daily_low
     
-    # Align 1-day TK to 6h timeframe
-    td_tenkan_aligned = align_htf_to_ltf(prices, df_1d, td_tenkan)
-    td_kijun_aligned = align_htf_to_ltf(prices, df_1d, td_kijun)
+    # Camarilla resistance levels
+    r3 = daily_close + (range_hl * 1.1 / 2)
+    r2 = daily_close + (range_hl * 1.1 / 4)
+    r1 = daily_close + (range_hl * 1.1 / 6)
     
-    # TK cross signals: 1 for bullish cross, -1 for bearish cross, 0 otherwise
-    tk_cross = np.zeros(n)
-    tk_cross[1:] = np.where(
-        (td_tenkan_aligned[1:] > td_kijun_aligned[1:]) & 
-        (td_tenkan_aligned[:-1] <= td_kijun_aligned[:-1]), 1,
-        np.where(
-            (td_tenkan_aligned[1:] < td_kijun_aligned[1:]) & 
-            (td_tenkan_aligned[:-1] >= td_kijun_aligned[:-1]), -1, 0
-        )
-    )
+    # Camarilla support levels
+    s1 = daily_close - (range_hl * 1.1 / 6)
+    s2 = daily_close - (range_hl * 1.1 / 4)
+    s3 = daily_close - (range_hl * 1.1 / 2)
     
-    # Volume confirmation: >1.5x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_filter = volume > (1.5 * vol_ma_50)
+    # Align daily Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate Choppiness Index (14-period) on 12h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR
+    
+    # ATR (14-period)
+    atr = np.zeros(n)
+    atr[13] = np.mean(tr[0:14])
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Sum of TRUE ranges over 14 periods
+    sum_tr = np.zeros(n)
+    for i in range(13, n):
+        if i == 13:
+            sum_tr[i] = np.sum(tr[0:14])
+        else:
+            sum_tr[i] = sum_tr[i-1] - tr[i-14] + tr[i]
+    
+    # Choppiness Index: 100 * log10(sum_tr / (atr * sqrt(14))) / log10(14)
+    chop = np.zeros(n)
+    for i in range(13, n):
+        if atr[i] > 0 and sum_tr[i] > 0:
+            chop[i] = 100 * np.log10(sum_tr[i] / (atr[i] * np.sqrt(14))) / np.log10(14)
+        else:
+            chop[i] = 50  # Neutral value
+    
+    # Volume confirmation: >2x 50-period average
+    vol_ma_50 = np.zeros(n)
+    for i in range(49, n):
+        if i == 49:
+            vol_ma_50[i] = np.mean(volume[0:50])
+        else:
+            vol_ma_50[i] = vol_ma_50[i-1] + (volume[i] - volume[i-50]) / 50
+    
+    volume_filter = volume > (2.0 * vol_ma_50)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -95,42 +102,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical value is NaN or outside session
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(td_tenkan_aligned[i]) or np.isnan(td_kijun_aligned[i]) or
-            np.isnan(volume_filter[i]) or not session_filter[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(chop[i]) or np.isnan(volume_filter[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine if price is above or below weekly cloud
-        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
         if position == 0:
-            # Long: price above cloud, bullish TK cross, volume confirmation
-            if price_above_cloud and tk_cross[i] == 1 and volume_filter[i]:
+            # Long: price crosses above Camarilla R3 with volume spike in ranging market
+            if close[i] > r3_aligned[i] and volume_filter[i] and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud, bearish TK cross, volume confirmation
-            elif price_below_cloud and tk_cross[i] == -1 and volume_filter[i]:
+            # Short: price crosses below Camarilla S3 with volume spike in ranging market
+            elif close[i] < s3_aligned[i] and volume_filter[i] and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below cloud or bearish TK cross
-            if close[i] < cloud_top or tk_cross[i] == -1:
+            # Exit long: price crosses below Camarilla S1 OR market becomes trending
+            if close[i] < s1_aligned[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above cloud or bullish TK cross
-            if close[i] > cloud_bottom or tk_cross[i] == 1:
+            # Exit short: price crosses above Camarilla R1 OR market becomes trending
+            if close[i] > r1_aligned[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
